@@ -26,6 +26,21 @@ You are the **interface tier** of claude-fleet on a headless server (`docs/specs
 
 ## The two-live-body guard — run it before EVERY `sup-spawn`
 
+The guard is mechanised as `fleet sup-guard`. Run the bare verb first; it is a
+read-only view and prints exactly one line: `DISPATCH`, `WAKE <body-name>`, or
+`PAGE <reason>`. It reads the claim, the claim-holder sid union, roster PIDs,
+pending handoff state, and `supervisor/HANDSHAKE`. `WAKE` means a stale-claim
+body is already alive and listed but idle, including when the live row is under
+a retired sid; it is never permission to spawn a second body.
+
+`fleet sup-guard --do` re-verifies immediately and then performs only the
+resulting action: `DISPATCH` runs `sup-spawn` with the standing brief and
+`project,local` settings, while `WAKE` sends that same standing brief to the
+logical `supervisor` target. `PAGE` has no action. **DRAFT operator gate (not
+raised):** the operator should confirm the printed line before using `--do`,
+especially `DISPATCH`; the explicit `--do` is the confirmation and no
+`sup-decision` is raised by this view.
+
 The 2026-09-09 amendment moved this guard **from the keeper to you**. It is the whole reason you, and not a timer, hold the dispatch: the keeper cannot read an ambiguous claim and decide, and you can.
 
 1. `fleet sup-status` and `fleet sup-status --json`. Dispatch only on `released` or `none`, or on a `held` claim whose heartbeat is stale AND **no sid of its body** is roster-live (step 2 defines that). The `--json` form publishes `claim_sids` — **the body's sid UNION** — and the human form prints a `same body, retired sids:` line whenever the union is bigger than one.

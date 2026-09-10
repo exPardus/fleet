@@ -48,6 +48,7 @@ import uuid
 from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 
 # The interpreter floor, in ONE place (posix-port campaign, follow-up 2).
 # Everything else that states it -- this module's docstring, the
@@ -912,12 +913,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11946) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11948) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:13152) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:13154) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17984) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17986) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -927,22 +928,22 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:3224) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:3225) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17705) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17707) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
-      * `_read_registry_readonly` (:4138) -- the VIEW surface's copy of the same
+      * `_read_registry_readonly` (:4139) -- the VIEW surface's copy of the same
         question, and the last reader to get it (P1-13, 2026-07-31). Until then
         every view described a just-quarantined fleet with the identical string
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13690) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13692) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -954,8 +955,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:7697) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:18162) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7699) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:18164) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3174,7 +3175,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17984`), where it costs the §6.5 gate nothing.
+    (`:17986`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -3190,7 +3191,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1067`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1068`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -4624,7 +4625,8 @@ NO_HOME_LINE = "[fleet]: no home"
 # directory no step selected. `index` is absent on purpose (`index init` creates
 # `.fleet-index/`), and `doctor` is here only without `--repair`.
 TERMINUS_VIEW_VERBS = ("home", "knowledge", "status", "peek", "result",
-                       "doctor", "q", "sup-status", "sup-context")
+                       "doctor", "q", "sup-status", "sup-context",
+                       "sup-guard")
 
 # The terminus does not apply to these AT ALL -- neither the refusal nor the
 # rendered `[fleet]: no home`. They act on the MACHINE, not on a home.
@@ -5136,7 +5138,7 @@ VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                           "resume-limited", "sup-heartbeat", "interface-register")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result",
                         "home", "knowledge", "attach", "wait", "sup-status",
-                        "sup-context", "q", "index")
+                        "sup-context", "sup-guard", "q", "index")
 
 #: Tier ranking. A verb matching two tokens takes the WORST of them, which is
 #: the only direction §5's *"worst irreversible effect in the wrong home"*
@@ -9879,7 +9881,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9773` / `cmd_respawn:9386`, before
+    # resolution that runs from `cmd_kill:9775` / `cmd_respawn:9388`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9942,10 +9944,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9773` / `cmd_respawn:9386`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9775` / `cmd_respawn:9388`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:9410-9412` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:9412-9414` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -16372,12 +16374,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1067`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1068`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:4100`) applied to the one other reader that has
+    rule for the view path (`:4101`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -16563,9 +16565,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is councilor 1's half of the same ruling. A bare `released_by_sid in
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
-    (ND4a)"* -- for the eighteen other sites that already key on the union (`:2826, :2897,
-    :2970, :3231, :3381, :4875, :9913, :10233, :10514, :10745, :10832, :10988,
-    :11000, :11011, :11160, :11976, :16435, :19339`). The thirteenth is multi-fleet §5 step 2's
+    (ND4a)"* -- for the eighteen other sites that already key on the union (`:2827, :2898,
+    :2971, :3232, :3382, :4877, :9915, :10235, :10516, :10747, :10834, :10990,
+    :11002, :11013, :11162, :11978, :16437, :18621, :18622, :18655, :19570`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16589,8 +16591,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8674, :9213, :14186,
-    :20002), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8676, :9215, :14188,
+    :20233), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17286,8 +17288,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8674, :9213, :14186,
-    #     :20002) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8676, :9215, :14188,
+    #     :20233) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17317,10 +17319,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:1067`), which is a write. Routing the identity read
+        #     file aside (`:1068`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16363`). A `None` here
+        #     this and names this gate as its reason (`:16365`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -17962,7 +17964,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11939`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11941`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -18598,6 +18600,235 @@ def cmd_sup_status(args) -> int:
               f"re-deriving steers (§5.3). Detection only; confirm the human owns "
               f"every session before trusting recent briefs.")
     return 0
+
+
+def _sup_guard_body_sids(claim):
+    """Return the released body's sid union, or ``None`` if it is unknown.
+
+    ``supervisor_claim_sids`` intentionally treats a released claim as having
+    no holder.  The guard still needs the releaser's union so a release that
+    has not yet stopped its body cannot authorize a second body.
+    """
+    if not isinstance(claim, dict):
+        return None
+    sid = claim.get("released_by_sid") or claim.get("session_id")
+    if not isinstance(sid, str) or not sid:
+        return None
+    registry = _registry_records_or_none()
+    if registry is None:
+        return None
+    for record in (registry.get("workers") or {}).values():
+        if sid in _record_sids(record):
+            return sorted(_record_sids(record))
+    return [sid]
+
+
+def _sup_guard_live_rows(entries):
+    """Map live roster sids to their rows using PID presence as liveness.
+
+    A terminal row may remain in ``claude agents --json --all`` after its
+    process exits.  The guard therefore requires a non-empty pid and ignores
+    rows explicitly marked ``done``; status alone is not evidence of life.
+    """
+    rows = {}
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("sessionId")
+        pid = entry.get("pid")
+        if (not isinstance(sid, str) or not sid or pid in (None, "", 0)
+                or entry.get("state") == "done"):
+            continue
+        rows.setdefault(sid, []).append(entry)
+    return rows
+
+
+def _sup_guard_body_name(sids):
+    """Resolve a body name from the same registry record as its sid union."""
+    if not sids:
+        return None
+    registry = _registry_records_or_none()
+    if registry is None:
+        return None
+    wanted = set(sids)
+    for name, record in (registry.get("workers") or {}).items():
+        if wanted.intersection(_record_sids(record)):
+            return name
+    return None
+
+
+def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
+    """Collect the read-only inputs for one two-live-body decision."""
+    snapshot_fn = snapshot_fn or status_snapshot
+    roster_fn = roster_fn or _fetch_agents_roster
+    snapshot = snapshot_fn()
+    sup = snapshot.get("supervisor") if isinstance(snapshot, dict) else None
+    sup = sup if isinstance(sup, dict) else {}
+    claim = read_incarnation()
+    state = sup.get("state")
+    if state not in ("none", "held", "released", "unknown"):
+        state = "unknown"
+    raw_state = ("none" if claim is None else
+                 "released" if claim.get("state") == "released" else "held"
+                 if isinstance(claim, dict) else "unknown")
+    if state != "unknown" and state != raw_state:
+        state = "unknown"
+
+    roster_ok, roster_or_reason = roster_fn()
+    entries = roster_or_reason if roster_ok else []
+    live_rows = _sup_guard_live_rows(entries)
+    handshake_exists = handshake_path().exists()
+    handshake = read_handshake() if handshake_exists else None
+    pending = bool(handoff_pending_members(claim))
+
+    if state == "held":
+        sids = supervisor_claim_sids(claim)
+    elif state == "released":
+        sids = _sup_guard_body_sids(claim)
+    else:
+        sids = None
+    body_name = _sup_guard_body_name(sids)
+    live_body_rows = [row for sid, rows in live_rows.items()
+                      for row in rows
+                      if isinstance(row.get("name"), str)
+                      and (row.get("name") == SUPERVISOR_BODY_NAME
+                           or _is_supervisor_shaped(row.get("name")))]
+    return {
+        "snapshot": snapshot,
+        "registry_ok": bool(snapshot.get("ok", True))
+        if isinstance(snapshot, dict) else False,
+        "registry_reason": snapshot.get("reason")
+        if isinstance(snapshot, dict) else "snapshot unreadable",
+        "state": state,
+        "claim": claim,
+        "claim_sids": sids,
+        "roster_ok": bool(roster_ok),
+        "roster_reason": None if roster_ok else str(roster_or_reason),
+        "live_rows": live_rows,
+        "live_body_rows": live_body_rows,
+        "handshake_exists": handshake_exists,
+        "handshake": handshake,
+        "pending": pending,
+        "body_name": body_name,
+        "heartbeat_age_seconds": sup.get("heartbeat_age_seconds"),
+        "goals_active": bool(sup.get("goals_active")),
+    }
+
+
+def _sup_guard_decide(observation):
+    """Return ``(verdict, reason, detail)`` for one guard observation."""
+    obs = observation
+    detail = {
+        key: obs.get(key) for key in
+        ("state", "claim_sids", "registry_ok", "registry_reason",
+         "roster_ok", "roster_reason",
+         "heartbeat_age_seconds", "body_name", "pending",
+         "handshake_exists")
+    }
+    if not obs.get("goals_active"):
+        return "PAGE", "supervisor goals inactive", detail
+    if obs.get("registry_ok", True) is False:
+        return "PAGE", f"registry unavailable: {obs.get('registry_reason')}", detail
+    if not obs.get("roster_ok"):
+        return "PAGE", f"roster unavailable: {obs.get('roster_reason')}", detail
+    if obs.get("state") == "unknown":
+        return "PAGE", "claim state unknown", detail
+    if obs.get("handshake_exists"):
+        reason = ("handoff in flight"
+                  if obs.get("handshake") is not None
+                  else "supervisor/HANDSHAKE unreadable")
+        return "PAGE", reason, detail
+    if obs.get("pending"):
+        return "PAGE", "handoff in flight", detail
+
+    state = obs.get("state")
+    claim = obs.get("claim") or {}
+    if (state == "held" and
+            (claim.get("claimed_via") == "seize" or
+             claim.get("state") == "seized")):
+        return "PAGE", "claim seized", detail
+
+    if state in ("none", "released"):
+        if obs.get("claim_sids") is None and state == "released":
+            return "PAGE", "releasing body identity unavailable", detail
+        if obs.get("live_body_rows"):
+            return "PAGE", "live supervisor body without a safe claim", detail
+        if state == "released":
+            return "DISPATCH", "claim released", detail
+        return "DISPATCH", "claim none", detail
+
+    sids = obs.get("claim_sids")
+    if not isinstance(sids, list) or not sids:
+        return "PAGE", "claim session not in the roster, sid union unavailable", detail
+    matching = [row for sid in sids for row in obs["live_rows"].get(sid, [])]
+    if matching:
+        statuses = {row.get("status") for row in matching}
+        if "busy" in statuses:
+            return "PAGE", "roster says busy", detail
+        if statuses == {"idle"}:
+            age = obs.get("heartbeat_age_seconds")
+            if (not isinstance(age, (int, float))
+                    or age <= SUPERVISOR_CLAIM_STALE_SECONDS):
+                return "PAGE", "fresh heartbeat with live idle body", detail
+            return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
+        return "PAGE", "live supervisor status unknown", detail
+
+    age = obs.get("heartbeat_age_seconds")
+    if not isinstance(age, (int, float)):
+        return "PAGE", "claim heartbeat unreadable", detail
+    if age <= SUPERVISOR_CLAIM_STALE_SECONDS:
+        return "PAGE", "fresh heartbeat but body is not roster-live", detail
+    if any(row not in matching for row in obs.get("live_body_rows", [])):
+        return "PAGE", "another live supervisor body is present", detail
+    return "DISPATCH", "stale claim with no live body", detail
+
+
+def _sup_guard_line(verdict, reason, target=None):
+    if verdict == "WAKE":
+        target = " ".join(str(target or SUPERVISOR_BODY_NAME).split())
+        return f"WAKE {target}"
+    if verdict == "DISPATCH":
+        return "DISPATCH"
+    reason = " ".join(str(reason).split())
+    return f"PAGE {reason}"
+
+
+def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
+    """`fleet sup-guard [--do] [--json]` -- one-line two-live-body view.
+
+    The default is a lock-free/read-only observation.  ``--do`` deliberately
+    remains an explicit operator action: it re-runs the complete observation
+    immediately before dispatching or waking, and executes only that second
+    verdict.  PAGE has no action.
+    """
+    observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+    verdict, reason, detail = _sup_guard_decide(observation)
+    if getattr(args, "do", False):
+        observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        verdict, reason, detail = _sup_guard_decide(observation)
+    line = _sup_guard_line(verdict, reason,
+                           detail.get("body_name"))
+    if getattr(args, "json", False):
+        output = {"verdict": line, "reason": reason, **detail}
+        print(json.dumps(output, separators=(",", ":"), sort_keys=True))
+    else:
+        print(line)
+    if not getattr(args, "do", False) or verdict == "PAGE":
+        return 0
+    try:
+        with redirect_stdout(io.StringIO()):
+            if verdict == "DISPATCH":
+                return cmd_sup_spawn(SimpleNamespace(
+                    task="@supervisor/briefs/server-standing.md",
+                    model=None, permission_mode=None, nonce=None,
+                    setting_sources="project,local"))
+            return cmd_send(SimpleNamespace(
+                name=SUPERVISOR_BODY_NAME,
+                message="@supervisor/briefs/server-standing.md", nonce=None))
+    except (FleetCliError, ClaudeNotFoundError, ValueError,
+            FleetLockTimeout) as exc:
+        print(f"fleet: sup-guard action failed: {exc}", file=sys.stderr)
+        return 1
 
 
 def cmd_sup_context(args) -> int:
@@ -23213,6 +23444,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")
 
+    p_supguard = sub.add_parser(
+        "sup-guard",
+        help="one-line two-live-body verdict before supervisor revival")
+    p_supguard.add_argument(
+        "--do", action="store_true",
+        help="re-verify immediately, then execute DISPATCH or WAKE")
+    p_supguard.add_argument(
+        "--json", action="store_true",
+        help="include read-only guard detail as one JSON line")
+
     # three-tier §11.2: self-monitored context band measurement (read-only).
     p_supctx = sub.add_parser(
         "sup-context",
@@ -23445,6 +23686,8 @@ def main(argv=None) -> int:
             return cmd_sup_release(args)
         if args.command == "sup-status":
             return cmd_sup_status(args)
+        if args.command == "sup-guard":
+            return cmd_sup_guard(args)
         if args.command == "sup-context":
             return cmd_sup_context(args)
         if args.command == "sup-notify":
