@@ -45,3 +45,37 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
 - `fleet resume-limited` — restart workers parked by a usage limit (UL1).
 - `--token-ceiling` on `spawn`/`respawn`; new statuses `over_budget` / `over_ceiling` / `limited`; spawn echoes the resolved model.
 - **New standing post-merge live checks:** FLEET_LIVE integration tier (default = main hooks); `fleet init` re-render when `worker-settings.template.json` changes (PostCompact hook added in C2); `fleet doctor` now also checks hook-registration, unreadable-starttime, limited-parks, ceiling-file-sweep, hook-errors; live hook-smoke.
+
+## kz-work host: memory, and the mcx substrate (2026-09-10)
+- **The host is RAM-bound and it has already cost a supervisor.** 8 GB total, **~1.7 GB of it the
+  claude daemon's pre-warm pool**. At **15:18:08Z the OOM killer hit the daemon scope**: it shut down
+  (`cause=signal`, `live_workers=12`) and **every Claude session on the box died, the supervisor body
+  included** — the next generation booted by SEIZE, not handoff. The 12 were mostly corpses: **4
+  retired supervisor bodies + 8 idle finished workers at ~350 MB each**, plus mcx lanes at ~170 MB per
+  lane across 3–4 node processes.
+- **`fleet autoclean` is 0-for-30 on exactly those rows** — measured post-OOM: `archived 0 worker(s),
+  skipped 30`, `husks_removed=0`. Cause: `--ttl-hours` defaults to 24 and every corpse was younger.
+  *An age-based sweeper cannot reap a fresh corpse, which is the only kind that can OOM you.*
+- **Ceiling, operator ruling: at most 3 live worker sessions on the host at once, Claude and Codex
+  counted together (a Codex lane counts as one); do not dispatch under 1.5 GB available** (`free -m`).
+  Note the ceiling is about the HOST, not about one fleet: lanes running in the operator's other
+  projects count against the same 8 GB, and are not visible in `fleet status`.
+- **mcx 0.2.0** (installed 2026-09-10T16:4xZ): `mcx spawn --wait` prints the ID, stays alive for that
+  one run and exits with its status — background THAT and let the harness notify you. **Poll loops
+  (`mcx list` + `sleep`) are retired**: each costs a shell and they are what a low-memory kill reaches
+  first. `mcx steer --wait ID` tracks a resumed run, one waiter per run; TERM/INT/HUP on a waiter
+  stops its run and children, so never `&` or `nohup` one. Approval modes `never` (default,
+  workspace-write) / `auto` / `unrestricted`; keep `never` for lanes. `.mcx/config` accepts only
+  `approval=`; `.mcx/` is gitignored, worktrees included; mcx state lives in `<cwd>/.mcx/`, so spawn
+  FROM the lane's worktree.
+- **Model budget, operator ruling 16:5xZ: default `gpt-5.6-luna` (omit `-m`), `-r medium`.** `-r high`
+  only for a build lane touching `bin/fleet.py`; `gpt-6-astra` only for a task whose failure on 5.6
+  can be NAMED IN ADVANCE, with the reason in the dispatch line — never for docs, tests, receipts,
+  reports or folds. **Both plans are constrained at once: Claude 77%, Codex 75%, both resetting around
+  2026-09-15**, so waves are 1–2 lanes.
+- **The supervisor must never export `MCX_WORKER=1`** — it is the lane-side recursion guard, and
+  setting it on yourself gets `mcx: workers cannot launch or steer workers`.
+- **Codex cannot commit**: its sandbox makes git metadata read-only. Every lane ends with the
+  supervisor committing on its behalf, so every brief must say so and ask for a PATH LIST.
+- **A Codex lane works on a SNAPSHOT** — anything mutating a live append-only file (`JOURNAL.md`,
+  `lessons.md`, `CHANGELOG.md`) must be re-derived at landing, never merged.
