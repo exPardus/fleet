@@ -23,6 +23,16 @@ fleet. A machine with one home short-circuits before the lookup and is
 byte-identical to the pre-slice statusline. None of the four points above move:
 the resolution takes no lock, probes nothing, writes nothing, and its failure
 mode is the default home rather than a blank line.
+
+WHICH home it read is answered by the NAMEPLATE (G-K5 item 1, operator ruling
+2026-09-10): on a machine that runs more than one fleet the row opens
+`[fleet:9c3a]` rather than `[fleet]`, where the tag is `fleet.home_tag()` of the
+home `status_snapshot()` actually read. Resolution alone was not the whole of
+the ruling -- two homes already produced two different COUNTS, and an operator
+with two windows could see that the numbers differed and not which fleet either
+row belonged to. The tag costs a single-home machine nothing: no homes list
+means `HOME_SINGLE` means no tag means the row this file rendered before the
+field existed, byte for byte. See `nameplate` and `rendered_home_tag`.
 """
 import json
 import os
@@ -48,6 +58,33 @@ import fleet  # noqa: E402
 
 PREFIX = "[fleet]"
 STALE_AFTER_SECONDS = 300
+
+
+def nameplate(tag=None) -> str:
+    """The row's owner token: `[fleet]`, or `[fleet:9c3a]` on a machine that
+    runs more than one fleet (G-K5 item 1, operator ruling 2026-09-10 --
+    *"fleet statusbar must be different per fleet home"*).
+
+    THE TAG GOES INSIDE THE NAMEPLATE, NOT BESIDE IT. The nameplate is the
+    token that says *"the next words are fleet's"* -- `_safe` strips brackets
+    out of every foreign string for exactly that reason -- and the operator's
+    eye lands on it before it reads a word. A separate field would be one more
+    thing to find on a line that is already dense, and would read as fleet
+    reporting a fact ABOUT a home rather than as fleet-over-here reporting.
+
+    `PREFIX` IS SLICED RATHER THAN RETYPED. `f"[fleet:{tag}]"` would be a
+    second literal spelling of the nameplate, and this file already treats that
+    as a defect class (`test_the_terminus_text_is_not_a_retyped_literal`): the
+    two spellings drift and the surface ends up with two nameplates.
+    `test_the_untagged_nameplate_is_the_prefix_itself` is the pin.
+
+    NO TAG IS THE SINGLE-HOME ANSWER, AND IT IS ALSO EVERY ERROR'S ANSWER. A
+    machine with one fleet renders the byte-identical row it rendered before
+    this field existed; so does a resolution that failed. See
+    `rendered_home_tag`."""
+    if not tag:
+        return PREFIX
+    return f"{PREFIX[:-1]}:{tag}{PREFIX[-1]}"
 
 # The rendered line is PURE ASCII by construction -- no glyphs, no box drawing.
 # A Windows console defaults to cp1252 and cannot encode the block/geometric
@@ -303,7 +340,14 @@ def _bucket_order(buckets) -> tuple:
 
 
 def render_statusline(snap: dict, color: bool = True,
-                      stale_after: int = STALE_AFTER_SECONDS) -> str:
+                      stale_after: int = STALE_AFTER_SECONDS,
+                      tag=None) -> str:
+    """`tag` DEFAULTS TO NONE, which is the pre-G-K5 row byte for byte.
+
+    Every existing caller and every existing test therefore renders exactly
+    what it rendered before, and the single-home non-regression the ruling asks
+    for is enforced by the suite that was already there rather than by a new
+    test that could be deleted with the feature."""
     def paint(text, code):
         return f"{code}{text}{_RESET}" if color and code else text
 
@@ -311,7 +355,13 @@ def render_statusline(snap: dict, color: bool = True,
     # the row's owner before reading a single word of it. Foreground only: a
     # reverse-video block reads as a hard UI chrome element next to Claude
     # Code's own rows, which are all plain bracketed labels.
-    head = paint(PREFIX, _NAME)
+    #
+    # THE TAG SHARES THE NAMEPLATE'S HUE and gets none of its own. Colour is
+    # rationed on this line -- grey is reserved for `dead`, every other hue is
+    # a documented status -- and a per-home hue derived from the tag would have
+    # to be drawn from the same small palette the statuses use, so `[fleet]`
+    # would eventually render in `working` green. One token, one colour.
+    head = paint(nameplate(tag), _NAME)
 
     if not snap.get("ok"):
         # P1-13: the rename makes absence ambiguous, so `not initialized` was
@@ -643,6 +693,51 @@ def render_home_terminus(decision, color: bool = True):
     return None
 
 
+def rendered_home_tag(decision, home) -> str:
+    """The nameplate tag for the home the row is ABOUT, or `""` for no tag.
+
+    THE ARGUMENT IS THE HOME THAT WAS READ, NOT THE ONE THAT WAS DECIDED.
+    `main` passes `fleet.FLEET_HOME` as it stands at the moment
+    `status_snapshot()` is called -- after `resolve_blob_home`'s verdict has
+    been applied -- so the tag cannot name one home while the counts come from
+    another. Reading the decision's own `home` would be right on the `lookup`
+    branch and `None` on every other one, and would have to re-derive the
+    default; this way there is one source for both halves of the row.
+
+    TAGGED ON EXACTLY THE TWO STATES THAT RENDER A ROSTER. `HOME_LOOKUP` (a
+    member home claims this session) and `HOME_DEFAULT` (nothing claimed it, so
+    the default home's row is what an operator on a multi-fleet machine is
+    looking at -- and an untagged row among tagged ones would be the one row
+    they could not place). `HOME_NONE` and `HOME_AMBIGUOUS` never reach here:
+    `render_home_terminus` has already taken the line, and both mean *"there is
+    no home to name"*.
+
+    `HOME_SINGLE` IS THE UNTAGGED ANSWER, AND IT CARRIES TWO CASES ON PURPOSE
+    -- see the constant. One is the machine every operator has today: one
+    fleet, so the short-circuit fired, nothing was looked up, and §5's arming
+    paragraph requires this row to be *"byte-identical to today"*. The other is
+    a resolution that DIED, which degrades to the same row for the same reason
+    it degrades to the default home: a view's failure mode is the surface it
+    always had, never a new word the operator cannot act on.
+
+    NO NEW READ, WHICH IS THE DOCTRINE THAT BINDS THIS SURFACE (root
+    `CLAUDE.md`, terminal-surface D4: views take no lock, probe nothing, write
+    nothing, quarantine nothing). `fleet.home_tag` is a pure string function
+    over a path this process already holds. The homes list that decided
+    `HOME_SINGLE` was read once by `resolve_blob_home`, before this field
+    existed and whether or not it does.
+
+    TOTAL. `home_tag` cannot raise on a `str`-able input, and the guard is here
+    anyway because the alternative on this surface is not a missing tag -- it
+    is `main`'s exit-0 handler eating the whole line."""
+    if (decision or {}).get("state") not in (HOME_LOOKUP, HOME_DEFAULT):
+        return ""
+    try:
+        return fleet.home_tag(home)
+    except BaseException:  # noqa: BLE001 -- a tag never costs the row
+        return ""
+
+
 # --- statusline chaining ---------------------------------------------------
 #
 # Claude Code allows exactly ONE `statusLine` command. An operator who already
@@ -785,7 +880,14 @@ def main() -> int:
         # the row's place -- one line either way, exit 0 either way.
         line = render_home_terminus(decision, color=_want_color())
         if line is None:
-            line = render_statusline(fleet.status_snapshot(), color=_want_color())
+            # `fleet.FLEET_HOME` is read TWICE here and both reads must see the
+            # same value: `status_snapshot()` counts that home's workers and
+            # `rendered_home_tag` names it. Passing the tag in rather than
+            # letting the renderer reach for the global is what keeps the row
+            # from ever naming a home it did not count.
+            line = render_statusline(
+                fleet.status_snapshot(), color=_want_color(),
+                tag=rendered_home_tag(decision, fleet.FLEET_HOME))
         print(line)
     except BaseException:  # noqa: BLE001 -- a statusline never surfaces a traceback
         return 0

@@ -82,6 +82,22 @@ def plain(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+#: `[fleet]` OR `[fleet:9c3a]` -- the row's owner token in either form.
+#:
+#: G-K5 item 1 (2026-09-10) let the nameplate carry the home's tag on a
+#: multi-fleet machine, and the assertions below that used the bare `sl.PREFIX`
+#: substring were using it as shorthand for *"fleet's row is on stdout"* -- a
+#: shorthand written when the nameplate could only take one form. The property
+#: they pin is unchanged and the predicate is no weaker: the bracket content is
+#: `fleet` or `fleet:<hex>` and nothing else, so a forged plate still fails it.
+#: `tests/test_statusline_home_tag.py` owns the tag itself.
+_NAMEPLATE = re.compile(r"\[fleet(?::[0-9a-f]+)?\]")
+
+
+def has_nameplate(text: str) -> bool:
+    return _NAMEPLATE.search(plain(text)) is not None
+
+
 # --- fixtures ---------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
@@ -1226,7 +1242,9 @@ def _row(**over):
 
 class TestAForeignHomeCannotEraseTheOperatorsRow:
     """THE PIN THE GATE ASKED FOR: a foreign registry of non-string field types
-    driven through `main()`, requiring `[fleet]` on stdout."""
+    driven through `main()`, requiring fleet's NAMEPLATE on stdout -- `[fleet]`,
+    or `[fleet:<tag>]` since G-K5 item 1, which is the form these two-home
+    fixtures now render. See `has_nameplate`."""
 
     @pytest.mark.parametrize("shape", sorted(HOSTILE_TYPES))
     def test_a_wrongly_typed_status_cannot_remove_the_fleet_row(
@@ -1238,7 +1256,7 @@ class TestAForeignHomeCannotEraseTheOperatorsRow:
         monkeypatch.setenv("NO_COLOR", "1")
         rc, out = run_main(BLOB_LATER_RENDER)
         assert rc == 0
-        assert sl.PREFIX in out, (
+        assert has_nameplate(out), (
             f"a foreign home with status={shape} removed fleet's own row: {out!r}")
         assert_no_terminal_control(out.strip())
 
@@ -1259,7 +1277,7 @@ class TestAForeignHomeCannotEraseTheOperatorsRow:
         monkeypatch.setenv("NO_COLOR", "1")
         rc, out = run_main(BLOB_LATER_RENDER)
         assert rc == 0
-        assert sl.PREFIX in out, out
+        assert has_nameplate(out), out
         assert_no_terminal_control(out.strip())
 
     def test_the_erasure_detector_can_see_an_erasure(self):
