@@ -3,6 +3,7 @@
 The expensive floor and real commit/push arm belong to the supervisor merge;
 these tests pin their input parsing and the fail-closed accounting seams.
 """
+import pathlib
 import subprocess
 
 import pytest
@@ -72,3 +73,69 @@ def test_prepend_helpers_keep_markdown_title_and_journal_entries(tmp_path):
     text = journal.read_text()
     assert "THROUGHPUT wave 66: test" in text
     assert text.index("THROUGHPUT") < text.index("## 2026-01-01")
+
+
+class TestTheFloorActuallyRuns:
+    """Both defects found on `wave-close`'s FIRST REAL RUN (2026-09-11, wave 67).
+
+    The existing tests above inject `run`, so neither was reachable from them:
+    one is about the argv the verb builds, the other about what it does with a
+    half that produced nothing. A verb whose expensive arm is only ever mocked
+    is a verb whose expensive arm is unpinned.
+    """
+
+    def _clone_stub(self, tmp_path, calls, stdout):
+        """Drive `_wave_floor` with a real tests/ tree and a recording runner."""
+        def fake_run(argv, **kwargs):
+            if argv[:2] == ["git", "clone"] or "clone" in argv[:3]:
+                dest = pathlib.Path(argv[-1])
+                (dest / "tests").mkdir(parents=True, exist_ok=True)
+                (dest / "tests" / "test_a.py").write_text("", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+        return fake_run
+
+    def test_the_floor_runs_pytest_through_uv_not_a_bare_interpreter(self, tmp_path):
+        """NO interpreter on PATH has pytest importable on this host -- the
+        china-infra venv included -- so `python3.10 -m pytest` dies with "No
+        module named pytest". That is what happened on the first real run: four
+        halves produced no summary and the verb aborted on an EMPTY failure set.
+        `uv` supplies the interpreter and the dependency both (CLAUDE.md)."""
+        calls = []
+        summary = "1 passed in 0.01s\n"
+        # The stub's clean run will not match the expected host-failure set, and
+        # that refusal is correct -- it is the argv this test is about.
+        with pytest.raises(fleet.FleetCliError):
+            fleet._wave_floor(tmp_path, 99,
+                              run=self._clone_stub(tmp_path, calls, summary),
+                              which=lambda name: f"/usr/bin/{name}",
+                              log_root=tmp_path / "logs")
+        assert calls, "the floor ran no pytest at all"
+        for argv in calls:
+            assert argv[0].endswith("uv"), f"floor did not go through uv: {argv}"
+            assert argv[1:4] == ["run", "--no-project", "--python"], argv
+            assert "--with" in argv and argv[argv.index("--with") + 1] == "pytest", argv
+            assert argv[argv.index("pytest") + 1:][:3] == ["python", "-m", "pytest"], argv
+
+    def test_a_half_that_produced_no_summary_is_not_a_clean_floor(self, tmp_path):
+        """The deeper defect. A half with no pytest summary parsed as zero of
+        everything, and zero failures compares EQUAL to an empty expected set --
+        so a floor that never ran could have read as a floor that ran clean and
+        licensed the push. It must raise instead."""
+        calls = []
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_floor(tmp_path, 99,
+                              run=self._clone_stub(tmp_path, calls, "No module named pytest\n"),
+                              which=lambda name: f"/usr/bin/{name}",
+                              log_root=tmp_path / "logs")
+        assert "did not run" in str(excinfo.value)
+
+    def test_uv_absent_is_a_loud_refusal(self, tmp_path):
+        """Fail closed on the tool the floor depends on, rather than falling
+        back to the bare interpreter that cannot work here."""
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_floor(tmp_path, 99, run=self._clone_stub(tmp_path, [], ""),
+                              which=lambda name: None if name == "uv" else "/usr/bin/x",
+                              log_root=tmp_path / "logs")
+        assert "uv" in str(excinfo.value)

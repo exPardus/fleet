@@ -18239,6 +18239,13 @@ def _wave_parse_pytest_result(stdout, stderr, returncode):
 def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                 log_root=None):
     """Run both foreground halves for each required interpreter in a fresh clone."""
+    # Checked BEFORE the clone: the floor cannot run without it, so refusing
+    # early costs nothing and refusing late costs a full clone.
+    uv = which("uv")
+    if uv is None:
+        raise FleetCliError(
+            "wave-close: `uv` is required to run the floor -- no interpreter on "
+            "PATH has pytest importable (CLAUDE.md)")
     clone_parent = Path(tempfile.mkdtemp(prefix="fleet-wave-close-"))
     clone = clone_parent / "repo"
     try:
@@ -18261,6 +18268,7 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
             executable = which(interpreter)
             if executable is None:
                 raise FleetCliError(f"wave-close: required interpreter {interpreter} is unavailable")
+            version = interpreter.replace("python", "", 1)
             aggregate = {key: 0 for key in
                          ("failed", "passed", "skipped", "xfailed", "xpassed",
                           "errors", "collected")}
@@ -18274,7 +18282,16 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                     env.pop(key, None)
                 env["UV_OFFLINE"] = "1"
                 env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
-                proc = run([executable, "-m", "pytest", "-q", "--color=no", *half],
+                # NOT `executable -m pytest`: on this host NO interpreter on
+                # PATH has pytest importable, the china-infra venv included, so
+                # a direct call dies with "No module named pytest" and parses as
+                # a floor with zero tests. `uv` supplies the interpreter AND the
+                # dependency (CLAUDE.md's first rule); `executable` above is
+                # still resolved, because a missing interpreter must fail loudly
+                # rather than let uv silently download one.
+                proc = run([uv, "run", "--no-project", "--python", version,
+                            "--with", "pytest", "python", "-m", "pytest",
+                            "-q", "--color=no", *half],
                            cwd=str(clone), env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
                 log = Path(log_root) / f"{interpreter}-half-{number}.log"
@@ -18282,6 +18299,15 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                                (proc.stderr or ""), encoding="utf-8")
                 parsed, half_failures = _wave_parse_pytest_result(
                     proc.stdout, proc.stderr, proc.returncode)
+                if parsed["collected"] == 0:
+                    # THE DEEPER DEFECT, found on this verb's first real run: a
+                    # half that produced no pytest summary parsed as zero of
+                    # everything, and zero failures compares EQUAL to an empty
+                    # expected set. A floor that did not run must never be
+                    # indistinguishable from a floor that ran clean.
+                    raise FleetCliError(
+                        f"wave-close: {interpreter} half {number} produced no "
+                        f"pytest summary -- the floor did not run; see {log}")
                 for key in aggregate:
                     aggregate[key] += parsed[key]
                 failures |= half_failures
