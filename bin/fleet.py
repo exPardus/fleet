@@ -32,6 +32,7 @@ import fnmatch
 import functools
 import hashlib
 import hmac
+import io
 import json
 import math
 import os
@@ -44,7 +45,7 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 
@@ -10946,10 +10947,90 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
 ARCHIVE_TTL_HOURS_DEFAULT = 24.0
 
 
+def _reap_mail_pending(sid: str) -> bool:
+    """Fail closed on unread or claimed mail, including IO uncertainty."""
+    try:
+        paths = [mailbox_dir() / f"{sid}.md"]
+        paths.extend(mailbox_dir().glob(f"{sid}.md.claimed.*"))
+        for path in paths:
+            try:
+                if path.stat().st_size:
+                    return True
+            except FileNotFoundError:
+                pass
+        return False
+    except OSError:
+        return True
+
+
+def _reap_protection(name: str, record: dict, roster_entries: list, claim):
+    """One whole-row veto shared by fresh archives, resumes and husks."""
+    holder = _record_is_supervisor_claim_holder(record, claim=claim)
+    if holder is True or (holder is None and
+            (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))):
+        return "current-claim"
+    if (isinstance(claim, dict) and claim.get("state") != "released"
+            and _is_supervisor_shaped(name)
+            and name.split("|")[1] == claim.get("incarnation_id")):
+        return "current-incarnation"
+    for member in _record_sids(record):
+        if _reap_mail_pending(member):
+            return "unread-mail"
+        entry = _roster_entry_for(roster_entries, member)
+        if entry is not None and ("pid" in entry or
+                ("status" in entry and entry.get("status") != "idle")):
+            return "roster-live"
+    return None
+
+
+def _reap_eligible(name: str, record: dict, roster_entries: list, claim) -> tuple:
+    """Age-independent criterion; the archive writer still owns all mutations.
+
+    A result alone is not a landing. Explicit lane_state or an outcome kind
+    records landed/abandoned; a daemon-dead entry needs neither it nor a TTL.
+    Roster absence alone is not daemon confirmation. PID presence is protected
+    conservatively (including retired sids), without host-dependent PID probes.
+    """
+    sid = record.get("session_id")
+    if not sid:
+        return False, "no-session-id"
+    protection = _reap_protection(name, record, roster_entries, claim)
+    if protection:
+        return False, protection
+    # A missing/corrupt claim cannot establish a predecessor. Pending handoff
+    # successors also do not become predecessors just by having another inc.
+    if isinstance(claim, dict) and (name == SUPERVISOR_BODY_NAME or
+                                    _is_supervisor_shaped(name)):
+        pending = handoff_pending_members(claim)
+        if any(not isinstance(m, dict) or
+               name == _successor_worker_name(m.get("successor_inc", ""))
+               for m in pending):
+            return False, "pending-successor"
+        if _record_is_supervisor_claim_holder(record, claim=claim) is False:
+            return True, "predecessor-supervisor"
+    entry = _roster_entry_for(roster_entries, sid)
+    if entry is not None and "status" not in entry and "pid" not in entry:
+        return True, "daemon-dead"
+    outcome = latest_outcome(name, sid)
+    lane_state = record.get("lane_state")
+    if lane_state not in ("landed", "abandoned") and isinstance(outcome, dict):
+        lane_state = outcome.get("kind")
+    if lane_state not in ("landed", "abandoned"):
+        return False, "lane-not-terminal"
+    if entry is not None and entry.get("status") == "idle":
+        return True, f"lane-{lane_state}"
+    if entry is None and record.get("status") == "idle":
+        return True, f"lane-{lane_state}"
+    return False, "session-not-idle"
+
+
 def _archive_eligible(name: str, record: dict, roster_entries: list, now,
-                      ttl_hours: float = ARCHIVE_TTL_HOURS_DEFAULT) -> tuple:
+                      ttl_hours: float = ARCHIVE_TTL_HOURS_DEFAULT,
+                      reap: bool = False) -> tuple:
     """Every gate must hold; returns (True, "eligible") or (False, reason)
-    naming the FIRST failed gate (binding order, task-9-brief.md):
+    naming the FIRST failed gate (binding order, task-9-brief.md).
+    Internal reap=True first applies the age-independent criterion and shared
+    PID/mail/claim veto, then falls back to these original TTL gates:
 
     1. is_native(record); archived_at is None.
     2. status in {"idle", "dead", "interrupted"} (the recomputed verdict
@@ -11002,6 +11083,13 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
         return (False, "not-native")
     if record.get("archived_at") is not None:
         return (False, "already-archived")
+    if reap:
+        eligible, reason = _reap_eligible(name, record, roster_entries, claim)
+        if eligible or reason not in ("lane-not-terminal", "session-not-idle"):
+            return eligible, reason
+        # Keep the pre-existing TTL policy for older completed workers. The
+        # accelerated path above never needs an age or outcome for daemon-dead
+        # rows, and its PID/mail/claim protections also cover this fallback.
     status = record.get("status")
     if status not in ("idle", "dead", "interrupted"):
         return (False, f"status:{status}")
@@ -11122,7 +11210,7 @@ def _archive_resume_pending(name: str, record: dict) -> bool:
 
 
 def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
-                         roster_entries: list, run, which) -> None:
+                         roster_entries: list, run, which, reap: bool = False) -> None:
     """The (potentially slow) file-move + `claude rm` phase, shared by a
     fresh archive and a resumed one: move every evidence file into
     `dest_dir`, then `claude rm` the current sid and every retired sid --
@@ -11137,13 +11225,28 @@ def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
     dir -- out from under a still-running session (G12 UNOBSERVED). A live
     sid is now SKIPPED (reported, not rm'd) rather than swept; a later
     archive run catches it once it actually retires."""
+    if reap:
+        # The same protection applies to crash-resumes, and BEFORE moving mail
+        # out of its inbox. A post-commit arrival leaves the archive resumable.
+        record = {"session_id": sid, "retired_sids": retired}
+        if _reap_protection(n, record, roster_entries, read_incarnation()):
+            return
     dest_dir.mkdir(parents=True, exist_ok=True)
     for src, dest_name in _archive_file_pairs(n, sid, retired):
+        if reap and src.parent == mailbox_dir():
+            # Mail can arrive while slow evidence moves run. Never move the
+            # inbox out from under the final pre-rm check in automatic cleanup.
+            continue
         _archive_move(src, dest_dir / dest_name, n)
 
+    if reap and _reap_protection(n, record, roster_entries, read_incarnation()):
+        return  # a delivery during file moves protects the entire sid union
     for s in ([sid] if sid else []) + retired:
         entry = _roster_entry_for(roster_entries, s)
-        live = entry is not None and ("status" in entry or "pid" in entry)
+        live = entry is not None and ("pid" in entry or
+                ("status" in entry and (not reap or entry.get("status") != "idle")))
+        if reap and _reap_mail_pending(s):
+            continue
         if live:
             print(f"fleet: {n}: skipping rm {s[:8]}... -- session live in roster",
                   file=sys.stderr)
@@ -11519,6 +11622,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
     if ttl_hours is None:
         ttl_hours = ARCHIVE_TTL_HOURS_DEFAULT
     dry_run = bool(getattr(args, "dry_run", False))
+    reap = bool(getattr(args, "reap", False))
 
     with fleet_lock():
         data = load_registry()
@@ -11565,7 +11669,8 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
         return 1
 
     now = datetime.now(timezone.utc)
-    verdicts = {n: _archive_eligible(n, before[n], roster_entries, now, ttl_hours=ttl_hours)
+    verdicts = {n: _archive_eligible(n, before[n], roster_entries, now,
+                                    ttl_hours=ttl_hours, reap=reap)
                for n in names}
 
     if dry_run:
@@ -11600,6 +11705,9 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
             if current != rec:
                 print(f"fleet: {n}: changed during archive -- skipped", file=sys.stderr)
                 continue
+            if reap and not _archive_eligible(n, current, roster_entries, now,
+                                              reap=True)[0]:
+                continue  # claim/mail may have changed without a registry write
             current = dict(current)
             current["archived_at"] = now_iso()
             data["workers"][n] = current
@@ -11608,7 +11716,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
             archived_count += 1
 
         _archive_move_and_rm(n, sid, retired, _archive_dest_dir(n),
-                             roster_entries, run, which)
+                             roster_entries, run, which, reap=reap)
 
     # T9 fix wave (finding C2/3b): resumed workers were ALREADY counted as
     # archived by whichever earlier run first stamped their archived_at --
@@ -11622,9 +11730,12 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
         print(f"fleet: {n}: resuming archive -- completing pending file moves",
               file=sys.stderr)
         _archive_move_and_rm(n, sid, retired, archive_root() / name_fs_stem(n),
-                             roster_entries, run, which)
+                             roster_entries, run, which, reap=reap)
 
     skipped_count = len(names) - archived_count
+    stats = getattr(args, "reap_stats", None)
+    if stats is not None:
+        stats["archived"] = archived_count
     print(f"archived {archived_count} worker(s), skipped {skipped_count}")
     return 0
 
@@ -11816,8 +11927,8 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
     # from an older code path) -- but the spec mandates the explicit gate, and
     # keyed on holder-alone it stays parity with `_archive_eligible`'s gate 0.
     claim = read_incarnation()
-    for rec in workers.values():
-        if isinstance(rec, dict) and _record_is_supervisor_claim_holder(rec, claim=claim) is True:
+    for name, rec in workers.items():
+        if isinstance(rec, dict) and _reap_protection(name, rec, payload, claim):
             protected |= _record_sids(rec)
 
     removed = []
@@ -11832,12 +11943,8 @@ def _sweep_husks(dry_run: bool, run=subprocess.run, which=shutil.which) -> tuple
             continue
         if "status" in entry or "pid" in entry:
             continue  # live session -- never touched (same test as archive gate 3)
-        try:
-            mailbox = mailbox_dir() / f"{sid}.md"
-            if mailbox.exists() and mailbox.stat().st_size > 0:
-                continue  # pending mail is not garbage
-        except OSError:
-            continue  # can't prove no mail -- fail safe, skip
+        if _reap_mail_pending(sid):
+            continue
         display = entry.get("name") if isinstance(entry.get("name"), str) else sid[:8]
         if dry_run:
             print(f"husk: would rm {sid} ({display})")
@@ -11908,8 +12015,8 @@ def _expire_tombstones(expire_hours: float, dry_run: bool) -> list:
 
 def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     """`fleet autoclean [--ttl-hours F] [--expire-tombstones-hours F]
-    [--dry-run]` (docs/specs/autoclean.md): tier 1 archive TTL pass +
-    tier 2 husk sweep, tier 3 tombstone expiry only with its flag. Tiers
+    [--dry-run]` (docs/specs/autoclean.md): tier 1 age-independent reap plus
+    legacy archive TTL fallback; tier 2 husk sweep, tier 3 expiry only with its flag. Tiers
     are isolated -- one tier failing never blocks the next (D3); errors
     land in stderr, the run stamp, one `autoclean_run` event, and exit 1.
 
@@ -11960,6 +12067,8 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     archive_rc = None
     try:
         archive_args = argparse.Namespace(name=None, ttl_hours=ttl_hours, dry_run=dry_run)
+        archive_args.reap = bool(getattr(args, "reap", True))
+        archive_args.reap_stats = getattr(args, "reap_stats", None)
         # `as_autoclean_tier=True` carries §7's `autoclean` exemption ACROSS the
         # frame boundary. Without it the sweep is refused by the very claim it
         # exists to clean up around, because both of its drivers -- the
@@ -12023,6 +12132,45 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
           f"tombstones_expired={len(tombstones)}"
           f" errors={len(errors)}{' (dry-run)' if dry_run else ''}")
     return 1 if errors else 0
+
+
+SUPERVISOR_REAP_RULE = (
+    "Fleet automatically reaps at supervisor boot, handoff completion and release: "
+    "landed or abandoned lanes with an idle session and no unread mail, "
+    "daemon-confirmed dead rows, and predecessor supervisor bodies outside the "
+    "current claim, regardless of age; unread mail and any live PID always protect "
+    "a row. Record landing as lane_state=landed or abandoned in the registry "
+    "(or a matching outcome kind); a result alone is not a landing. "
+    "Before any dispatch, allow at most 3 live worker sessions total across Claude "
+    "and Codex (a Codex lane counts as one), and require at least 1.5 GB available "
+    "memory. Reaping is automatic; supervisors do not run fleet autoclean or fleet "
+    "archive by hand."
+)
+
+
+def _supervisor_reap(run=subprocess.run, which=shutil.which) -> tuple:
+    """Best-effort lifecycle maintenance, after the claim lock is released.
+
+    Never strand a minted nonce because maintenance failed, or quarantine an
+    unreadable registry on a supervisor transition. Keep the existing autoclean
+    stamp/event and stderr diagnostics; only its compact count enters the bundle.
+    """
+    ok, reason, data = _read_registry_readonly()
+    if not ok:
+        return 0, f"registry {reason}"
+    stats = {}
+    args = argparse.Namespace(reap=True, reap_stats=stats, dry_run=False)
+    try:
+        with redirect_stdout(io.StringIO()):
+            rc = cmd_autoclean(args, run=run, which=which)
+        return stats.get("archived", 0), "autoclean incomplete; see run stamp" if rc else None
+    except Exception as exc:
+        return stats.get("archived", 0), f"{type(exc).__name__}: {exc}"
+
+
+def _supervisor_reap_line(run=subprocess.run, which=shutil.which) -> str:
+    count, error = _supervisor_reap(run=run, which=which)
+    return f"reaped: {count} rows" + (f" (deferred: {error})" if error else "")
 
 
 # ---------------------------------------------------------------------------
@@ -16726,7 +16874,13 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
         rc = SUPERVISOR_BOOT_RC[verdict]
 
     bundle = _render_boot_bundle(entries, status_snapshot(), supervisor_journal_entries())
-    lines = [bundle, "", f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]
+    # Refused/frozen boots and claim-pending successors remain read-only apart
+    # from their existing claim/handshake protocol. No sweep before it succeeds.
+    reap_line = (_supervisor_reap_line(run=run, which=which)
+                 if rc == 0 and not getattr(args, "handoff_inc", None) else
+                 "reaped: 0 rows (deferred: boot has not acquired the claim)")
+    lines = [bundle, "", reap_line, SUPERVISOR_REAP_RULE, "",
+             f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]
     if inc_line:
         lines.append(f"INCARNATION: {inc_line}")
     lines.append(f"VERDICT: {verdict} -- {reason}")
@@ -17881,7 +18035,7 @@ def _tombstone_releasing_body(caller: str, inc: str):
     return name
 
 
-def cmd_sup_release(args) -> int:
+def cmd_sup_release(args, run=subprocess.run, which=shutil.which) -> int:
     """`fleet sup-release [--reason TEXT] [--nonce N] [--sid S]` -- claim-nonce
     §6.3 / D3. The verb that produces a RELEASED claim.
 
@@ -17981,6 +18135,7 @@ def cmd_sup_release(args) -> int:
         write_incarnation(released)
         # AFTER the claim write, never before -- see the ORDER note above.
         retired = _tombstone_releasing_body(caller, inc)
+    print(_supervisor_reap_line(run=run, which=which))
     tail = (f"This body's registry record ({retired}) is tombstoned, so the next "
             f"`fleet sup-boot` claims immediately -- nobody has to stop this "
             f"session first." if retired else
@@ -19528,7 +19683,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     return 0
 
 
-def cmd_sup_handoff_complete(args) -> int:
+def cmd_sup_handoff_complete(args, run=subprocess.run, which=shutil.which) -> int:
     """`fleet sup-handoff-complete --expect-inc I [--expect-sid S] [--sid ...]`.
 
     §6.4 / D4: verification turns on the TOKEN, not the sid. The HANDSHAKE must
@@ -19658,6 +19813,7 @@ def cmd_sup_handoff_complete(args) -> int:
         # claim we just wrote, whose holder is the successor and whose pending
         # marker is gone, so nothing live is in the sweep's range.
         sweep_handoff_task_files(new_claim)
+    print(_supervisor_reap_line(run=run, which=which))
     if sid_warning:
         print(sid_warning)
     print(f"claim transferred to {args.expect_inc}. This (old) incarnation must now "

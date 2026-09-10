@@ -643,12 +643,16 @@ class TestWhatElseTheTombstoneChanges:
         assert fleet.main(["clean", "--yes"]) == 0
         assert "RELEASED" in journal.read_text(encoding="utf-8")
 
-    def test_it_does_not_cost_the_operator_the_stop_lever(self, sup_home, capsys):
+    def test_it_does_not_cost_the_operator_the_stop_lever(self, sup_home, capsys,
+                                                       monkeypatch):
         # `fleet kill <body>` must still reach a tombstoned record, or the
         # operator loses the ability to stop a lingering released session
         # through fleet. `kill` refuses ARCHIVED records, not dead ones -- which
         # is one more reason the tombstone is `status`, never `archived_at`.
         _install(_record(RELEASER))
+        # Release now reaps automatically. This test describes a lingering
+        # LIVE body, so give the pass the same liveness evidence as kill.
+        _roster(monkeypatch, RELEASER)
         value = _hold()
         assert _release(nonce=value) == 0
         rec = fleet.load_registry()["workers"][BODY]
