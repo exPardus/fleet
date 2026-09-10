@@ -13,8 +13,10 @@ AMENDMENT, `state/tasks/20260909-succession-ruling.md`; it supersedes the
 docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md, which
 still carries the old page text and is the prose lane's to correct). The
 keeper's own boundary is UNCHANGED in kind -- it observes and it types. What
-changed is what it types: `rule_supervisor_dead` used to say "await operator
-before sup-spawn" and now says "relaunch", because the INTERFACE runs
+changed is what it types: the supervisor-liveness rule (named
+`rule_supervisor_dead` then, `rule_supervisor_stalled` since G-K6 wave 1)
+used to say "await operator before sup-spawn" and now says "relaunch",
+because the INTERFACE runs
 `sup-spawn` on that line without waiting for the operator. Revival is
 therefore no longer a human message from the phone, and the keeper still
 runs no `sup-spawn` itself. The two-live-body guard the amendment asks for
@@ -135,8 +137,9 @@ def rule_login_expired(obs, now):
 def rule_claim_unknown(obs, now):
     """`unknown` is "the claim could not be read or projected"
     (`_supervisor_tier_snapshot`), which is NOT evidence of death. It used to
-    ride the supervisor-dead page and so reported a read failure as a fact
-    about the supervisor (fix wave 1, C2)."""
+    ride the supervisor-stalled page (`supervisor-dead` when C2 split them)
+    and so reported a read failure as a fact about the supervisor (fix wave
+    1, C2)."""
     if not obs.get("goals_active"):
         return None
     if not obs.get("agents_ok", True):
@@ -148,19 +151,101 @@ def rule_claim_unknown(obs, now):
                 "Report it; do not repair.")
 
 
-def rule_supervisor_dead(obs, now):
-    """Fires on: GOALS active, the roster readable, and either a
-    released/absent claim (dead by definition -- no roster condition), or a
-    HELD claim whose heartbeat is missing/stale AND whose own session id is
-    not in `claude agents --json`.
+#: The ONE roster `status` value that means "this body is taking a turn right
+#: now" (MEASURED, `docs/lanes/w61-keeperblind.md` §3, claude 2.1.267 on this
+#: host: a background session reads `busy` inside its turn and flips to `idle`
+#: within 13 s of the turn ending, with no other field moving).
+#:
+#: IT IS AN ALLOWLIST OF ONE, AND THAT IS THE DELIBERATE CHOICE. Everything
+#: else -- `idle`, `waiting`, a value a later CLI invents, a non-string, or no
+#: `status` key at all -- reads as NOT WORKING and therefore PAGES once the
+#: heartbeat is stale. This is an alarm; the direction it must fail in is
+#: LOUD. A denylist ("page unless the status is one of these dead ones") would
+#: silently re-acquire the 2026-09-09 blindness the first time the CLI shipped
+#: a new value.
+ROSTER_BUSY = "busy"
 
-    Fix wave 1, C2: the identity test is the claim's SESSION ID, not a
-    `sup|` name prefix. `claude agents --json` lists ACTIVE sessions only, so
-    an idle-between-turns supervisor is absent from it while perfectly alive
-    -- fleet's own verdict engine reads roster-absence plus a fresh outcome
-    as `idle`, not dead -- and a name join is the weaker proof anyway
-    (ai-title can overwrite `name` after a resume). A held claim with a
-    FRESH heartbeat never pages, whatever the roster says."""
+
+def _claim_activity(obs):
+    """`(activity, status)` for the claim's OWN roster row, from
+    `claude agents --json` (the plain spelling; never `--all`).
+
+    Four classes, because the three non-busy ones are three different
+    sentences for the operator and one of them is not even a defect in the
+    same sense:
+
+    - `"busy"`   -- listed, `status == "busy"`: a body in a turn right now.
+    - `"quiet"`  -- listed with some other status (`idle` is the measured
+                    one): the body is ALIVE and NOT WORKING. This is the
+                    2026-09-09 outage, and it is what C exists to page.
+    - `"dead"`   -- listed, but the row carries NO `status` at all. MEASURED:
+                    on a dead row `status` and `pid` are ABSENT from the
+                    object, not present-and-null (w61 §2), and such rows
+                    persist in the plain spelling indefinitely -- one was 22h
+                    old when measured. Listed is not alive.
+    - `"absent"` -- no row for this sid at all.
+
+    `obs.get("claim_row_status")` is NOT read as a bare `.get()` truth test.
+    A missing obs key, a row without the key, and a row whose key holds a
+    non-string all land on `"dead"`/`"absent"` EXPLICITLY, so the alarm can
+    never be silenced by a shape nobody anticipated -- `.get()` returning
+    `None` by accident is exactly how a rule ends up passing its tests while
+    watching nothing."""
+    if not obs.get("claim_in_roster"):
+        return "absent", None
+    status = obs.get("claim_row_status")
+    if not isinstance(status, str) or not status:
+        return "dead", None
+    return ("busy" if status == ROSTER_BUSY else "quiet"), status
+
+
+def rule_supervisor_stalled(obs, now):
+    """The fleet has no supervisor TAKING TURNS. Fires on: GOALS active, the
+    roster readable, and either a released/absent claim (no supervisor by
+    definition -- no roster condition), or a HELD claim whose heartbeat is
+    missing/stale AND whose own session row is not `busy`.
+
+    RENAMED FROM `rule_supervisor_dead` (G-K6 wave 1, operator ruling
+    2026-09-10 *"G-K6 C then B"*, which invites the rename *"if the lane
+    agrees the name is wrong"*). The lane agrees. The rule now pages a body
+    that is alive, listed, holding the claim, and idle -- calling that "dead"
+    is a false claim about the world in the page the operator reads at 3am.
+    The `Page` rule name moved with it (`supervisor-dead` ->
+    `supervisor-stalled`), which is the dedup key: see the report for the
+    one-off re-fire that costs.
+
+    WHAT C CHANGED, AND WHY THE OLD ARM WAS THE WRONG INSTRUMENT. The arm used
+    to be `claim_sid in roster_sids` -- MERE PRESENCE. It was added (fix wave
+    1, C2) to protect a supervisor that was *alive and unlisted*, on the
+    premise that `claude agents --json` "lists ACTIVE sessions only". MEASURED
+    (`docs/lanes/w61-keeperblind.md` §3, §6), that premise is exactly
+    INVERTED: an idle-between-turns background session is PRESENT, at
+    `state: "working"`, `status: "idle"`, with a live pid, and it stays that
+    way until the daemon retires it at 8h. Alive-and-unlisted does not occur
+    for a background session on this host. What occurs is dead-and-listed
+    (5 of 10 plain rows, one 22h old) and alive-listed-and-doing-nothing --
+    and the old arm admitted both. On 2026-09-09 it suppressed the page for
+    8h10m51s while the heartbeat screamed; `status`-armed, the identical
+    observations page at 21:04:36Z instead of 04:14:36Z.
+
+    THE SID JOIN STAYS, AND IT IS LOAD-BEARING. Only the MEMBERSHIP predicate
+    changed. C2's fix -- join on the claim's SESSION ID, never a `sup|` name
+    prefix -- is untouched, because `ai-title` can overwrite `name` after a
+    resume, so a name join can bind a live supervisor to the wrong row or
+    miss it entirely and page at a healthy fleet.
+
+    THE RESIDUAL C DOES NOT CLOSE, STATED PLAINLY: a supervisor WEDGED
+    MID-TURN reports `status: "busy"` for as long as its process lives, and
+    this rule stays silent for exactly as long. UNMEASURED -- w61 could not
+    produce a wedge, and neither did this lane. The hole is strictly smaller
+    than the one it replaces (that one swallowed every idle body too), but it
+    is a hole, and it is the reason a heartbeat-only rule (reading A) is still
+    arguable. A supervisor mid-LEGITIMATE-long-turn reads `busy` too, and is
+    suppressed on purpose: that is C's whole claim to introducing no new false
+    positive.
+
+    A held claim with a FRESH heartbeat never pages, whatever the roster
+    says -- that gate is checked first and is unchanged."""
     if not obs.get("goals_active"):
         return None
     if not obs.get("agents_ok", True):
@@ -173,11 +258,22 @@ def rule_supervisor_dead(obs, now):
         beat = obs.get("heartbeat_age_seconds")
         if beat is not None and beat <= HEARTBEAT_STALE_SECONDS:
             return None
-        if obs.get("claim_sid_live"):
+        activity, status = _claim_activity(obs)
+        if activity == "busy":
             return None
         stale = ("no heartbeat" if beat is None
                  else f"heartbeat {int(beat // 60)} min stale")
-        reason = f"{stale}, claim session not in the roster"
+        if activity == "quiet":
+            # The 2026-09-09 shape. Name the value, because "idle" and
+            # "waiting" (a permission prompt nobody is at the keyboard for)
+            # are different remedies and the operator can only see which
+            # from the page.
+            seen = f"roster says {status}"
+        elif activity == "dead":
+            seen = "claim session listed with no live process"
+        else:
+            seen = "claim session not in the roster"
+        reason = f"{stale}, {seen}"
         # The fingerprint must NOT carry the heartbeat age (re-review minor
         # 1): the age changes every tick, so a beat-bearing fingerprint never
         # equals its predecessor and `dedup` can never suppress it -- the
@@ -188,7 +284,8 @@ def rule_supervisor_dead(obs, now):
     else:
         return None  # `unknown` belongs to rule_claim_unknown
     since = _since(obs)
-    head = f"supervisor dead since {since}" if since else "supervisor dead"
+    head = (f"supervisor stalled since {since}" if since
+            else "supervisor stalled")
     # THE INSTRUCTION IS `RELAUNCH`, NOT `WAIT` (operator ruling 2026-09-09,
     # AMENDMENT: *"keeper must just instruct interface to relaunch
     # supervisor"*). The keeper still does not dispatch -- it types, the
@@ -204,10 +301,21 @@ def rule_supervisor_dead(obs, now):
     # shared with a worker-writable `released_at`. A page that spends its
     # budget restating a checklist truncates the verb it exists to name.
     #
-    # `Page(...)`'s rule name and fingerprint are UNTOUCHED. `fp` still
-    # carries no heartbeat age (see the comment above), so this rewording
-    # cannot change how often the operator is paged.
-    return Page("supervisor-dead", f"{state}:{fp}",
+    # THE FINGERPRINT IS UNCHANGED ACROSS C, ON PURPOSE, AND THE INVARIANT
+    # WAS RE-CHECKED (this change DOES alter what the page says). `fp` still
+    # carries no heartbeat age -- and it also does NOT carry the activity
+    # class. The class can move under a stalled supervisor (`quiet` becomes
+    # `dead` when the daemon finally retires the body, as it did at 04:05:58Z
+    # on 2026-09-09), and folding it in would re-page on a transition that
+    # changes nothing the operator does. One claim, one held-and-stalled
+    # fingerprint, one page per REPAGE_SECONDS.
+    #
+    # THE RULE NAME DID CHANGE: `supervisor-dead` -> `supervisor-stalled`.
+    # That IS the dedup identity (`state/keeper/last-page.json` keys on it),
+    # so the first tick after this lands re-pages a stall that was already
+    # paged under the old name -- once. Stated, not discovered; see
+    # `docs/lanes/w62-keeperc.md`.
+    return Page("supervisor-stalled", f"{state}:{fp}",
                 f"KEEPER: {head} ({reason}). Report state, then relaunch "
                 "with sup-spawn; do not await the operator.")
 
@@ -276,7 +384,7 @@ RULES = (
     rule_claude_missing,
     rule_login_expired,
     rule_claim_unknown,
-    rule_supervisor_dead,
+    rule_supervisor_stalled,
     rule_supervisor_frozen,
     rule_worker_anomaly,
     rule_unpushed,
@@ -390,26 +498,49 @@ def _pending_question(status):
 
 
 def _agents(run):
-    """(ok, missing, session_ids). `claude agents --json` lists the ACTIVE
-    sessions; the sids are the identity join C2 replaced the name prefix
-    with."""
+    """(ok, missing, {sessionId: status-or-None}). `claude agents --json`,
+    with NO `--all` -- the two spellings are different lists (the plain one
+    omits `done`/`failed`/`stopped` rows) and a claim about one is not a
+    claim about the other. Name the spelling beside any count taken from it.
+
+    THE OLD DOCSTRING SAID THIS LISTS "the ACTIVE sessions". IT IS FALSE, AND
+    IT WAS LOAD-BEARING (`docs/lanes/w61-keeperblind.md` §6, MEASURED on this
+    host at `claude 2.1.267`): at 04:27Z the plain spelling returned 10 rows
+    of which 5 were dead bodies, the oldest dead and listed for 22h05m. That
+    word told every reader that membership IS liveness, so no caller filtered
+    -- and the resulting arm watched a dark fleet for 8h10m.
+
+    SO THE VALUE IS THE ROW'S `status`, NOT JUST THE KEY (G-K6 wave 1 / C).
+    Rows are heterogeneous by `kind`: an `interactive` row carries
+    `pid`/`status` and no `state`; a `background` row carries `state`, and
+    carries `pid`/`status` ONLY WHILE THE PROCESS LIVES. On a dead row the
+    `status` key is ABSENT from the object, not present-and-null -- so the
+    mapping's value is None for "listed with no live process", and a sid
+    missing from the mapping is "no row at all". `_claim_activity` is the one
+    place that reads the difference.
+
+    A non-str or empty `status` is normalised to None (the same treatment a
+    dead row gets), because this data crosses a process boundary and the
+    alarm must not depend on the CLI's JSON being well-typed."""
     rc, out = _run_text(run, ["claude", "agents", "--json"])
     if rc == MISSING_BINARY_RC:
-        return False, True, set()
+        return False, True, {}
     if rc != 0:
-        return False, False, set()
+        return False, False, {}
     try:
         rows = json.loads(out)
     except ValueError:
-        return False, False, set()
+        return False, False, {}
     if not isinstance(rows, list):
-        return False, False, set()
-    sids = set()
+        return False, False, {}
+    statuses = {}
     for row in rows:
         if isinstance(row, dict) and isinstance(row.get("sessionId"), str):
             if row["sessionId"]:
-                sids.add(row["sessionId"])
-    return True, False, sids
+                status = row.get("status")
+                statuses[row["sessionId"]] = (
+                    status if isinstance(status, str) and status else None)
+    return True, False, statuses
 
 
 def _git_unpushed(home, run, out=sys.stdout):
@@ -541,24 +672,36 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         pending = None
         claim_sid = None
         released_at = None
-    agents_ok, agents_missing, agent_sids = _agents(run)
+    agents_ok, agents_missing, agent_statuses = _agents(run)
     unpushed, oldest, unpushed_ref = _git_unpushed(home, run, out=out)
     workers = [{"name": w.get("name"), "status": w.get("status"),
                 "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind")}
                for w in (snap.get("workers") or [])]
-    # Type-normalise BEFORE the roster membership test (re-review minor 2):
+    # Type-normalise BEFORE the roster lookup (re-review minor 2):
     # `incarnation.get("session_id")` is worker-writable projection data, and
     # a non-str shape (a dict, say) used to reach `claim_sid in agent_sids`
     # RAW -- `in` on a set hashes its operand, and an unhashable value raised
-    # `TypeError` straight out of the tick. `claim_sid` here is the same
-    # normalised value the caller reads back as `obs["claim_sid"]`.
+    # `TypeError` straight out of the tick. A dict key lookup hashes its
+    # operand the same way, so the normalisation is still load-bearing after
+    # C swapped the set for a sid->status mapping. `claim_sid` here is the
+    # same normalised value the caller reads back as `obs["claim_sid"]`.
     claim_sid = claim_sid if isinstance(claim_sid, str) and claim_sid else None
-    roster_sids = agent_sids
+    # C (G-K6 wave 1): the observation carries the claim row's own `status`,
+    # not merely whether a row exists. `claim_in_roster` and
+    # `claim_row_status` are separate keys because "no row" and "a row with
+    # no status" are different facts about the world -- the second is a
+    # corpse the CLI is still listing -- and `_claim_activity` is the only
+    # reader that has to tell them apart. There is no `claim_sid_live` any
+    # more: it was never a liveness fact (w61 §5), and leaving the name in
+    # place with a new meaning is how the next reader inherits this outage.
+    claim_in_roster = claim_sid is not None and claim_sid in agent_statuses
+    claim_row_status = agent_statuses.get(claim_sid) if claim_in_roster else None
     return {
         "goals_active": goals_active,
         "claim_state": claim_state,
         "claim_sid": claim_sid,
-        "claim_sid_live": claim_sid is not None and claim_sid in roster_sids,
+        "claim_in_roster": claim_in_roster,
+        "claim_row_status": claim_row_status,
         "released_at": released_at,
         "heartbeat_age_seconds": beat,
         "pending_decision": pending,

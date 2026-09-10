@@ -3,13 +3,13 @@ import json
 import fleet_keeper as k
 
 NOW = 1_800_000_000.0
-P = k.Page("supervisor-dead", "released", "KEEPER: supervisor dead")
+P = k.Page("supervisor-stalled", "released", "KEEPER: supervisor stalled")
 
 
 def test_first_page_is_sent_and_recorded():
     send, state = k.dedup([P], {}, NOW)
     assert send == [P]
-    assert state == {"supervisor-dead": {"fingerprint": "released", "at": NOW}}
+    assert state == {"supervisor-stalled": {"fingerprint": "released", "at": NOW}}
 
 
 def test_same_fingerprint_inside_the_window_is_suppressed():
@@ -23,7 +23,7 @@ def test_same_fingerprint_after_the_window_repages():
     _, state = k.dedup([P], {}, NOW)
     send, state2 = k.dedup([P], state, NOW + k.REPAGE_SECONDS + 1)
     assert send == [P]
-    assert state2["supervisor-dead"]["at"] == NOW + k.REPAGE_SECONDS + 1
+    assert state2["supervisor-stalled"]["at"] == NOW + k.REPAGE_SECONDS + 1
 
 
 def test_changed_fingerprint_repages_immediately():
@@ -39,7 +39,7 @@ def test_a_rule_that_stops_firing_is_forgotten():
     assert send == [] and state2 == {}
 
 
-def test_a_held_stale_supervisor_dead_page_dedups_across_a_tick():
+def test_a_held_stale_supervisor_stalled_page_dedups_across_a_tick():
     """End-to-end version of the beat-free fingerprint fix (re-review minor
     1): the same held+stale situation, observed 15 minutes apart with the
     heartbeat age advanced, must not re-page -- only the fingerprint (which
@@ -48,7 +48,8 @@ def test_a_held_stale_supervisor_dead_page_dedups_across_a_tick():
 
     def obs(beat):
         return {"goals_active": True, "claim_state": "held", "claim_sid": sid,
-                "claim_sid_live": False, "heartbeat_age_seconds": beat}
+                "claim_in_roster": True, "claim_row_status": "idle",
+                "heartbeat_age_seconds": beat}
 
     p1 = k.evaluate(obs(k.HEARTBEAT_STALE_SECONDS + 1), NOW)[0]
     send1, state = k.dedup([p1], {}, NOW)

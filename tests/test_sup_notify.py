@@ -298,7 +298,7 @@ class TestSupNotify:
         ("only if the handoff is stillborn: `sup-release`") means a supervisor
         that releases FIRST can no longer announce anything -- there is no
         holder to be. Announce BEFORE releasing; after a release the keeper's
-        `supervisor-dead` page is the channel."""
+        `supervisor-stalled` page is the channel."""
         nonce = _hold()
         claim = fleet.read_incarnation()
         claim["state"] = "released"

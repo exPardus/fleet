@@ -11,12 +11,18 @@ LIVE_SID = "11111111-2222-3333-4444-555555555555"
 
 def _obs(**over):
     """A healthy fleet: GOALS active, claim HELD, heartbeat fresh, the claim's
-    own session live in the roster."""
+    own session listed in the roster AND reading `status: "busy"`.
+
+    `claim_row_status` is the C arm (G-K6 wave 1): `busy` is the only value
+    that means "this body is taking a turn". The fixture states it explicitly
+    rather than leaning on a default, because every silence in this file has
+    to be attributable to one named key."""
     base = {
         "goals_active": True,
         "claim_state": "held",
         "claim_sid": LIVE_SID,
-        "claim_sid_live": True,
+        "claim_in_roster": True,
+        "claim_row_status": "busy",
         "released_at": None,
         "heartbeat_age_seconds": 120.0,
         "pending_decision": None,
@@ -49,86 +55,233 @@ def test_a_healthy_fleet_pages_nothing():
     assert k.evaluate(_obs(), NOW) == []
 
 
-# --- supervisor-dead (C2: the sid join, not a name prefix) ------------------
+# --- supervisor-stalled (C2's sid join, C's `status` arm) -------------------
+#
+# EFA0, THE 2026-09-09 OUTAGE, IS THE FIXTURE THIS SECTION IS BUILT AROUND.
+# MEASURED (`docs/lanes/w61-keeperblind.md` §0/§3/§7, and the daemon log):
+# the supervisor body `f9b83beb` held the claim, took its last turn at
+# 20:03:44Z, and then sat ALIVE with a live pid, listed in
+# `claude agents --json`, at `state: "working"`, `status: "idle"`, for
+# 8h10m51s. The keeper ticked ~31 times and paged nothing, because the arm
+# asked only whether the sid was PRESENT. It is present. It was present the
+# whole time.
 
-def test_released_claim_with_goals_active_pages_supervisor_dead():
+EFA0_SID = "f9b83beb-0000-0000-0000-000000000000"
+#: The heartbeat age at the 04:14:35Z tick that finally paged (MEASURED, from
+#: `state/keeper/last-page.json` and reproduced by w61).
+EFA0_BEAT_AT_THE_REAL_PAGE = 29451.0
+#: 2026-09-09T21:04:36Z, the first keeper tick at or after the heartbeat
+#: crossed `HEARTBEAT_STALE_SECONDS` (MEASURED, `journalctl --user -u
+#: fleet-keeper.service`). The whole point of C is that the page lands here.
+EFA0_BEAT_AT_THE_FIRST_STALE_TICK = 3652.0
+
+
+def _efa0(beat=EFA0_BEAT_AT_THE_FIRST_STALE_TICK, **over):
+    """The efa0 observation, exactly as `collect` would have built it during
+    the outage: GOALS active, roster readable, claim HELD by efa0, heartbeat
+    stale, and efa0's own row PRESENT in the plain roster reading
+    `status: "idle"`."""
+    fields = dict(claim_state="held", claim_sid=EFA0_SID, claim_in_roster=True,
+                  claim_row_status="idle", heartbeat_age_seconds=beat,
+                  released_at=None)
+    fields.update(over)
+    return _obs(**fields)
+
+
+def test_the_efa0_observation_pages_at_the_first_stale_tick():
+    """THE REPLAY, POSITIVE DIRECTION. This is the alarm that failed; a
+    `None` here is the outage, not a passing test."""
+    pages = k.evaluate(_efa0(), NOW)
+    assert _rules(pages) == ["supervisor-stalled"], (
+        "the 2026-09-09 outage observation must PAGE at 21:04:36Z")
+    assert pages[0].text.startswith("KEEPER: supervisor stalled since 60 min ago")
+    assert "roster says idle" in pages[0].text
+
+
+def test_the_efa0_observation_still_pages_seven_hours_later():
+    """The same body, seven hours further on, at the moment the keeper
+    actually paged. It must page for the SAME reason and under the SAME
+    fingerprint -- the eight hours of silence must not turn into eight hours
+    of a different alarm."""
+    late = k.evaluate(_efa0(beat=EFA0_BEAT_AT_THE_REAL_PAGE), NOW)
+    early = k.evaluate(_efa0(), NOW)
+    assert _rules(late) == ["supervisor-stalled"]
+    assert late[0].fingerprint == early[0].fingerprint
+    assert "since 490 min ago" in late[0].text
+
+
+def test_the_pre_c_arm_would_have_been_silent_on_the_same_observation():
+    """THE REPLAY, NEGATIVE DIRECTION -- and it is the half that proves the
+    test above is testing C and not something else.
+
+    Pre-C the arm was `if obs.get("claim_sid_live"): return None`, where
+    `claim_sid_live` was `claim_sid is not None and claim_sid in
+    roster_sids`. Reconstructed here from the SAME observation, mechanically,
+    rather than asserted from memory: efa0's sid is in the roster, so the old
+    predicate is True, so the old rule returned None -- for 8h10m51s."""
+    obs = _efa0()
+    pre_c_claim_sid_live = obs["claim_sid"] is not None and obs["claim_in_roster"]
+    assert pre_c_claim_sid_live is True, (
+        "efa0 WAS listed -- if this is False the replay is not the outage")
+    assert k.evaluate(obs, NOW), "and C pages it anyway"
+
+
+def test_a_busy_supervisor_mid_long_turn_with_a_stale_beat_is_suppressed():
+    """C'S WHOLE CLAIM TO INTRODUCING NO NEW FALSE POSITIVE. A supervisor
+    that has been inside one legitimate turn for over an hour has a stale
+    heartbeat (it only refreshes between turns) and reads `status: "busy"`.
+    It must stay silent. If this ever goes red, C has started paging at
+    working supervisors and the operator will learn to ignore the channel."""
+    for beat in (k.HEARTBEAT_STALE_SECONDS + 1, EFA0_BEAT_AT_THE_REAL_PAGE,
+                 30 * 3600.0):
+        assert k.evaluate(_obs(claim_state="held", claim_row_status="busy",
+                               heartbeat_age_seconds=beat), NOW) == [], beat
+
+
+def test_a_dead_row_carrying_no_status_key_pages():
+    """MEASURED (w61 §2): a dead body's row keeps its `sessionId` and loses
+    `status` and `pid` entirely -- the keys are ABSENT, not null -- and such
+    rows sit in the plain roster indefinitely (one was 22h old). `collect`
+    turns that into `claim_in_roster=True, claim_row_status=None`. Reading
+    `row["status"]` instead would raise and fail the alarm CLOSED, which is
+    the worst available direction."""
+    pages = k.evaluate(_obs(claim_state="held", claim_in_roster=True,
+                            claim_row_status=None,
+                            heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1),
+                       NOW)
+    assert _rules(pages) == ["supervisor-stalled"]
+    assert "claim session listed with no live process" in pages[0].text
+
+
+def test_an_unrecognised_status_value_pages_rather_than_suppressing():
+    """The allowlist is one value long ON PURPOSE. A future CLI value, or a
+    `waiting` (a permission prompt with nobody at the keyboard, which is as
+    stalled as dead on a headless host), must PAGE. A denylist would
+    re-acquire the 2026-09-09 blindness silently."""
+    for status in ("idle", "waiting", "paused", "BUSY", "busy ", "zzz-new"):
+        pages = k.evaluate(
+            _obs(claim_state="held", claim_row_status=status,
+                 heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1), NOW)
+        assert _rules(pages) == ["supervisor-stalled"], status
+        assert f"roster says {status}" in pages[0].text
+
+
+def test_a_missing_roster_key_is_handled_deliberately_not_by_accident():
+    """An observation that carries neither roster key at all (a shape no
+    current `collect` produces) must still page, and must say the honest
+    thing: nothing was found for this sid."""
+    obs = {"goals_active": True, "claim_state": "held", "claim_sid": LIVE_SID,
+           "agents_ok": True,
+           "heartbeat_age_seconds": k.HEARTBEAT_STALE_SECONDS + 1}
+    page = k.rule_supervisor_stalled(obs, NOW)
+    assert page is not None and page.rule == "supervisor-stalled"
+    assert "claim session not in the roster" in page.text
+
+
+def test_the_activity_classifier_is_four_ways_and_each_way_is_reachable():
+    """The seed for every pin above: a classifier that collapsed to one
+    answer would make several of them vacuous."""
+    assert k._claim_activity({"claim_in_roster": True,
+                              "claim_row_status": "busy"}) == ("busy", "busy")
+    assert k._claim_activity({"claim_in_roster": True,
+                              "claim_row_status": "idle"}) == ("quiet", "idle")
+    assert k._claim_activity({"claim_in_roster": True,
+                              "claim_row_status": None}) == ("dead", None)
+    assert k._claim_activity({}) == ("absent", None)
+    # a non-string status is a corpse, not a working body
+    assert k._claim_activity({"claim_in_roster": True,
+                              "claim_row_status": {"x": 1}}) == ("dead", None)
+
+
+def test_released_claim_with_goals_active_pages_supervisor_stalled():
     pages = k.evaluate(_obs(claim_state="released", claim_sid=None,
-                            claim_sid_live=False, heartbeat_age_seconds=None,
+                            claim_in_roster=False, claim_row_status=None,
+                            heartbeat_age_seconds=None,
                             released_at="2026-09-08T04:00:00Z"), NOW)
-    assert _rules(pages) == ["supervisor-dead"]
-    assert pages[0].text.startswith("KEEPER: supervisor dead")
-    # THIS PIN MOVED, AND THE MOVE IS THE POINT (operator ruling 2026-09-09,
-    # AMENDMENT: *"keeper must just instruct interface to relaunch
-    # supervisor"*). It used to read `"await operator" in pages[0].text`,
-    # which pinned the 2026-09-08 ruling the amendment supersedes. Both
-    # halves are asserted so a page that merely dropped the old sentence
-    # without naming the new act cannot pass.
+    assert _rules(pages) == ["supervisor-stalled"]
+    assert pages[0].text.startswith("KEEPER: supervisor stalled")
+    # THE NAME MOVED, AND THE MOVE IS THE POINT (operator ruling 2026-09-10,
+    # G-K6: *"Rename honestly (`supervisor_stalled`) if the lane agrees the
+    # name is wrong"*). The rule pages a body that is alive and not working;
+    # "dead" was a false claim about the world. Pinned in both directions so
+    # a page that merely added the new word cannot pass.
+    assert "dead" not in pages[0].text
+    # THIS PIN MOVED ONCE BEFORE, AND THAT MOVE WAS ALSO THE POINT (operator
+    # ruling 2026-09-09, AMENDMENT: *"keeper must just instruct interface to
+    # relaunch supervisor"*). It used to read `"await operator" in text`.
     assert "relaunch with sup-spawn" in pages[0].text
     assert "do not await the operator" in pages[0].text
     assert "await operator before" not in pages[0].text
 
 
-def test_absent_claim_with_goals_active_pages_supervisor_dead():
+def test_absent_claim_with_goals_active_pages_supervisor_stalled():
     pages = k.evaluate(_obs(claim_state="none", claim_sid=None,
-                            claim_sid_live=False,
+                            claim_in_roster=False, claim_row_status=None,
                             heartbeat_age_seconds=None), NOW)
-    assert _rules(pages) == ["supervisor-dead"]
+    assert _rules(pages) == ["supervisor-stalled"]
 
 
 def test_a_released_claim_pages_whatever_the_roster_says():
     """C2: a released claim is dead BY DEFINITION -- the old rule let a
-    roster hit (any `sup|*` name, from any launch) silence it."""
-    pages = k.evaluate(_obs(claim_state="released", claim_sid_live=True,
+    roster hit (any `sup|*` name, from any launch) silence it. C did not
+    reintroduce a roster condition here: a `busy` row does not save it
+    either."""
+    pages = k.evaluate(_obs(claim_state="released", claim_row_status="busy",
                             heartbeat_age_seconds=1.0), NOW)
-    assert _rules(pages) == ["supervisor-dead"]
+    assert _rules(pages) == ["supervisor-stalled"]
 
 
 def test_held_claim_with_a_fresh_heartbeat_never_pages():
-    """C2's headline: an idle-between-turns supervisor is absent from
-    `claude agents --json` (it lists ACTIVE sessions only) while alive. A
-    fresh heartbeat settles it before the roster is consulted at all."""
-    pages = k.evaluate(_obs(claim_state="held", claim_sid_live=False,
-                            heartbeat_age_seconds=120.0), NOW)
+    """A fresh heartbeat settles it before the roster is consulted at all --
+    unchanged by C, and it is the gate that keeps a supervisor between two
+    quick turns quiet no matter what the roster row says at that instant."""
+    for status, in_roster in (("idle", True), (None, True), (None, False),
+                              ("busy", True)):
+        assert k.evaluate(_obs(claim_state="held", claim_in_roster=in_roster,
+                               claim_row_status=status,
+                               heartbeat_age_seconds=120.0), NOW) == []
+
+
+def test_held_claim_stale_heartbeat_but_session_busy_is_silent():
+    pages = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1,
+                            claim_row_status="busy"), NOW)
     assert pages == []
 
 
-def test_held_claim_stale_heartbeat_but_session_live_is_silent():
+def test_held_claim_stale_heartbeat_and_no_session_row_pages():
     pages = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1,
-                            claim_sid_live=True), NOW)
-    assert pages == []
-
-
-def test_held_claim_stale_heartbeat_and_no_live_session_pages():
-    pages = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1,
-                            claim_sid_live=False), NOW)
-    assert _rules(pages) == ["supervisor-dead"]
+                            claim_in_roster=False, claim_row_status=None), NOW)
+    assert _rules(pages) == ["supervisor-stalled"]
     assert "claim session not in the roster" in pages[0].text
 
 
-def test_held_claim_with_no_heartbeat_and_no_live_session_pages():
-    pages = k.evaluate(_obs(heartbeat_age_seconds=None, claim_sid_live=False), NOW)
-    assert _rules(pages) == ["supervisor-dead"]
+def test_held_claim_with_no_heartbeat_and_no_session_row_pages():
+    pages = k.evaluate(_obs(heartbeat_age_seconds=None, claim_in_roster=False,
+                            claim_row_status=None), NOW)
+    assert _rules(pages) == ["supervisor-stalled"]
     assert "no heartbeat" in pages[0].text
 
 
-def test_supervisor_dead_reports_since_from_released_at():
+def test_supervisor_stalled_reports_since_from_released_at():
     """Minor: say WHEN, from `incarnation.released_at` when the claim has it."""
-    pages = k.evaluate(_obs(claim_state="released", claim_sid_live=False,
+    pages = k.evaluate(_obs(claim_state="released", claim_in_roster=False,
+                            claim_row_status=None,
                             heartbeat_age_seconds=None,
                             released_at="2026-09-08T04:00:00Z"), NOW)
     assert "since 2026-09-08T04:00:00Z" in pages[0].text
 
 
-def test_supervisor_dead_falls_back_to_the_heartbeat_age_for_since():
-    pages = k.evaluate(_obs(heartbeat_age_seconds=7200.0, claim_sid_live=False,
-                            released_at=None), NOW)
+def test_supervisor_stalled_falls_back_to_the_heartbeat_age_for_since():
+    pages = k.evaluate(_obs(heartbeat_age_seconds=7200.0, claim_in_roster=False,
+                            claim_row_status=None, released_at=None), NOW)
     assert "since 120 min ago" in pages[0].text
 
 
-def test_supervisor_dead_says_nothing_about_when_if_nothing_knows():
-    pages = k.evaluate(_obs(claim_state="none", claim_sid_live=False,
+def test_supervisor_stalled_says_nothing_about_when_if_nothing_knows():
+    pages = k.evaluate(_obs(claim_state="none", claim_in_roster=False,
+                            claim_row_status=None,
                             heartbeat_age_seconds=None, released_at=None), NOW)
-    assert pages[0].text.startswith("KEEPER: supervisor dead (claim none)")
+    assert pages[0].text.startswith("KEEPER: supervisor stalled (claim none)")
 
 
 def test_held_stale_fingerprint_is_beat_free_across_ticks():
@@ -137,28 +290,50 @@ def test_held_stale_fingerprint_is_beat_free_across_ticks():
     tick, so a beat-bearing fingerprint would never equal its predecessor and
     the operator would be paged every 15 minutes instead of once per
     REPAGE_SECONDS. The age still reaches the operator, in the TEXT, via
-    `_since`."""
+    `_since`.
+
+    RE-CHECKED UNDER C, because C changed what the page says (G-K6 wave 1
+    asks for exactly this). The reason clause now names the roster status,
+    and the fingerprint still does not carry it -- see the next test."""
     p1 = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 1,
-                         claim_sid_live=False), NOW)[0]
+                         claim_in_roster=False, claim_row_status=None), NOW)[0]
     p2 = k.evaluate(_obs(heartbeat_age_seconds=k.HEARTBEAT_STALE_SECONDS + 901,
-                         claim_sid_live=False), NOW + 900)[0]
-    assert p1.rule == p2.rule == "supervisor-dead"
+                         claim_in_roster=False, claim_row_status=None),
+                    NOW + 900)[0]
+    assert p1.rule == p2.rule == "supervisor-stalled"
     assert p1.fingerprint == p2.fingerprint
     assert "60 min stale" in p1.text
     assert "75 min stale" in p2.text
 
 
-def test_goals_inactive_never_pages_supervisor_dead():
+def test_the_fingerprint_does_not_carry_the_activity_class_either():
+    """The stalled body's row degrades over time -- efa0 read `idle` for
+    8h10m and then, when the daemon retired it at 04:05:58Z, became a row
+    with no `status` at all. Same claim, same stall, same remedy: one page,
+    not two. A class-bearing fingerprint would re-page on that transition."""
+    quiet = k.evaluate(_efa0(), NOW)[0]
+    dead = k.evaluate(_efa0(claim_row_status=None), NOW)[0]
+    absent = k.evaluate(_efa0(claim_in_roster=False,
+                              claim_row_status=None), NOW)[0]
+    assert quiet.fingerprint == dead.fingerprint == absent.fingerprint
+    # and the operator still sees the difference, in the text
+    assert quiet.text != dead.text != absent.text
+    send, state = k.dedup([quiet], {}, NOW)
+    assert send == [quiet]
+    assert k.dedup([dead], state, NOW + 900)[0] == []
+
+
+def test_goals_inactive_never_pages_supervisor_stalled():
     pages = k.evaluate(_obs(goals_active=False, claim_state="none",
-                            claim_sid_live=False), NOW)
-    assert "supervisor-dead" not in _rules(pages)
+                            claim_in_roster=False, claim_row_status=None), NOW)
+    assert "supervisor-stalled" not in _rules(pages)
 
 
 # --- claim-unknown (C2: a read failure is not a death) ----------------------
 
 def test_unknown_claim_state_pages_its_own_distinct_text():
     pages = k.evaluate(_obs(claim_state="unknown", claim_sid=None,
-                            claim_sid_live=False, heartbeat_age_seconds=None), NOW)
+                            claim_in_roster=False, heartbeat_age_seconds=None), NOW)
     assert _rules(pages) == ["claim-unknown"]
     assert pages[0].text == ("KEEPER: supervisor claim unreadable (state unknown). "
                              "Report it; do not repair.")
@@ -168,7 +343,7 @@ def test_unknown_claim_state_pages_its_own_distinct_text():
 def test_a_readable_claim_never_pages_claim_unknown():
     assert "claim-unknown" not in _rules(k.evaluate(_obs(claim_state="held"), NOW))
     assert "claim-unknown" not in _rules(
-        k.evaluate(_obs(claim_state="released", claim_sid_live=False,
+        k.evaluate(_obs(claim_state="released", claim_in_roster=False,
                         heartbeat_age_seconds=None), NOW))
 
 
@@ -188,8 +363,8 @@ def test_a_missing_claude_binary_pages_the_path_fault_not_a_login():
 def test_agents_failure_pages_login_expired():
     pages = k.evaluate(_obs(agents_ok=False, agents_missing=False), NOW)
     assert _rules(pages) == ["login-expired"]
-    # and it must NOT also claim the supervisor is dead on evidence it lacks
-    assert "supervisor-dead" not in _rules(pages)
+    # and it must NOT also claim the supervisor stalled on evidence it lacks
+    assert "supervisor-stalled" not in _rules(pages)
 
 
 def test_a_working_roster_pages_neither():
@@ -308,7 +483,7 @@ def test_fingerprints_change_when_the_situation_changes():
 
 
 def test_every_page_renders_as_one_prefixed_line():
-    obs = _obs(claim_state="released", claim_sid_live=False,
+    obs = _obs(claim_state="released", claim_in_roster=False,
                heartbeat_age_seconds=None, pending_decision="q?",
                workers=[{"name": "a", "status": "dead-suspected", "mail": 0,
                          "limit_kind": None}],
