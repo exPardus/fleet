@@ -33,11 +33,13 @@ measured defect, not the journal itself.
 Paste this into any brief whose lane will run `fleet` verbs and must not touch the live home.
 
 ```
-**Safety:** for a home that is ALREADY INITIALISED, pass `--fleet-home <temp>` EXPLICITLY on every
-`fleet` invocation meant for it. For a home you are about to CREATE, the flag cannot be used (see
-below) — set `FLEET_HOME` and **remove `CLAUDE_CODE_SESSION_ID` from the child environment**;
-that removal, not the env var, is what makes the fence hold. EITHER WAY, gate the whole run on
-`fleet home` invoked exactly the same way: if it does not print your temp path, run nothing else.
+**Safety:** **remove `CLAUDE_CODE_SESSION_ID` from the child environment on EVERY `fleet`
+invocation aimed at another home — `env -u CLAUDE_CODE_SESSION_ID fleet …`. That removal is the
+fence.** With it gone, pass `--fleet-home <temp>` explicitly for a home that ALREADY EXISTS, or set
+`FLEET_HOME` for a home you are about to CREATE (the flag cannot name one — see below). Gate the
+whole run on `fleet home` invoked exactly the same way: if it does not print your temp path, run
+nothing else — **except for the one `init --home` call that creates the home, which no `fleet home`
+can gate (see the 2026-09-10 correction below).**
 Compare it NORMALISED — `fleet home` prints `as_posix()`, so a literal string compare against a
 Windows path fails on the separators and looks like a breach that is not one. Point `INSTALL_ROOT`
 at a throwaway worktree too, so a step-4 install-root fallback cannot reach the real home. Never
@@ -45,6 +47,32 @@ at a throwaway worktree too, so a step-4 install-root fallback cannot reach the 
 DESTRUCTIVE, only the fold reverses it); never write `~/.claude/settings.json`. Enumerate every
 `fleet` command you ran and which home it actually touched, in your report.
 ```
+
+**CORRECTED 2026-09-10 (wave 62, lane `w62-dogfood`) — the sid removal is NOT specific to
+`FLEET_HOME`, and the superseded stanza scoped it that way.** It said `--fleet-home` was
+unconditionally sufficient for an existing home. **MEASURED: it is not, from a fleet-launched
+session, and it fails on an ORDINARY READ VERB:**
+
+```text
+$ fleet --fleet-home /home/altai/proga/fleet-dogfood home     # sid NOT stripped
+fleet: [fleet] WITNESS: --fleet-home names /home/altai/proga/fleet-dogfood, but this session is a
+member of /home/altai/proga/fleet. Refusing to act on a home the flag and the registry disagree
+about. Drop `--fleet-home` to act on the home this session belongs to.
+```
+
+That is §5 step 1's disagreement guard. **Worse for the reader than a plain refusal: its remedy says
+*"drop `--fleet-home`"*, which is the exact opposite of what a lane aiming at another home wants**
+(`_disagreement_remedy` only offers `--yes` on the three verbs that have it, and `home` is not one).
+A lane that obeys the message walks back into the live home. **Every brief on this machine that
+handed out `--fleet-home <other home>` as the idiom inherited this**, which is why the correction
+belongs here and not in one lane report.
+
+**AND THE `fleet home` GATE IS UNSATISFIABLE FOR THE ONE CALL THAT CREATES THE HOME.** For the
+`init --home` call the home does not exist yet, `--fleet-home` is refused in the same invocation,
+and there is no third spelling — so `fleet home` prints the LIVE home, which by the gate's own rule
+means *run nothing else*, and would stop the lane at step one. **The gate is sound for every call
+after the creating one and vacuous for that one.** State which call is which in the brief rather
+than letting the next lane discover it by ignoring its own instruction.
 
 **Why the env var does not work on its own, measured 2026-08-09 (wave 48), three runs, one
 discriminator:**
