@@ -98,7 +98,8 @@ def test_happy_path_observation(home):
     assert obs["goals_active"] is True
     assert obs["claim_state"] == "held"
     assert obs["claim_sid"] == SUP_SID
-    assert obs["claim_sid_live"] is True
+    assert obs["claim_in_roster"] is True
+    assert obs["claim_row_status"] == "busy"
     assert obs["heartbeat_age_seconds"] == 30.0
     assert obs["pending_decision"] is None
     assert obs["agents_ok"] is True and obs["agents_missing"] is False
@@ -140,7 +141,8 @@ def test_sup_status_garbage_falls_back_to_the_snapshot(home):
                        "incarnation_id": None, "heartbeat_age_seconds": None}))
     assert obs["claim_state"] == "released"
     assert obs["pending_decision"] is None
-    assert obs["claim_sid"] is None and obs["claim_sid_live"] is False
+    assert obs["claim_sid"] is None and obs["claim_in_roster"] is False
+    assert obs["claim_row_status"] is None
 
 
 def test_the_released_timestamp_is_carried_for_the_since_clause(home):
@@ -163,7 +165,7 @@ def test_the_claim_session_is_looked_up_by_sid_not_by_name(home):
     renamed = json.dumps([{"name": "Investigating the flaky pin",
                            "sessionId": SUP_SID, "status": "busy"}])
     obs = _collect(home, _runner(_table(agents=renamed)))
-    assert obs["claim_sid_live"] is True
+    assert obs["claim_in_roster"] is True and obs["claim_row_status"] == "busy"
 
 
 def test_a_supervisor_shaped_name_from_another_launch_is_not_the_claim(home):
@@ -171,30 +173,91 @@ def test_a_supervisor_shaped_name_from_another_launch_is_not_the_claim(home):
                          "sessionId": "some-other-sid", "status": "busy"}])
     obs = _collect(home, _runner(_table(agents=other)))
     assert obs["claim_sid"] == SUP_SID
-    assert obs["claim_sid_live"] is False
+    assert obs["claim_in_roster"] is False and obs["claim_row_status"] is None
 
 
 def test_a_non_string_session_id_is_normalised_before_the_roster_test(home):
-    """Re-review minor 2: `claim_sid_live` used to test the RAW projection
-    value's membership in the roster set, while `claim_sid` just above it was
-    already type-normalised. A non-str `session_id` (a dict, from a
-    malformed or hostile sup-status projection) made `in` on a set raise
-    `TypeError`, which killed the tick. The normalised value must be what
-    both fields are built from."""
+    """Re-review minor 2: the roster membership test used to run on the RAW
+    projection value, while `claim_sid` just above it was already
+    type-normalised. A non-str `session_id` (a dict, from a malformed or
+    hostile sup-status projection) made `in` on a set raise `TypeError`,
+    which killed the tick. C swapped that set for a sid->status mapping and
+    a dict key lookup hashes its operand exactly the same way, so the
+    normalisation is still what stands between a bad projection and a dead
+    tick. The normalised value must be what every roster field is built
+    from."""
     weird = json.dumps({"goals_active": True,
                         "incarnation": {"state": None, "session_id": {"x": 1},
                                         "released_at": None},
                         "heartbeat_age_seconds": 30.0, "pending_decision": None})
     obs = _collect(home, _runner(_table(sup=weird)))
     assert obs["claim_sid"] is None
-    assert obs["claim_sid_live"] is False
+    assert obs["claim_in_roster"] is False and obs["claim_row_status"] is None
 
 
 def test_an_absent_claim_sid_is_never_live(home):
     no_sid = json.dumps({"goals_active": True, "incarnation": None,
                          "heartbeat_age_seconds": None, "pending_decision": None})
     obs = _collect(home, _runner(_table(sup=no_sid)))
-    assert obs["claim_sid"] is None and obs["claim_sid_live"] is False
+    assert obs["claim_sid"] is None and obs["claim_in_roster"] is False
+    assert obs["claim_row_status"] is None
+
+
+# --- C (G-K6 wave 1): the row's `status`, not merely the row ---------------
+
+def test_the_claim_rows_status_reaches_the_observation(home):
+    """MEASURED (w61 §3, claude 2.1.267): a background session reads
+    `status: "busy"` inside its turn and `"idle"` between turns, with a live
+    pid either way. The keeper used to keep only the sid and throw the value
+    away, which is why it watched a dark fleet for 8h10m."""
+    idle = json.dumps([{"name": "sup|l1|boot", "sessionId": SUP_SID,
+                        "kind": "background", "state": "working",
+                        "status": "idle", "pid": 303182}])
+    obs = _collect(home, _runner(_table(agents=idle)))
+    assert obs["claim_in_roster"] is True
+    assert obs["claim_row_status"] == "idle"
+    stale = {**obs, "heartbeat_age_seconds": 29451.0}
+    assert "supervisor-stalled" in [p.rule for p in k.evaluate(stale, NOW)]
+
+
+def test_a_dead_row_keeps_its_sid_and_carries_no_status_key(home):
+    """MEASURED (w61 §2): a dead body's row is exactly
+    `['cwd','id','kind','name','sessionId','startedAt','state']` -- `status`
+    and `pid` are ABSENT from the object, not present-and-null -- and such a
+    row stays in the PLAIN spelling indefinitely (one was 22h05m old when
+    measured). `row["status"]` here would raise and kill the tick, failing
+    the alarm CLOSED. It must read as listed-with-no-live-process."""
+    corpse = json.dumps([{"name": "sup|l1|boot", "sessionId": SUP_SID,
+                          "kind": "background", "state": "blocked",
+                          "cwd": "/home/altai/proga/fleet",
+                          "startedAt": "2026-09-09T16:29:31Z"}])
+    obs = _collect(home, _runner(_table(agents=corpse)))
+    assert obs["claim_in_roster"] is True
+    assert obs["claim_row_status"] is None
+    stale = {**obs, "heartbeat_age_seconds": 29451.0}
+    assert "supervisor-stalled" in [p.rule for p in k.evaluate(stale, NOW)]
+
+
+def test_a_non_string_status_on_the_claim_row_is_not_a_working_body(home):
+    """The roster crosses a process boundary. A `status` that is not a
+    non-empty string is normalised to None -- the corpse reading -- so a
+    malformed row can never silence the alarm."""
+    for bad in ({"x": 1}, [], 7, "", None):
+        weird = json.dumps([{"name": "s", "sessionId": SUP_SID, "status": bad}])
+        obs = _collect(home, _runner(_table(agents=weird)))
+        assert obs["claim_in_roster"] is True, bad
+        assert obs["claim_row_status"] is None, bad
+
+
+def test_the_keeper_asks_the_plain_spelling_and_never_all(home):
+    """The two spellings are different lists: `--all` adds the terminal-state
+    rows (`done`/`failed`/`stopped`). Every claim the keeper makes is about
+    the plain one, and `bin/fleet.py`'s roster call -- which DOES use
+    `--all` -- is a different surface. Pinned so nobody mixes them."""
+    run = _runner(_table())
+    _collect(home, run)
+    agents = [argv for argv, _ in run.calls if argv[:2] == ["claude", "agents"]]
+    assert agents == [["claude", "agents", "--json"]]
 
 
 # --- C4: the pending decision is a dict, and an answered one is not a freeze -
@@ -242,7 +305,7 @@ def test_a_missing_claude_binary_is_reported_distinctly(home):
 def test_agents_failure_is_reported_not_raised(home):
     obs = _collect(home, _runner(_table(agents="", agents_rc=1)))
     assert obs["agents_ok"] is False and obs["agents_missing"] is False
-    assert obs["claim_sid_live"] is False
+    assert obs["claim_in_roster"] is False and obs["claim_row_status"] is None
 
 
 def test_a_subprocess_timeout_degrades_to_not_ok(home):
@@ -256,7 +319,8 @@ def test_a_subprocess_timeout_degrades_to_not_ok(home):
 
 def test_garbage_from_claude_agents_is_not_a_live_session(home):
     obs = _collect(home, _runner(_table(agents='{"not": "a list"}')))
-    assert obs["agents_ok"] is False and obs["claim_sid_live"] is False
+    assert obs["agents_ok"] is False and obs["claim_in_roster"] is False
+    assert obs["claim_row_status"] is None
 
 
 # --- registry ---------------------------------------------------------------
@@ -421,7 +485,8 @@ def _rule_obs(n, oldest, ref):
     """A quiet observation carrying only the git half, so `evaluate` sees the
     unpushed rule and nothing else."""
     return {"goals_active": True, "claim_state": "held", "claim_sid": None,
-            "claim_sid_live": True, "heartbeat_age_seconds": 1.0,
+            "claim_in_roster": True, "claim_row_status": "busy",
+            "heartbeat_age_seconds": 1.0,
             "agents_ok": True, "agents_missing": False, "registry_ok": True,
             "pending_decision": None, "workers": [],
             "unpushed": n, "oldest_unpushed_ts": oldest, "unpushed_ref": ref,

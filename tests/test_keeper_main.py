@@ -103,17 +103,17 @@ def test_once_is_required():
     assert e.value.code == 2
 
 
-def test_dead_supervisor_is_paged_into_the_window(home):
+def test_a_stalled_supervisor_is_paged_into_the_window(home):
     r = Runner()
     rc, out = _main(home, r)
     assert rc == 0
     sends = r.tmux("send-keys")
     assert len(sends) == 2
     assert sends[0][2:] == ["-t", "work:fleet", "-l", sends[0][-1]]
-    assert sends[0][-1].startswith("KEEPER: supervisor dead")
+    assert sends[0][-1].startswith("KEEPER: supervisor stalled")
     assert sends[1][-1] == "Enter"
     state = _state(home)
-    assert "supervisor-dead" in state and state["_hook_error_lines"] == 0
+    assert "supervisor-stalled" in state and state["_hook_error_lines"] == 0
 
 
 def test_second_tick_inside_the_window_sends_nothing(home):
@@ -169,7 +169,7 @@ def test_a_created_window_defers_its_pages_to_the_next_tick(home):
     assert r.tmux("send-keys") == []
     assert "pages deferred to next tick" in out
     # dedup state untouched, so the next tick pages what is still true
-    assert "supervisor-dead" not in _state(home)
+    assert "supervisor-stalled" not in _state(home)
 
 
 def test_the_tick_after_a_creation_pages(home):
@@ -179,8 +179,8 @@ def test_the_tick_after_a_creation_pages(home):
     _main(home, live)
     assert live.tmux("new-window") == []
     sends = live.tmux("send-keys")
-    assert len(sends) == 2 and sends[0][-1].startswith("KEEPER: supervisor dead")
-    assert "supervisor-dead" in _state(home)
+    assert len(sends) == 2 and sends[0][-1].startswith("KEEPER: supervisor stalled")
+    assert "supervisor-stalled" in _state(home)
 
 
 # --- I5: recycle only a shell or a dead pane -------------------------------
@@ -216,9 +216,9 @@ def test_a_failed_delivery_is_not_recorded_as_sent(home):
     rc, out = _main(home, r)
     assert rc == 0
     assert "keeper: tmux failed" in out
-    assert "page NOT delivered: supervisor-dead" in out
+    assert "page NOT delivered: supervisor-stalled" in out
     state = _state(home)
-    assert "supervisor-dead" not in state
+    assert "supervisor-stalled" not in state
     assert state["_hook_error_lines"] == 0   # the tick still ran
 
 
@@ -227,7 +227,7 @@ def test_the_next_tick_retries_a_failed_delivery(home):
     r = Runner()
     _main(home, r)
     sends = r.tmux("send-keys")
-    assert len(sends) == 2 and sends[0][-1].startswith("KEEPER: supervisor dead")
+    assert len(sends) == 2 and sends[0][-1].startswith("KEEPER: supervisor stalled")
 
 
 def test_a_failed_delivery_keeps_the_previous_record_for_that_rule(home):
@@ -237,13 +237,13 @@ def test_a_failed_delivery_keeps_the_previous_record_for_that_rule(home):
     would silence the rule for another six hours on the strength of a page
     nobody saw."""
     _main(home, Runner())
-    before = _state(home)["supervisor-dead"]
+    before = _state(home)["supervisor-stalled"]
     assert before["at"] == NOW
     later = NOW + k.REPAGE_SECONDS + 1
     r = Runner(tmux_rc=1)
     _, out = _main(home, r, now=later)
-    assert "page NOT delivered: supervisor-dead" in out
-    assert _state(home)["supervisor-dead"] == before
+    assert "page NOT delivered: supervisor-stalled" in out
+    assert _state(home)["supervisor-stalled"] == before
 
 
 def test_enter_is_not_sent_when_the_literal_send_failed(home):
@@ -251,7 +251,7 @@ def test_enter_is_not_sent_when_the_literal_send_failed(home):
     in its prompt box."""
     r = Runner(tmux_rc=1)
     _main(home, r)
-    assert [a[-1] for a in r.tmux("send-keys")] == ["KEEPER: supervisor dead (claim none). "
+    assert [a[-1] for a in r.tmux("send-keys")] == ["KEEPER: supervisor stalled (claim none). "
                                                     "Report state, then relaunch with "
                                                     "sup-spawn; do not await the operator."]
 
@@ -276,7 +276,7 @@ def test_dry_run_performs_no_tmux_action_and_writes_no_state(home):
     rc, out = _main(home, r, "--dry-run")
     assert rc == 0
     assert not [a for a in r.calls if a[0] == "tmux" and a[1] != "list-panes"]
-    assert "KEEPER: supervisor dead" in out
+    assert "KEEPER: supervisor stalled" in out
     assert not (home / "state" / "keeper" / "last-page.json").exists()
 
 
