@@ -209,6 +209,19 @@ def test_a_busy_fork_row_suppresses_even_though_the_claim_sid_is_the_fork():
                   ) == ["supervisor-stalled"]
 
 
+def test_a_live_row_is_not_called_retired_when_the_claim_sid_is_unknown():
+    """A page must not assert a relation it did not observe. With no readable
+    claim sid, `sid != claim_sid` is trivially true, and an unguarded clause
+    would tell the operator the live session is a RETIRED one on no evidence.
+    No `collect` produces this shape today -- a malformed holder sid empties
+    the union too -- so this pins the guard against the observation dict a
+    future caller hands in."""
+    pages = k.evaluate(_4f99(claim_sid=None), NOW)
+    assert _rules(pages) == ["supervisor-stalled"]
+    assert "roster says idle" in pages[0].text
+    assert "under a retired sid" not in pages[0].text
+
+
 def test_a_body_whose_whole_union_is_corpses_still_pages():
     """THE MUTANT-2 SHAPE, and the reason the predicate is not "any union sid
     is listed". MEASURED on this host: `sup|inc-20260910T041459Z-2382|boot`

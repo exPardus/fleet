@@ -89,6 +89,30 @@ The brief asked for the reason clause to be right. `claim session not in the ros
 restated; `roster says idle under a retired sid` is the true sentence, and it is the one that
 tells an operator who greps the roster for the printed sid why they will not find it.
 
+### The live receipt — the branch resolving the REAL body, on the REAL registry
+
+MEASURED 2026-09-10T11:07Z, this branch's `bin/fleet.py` against the live `FLEET_HOME`
+(read-only; §11):
+
+```
+$ FLEET_HOME=/home/altai/proga/fleet python bin/fleet.py sup-status --json
+  claim_sids : ["37e5c61c-…", "42445477-…", "d605e989-…"]
+  claim sid  : 42445477-de98-4813-937a-e18c965de740
+  inc id     : inc-20260910T075355Z-4f99
+  claim_sids inside incarnation? False
+
+$ FLEET_HOME=/home/altai/proga/fleet python bin/fleet.py sup-status
+supervisor: inc-20260910T075355Z-4f99 sid=42445477-de98-4813-937a-e18c965de740 via handoff,
+heartbeat 1913s ago
+  same body, retired sids: 37e5c61c-…, d605e989-… -- a roster row under ANY of these is this
+  body alive
+```
+
+All three sids, resolved from the live registry record, on the body the incident happened to. No
+`fleet.lock` and no `fleet.json.corrupt.*` appeared in `state/` (MEASURED after the runs). Note the
+heartbeat: **1913 s stale while the body reads `busy`** — the legitimate-long-turn case C
+deliberately suppresses, live, at the moment of writing.
+
 ---
 
 ## 2. §4 ANSWERED: WHAT THE KEEPER MAY READ, MEASURED, AND WHERE THE BRIEF IS OFF
@@ -193,9 +217,11 @@ row at all. That body is dead and must page. It does: all-corpse unions grade `d
 
 ## 5. THE MUTANTS — EIGHT, EACH IN A SEPARATE CLONE
 
-**MEASURED.** Every mutant was planted in `$CLAUDE_JOB_DIR/tmp/mutant`, a separate
-`git clone --no-local` of the branch — never in this worktree, never in the floor clone — and
-reverted with `git checkout --` before the next.
+**MEASURED, re-run against the FINAL commit `338fc86`.** Every mutant was planted in
+`$CLAUDE_JOB_DIR/tmp/mutant`, a separate `git clone --no-local` of the branch — never in this
+worktree, never in the floor clone — and reverted with `git checkout --` before the next. The
+battery runs the five keeper test files plus the new one (155 tests); **all eight go RED and none
+is redundant** — no two mutants redden the same set.
 
 | # | mutation | reddens |
 |---|---|---|
@@ -205,7 +231,7 @@ reverted with `git checkout --` before the next.
 | M4 | resolve the holder by `rec["session_id"] == holder` instead of `_record_sids` | 1 — the ND4a stale-claim window |
 | M5 | pool EVERY record's sids into one union | 1 — `test_another_bodys_record_never_contributes_its_sids` |
 | M6 | read the registry with `load_registry` | 2, incl. the non-quarantine pin |
-| M7 | drop the `under a retired sid` clause | 1 — the 10:16Z reason clause |
+| M7 | drop the `under a retired sid` clause | 2 — the 10:16Z reason clause, both pins |
 | M8 | publish `claim_sids: null` unconditionally | 2 — the JSON and the human form |
 
 M1 and M2 are the two the brief names. **M1's verbatim output** (MEASURED):
@@ -361,6 +387,14 @@ nine. **The RECEIPT is safe** — it is pinned `# at cebae4f` and is verified ag
 tree, so `tools/verify_receipts.py` cannot rot on my change (MEASURED: the receipt block carries
 that sha). It is the surrounding present-tense PROSE that is now stale.
 
+**NOT AUDITED, and named so nobody reads this lane as wider than it is.** `bin/fleet.py` has
+~17 `_fetch_agents_roster` call sites. I did not audit them for the same bare-sid defect; the brief
+named two sites and I built two. What I can say is where an auditor should start: the enumeration
+comment at `bin/fleet.py:16174` now lists **fifteen** union-keyed identity sites and
+`tests/test_self_citations.py` derives that set from the source, so a roster join that is NOT
+union-keyed is precisely one that does not appear there. B6 (`_releaser_is_roster_live`) was the
+last such site found, by councilor 1, and it took a wedge to find it.
+
 **Unmeasured, and named:** I never produced a live turn-END transition. A bounded roster sampler
 ran 10:38Z→10:56Z at 60 s (18 samples) and the 4f99 body was `busy` throughout, so I did not watch
 the fork row drop in real time. The drop is nonetheless MEASURED **structurally** — `d605e989…`
@@ -383,15 +417,23 @@ paid the one-off re-fire for the rename; this lane adds none.
 
 All read-only. MEASURED:
 
-- `cat /home/altai/proga/fleet/supervisor/INCARNATION`, `state/fleet.json` (read via python `json.load`)
-- `claude agents --json` and `claude agents --json --all` (from `/home/altai/proga/fleet`)
-- `kill -0 <pid>` / `ps -o …` on 10 roster pids
-- the bounded sampler `roster_sampler.sh` (60 samples max, `claude agents --json` only), pid 559200,
-  writing to `$CLAUDE_JOB_DIR/tmp/roster-samples.jsonl`; killed before the turn ended.
+- `cat /home/altai/proga/fleet/supervisor/INCARNATION`; `state/fleet.json` read via python
+  `json.load` (never `fleet.load_registry`, which quarantines)
+- `claude agents --json` and `claude agents --json --all`, run from `/home/altai/proga/fleet`
+- `kill -0 <pid>` and `ps -o pid,ppid,etime,args` on the 10 roster pids
+- the bounded sampler `roster_sampler.sh` — `claude agents --json` only, 60 samples max, 60 s
+  apart, self-terminating; pid 559200, output `$CLAUDE_JOB_DIR/tmp/roster-samples.jsonl`. Killed
+  before this turn ended; its pid was in the journal from the moment it started.
+- **`FLEET_HOME=/home/altai/proga/fleet python bin/fleet.py sup-status [--json]`, this branch's
+  build, twice** (§1). `cmd_sup_status` is a view: `read_incarnation`, `read_handshake`,
+  `supervisor_goals_active`, `read_pending_decision`, `_interface_divergence`,
+  `supervisor_status_line`, and — new in w63 — `_registry_records_or_none`. No lock, no write, no
+  probe. Checked afterwards: `state/` contains no `fleet.lock` and no `fleet.json.corrupt.*`.
 
-**Nothing wrote to the live home. No `fleet` mutating verb was run. The suite was never run in the
-main checkout** — the floor ran in `$CLAUDE_JOB_DIR/tmp/floor`, the branch in `…/branch`, the
-mutants in `…/mutant`, each a separate `git clone --no-local`.
+**Nothing wrote to the live home. No `fleet` mutating verb was run. `bin/fleet_keeper.py` was never
+executed against the live home, in any mode, `--dry-run` included. The suite was never run in the
+main checkout** — the floor ran in `$CLAUDE_JOB_DIR/tmp/floor`, the branch in `…/branch` and
+`…/final`/`…/final312`, the mutants in `…/mutant`, each a separate `git clone --no-local`.
 
 ---
 

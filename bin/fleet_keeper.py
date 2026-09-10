@@ -315,12 +315,21 @@ def rule_supervisor_stalled(obs, now):
             # are different remedies and the operator can only see which
             # from the page.
             seen = f"roster says {status}"
-            if sid != obs.get("claim_sid"):
+            if obs.get("claim_sid") and sid != obs.get("claim_sid"):
                 # ...and the 2026-09-10 10:16Z shape, which is the SAME
                 # remedy but a different sentence: the live session is a
                 # pre-steer one, so an operator who greps the roster for the
                 # sid in `sup-status` will not find it and must not conclude
                 # the body is gone.
+                #
+                # GUARDED ON `claim_sid` BEING KNOWN, not just on inequality.
+                # With no readable claim sid, `sid != None` is trivially true
+                # and the page would call a row "retired" on no evidence --
+                # a page must not assert a relation it did not observe. No
+                # `collect` produces that shape today (a malformed holder sid
+                # empties the union too), so this is a guard against the
+                # observation dict a future caller hands in, and it is
+                # pinned rather than left to the argument above.
                 seen += " under a retired sid"
         elif activity == "dead":
             # "body", not "claim session": the rows that were listed may be
