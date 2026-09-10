@@ -1,9 +1,11 @@
 # w63-sidunion — the claim→roster join is now the BODY's sid union, in the keeper and in the guard
 
-**Lane:** build (keeper + operator surface). Branch `w63/sid-union` from `64aa96b`, six commits:
+**Lane:** build (keeper + operator surface). Branch `w63/sid-union` from `64aa96b`, eleven commits:
 `ba7fc40` (the build), `72f1975` (pin 1 end to end), `c41e451` (the plain-spelling measurement),
 `b6a2beb` (the rule docstring), `338fc86` (pass the claim to the resolver), `1b76726` (the
-`claim_sid`-unknown guard).
+`claim_sid`-unknown guard), `ab82853`/`cc7f59a`/`81fa544` (the narrow-reader and view pins, and the
+rewrite after M10/M11 showed the first version of them was dead), `3e7f448` (the guard's mechanism
+sentence, made precise), and this report.
 **Every line below is tagged MEASURED (I ran it, on this host, today, 2026-09-10) or
 BELIEVED (inference, code reading, or someone else's report).** Host `kz-work`, Linux 6.8.0-139,
 `claude` 2.1.267-era roster shapes.
@@ -522,18 +524,27 @@ in its own `git clone --no-local`:
 | `338fc86` | 3.10 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 490.50 s |
 | `1b76726` | 3.12 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 370.86 s |
 | `1b76726` | 3.10 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 404.85 s |
-| **`cc7f59a` TIP** | 3.12 | *(filled in below)* | | |
-| **`cc7f59a` TIP** | 3.10 | *(filled in below)* | | |
+| `cc7f59a` | 3.12 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 397.53 s |
+| `cc7f59a` | 3.10 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 450.13 s |
+| **`81fa544`** | 3.12 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 504.40 s |
+| **`81fa544`** | 3.10 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 554.80 s |
 
-**Three predictions, all held, all written down first.** (1) The floor, from the brief, before any
-run: 4978 / `6 failed, 4955 passed, 16 skipped, 1 xfailed`, identical on both — exact, on both.
+**The tip of the branch is `3e7f448`, one commit past `81fa544`, and it is MARKDOWN ONLY** — one
+sentence in `docs/operator/server-interface-profile.md`, a file no test reads (`test_keeper_main`
+writes its own fixture copy of that path). I did not re-run the whole suite for it; I re-ran the
+five doc-scanning suites (`test_doc_claims`, `test_receipts`, `test_doctrine_citations`,
+`test_lane_report_durability`, `test_keeper_main`) — **187 passed** — and the two later wall-clock
+figures above are inflated by the two interpreters sharing this 8 GB host, not by anything the
+branch does.
+
+**Four predictions, all held, all written down before their run.** (1) The floor, from the brief:
+4978 / `6 failed, 4955 passed, 16 skipped, 1 xfailed`, identical on both — exact, on both.
 (2) The branch, written into the journal before that run finished: +32 tests → 5010 /
-`…4987 passed…` — exact, on both. (3) The `1b76726` tip: one more test → 5011 — exact, on both.
-The tip commits after it are test-only and add no test, so **5011 is the predicted count for
-`cc7f59a` too**.
+`…4987 passed…` — exact, on both. (3) `1b76726`: one more test → 5011 — exact, on both.
+(4) `cc7f59a`/`81fa544`: test-only commits that add no test → 5011 — exact, on both.
 
-**Every failure SET is byte-identical** — floor↔floor, tip↔tip, and floor↔tip (MEASURED: `diff` of
-the sorted `FAILED` lines is empty in all three comparisons). All six are the known host
+**Every failure SET is byte-identical** — floor 3.10↔3.12, tip 3.10↔3.12, and floor↔tip (MEASURED:
+`diff` of the sorted `FAILED` lines is empty in all three comparisons). All six are the known host
 assumptions: four Windows drive-qualified-path escapes in
 `test_fleet_index.py`/`test_fleet_q.py`, two venv-shim re-execs in `test_terminal_surface.py`.
 **No `skipif` added, none removed; skips and the one xfail are unmoved.**
