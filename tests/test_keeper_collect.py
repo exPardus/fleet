@@ -288,6 +288,32 @@ def test_the_pre_steer_row_is_what_the_join_finds(home):
     assert k._claim_activity(obs)[0] == "quiet"
 
 
+def test_the_10_16Z_false_page_does_not_fire_end_to_end(home):
+    """PIN 1, WHOLE. `collect` -> `evaluate` -> the page an operator reads, on
+    the roster and the `sup-status` of 2026-09-10T10:16Z. The body is alive and
+    idle, so `supervisor-stalled` is CORRECT and stays; what must never appear
+    is the sentence that its session is gone, about a body that visibly IS in
+    the roster under another sid. That sentence is what sends the interface to
+    `sup-spawn` and puts a second body over one `supervisor/GOALS.md`.
+
+    The rules-level twin (`test_the_4f99_observation_never_pages_that_the_
+    session_is_gone`) pins the reason CLAUSE from a hand-built observation;
+    this one pins the JOIN, because the join lives in `collect` and a
+    rules-level fixture cannot exercise it."""
+    roster = json.dumps([{"name": "sup|inc-4f99|successor",
+                          "sessionId": F4_RETIRED_1, "kind": "background",
+                          "state": "blocked", "status": "idle", "pid": 434832}])
+    obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
+    pages = k.evaluate(obs, NOW)
+    stalled = [p for p in pages if p.rule == "supervisor-stalled"]
+    assert len(stalled) == 1, [p.rule for p in pages]
+    text = stalled[0].text
+    assert "roster says idle under a retired sid" in text, text
+    assert "not in the roster" not in text, text
+    assert "no live process" not in text, text
+    assert "dead" not in text, text
+
+
 def test_both_rows_reach_the_observation_during_a_turn(home):
     """MEASURED 2026-09-10T10:38Z: one body, two roster rows, two live
     processes -- `37e5c61c...` idle at pid 434832 and `42445477...` busy at
