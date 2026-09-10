@@ -53,7 +53,14 @@ HOOKS = REPO / "bin" / "hooks"
 # the same reason `conftest.real_homes_list_path` spells it out by hand.
 REAL_LIST = Path.home() / ".claude" / "fleet-homes.list"
 
-SID = "20fee653-f07e-4208-8c0e-1c737f9119f7"
+# SYNTHETIC. This value is handed to a CHILD as `CLAUDE_CODE_SESSION_ID` and
+# the child drives a real `fleet kill`, so it is the input to §5 step 2's
+# lookup over `resolution_population()` -- which always includes the
+# `INSTALL_ROOT` home, whatever `$HOME` this seam redirects. The value that
+# stood here until w61 was a real historical session id of this project;
+# `tests/test_sid_collision.py` pins that no caller sid a test hands a child
+# is an RFC-4122 v4 UUID, which is the only shape `claude` issues.
+SID = "fa15e51d-0000-0000-0000-000000000004"
 
 _PROBE = (
     "import sys, json\n"
