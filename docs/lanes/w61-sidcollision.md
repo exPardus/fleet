@@ -334,10 +334,15 @@ never from the tree being edited.
 | `475f04b` | 3.10 | same | **exactly that**, 370s |
 | `80959f6` | 3.12 | `6 failed, 4942 passed, 16 skipped, 1 xfailed` | **exactly that**, 330s |
 | `80959f6` | 3.10 | same | **exactly that**, 351s |
+| `5b54334` (this report) | 3.12 | same | **exactly that**, 325s — repo root clean after |
+| `5b54334` (this report) | 3.10 | same | **exactly that**, 361s |
 
-4965 collected at `80959f6` (4946 baseline + 15 + 4). The report commit that follows adds this
-file and one corrected COMMENT in `tests/test_sid_collision.py`; the floor was re-measured at that
-sha too and is unchanged (§8 last row). The six failures are the same host-assumption
+4965 collected at `80959f6` (4946 baseline + 15 + 4). The report commit `5b54334` adds this file and one
+corrected COMMENT in `tests/test_sid_collision.py`; the floor was re-measured **at that sha** on
+both interpreters and is unchanged. The commit after it edits ONLY the two rows of the table below
+that record those two runs — doc-only, no test and no code, so it is the one state of this branch
+whose floor is stated rather than measured. Everything else in this table was measured at the sha
+named beside it. The six failures are the same host-assumption
 ids named in `CLAUDE.md` — three `test_fleet_index.py::TestPathContainment`, one
 `test_fleet_q.py::TestOutlinePathContainment`, two `test_terminal_surface.py::TestCollaboratorInstall`.
 **No `skipif` was added to any of them.**
