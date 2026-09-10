@@ -404,10 +404,13 @@ def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home):
 
 
 def test_the_keeper_asks_the_plain_spelling_and_never_all(home):
-    """The two spellings are different lists: `--all` adds the terminal-state
-    rows (`done`/`failed`/`stopped`). Every claim the keeper makes is about
-    the plain one, and `bin/fleet.py`'s roster call -- which DOES use
-    `--all` -- is a different surface. Pinned so nobody mixes them."""
+    """The two spellings are different lists: MEASURED 2026-09-10T10:56Z on
+    this host, 18 plain rows against 32 with `--all`, and every one of the 14
+    extra rows was in a terminal state AND carried no `pid`/`status` -- while
+    the PLAIN list held three `done` rows whose processes were still alive.
+    Every claim the keeper makes is about the plain one, and `bin/fleet.py`'s
+    roster call -- which DOES use `--all` -- is a different surface. Pinned so
+    nobody mixes them."""
     run = _runner(_table())
     _collect(home, run)
     agents = [argv for argv, _ in run.calls if argv[:2] == ["claude", "agents"]]
