@@ -41,7 +41,7 @@ WHAT IS PINNED HERE, AND WHAT IS NOT -- read this before trusting the name.
 
     * Citations of OTHER documents -- `SPEC.md:204`, `SPEC:1196-1198`,
       `three-tier-command.md :432-437`,
-      `skills/fleet/SKILL.md:54`, `spike/m0/VERDICTS.md:441`, `CN:1671-1675`,
+      `skills/fleet/SKILL.md`, `spike/m0/VERDICTS.md:441`, `CN:1671-1675`,
       `SPAWN:461-471`. (`knowledge/lessons.md` is cited by ANCHOR only --
       it is append-at-top, so a line citation into it rots every wave;
       the 2026-08-05 pass converted the last one.) This file resolves

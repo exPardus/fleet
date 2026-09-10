@@ -453,7 +453,7 @@ class TestLimitedHolderTransfer:
         assert v in fleet.SUPERVISOR_BOOT_RC
 
     def test_the_transfer_is_rc_0_and_a_known_verdict(self):
-        # The exit-code contract published at skills/fleet/SKILL.md:54 is
+        # The exit-code contract published in the fleet skill is
         # unchanged: this is a took-the-claim outcome, which is already the
         # 0-row. A verdict outside SUPERVISOR_BOOT_RC is a KeyError in the
         # boot ritual rather than a safe stop (break-gate residual F2).
@@ -1733,8 +1733,8 @@ class TestRefusalMessageIsAgentSafe:
     the DIVERGENT one (§5.4(c) cannot prefer either), so naming a lever hands
     it to whichever body reads the message first.
 
-    The human-facing runbook (`skills/fleet/supervisor.md`) is the far side of
-    that audience boundary, and it is a convention, not a mechanism."""
+    The human-facing fleet skill is the far side of that audience boundary, and
+    it is a convention, not a mechanism."""
 
     def _refusal(self, sup_home):
         value = fleet.mint_nonce()
@@ -2363,8 +2363,8 @@ class TestContinuityExitCode:
         assert fleet.main(["sup-checkpoint", "body", "--sid", "sid-me"]) == 1
 
     def test_the_boot_refusal_verdicts_keep_their_own_codes(self, sup_home, capsys, monkeypatch):
-        # §4.13(b)'s codes 2 and 3 are a different contract, published at
-        # skills/fleet/SKILL.md:54, and this slice must not perturb them.
+        # §4.13(b)'s codes 2 and 3 are a different contract, published in the
+        # fleet skill, and this slice must not perturb them.
         fleet.write_incarnation(_claim(sid="sid-holder"))
         monkeypatch.setattr(fleet, "_fetch_agents_roster",
                             lambda **kw: (True, [{"sessionId": "sid-holder", "status": "idle"},
@@ -2372,7 +2372,7 @@ class TestContinuityExitCode:
         assert fleet.main(["sup-boot", "--sid", "sid-me"]) == 2
 
     def test_SKILL_md_publishes_the_new_code(self):
-        # §8 lists `skills/fleet/SKILL.md:54` as this slice's edit, and §11
+        # The fleet skill publishes this slice's exit code, and §11
         # says the value is a builder detail but "that it needs a seam and a
         # published-contract amendment is not". An exit code nobody documents
         # is an exit code nobody can script against.
@@ -4082,13 +4082,11 @@ class TestOperatorGatesFile:
             assert re.search(r"\*\(20\d\d-\d\d-\d\d", ln), (
                 f"a settled gate must carry its decision date: {ln[:80]}")
 
-    def test_the_skill_startup_ritual_still_routes_the_operator_to_the_gates(self):
-        """The hook was the enforcement; the skill is now the only one. If the
-        ritual stops naming the gates file, the 2026-07-21 ask is silently
-        unmet and no other test notices."""
+    def test_the_skill_startup_routes_the_operator_to_the_gates(self):
+        """The startup section must name the operator gate file."""
         repo = Path(__file__).resolve().parents[1]
         skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
-        ritual = skill.split("## Startup ritual", 1)[1].split("\n## ", 1)[0]
+        ritual = skill.split("## Startup", 1)[1].split("\n## ", 1)[0]
         assert "OPERATOR-GATES.md" in ritual
 
 
