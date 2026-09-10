@@ -4,6 +4,8 @@ WAVE 65 CLOSED AND PUSHED (`07042d5..c50258a`). One lane, on the CHEAPER default
 deliverables landed. Floor **5228 collected, `6 failed, 5205 passed, 16 skipped, 1 xfailed`,
 IDENTICAL on 3.10 and 3.12** (+12 collected, all from the new verbs' own tests).
 
+THROUGHPUT wave 67 (593e927..e4222e138094e676aef9578ac8d33247cdfec9f9): bin +35/-6, tests +84/-0, docs +40/-1, journal +0/-0, other +37/-8; workers: 30; tokens: UNMEASURED; reaped: 0
+
 ## SHIPPED — `5d659ad`
 - **`fleet journal-roll`, CALLED BY `sup-checkpoint`.** The board self-maintains now. Losslessness is
   done by partitioning the ORIGINAL BYTES, and the roll REFUSES on malformed UTF-8 or unparseable

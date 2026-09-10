@@ -956,7 +956,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:7699) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:18555) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:18567) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -16572,7 +16572,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2827, :2898,
     :2971, :3232, :3382, :4877, :9915, :10235, :10516, :10747, :10834, :10990,
-    :11002, :11013, :11162, :11978, :16442, :19012, :19013, :19046, :19964`). The thirteenth is multi-fleet §5 step 2's
+    :11002, :11013, :11162, :11978, :16442, :19024, :19025, :19058, :19976`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16597,7 +16597,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8676, :9215, :14188,
-    :20627), the same safety invariant §7.1's send carve-out rests on. That
+    :20639), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17294,7 +17294,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8676, :9215, :14188,
-    #     :20627) -- so the sid union can never make one body answer for another.
+    #     :20639) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -18240,7 +18240,8 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                 log_root=None):
     """Run both foreground halves for each required interpreter in a fresh clone."""
     # Checked BEFORE the clone: the floor cannot run without it, so refusing
-    # early costs nothing and refusing late costs a full clone.
+    # early costs nothing and refusing late costs a full clone. The same
+    # reasoning covers the committer identity, checked by the caller.
     uv = which("uv")
     if uv is None:
         raise FleetCliError(
@@ -18401,6 +18402,17 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     changelog = _read_task_arg(args.changelog)
     if not changelog.strip():
         raise FleetCliError("wave-close: --changelog must contain at least one sentence")
+    # Checked here, with the other cheap preconditions, because the reap and the
+    # two-interpreter floor between this point and the commit take about twelve
+    # minutes. On the verb's first real run an unset committer identity was not
+    # discovered until after all of it, with the landing prepared and staged.
+    identity = run(["git", "-C", str(repo), "var", "GIT_COMMITTER_IDENT"],
+                   capture_output=True, text=True, encoding="utf-8",
+                   errors="replace")
+    if identity.returncode != 0:
+        raise FleetCliError(
+            "wave-close: git has no committer identity in this repo -- set "
+            "`git config user.name` and `user.email` before closing a wave")
 
     # Claim first: the reap, floor, and git operations below can take time,
     # but an unclaimed body must not perform even the janitorial mutation.

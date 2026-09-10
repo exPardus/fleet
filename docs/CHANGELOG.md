@@ -1,4 +1,6 @@
 # Operator changelog
+- 2026-09-11 — `a1b04cb`: `fleet sup-guard` no longer pages on a healthy fleet — a seize is an event in the past, so a seized claim with a fresh heartbeat is an ordinary held claim; seized plus a stale heartbeat still pages.
+- 2026-09-11 — `8a8d086`: `fleet wave-close` runs its floor through `uv` (no interpreter on this host has pytest importable) and now refuses a floor that produced no pytest summary, which previously read as a clean floor.
 
 Newest first, ONE line per user-visible change. At landing the supervisor prepends
 new lines with date and commit evidence; the interface quotes them at each wave
