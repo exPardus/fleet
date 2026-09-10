@@ -613,3 +613,114 @@ ok: [localhost] => {"cmd": ["/bin/sh", ".../bin/hooks/run_py.sh", ".../bin/fleet
 
 Timer active, `NEXT` cadence ~15min, unit header confirms "Managed by Ansible — roles/fleet_keeper".
 `china-infra` left untouched beyond reads; still only the pre-existing dirty `secrets.sops.yml`.
+
+## Multi-fleet dogfood — a SECOND home on this host (lane `w62-dogfood`, 2026-09-10)
+
+**Why it is in this file and not a new one.** `grep -rl soak docs/` returns exactly one file
+whose subject is host receipts rather than a mention of the word, and this is it: it is the
+log of *what this machine actually did*, every block `# volatile: host state`. A second
+fleet home is a host fact of the same kind. It is also **outside `docs/specs/`**, so
+`tests/test_receipts.py` (which globs `SPEC_DIR.glob("*.md")`, i.e. `docs/specs/*.md` only)
+does not re-execute these blocks — deliberate, because half of them are refusals whose text
+would have to be pinned to a host state that is about to change when the gate below is ruled.
+
+**Read this first: the destructive act was NOT performed.** `~/.claude/fleet-homes.list` is
+still absent. Every `fleet` invocation below ran with `HOME` redirected to a scratch
+directory, so the append landed in a sandbox list. The *home* at
+`/home/altai/proga/fleet-dogfood` is real and is left in place; its *membership* is not.
+Reasoning and draft gate text: `docs/lanes/w62-dogfood.md`.
+
+### The append is not neutral — it arms §5's wrong-home guard machine-wide
+
+Driven in a fully sealed sandbox (scratch `HOME` **and** a copied install root, so both homes
+in the population were throwaways and no live home was read or written):
+
+```text
+# volatile: host state — measured 2026-09-10, branch w62/dogfood at 294315d
+$ # ONE home listed (the legacy install root only):
+$ fleet archive no-such-worker-xyz
+fleet: unknown worker: 'no-such-worker-xyz'
+
+$ fleet init --home <second>            # ...append a second home, then repeat verbatim:
+$ fleet archive no-such-worker-xyz
+fleet: `archive` destroys evidence or sessions and nothing recovers it, this machine runs 2 fleets, and no `--fleet-home` and no session membership chose this home:
+[fleet] home <install> (via the legacy install-root default)
+Homes counted:
+    <install>
+    <second>
+Name the home you mean with `--fleet-home <PATH>`.
+```
+
+The verb went from *reaching its own argument check* to *refused before dispatch*, on one
+append. `multi_fleet_arming` moves `population_below_two` → `population_at_least_two`, and
+`_apply_wrong_home_guard` then refuses every DESTRUCTIVE verb resolved at §5 step 3 (env) or
+step 4 (legacy): `clean`, `archive`, `autoclean`, `doctor --repair`, `sup-boot`, `sup-spawn`,
+`sup-checkpoint`, `sup-release`, `sup-handoff-*`, `sup-decision --clear`, `homes --add/--retire`,
+`init --home`.
+
+**The keeper is not the casualty.** Its unit passes `--fleet-home /home/altai/proga/fleet`
+(see S0 above), and the only `fleet` verb it shells out to is `sup-status`, which is ORDINARY.
+**The INTERFACE tier is the casualty**: `bin/fleet_keeper.py:704` launches it as a bare
+`claude --permission-mode bypassPermissions "Read <profile> …"`, never through `fleet spawn`,
+so it holds no registry membership, §5 step 2 cannot exempt it, and it lands on step 4. Its
+profile has it run `fleet autoclean` in startup ritual step 1 and `fleet sup-spawn` on every
+`supervisor-dead` page. Both are DESTRUCTIVE. Post-append, both refuse.
+
+### The keeper cannot be pointed at a second home
+
+```text
+# volatile: host state — measured 2026-09-10
+$ python3 bin/fleet_keeper.py --once --dry-run --fleet-home /home/altai/proga/fleet-dogfood
+keeper: --fleet-home /home/altai/proga/fleet-dogfood does not match the imported fleet home /home/altai/proga/fleet; refusing
+
+$ FLEET_HOME=/home/altai/proga/fleet-dogfood python3 bin/fleet_keeper.py --once --dry-run
+keeper: --fleet-home /home/altai/proga/fleet does not match the imported fleet home /home/altai/proga/fleet-dogfood; refusing
+
+$ FLEET_HOME=/home/altai/proga/fleet-dogfood python3 bin/fleet_keeper.py --once --dry-run --fleet-home /home/altai/proga/fleet-dogfood
+keeper: git unpushed check unavailable (no remote-tracking ref to compare against)
+```
+
+`--fleet-home` on the keeper is **an assertion, not a selector** — `fleet_keeper.py:697`
+compares it against `fleet.FLEET_HOME` frozen at import and refuses a mismatch — and it
+defaults to `_INSTALL_ROOT` (`:679`), not to `fleet.FLEET_HOME`. So neither the flag alone nor
+the env alone reaches a second home; both must be set, consistently. The third run proves it
+read the *dogfood* home rather than the live one: only the dogfood repo has no
+remote-tracking ref.
+
+### A second home's own workers are NOT contained until it is listed
+
+```text
+# volatile: host state — measured 2026-09-10; sid is df-hello, a live worker in the dogfood home
+$ CLAUDE_CODE_SESSION_ID=bf25f0f2-… fleet home      # real HOME, list absent
+/home/altai/proga/fleet
+$ CLAUDE_CODE_SESSION_ID=bf25f0f2-… fleet home      # sandbox HOME, dogfood listed
+/home/altai/proga/fleet-dogfood
+```
+
+A bare `fleet` call from a second home's own worker resolves to the **live** home while that
+home is unlisted: §5 step 2 misses (the population is `listed ∪ legacy`, and it is not
+listed), so it falls through to step 4. What contained this lane's worker was not the list —
+it was the explicit `--fleet-home` that `fleet init --home` renders into every hook command
+in the new home's `state/worker-settings.json`. **So the append is simultaneously the
+containment mechanism and the thing that arms the guard.** Both belong in the ruling.
+
+### What did work, end to end, against the second home
+
+```text
+# volatile: host state — measured 2026-09-10
+$ fleet --fleet-home /home/altai/proga/fleet-dogfood status
+NAME                STATUS     TURNS     COST  MIN-AGO  MAIL   ATTACH  FLAGS
+df-hello            idle           1        -        2     0        -  tokens:in=2 out=329
+
+$ fleet --fleet-home /home/altai/proga/fleet-dogfood result df-hello
+-- tokens in=2 out=329 model=claude-sonnet-5
+changed: hello.txt; verified: wrote it; blocked: none
+```
+
+Spawn → dispatch → Stop hook → outcome record → `status` → `result`, all inside the second
+home, with the live home's 26-worker registry untouched (0 files under its `state/`, `logs/`
+or `mailbox/` mention `df-hello` or its sid; 0 files under the dogfood home's `state/`
+mention any live worker). `--mode bypass` is unusable for this on this host — `--bg with
+bypassPermissions requires accepting the disclaimer first` — and `--mode accept` is what
+worked; note that the shipped `spawn` default is `dontask`, which is what killed three
+workers in S-2 above.
