@@ -53,7 +53,7 @@ The 2026-09-09 amendment moved this guard **from the keeper to you**. It is the 
 
    MEASURED on this host 2026-09-10T10:38Z, 18 rows: every row carrying a `pid` had a live process (10/10, checked with `kill -0`), and every row without one carried no `status` either. `pid` and `status` presence moved together on all 18.
 3. **Page the operator instead of dispatching whenever the state is ambiguous.** Named ambiguous states, none of which you resolve yourself:
-   - the claim was **seized**, or reads `unknown` (a read failure is not evidence of death);
+   - the claim was **seized and its heartbeat is stale or unreadable**, or reads `unknown` (a read failure is not evidence of death); a seized claim with a fresh heartbeat follows the ordinary held-claim liveness rules below;
    - a handoff is **in flight** — `sup-status --json` carries a non-empty `handoff_pending[]`, or `supervisor/HANDSHAKE` exists;
    - a **releasing body is still roster-live** (`sup-release` could not tombstone its own record: unreadable registry, ambiguous identity, or a crash between the two writes);
    - the claim is `held` with a **fresh** heartbeat while the body looks gone — that is `freeze`, the operator's call;

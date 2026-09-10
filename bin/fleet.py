@@ -16572,7 +16572,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2827, :2898,
     :2971, :3232, :3382, :4877, :9915, :10235, :10516, :10747, :10834, :10990,
-    :11002, :11013, :11162, :11978, :16442, :18986, :18987, :19020, :19935`). The thirteenth is multi-fleet §5 step 2's
+    :11002, :11013, :11162, :11978, :16442, :18986, :18987, :19020, :19938`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16597,7 +16597,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8676, :9215, :14188,
-    :20598), the same safety invariant §7.1's send carve-out rests on. That
+    :20601), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17294,7 +17294,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8676, :9215, :14188,
-    #     :20598) -- so the sid union can never make one body answer for another.
+    #     :20601) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -19111,7 +19111,10 @@ def _sup_guard_decide(observation):
     if (state == "held" and
             (claim.get("claimed_via") == "seize" or
              claim.get("state") == "seized")):
-        return "PAGE", "claim seized", detail
+        age = obs.get("heartbeat_age_seconds")
+        if (not isinstance(age, (int, float))
+                or age > SUPERVISOR_CLAIM_STALE_SECONDS):
+            return "PAGE", "claim seized", detail
 
     if state in ("none", "released"):
         if obs.get("claim_sids") is None and state == "released":
