@@ -276,14 +276,20 @@ Claude workers are dispatched, and a parked Claude lane is NOT resumed -- its br
 is re-cut for Codex against the current tree instead. Assume the freeze still holds
 after 2026-09-15 and ask through the interface before lifting it.
 
-**Dispatch mechanics, mcx 0.2.0 (installed 2026-09-10T16:4xZ):** spawn with
-`mcx spawn --wait -m gpt-6-astra -r high -` and run THAT as a harness-backgrounded
-Bash command -- it prints the ID, stays alive for the one run, and exits with its
-status, so the harness notifies you at completion. **Do not write `mcx list` +
-`sleep` poll loops**; each costs a shell of its own and they are what a
-low-memory kill reaches first. `mcx steer --wait ID` tracks a resumed run (one
-waiter per run); cancelling a waiter with TERM/INT/HUP stops its run and children,
-so never `&` or `nohup` a `--wait`. Keep approval mode `never` (the default
+**Dispatch mechanics on THIS host — lanes stay DETACHED (operator/interface rule,
+2026-09-10, after a lane was measured lost):** `mcx spawn -r <effort> -` with **no
+`--wait`, no background waiter of any kind, and no `mcx list` + `sleep` poll
+loop**. Check `mcx list` / `mcx result <ID>` at your natural turn points instead.
+
+*Why, since the shipped advice says otherwise:* `--wait` is documented to stop its
+run and children when the waiter is cancelled, and this harness kills background
+commands on a low-memory guard keyed on `free` (253 MB) rather than `available`
+(4147 MB, PSI zero). The two compose: the guard reaches through the waiter and
+stops the lane. Lane `mImoA8QT` was spawned and read `stopped` seconds later
+having done nothing. The same guard killed two full floor runs within seconds
+each — so **run the floor in the FOREGROUND, split into halves**, and remember
+that `ls tests/test_*.py` silently misses `tests/integration`. `mcx steer ID`
+resumes a lane the same detached way. Keep approval mode `never` (the default
 workspace-write sandbox) -- the supervisor commits on the lane's behalf anyway.
 **Model, per the operator's 16:5xZ Codex-budget ruling: the DEFAULT is
 `gpt-5.6-luna` -- omit `-m` and take the binary default, with `-r medium`.**

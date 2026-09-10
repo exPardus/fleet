@@ -72,11 +72,12 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   at the time) rather than `available` (4147 MB, PSI zero). The two compose into a lane that is
   spawned and then immediately `stopped`: lane `mImoA8QT` died that way seconds after dispatch. The
   same guard killed two full floor runs within seconds each.
-  **The safe pair on this host: `mcx spawn` WITHOUT `--wait` (the lane detaches and survives), then a
-  separate blocking `tail --pid=<mcx _run pid> -f /dev/null` as the harness-backgrounded waiter** —
-  killing THAT waiter is harmless, because it owns nothing. Get the pid with
-  `pgrep -af "mcx _run.*<ID>"`. Same reasoning for long test runs: **run the floor in the FOREGROUND,
-  split into halves** to stay inside the tool timeout.
+  **RULE (interface, 2026-09-10, after accepting the measurement): lanes stay DETACHED — `mcx spawn`
+  with no `--wait`, NO background waiter at all, and no sleep loops. Poll `mcx list` / `mcx result`
+  at your natural turn points only.** A `tail --pid` waiter was the first remedy and works, but a
+  waiter you do not need is a shell you are paying for on a box that kills shells. Same reasoning for
+  long test runs: **run the floor in the FOREGROUND, split into halves** to stay inside the tool
+  timeout — and note `ls tests/test_*.py` silently misses `tests/integration` (9 skips).
 - **mcx 0.2.0** (installed 2026-09-10T16:4xZ): `mcx spawn --wait` prints the ID, stays alive for that
   one run and exits with its status — sound on a host without a background-kill guard, but see the
   entry above for why it is not used here. **Poll loops
