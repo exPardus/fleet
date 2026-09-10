@@ -21,14 +21,22 @@ The 2026-09-09 amendment moved this guard **from the keeper to you**. It is the 
    - the claim was **seized**, or reads `unknown` (a read failure is not evidence of death);
    - a handoff is **in flight** — `sup-status --json` carries a non-empty `handoff_pending[]`, or `supervisor/HANDSHAKE` exists;
    - a **releasing body is still roster-live** (`sup-release` could not tombstone its own record: unreadable registry, ambiguous identity, or a crash between the two writes);
-   - the claim is `held` with a **fresh** heartbeat while the body looks gone — that is `freeze`, the operator's call.
+   - the claim is `held` with a **fresh** heartbeat while the body looks gone — that is `freeze`, the operator's call;
+   - the claim is `held` with a **stale** heartbeat while its body is **still listed and not `busy`** — a live, idle supervisor. Added 2026-09-10 with the keeper's `supervisor-stalled` rearm: this is now a state the keeper PAGES about, and it is exactly the state where a second body would be two bodies. Page the operator; do not dispatch.
 4. Never dispatch a second supervisor body while any of the above stands. Two live bodies over one `supervisor/GOALS.md` is the single condition the entire claim system exists to prevent.
 
 ## Lines that start with `KEEPER:`
 
 They come from `bin/fleet_keeper.py`, not from a person. The keeper observes and types; it never dispatches, never takes `fleet.lock`, never repairs.
 
-- **The `supervisor-dead` page — the one that says the supervisor is dead or released** — **run the two-live-body guard, then `fleet sup-spawn --task @supervisor/briefs/server-standing.md --setting-sources project,local`, WITHOUT waiting for the operator.** Report the launch id and `fleet sup-status` into the topic afterwards. *(2026-09-09 amendment: "keeper must just instruct interface to relaunch supervisor." The keeper never runs `sup-spawn`; you do. The keeper still recreates this window itself when it is gone.)* **⚠ Act on the MEANING of the page, not on its wording.** At `2a15dec` the shipped page still ends `Report state; await operator before sup-spawn.` — the pre-amendment text, which a sibling build lane owns and has not yet changed. **That sentence is superseded: do not await the operator on it.** When the page is reworded to say `relaunch`, nothing here changes.
+- **The `supervisor-stalled` page — the one that says the fleet has no supervisor taking turns** — **run the two-live-body guard, then `fleet sup-spawn --task @supervisor/briefs/server-standing.md --setting-sources project,local`, WITHOUT waiting for the operator.** Report the launch id and `fleet sup-status` into the topic afterwards. *(2026-09-09 amendment: "keeper must just instruct interface to relaunch supervisor." The keeper never runs `sup-spawn`; you do. The keeper still recreates this window itself when it is gone.)* **⚠ Act on the MEANING of the page, not on its wording.**
+
+  **RENAMED AND REARMED 2026-09-10 (operator ruling G-K6 "C then B", lane `w62-keeperc`).** The rule was `supervisor-dead` and armed on the claim's session id being PRESENT in `claude agents --json`. It is now `supervisor-stalled` and arms on that row reading `status == "busy"`. Two consequences for you:
+
+  1. **The page no longer means the body is gone.** It means *no supervisor is taking turns*: the claim is `none`/`released`, **or** it is `held` with a stale heartbeat and its body is idle, listed-but-dead, or absent. The page's reason clause names which — `roster says idle`, `claim session listed with no live process`, `claim session not in the roster`, `claim released`, `claim none`. Read it before you act.
+  2. **`roster says idle` is a NEW state for you, and the guard will refuse it.** A body that is alive and listed is a live body (guard step 2), so **do not `sup-spawn` over it.** This is the 2026-09-09 outage shape: a healthy supervisor that simply never got another turn. Carry it to the operator — say the body is alive, name the heartbeat age from the page, and say that the choices are to give it a turn (`fleet send sup|<launch>|boot …`) or to retire it and relaunch. **Both are mutating; neither is yours without the operator's word.** *(The mechanism that stops this happening at all is G-K6 wave 2 — the wake mechanism — and it is not built.)*
+
+  *(The pre-amendment `Report state; await operator before sup-spawn.` sentence is long gone from the shipped page; it now reads `Report state, then relaunch with sup-spawn; do not await the operator.` The `2a15dec` caveat that used to stand here is discharged.)*
 - **Every other KEEPER line** — investigate with read-only verbs (`fleet status`, `fleet sup-status`, `fleet peek`, `fleet doctor`, `git status`), then write one short message for the operator: what the keeper saw, what you confirmed, what you recommend. Never act on those with a mutating verb unless the operator has already asked for that action.
 
 ## Lines that start with `SUPERVISOR:`
