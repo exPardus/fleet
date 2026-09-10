@@ -1,10 +1,10 @@
 """Pin the D4 doctrine sentence to what shipped code actually does.
 
-THE DEFECT THIS EXISTS FOR. Root `CLAUDE.md` and `docs/specs/terminal-surface.md`
-D4 both asserted, as a description of shipped behaviour:
+Root `CLAUDE.md` and `docs/specs/terminal-surface.md` state the D4 view
+constraint. This test keeps the constraint tied to the shipped call graph:
 
-    Views (statusline, `/fleet:*`) never take `fleet.lock`, never probe a PID,
-    never write, and never quarantine a corrupt registry -- they read
+    Views (statusline and `/fleet:*`) never take `fleet.lock`, probe, write, or
+    quarantine a corrupt registry -- they read
     `fleet.status_snapshot()` and exit 0.
 
 Measured 2026-07-27 at `02bf276`, that is true of `bin/fleet_statusline.py` and
@@ -278,8 +278,8 @@ def test_doctrine_is_not_restated_unqualified_while_it_is_false(
 # a count-based non-vacuity check could not tell.
 ORIGINAL_CLAIMS = {
     "CLAUDE.md rules bullet":
-        "Views (statusline, `/fleet:*`) never take `fleet.lock`, never probe a "
-        "PID, never write, and never quarantine a corrupt registry — they read "
+        "Views (statusline and `/fleet:*`) never take `fleet.lock`, probe, write, "
+        "or quarantine a corrupt registry; they read "
         "`fleet.status_snapshot()` and exit 0.",
     "architectural constraint, No view writes":
         "**No view writes.** Nothing in this phase writes `state/fleet.json`, "
