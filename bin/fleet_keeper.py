@@ -258,11 +258,27 @@ def rule_supervisor_stalled(obs, now):
     8h10m51s while the heartbeat screamed; `status`-armed, the identical
     observations page at 21:04:36Z instead of 04:14:36Z.
 
-    THE SID JOIN STAYS, AND IT IS LOAD-BEARING. Only the MEMBERSHIP predicate
-    changed. C2's fix -- join on the claim's SESSION ID, never a `sup|` name
-    prefix -- is untouched, because `ai-title` can overwrite `name` after a
-    resume, so a name join can bind a live supervisor to the wrong row or
+    THE SID JOIN STAYS, AND IT IS LOAD-BEARING. C's change was to the
+    MEMBERSHIP predicate; C2's fix -- join on a SESSION ID, never a `sup|`
+    name prefix -- is untouched, because `ai-title` can overwrite `name` after
+    a resume, so a name join can bind a live supervisor to the wrong row or
     miss it entirely and page at a healthy fleet.
+
+    WHAT w63 CHANGED IS THE JOIN'S SUBJECT: the claim's ONE sid became the
+    claim-holder BODY's sid UNION (`session_id` u `retired_sids`), resolved in
+    `sup-status --json` and read here out of `obs["claim_rows"]`. C asked
+    whether the CLAIM's session had a roster row, which for a fork-steered
+    body is a question about one of its several sessions and flips as turns
+    start and end -- so on 2026-09-10 at 10:16Z it paged that a live,
+    listed, idle supervisor was gone. See `_claim_activity`.
+
+    THE FINGERPRINT IS DELIBERATELY LEFT ON THE CLAIM SID, and the cost is
+    named rather than discovered. `claim_sid` ROTATES on every fork-steer, so
+    two stalls either side of a `fleet send` dedup as different pages. That is
+    the right answer here -- a steer is a fresh attempt to un-stall the body,
+    and a stall that survives it is news -- and re-keying on something stable
+    (the incarnation id, or the union's minimum) would be a behaviour change
+    to `dedup` that no measured event asks for. w63 does not make it.
 
     THE RESIDUAL C DOES NOT CLOSE, STATED PLAINLY: a supervisor WEDGED
     MID-TURN reports `status: "busy"` for as long as its process lives, and
