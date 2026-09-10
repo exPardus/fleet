@@ -14,6 +14,11 @@ BELIEVED (inference, code reading, or someone else's report).** Host `kz-work`, 
 (MEASURED: `git diff --stat 64aa96b..HEAD -- docs/specs/ docs/OPERATOR-GATES.md` is **empty** —
 neither the specs nor the gate file is touched). C is not reverted (§4).
 
+**SHIPPED, in one line:** the claim→roster join is the body's sid union at both sites; the union
+is published by `sup-status --json` (`claim_sids`) and printed by its human form; eleven mutants
+red; the floor is unmoved on 3.10 and 3.12; no spec edit, no gate ticked, one gate DRAFTED for the
+operator.
+
 ---
 
 ## 0. THE ONE-PARAGRAPH ANSWER
@@ -156,8 +161,9 @@ because *"`load_registry` QUARANTINES a corrupt registry — it renames the file
 WRITE"*. `supervisor_claim_sids` routes through it, so `sup-status` gains a **read** and no
 capability D4 cares about. **Pinned, not asserted:** `test_a_corrupt_registry_is_none_and_is_not_
 quarantined` leaves the corrupt file untouched and then proves its own detector can see a real
-quarantine, and `test_the_union_read_never_takes_the_lock` fails the test if `fleet_lock` is
-called at all.
+quarantine; `test_the_union_read_never_takes_the_lock` and `…_is_not_load_registry` record every
+call to `fleet_lock`/`load_registry` and assert none happened — a shape they had to be rewritten
+into after a mutant showed the raising version was dead (§5, M10/M11).
 
 **So: no gate drafted, and none owed.** §6 asked me to file a draft and stop if the work collided
 with D4's narrow-reader rule. It does not collide. What I owe instead is the honest statement that
@@ -223,16 +229,16 @@ row at all. That body is dead and must page. It does: all-corpse unions grade `d
 
 ---
 
-## 5. THE MUTANTS — NINE, PLUS THE ONE THAT FOUND AN UNSOUND PIN
+## 5. THE MUTANTS — ELEVEN, TWO OF WHICH FOUND UNSOUND PINS OF MINE
 
 **MEASURED, re-run against the tip `1b76726`.** Every mutant was planted in
 `$CLAUDE_JOB_DIR/tmp/mutant`, a separate `git clone --no-local` of the branch — never in this
 worktree, never in the floor clone — and reverted with `git checkout --` before the next. The
-battery runs the five keeper test files plus the new one (156 tests); **all nine go RED and none
-is redundant** — no two mutants redden the same set. Two of the nine were caught by the harness
-itself: M7's and M8's anchors stopped matching when later commits touched those lines, and the
-script **fails loudly on a non-unique anchor** rather than reporting a green mutant, which is the
-only reason this table is not quietly two rows short.
+battery runs the five keeper test files plus the new one (156 tests); **all eleven go RED and none
+is redundant** — no two mutants redden the same set. Two of them were caught by the harness itself:
+M7's and M8's anchors stopped matching when later commits touched those lines, and the script
+**fails loudly on a non-unique anchor** rather than reporting a green mutant, which is the only
+reason this table is not quietly two rows short.
 
 | # | mutation | reddens |
 |---|---|---|
@@ -245,29 +251,40 @@ only reason this table is not quietly two rows short.
 | M7 | drop the `under a retired sid` clause | 2 — the 10:16Z reason clause, both pins |
 | M8 | publish `claim_sids: null` unconditionally | 2 — the JSON and the human form |
 | M9 | drop the claim-sid-known guard on the retired-sid clause | 1 — `test_a_live_row_is_not_called_retired_when_the_claim_sid_is_unknown` |
+| **M10** | **the keeper resolves the union itself — option (a)** | 2 — the narrow-reader pin, once it was sound |
+| **M11** | **the resolver takes `fleet.lock`** | 1 — the view pin, once it was sound |
 
-### M10 — the mutant that proved a pin of mine was worthless, and is the most useful thing here
+### M10 and M11 — the mutants that proved three pins of mine were worthless
 
-I claimed in §3 that the keeper reads no registry of its own, and pinned it. **M10 is the keeper
-the brief's option (a) would have produced** — `collect` resolving the union itself through
-`fleet.supervisor_claim_sids()` — planted precisely to check that the pin fires. MEASURED, in
-order:
+This is the most useful paragraph in the report, and it is about my own work being wrong.
 
-1. The pin's first draft stubbed fleet's registry readers with `pytest.fail(...)`. **M10 passed
-   all 48 tests.** `pytest.fail` raises `Failed`, which derives from `Exception`, and
-   `supervisor_claim_sids` — like every reader on a view path — ends in
-   `except Exception: return None`. **The mutant swallowed the pin's own failure.** A pin that a
-   view-path `except Exception` can eat is not a pin.
-2. Rewritten to RECORD the call and delegate, then assert nothing was recorded (`cc7f59a`).
-3. Re-run against a **second** M10 variant that reaches the registry read (the first passed the
-   claim through, and without it `read_incarnation()` returns `None` in a tmp home and the
-   function short-circuits before ever touching the registry — so that green was CORRECT and the
-   seed was the weak thing, not the code). **The pin goes RED**:
-   `FAILED …::test_the_keeper_reads_no_registry_of_its_own_to_get_the_union`.
+I claimed in §3 that the keeper reads no registry of its own, and in §2 that the resolver takes no
+lock and is not `load_registry`. I pinned all three. **M10 is the keeper the brief's option (a)
+would have produced** — `collect` resolving the union itself — and **M11 wraps the resolver's
+registry read in `fleet_lock()`**. Both were planted precisely to check that those pins fire.
+MEASURED, in order:
 
-The lesson generalises past this lane: **any pin implemented by raising inside a function the
-system-under-test wraps in `except Exception` is silently dead.** This repo has a lot of
-`except Exception: return None` on its view paths.
+1. All three pins were written as monkeypatched stubs calling `pytest.fail(...)`. **M10 passed all
+   48 tests.** `pytest.fail` raises `Failed`, which derives from `Exception`, and
+   `supervisor_claim_sids` — like every reader on a view path in this repo — ends in
+   `except Exception: return None`. **The mutant swallowed the pin's own failure.** A pin that the
+   code under test can eat is not a pin. M11's target had the identical shape.
+2. Rewritten to RECORD the call, delegate to the real function, and assert nothing was recorded —
+   `cc7f59a` for the keeper pin, `81fa544` for the two resolver pins.
+3. Re-run. **The pins go RED**:
+   `FAILED …::test_the_keeper_reads_no_registry_of_its_own_to_get_the_union` under M10 and
+   `FAILED …::test_the_union_read_never_takes_the_lock` under M11.
+
+One honest sub-note, because it is the reason this took two attempts: the FIRST M10 I planted also
+passed, and that green was **correct**. It called `supervisor_claim_sids()` with no argument, so
+`read_incarnation()` returned `None` in the tmp home and the function short-circuited before
+touching the registry at all. The seed was weak, not the code. The second variant passes the claim
+through, which is what a real option-(a) keeper would do.
+
+**The lesson generalises past this lane: any pin implemented by raising inside a function the
+system under test wraps in `except Exception` is silently dead.** This repo has a great many
+`except Exception: return None` view paths, each of them there for a good reason, and each of them
+a place where this class of dead pin can live. I did not audit the others.
 
 M1 and M2 are the two the brief names. **M1's verbatim output** (MEASURED):
 
