@@ -444,6 +444,9 @@ def find_pass_fail_totals(text):
 # this site, 328 lines below its own retraction. One file may not claim both.
 _HISTORICAL_PREFIXES = (
     # dated, per-wave working records
+    # docs/archive/ is the prose campaign's one-way sink: nothing loads it and
+    # nothing in it claims the current tree.
+    "docs/archive/",
     "docs/lanes/", "docs/reviews/", "docs/proposals/", "docs/superpowers/",
     "docs/decisions/", "docs/AUTONOMOUS-", "docs/OVERNIGHT-", "docs/mf-",
     "spike/", "FIX-WAVE-", "REVIEW-INPUT-",
