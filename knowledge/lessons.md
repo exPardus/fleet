@@ -2023,3 +2023,7 @@ At 15:18:08Z the OOM killer hit the claude daemon scope on kz-work; the daemon s
 ## 2026-09-10 — mechanise every ritual {#2026-09-10-mechanise-rituals}
 
 Operator standing directive: "optimize the hell out of all the rituals and stuff, everything that can be handled by scripts and code should not be done by the harness or model". A ritual step is CODE when its inputs are files, git, the registry or the roster and its output is deterministic; MODEL only for judgement on content, with one line of justification. First batch: `fleet wave-close`, an extended `fleet sup-boot` (reap, memory floor, inbox drain, docs-currency), `fleet sup-guard` (the two-live-body guard as one verdict line), `fleet interface-register`, the journal board roll. Text: `state/tasks/20260910-mechanise-rituals.md` in the fleet home.
+
+## 2026-09-10 — Codex budget: gpt-5.6 by default, astra by exception {#2026-09-10-codex-budget}
+
+Operator ruling 2026-09-10T16:5xZ, verbatim: "dont spam astra, use with discretion and use the gpt5.6 models instead. we burned also 75% of the codex weekly limit too, well not fleet only but still". Supersedes the earlier "spam astra" line. Default mcx worker model is `gpt-5.6-luna` (omit `-m`), effort medium (high for `bin/fleet.py` build lanes); `gpt-6-astra` only with a written reason naming why 5.6 would fail, never for docs, tests, receipts or folds. With Claude at 77% and Codex at 75% of their weekly plans, waves are 1-2 lanes until 2026-09-15. Text: `state/tasks/20260910-codex-budget.md` in the fleet home.
