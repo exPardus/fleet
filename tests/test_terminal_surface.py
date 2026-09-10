@@ -900,7 +900,7 @@ class TestCommandFiles:
                          # the irreversible append to the machine-global
                          # `~/.claude/fleet-homes.list`. PROSPECTIVE, measured:
                          # no shipped `commands/*.md` grants `fleet init` at all.
-                         "init --home",
+                         "init --home", "journal-roll",
                          # [w58/notify] `sup-notify` TYPES A LINE INTO THE
                          # OPERATOR'S INTERFACE WINDOW, which the ccgram bridge
                          # relays to their phone, and it writes the supervisor

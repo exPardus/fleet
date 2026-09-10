@@ -437,9 +437,9 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         # [w47/homes] E2/homes split, operator 2026-08-08
                         "homes --add", "homes --retire",
                         # [w59/inithome] E2/init split, operator 2026-08-10
-                        "init --home")
+                        "init --home", "journal-roll")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
-                       "resume-limited", "sup-heartbeat")
+                       "resume-limited", "sup-heartbeat", "interface-register")
 RATIFIED_ORDINARY = ("spawn", "status", "peek", "result",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "q", "index")

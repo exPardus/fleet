@@ -30,13 +30,13 @@ The same file pins DONE placement on new lane documents and post-cutoff runtime
 tasks; cutoff details live in `docs/lanes/BRIEF-TEMPLATE.md`.
 
 The supervisor procedure is `skills/fleet/supervisor.md`: last three journal
-checkpoints (≤40 lines for new entries), lossless monthly history rolls, 40k-token
+checkpoints (≤40 lines for new entries), lossless journal history rolls, 40k-token
 boot-read cap, one priority item per wave, model routing and spawn token ceilings,
 targeted lane checks, one merged floor per interpreter, and current boards plus
 one-line changelog and throughput accounting at landing. Gate batching and the
 interface's one feature offer are in `docs/operator/server-interface-profile.md`.
-These are operator-adopted procedures; the checkpoint verb's automatic roll is
-a separate build deliverable, not claimed by this documentation change.
+These are operator-adopted procedures; `sup-checkpoint` performs the roll after
+every append, and `fleet journal-roll` is available for an explicit pass.
 
 ## 1. Problem, decision, architecture
 
@@ -244,7 +244,8 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 | `resume-limited [name] [--force-now]` | §10. Native resume = fork-steer per G2(b) (`_resume_one_limited_native` @3255). |
 | `archive [--ttl-hours] [--dry-run]` / `autoclean` | §11. |
 | `doctor` | §13 roster. |
-| `sup-boot / sup-checkpoint / sup-heartbeat / sup-status / sup-handoff-begin / sup-handoff-complete / sup-handoff-abort` | §12 supervisor protocol (parser rows @7266-7292). |
+| `sup-boot / sup-checkpoint / journal-roll / sup-heartbeat / sup-status / sup-handoff-begin / sup-handoff-complete / sup-handoff-abort` | §12 supervisor protocol; `sup-checkpoint` keeps the board at the newest three checkpoints by rolling older entry bytes into `supervisor/journal-history/journal-roll.md`. |
+| `interface-register` | Reads and validates `TMUX_PANE`, restores the pane's window name to `fleet`, and writes `state/interface-pane` only after tmux succeeds. Re-running with the same pane and window is a no-op; outside tmux it refuses. |
 | `init [--home PATH] [--statusline [--chain\|--force]]` | Bare `init` creates an initialized fleet home in cwd: `state/fleet.json` plus rendered `state/worker-settings.json` (G-K5 Reading A, 2026-09-10). It does not register the home globally. Explicit `--home PATH` also appends its registration (DESTRUCTIVE, E2); it refuses with `--fleet-home` or `--statusline`. Explicit `--fleet-home` keeps settings rendering in the selected initialized home; `--statusline` keeps existing resolved-home setup and installs into `~/.claude/settings.json`, refusing foreign incumbents (terminal-surface D6). Scheduler flags remain removed. |
 | `home` / `knowledge` | Print resolved `FLEET_HOME`; print `knowledge/INDEX.md`. |
 
@@ -320,6 +321,22 @@ session writer; Codex lanes still count toward the combined dispatch limit.
 ## 12. Supervisor protocol (§4 of the pivot spec — survives unchanged, now with verbs)
 
 **Soul = files:** `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md` (append-only, claim-holder-only) + `knowledge/` — git-tracked. **Body = any session** holding the claim: `supervisor/INCARNATION` (gitignored), written only under `fleet.lock`, read lock-free (atomic `os.replace` writes), carrying incarnation id, sid, and a heartbeat the holder refreshes at every checkpoint/beat (`SUPERVISOR_CLAIM_STALE_SECONDS = 3600` @6367).
+
+**Journal board maintenance.** `fleet journal-roll` and the post-append step in
+`sup-checkpoint` retain the newest three `CHECKPOINT` entries on the board.
+Entries before the oldest retained checkpoint, including older `BOOT`, `SEIZED`,
+and `HANDOFF-*` entries, are copied as exact bytes to the stable append-only
+sink `supervisor/journal-history/journal-roll.md`; the board's seed text and
+retained entries remain in place. The roll verifies its byte partition and
+refuses a malformed entry-looking header without changing either file. The
+fixed sink avoids a date-range filename becoming stale or ambiguous.
+
+**`interface-register`.** The interface runs this one command on resume. It
+accepts only the `%<decimal>` pane shape already required by the keeper,
+renames that pane's window to `fleet` when needed, and writes
+`state/interface-pane` after successful tmux verification. An unset or invalid
+`TMUX_PANE`, or an unavailable tmux pane, is a clear refusal and never writes a
+registration.
 
 **INCARNATION v2 (claim-nonce §5.2).** The claim additionally carries a per-body **generation** — `nonce_hash` (the live generation), optional `pending_nonce_hash`/`pending_at`/`prior_pending_hash`, `nonce_seq`, and a `lineage_id` — none of which is a stored secret (only sha256 hashes live in the file; the plaintext is printed once, on the minting verb's stdout). Continuity, not the sid, is the claim key: it survives fork-steer/respawn/handoff, and a stale generation is *evidence* rather than noise. A **released** claim (`state: "released"`) drops the generation and the sid entirely (§6.3). Additive-schema: a pre-nonce five-key INCARNATION is a **legacy** claim (`nonce_hash` absent AND `state` absent), honored once by sid equality and upgraded in place (§9).
 
