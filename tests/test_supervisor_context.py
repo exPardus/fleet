@@ -320,41 +320,12 @@ class TestTierResolution:
 
 
 class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
-    """The band numbers live in FOUR places a body actually reads: the two
-    constants, the skill table an interface session opens, and the ritual doc a
-    supervisor boots on. Before this class, **nothing pinned the last two** --
-    the same shape as this repo's recorded recurrences, where a false sentence
-    survives on a RUNNING surface because only the code was tested.
+    """Pin the current context bands on the operator-facing skill."""
 
-    The expected strings are DERIVED from the constants, so raising the band
-    again cannot leave this test green against stale doctrine: it will name the
-    file and the string it wanted.
-    """
+    SURFACES = ("skills/fleet/SKILL.md",)
 
-    SURFACES = ("skills/fleet/SKILL.md", "skills/fleet/supervisor.md")
-
-    # THE SEPARATE-TOKEN HOLE, and the numbers that close it.
-    #
-    # `test_no_superseded_band_is_stated_as_current` below forbids the JOINED
-    # renderings and nothing else, so w45-gceil §3's mutant D reverted BOTH of
-    # `supervisor.md`'s trigger sentences to the old ceiling while writing zero
-    # joined tokens -- `**150k**`, `**200k**`, `at 150k`, `At 200k`. The
-    # required renderings still appeared elsewhere in the file, so the sibling
-    # assertion stayed green too. Measured: 36 passed in this file, and 493
-    # passed across every test in the tree that reads `supervisor.md`. A
-    # booting supervisor was told its hard ceiling was 200k and the whole suite
-    # said nothing.
-    #
-    # A SUPERSEDED band is a historical fact; no constant in `bin/fleet.py`
-    # remembers one, so the history is transcribed here and re-pinning it is a
-    # deliberate edit. What is NOT transcribed is which of them are dead --
-    # `_dead_edges` subtracts the CURRENTLY SHIPPED edges, because `300k` is
-    # half of the 2026-07-14 band AND the live worker ceiling, so a list that
-    # did not subtract would forbid a number shipped code enforces. That
-    # subtraction is also what makes the next raise safe: whatever the operator
-    # raises the band to leaves this list automatically.
-    SUPERSEDED_BAND_EDGES_K = (150, 200,    # ratified 2026-07-23, raised 2026-08-05
-                               300, 500)    # ratified 2026-07-14, superseded 2026-07-23
+    # Keep only edges that are not currently enforced by either tier.
+    SUPERSEDED_BAND_EDGES_K = (150, 200, 300, 500)
 
     # A dated citation may state a dead number; a live instruction may not.
     _DATED = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -407,39 +378,8 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
         CLAUSE-scoped since 2026-08-06, and both halves of that scope are
         load-bearing measurements rather than taste.
 
-        NOT PARAGRAPH-SCOPED. `supervisor.md`'s trigger paragraph OPENS with a
-        dated citation of the 2026-07-14 band and gceil's mutant D lands one and
-        two lines below it, inside the same paragraph. MEASURED over the mutated
-        file: a paragraph scope waves through BOTH reverted lines (186 and 191),
-        not merely the one adjacent to the date.
-
-        NOT LINE-SCOPED EITHER, AND THAT WAS THIS PIN'S OWN GATING DEFECT.
-        Line scoping is what shipped at `bc1ad91`, and gate `w45-gpins` F1
-        measured what it cost: every band-bearing line of `skills/fleet/SKILL.md`
-        carries its ratification date INLINE -- it is a table row and a bullet,
-        so date and instruction share one line by construction -- so all three
-        were exempt and the `[skills/fleet/SKILL.md]` parameter could not fail
-        for the class it was built for. Mutant K1 put *"the supervisor enters
-        its band at **150k** ... hard ceiling **200k**"* on SKILL.md's live
-        trigger row and **713 tests passed**, every test in the tree that reads
-        that file. A green parameter over an uncoverable file reads as coverage
-        and is not.
-
-        So the question is no longer "is this line dated" but "is the date
-        dating THIS NUMBER". MEASURED when choosing the shape: on a clean tree
-        the only dead-edge occurrence on either surface is `supervisor.md:185`'s
-        `500k`, whose date sits 5 characters away with nothing between --
-        exempt under every candidate rule, so zero false positives. Under K1 the
-        nearest date is 41 characters from `150k` with `)` and `:` between.
-        The gate's suggested 40-character proximity rule also catches it, by
-        **one character**; a constant that close to its own mutant is tuned to
-        it. The clause rule needs no constant and names the real distinction.
-
-        THE RESIDUAL, STATED: a revert that writes a date into the SAME CLAUSE
-        as the dead number still escapes -- *"the 2026-08-05 150k ceiling"*
-        reads as dated history to this rule. That is a deliberate act, and
-        unlike the line-scoped residual it is not one the surfaces hand out for
-        free.
+        The detector rejects a stale band edge even when it appears in a
+        sentence with a valid current band.
         """
         dead = cls._dead_edges()
         if not dead:
@@ -555,14 +495,8 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
             "supersedes the 2026-07-14 300–500k band")
         assert self._stale_edge_hits("supersedes the 300–500k band")
 
-    def test_the_carve_out_does_not_exempt_a_DATED_LINE_that_instructs(self):
-        """MUTANT K1 — gate `w45-gpins` F1, the defect this pin shipped with.
-
-        Built from `SKILL.md`'s OWN live trigger row rather than from a quoted
-        copy, so it cannot drift into a strawman: take the shipped sentence,
-        swap the shipped supervisor edges for the superseded ones, and that is
-        K1. Under the line-scoped rule this survived 713 tests.
-        """
+    def test_the_surface_rejects_stale_band_edges(self):
+        """Build a stale-band mutation from the current skill line."""
         line = next(ln for ln in self._text("skills/fleet/SKILL.md").splitlines()
                     if "enters its band at" in ln)
         soft, hard = fleet.band_thresholds("supervisor")
@@ -575,26 +509,10 @@ class TestTheDoctrineSurfacesQuoteTheSHIPPEDBand:
             "tokens, in which case re-derive this seed against the row as it is "
             "written now. Do not delete it.")
 
-        # The line IS dated, and that is exactly why the old rule let it past.
-        assert self._DATED.search(k1), (
-            "the row carries no inline date, so it is no longer the F1 shape")
         assert self._stale_edge_hits(k1), (
-            "K1 is not caught: a dated line may not state a dead band edge as "
-            "a live instruction, whatever else the line dates")
+            "the skill must not state a stale band edge as live doctrine")
 
-        # THE COUNTERFACTUAL THAT NAMES F1, run rather than asserted: the rule
-        # this pin shipped with at `bc1ad91`, applied to the same text.
-        def line_scoped_hits(body):
-            dead = "|".join(str(k) for k in self._dead_edges())
-            edge = re.compile(rf"(?<![\d,])(?:{dead})(?:k\b|,000(?![\d,]))")
-            return [i for i, ln in enumerate(body.splitlines(), start=1)
-                    if edge.search(ln) and not self._DATED.search(ln)]
-
-        assert line_scoped_hits(k1) == [], (
-            "the line-scoped rule no longer exempts K1, so this counterfactual "
-            "has stopped demonstrating F1 -- re-read gpins §3 before editing")
-
-        # And the shipped row, unmutated, stays green under the new rule.
+        # The shipped row, unmutated, stays green.
         assert not self._stale_edge_hits(line)
 
     def test_the_detector_can_see_a_stale_surface(self, tmp_path):

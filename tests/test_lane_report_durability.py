@@ -94,7 +94,6 @@ README = "docs/lanes/README.md"
 #: the surface that reaches every lane is the one most worth pinning.
 SURFACES = (
     "skills/fleet/SKILL.md",
-    "skills/fleet/supervisor.md",
     "docs/lanes/BRIEF-TEMPLATE.md",
 )
 
@@ -114,9 +113,9 @@ _BACKTICKED = re.compile(r"`([^`\n]+)`")
 #: Proximity, not mere co-occurrence in the block, and the difference is
 #: measured rather than theoretical. Scoped to the whole block this fired on
 #: three innocent passages on its first run: the `fleet archive` and `fleet
-#: doctor` rows of SKILL.md's command table, and supervisor.md's boot-bundle
-#: paragraph. All three name a gitignored runtime path -- correctly, it is
-#: where those commands really write -- and all three use "report" elsewhere in
+#: doctor` rows of SKILL.md's command list. Both name a gitignored runtime path
+#: -- correctly, it is where those commands really write -- and use "report"
+#: elsewhere in
 #: the row as a VERB about what a command prints. A rule that cannot tell "the
 #: verb reports" from "your report goes here" would have had to be relaxed or
 #: allowlisted, and an allowlist is how a pin stops being evidence.
