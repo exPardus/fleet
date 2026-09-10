@@ -16172,7 +16172,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the fifteen other sites that already key on the union
     (`:2825, :2896, :2969, :3230, :3380, :4825, :9789, :10109, :10390, :10621,
-    :10708, :10931, :11717, :16042, :18871`). The thirteenth is multi-fleet §5
+    :10708, :10931, :11717, :16042, :18877`). The thirteenth is multi-fleet §5
     step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
@@ -16198,7 +16198,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8550, :9089, :13882,
-    :19534), the same safety invariant §7.1's send carve-out rests on. That
+    :19540), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16889,7 +16889,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8550, :9089, :13882,
-    #     :19534) -- so the sid union can never make one body answer for another.
+    #     :19540) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -18066,7 +18066,13 @@ def cmd_sup_status(args) -> int:
         # `status_snapshot`'s, with the claim sid resolved against a registry
         # it did not read. Resolved HERE, the union is self-consistent with
         # the very `incarnation.session_id` published beside it.
-        "claim_sids": supervisor_claim_sids(claim),
+        #
+        # `claim` is passed in rather than re-read: with `claim=None` the
+        # resolver reads `INCARNATION` itself, and a claim appearing between
+        # this function's read and that one would publish a union for a claim
+        # this response does not describe. On the no-claim path it also skips
+        # the registry read entirely.
+        "claim_sids": supervisor_claim_sids(claim) if claim is not None else None,
     }
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
