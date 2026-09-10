@@ -11994,3 +11994,47 @@ commit message and a notify before a lane took one measurement and dissolved it 
 did it was one I had told to attack its own brief. **Four waves running, both lanes have corrected
 their supervisor on the point the brief called most likely. That is not luck and it is not a lane
 property; it is what instructing them to attack buys, and it is the cheapest thing this fleet does.**
+
+## 2026-09-10T05:49:21Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=65602a07-06d0-47b9-85e7-68c1158c4d8a
+
+POST-WAVE CORRECTION TO MY OWN SUCCESSOR QUEUE — item 4's `identity-witness` is NOT reproducing, and
+why it is green is better evidence than the red row ever was.
+
+**MEASURED just now: `[PASS] identity-witness: the FLEET_WORKER witness agrees with the registry`**,
+both naming `sup|inc-20260910T041459Z-2382|boot` for sid `65602a07-…`. The w59/w60 finding was that
+the row is red for **every `--bg` body that did not FOUND the daemon**, because the daemon donates
+its founder's name to every session it hosts (claim-nonce §18). It is green for me, and lane
+`w61-keeperblind` measured exactly why without either of us aiming at it: **the old daemon exited at
+`04:06:03Z` (`cause=idle_exit, live_workers=0`) — eight minutes before my dispatch at `04:14:59Z`.
+So I founded the daemon I run in.** That is the §18 mechanism confirmed from the *other* direction,
+by an accident of timing rather than by a test.
+
+**The honest status of the queue item is therefore neither "open defect" nor "fixed":** the row's
+verdict is a property of the TREE-AND-DAEMON a body happens to boot into, not of the body. It reads
+PASS for a founder and FAIL for every later `--bg` body on the same daemon. **Do not open it as a
+bug on a green fleet and do not close it as fixed** — the grading question w60 framed (demote to
+NOTE when the disagreement is fully explained by §18, or accept the row is decorative here) is
+unchanged and still owed. Whoever takes it must arrange a non-founding body to see the red, because
+on today's daemon it cannot be reproduced.
+
+**And note the shape, because it is this wave's shape again:** an inherited queue item asserted a
+present-tense fact about the tree ("the row is red"), nobody re-derived it, and it was false the
+moment a daemon restarted. Same class as *"the six failures write into the repo root"* (three waves,
+false) and *"`sup-notify` is unshipped"* (a day, false). **Re-measure an inherited claim before
+briefing a lane on it. I did, twice this wave, and both times the claim had moved.**
+
+## FLEET STATE AT THIS CHECKPOINT
+
+`doctor`: every row PASS except `supervisor-pending-decision`, which is **my own G-K6 correctly
+flagged as needing the operator**. No lane running, no worktree left, nothing stranded, repo root
+clean, `rev-list --count HEAD --not --remotes` = 0. Context **239,415 — BELOW-BAND** against a
+350,000 trigger, so no handoff is owed and taking one now would waste a generation.
+
+**I am deliberately NOT dispatching another wave.** The two candidates are gate-blocked — the G-K6
+fix on the ruling itself, and the two-home dogfood proof because a real second home appends to the
+machine-global `~/.claude/fleet-homes.list`, which is RATIFIED DESTRUCTIVE and the operator's call
+(and the `sup-decision` slot is single-occupancy, already holding G-K6). The remaining unblocked
+items are inert-today hardening. **Manufacturing a wave to keep myself awake would be the wrong
+reason to spend the operator's tokens**, and it is a reason I can feel, which is why I am writing it
+down: the alternative to a wave is that I sit idle-but-listed, invisible to the keeper, in the exact
+condition G-K6 describes. **That is the correct thing to do anyway, and the gate is what fixes it.**
