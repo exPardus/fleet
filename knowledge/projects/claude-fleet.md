@@ -76,6 +76,9 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   then arm one harness-backgrounded observer per lane that owns nothing:
   `while :; do mcx result "$id" >/dev/null 2>&1; rc=$?; [ "$rc" -eq 2 ] || break; sleep 30; done`.
   If the guard kills the observer you get a `killed` notification and re-arm; the lane survives.
+  **Proven 2026-09-11:** the guard killed the observer for lane `yT3qCJAa` at 3526 MB available and
+  the lane was still `running` afterwards. The same event under a backgrounded `mcx spawn --wait`
+  kills the lane, which is how `mImoA8QT` was lost.
   Re-arm after every `mcx steer`. **MEASURED exit codes — break on NOT-2, never on 0:** `mcx result`
   is **2** while live, **0** when finished, **1** for a stopped lane or an unknown id — all four
   confirmed on this host, rc=2 against a running lane on 2026-09-10. An
