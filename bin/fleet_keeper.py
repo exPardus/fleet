@@ -167,36 +167,66 @@ ROSTER_BUSY = "busy"
 
 
 def _claim_activity(obs):
-    """`(activity, status)` for the claim's OWN roster row, from
+    """`(activity, status, sid)` for the claim-holder BODY's roster rows, from
     `claude agents --json` (the plain spelling; never `--all`).
+
+    IT GRADES A SET OF ROWS, NOT ONE ROW (w63). `obs["claim_rows"]` is every
+    roster row belonging to any sid in the body's UNION
+    (`session_id` u `retired_sids`), because a fork-steered body HAS several
+    sessions at once and the claim names only the newest. MEASURED on this
+    host 2026-09-10T10:38Z, one body, two live rows and two live processes:
+    `37e5c61c...` idle at pid 434832 (the pre-steer session) and
+    `42445477...` busy at pid 515437 (the fork holding the claim). Grading
+    the claim's row alone answers a question about a SESSION while the page
+    speaks about a BODY.
 
     Four classes, because the three non-busy ones are three different
     sentences for the operator and one of them is not even a defect in the
-    same sense:
+    same sense. Read in this order, most-alive first -- ANY row that is busy
+    makes the body busy:
 
-    - `"busy"`   -- listed, `status == "busy"`: a body in a turn right now.
-    - `"quiet"`  -- listed with some other status (`idle` is the measured
-                    one): the body is ALIVE and NOT WORKING. This is the
-                    2026-09-09 outage, and it is what C exists to page.
-    - `"dead"`   -- listed, but the row carries NO `status` at all. MEASURED:
-                    on a dead row `status` and `pid` are ABSENT from the
-                    object, not present-and-null (w61 §2), and such rows
-                    persist in the plain spelling indefinitely -- one was 22h
-                    old when measured. Listed is not alive.
-    - `"absent"` -- no row for this sid at all.
+    - `"busy"`   -- some union row reads `status == "busy"`: this body is in a
+                    turn right now.
+    - `"quiet"`  -- some union row carries some other status (`idle` is the
+                    measured one): the body is ALIVE and NOT WORKING. This is
+                    both the 2026-09-09 outage (the claim's own row idle) and
+                    the 2026-09-10 10:16Z false page (the claim's row gone,
+                    the PRE-STEER row idle with a live pid).
+    - `"dead"`   -- union rows exist but NONE carries a `status`. MEASURED: on
+                    a dead row `status` and `pid` are ABSENT from the object,
+                    not present-and-null (w61 §2), and such rows persist in the
+                    plain spelling indefinitely -- one was 22h old when
+                    measured. MEASURED again by w63 over a whole body:
+                    `sup|inc-20260910T041459Z-2382|boot` had BOTH its retired
+                    sids listed as pid-less `blocked` rows while its current
+                    `session_id` had no row at all. Listed is not alive, and
+                    that is why "any union sid is in the roster" is NOT the
+                    predicate -- it would make that corpse immortal.
+    - `"absent"` -- no row for ANY sid of this body.
 
-    `obs.get("claim_row_status")` is NOT read as a bare `.get()` truth test.
-    A missing obs key, a row without the key, and a row whose key holds a
-    non-string all land on `"dead"`/`"absent"` EXPLICITLY, so the alarm can
-    never be silenced by a shape nobody anticipated -- `.get()` returning
-    `None` by accident is exactly how a rule ends up passing its tests while
-    watching nothing."""
-    if not obs.get("claim_in_roster"):
-        return "absent", None
-    status = obs.get("claim_row_status")
-    if not isinstance(status, str) or not status:
-        return "dead", None
-    return ("busy" if status == ROSTER_BUSY else "quiet"), status
+    `sid` is the row the class was decided on, so the page can say whether the
+    live session is the claim's or a retired one. It is picked by sorted sid
+    among equals, never by dict order, so the same observation always produces
+    the same page text and therefore the same dedup fingerprint.
+
+    NO VALUE IS READ AS A BARE `.get()` TRUTH TEST. A missing obs key, a
+    non-dict, a row without the key, and a row whose key holds a non-string
+    all land on `"dead"`/`"absent"` EXPLICITLY, so the alarm can never be
+    silenced by a shape nobody anticipated -- `.get()` returning `None` by
+    accident is exactly how a rule ends up passing its tests while watching
+    nothing."""
+    rows = obs.get("claim_rows")
+    if not isinstance(rows, dict) or not rows:
+        return "absent", None, None
+    live = {sid: st for sid, st in rows.items()
+            if isinstance(st, str) and st}
+    busy = sorted(sid for sid, st in live.items() if st == ROSTER_BUSY)
+    if busy:
+        return "busy", live[busy[0]], busy[0]
+    if live:
+        sid = sorted(live)[0]
+        return "quiet", live[sid], sid
+    return "dead", None, sorted(rows)[0]
 
 
 def rule_supervisor_stalled(obs, now):
@@ -258,7 +288,7 @@ def rule_supervisor_stalled(obs, now):
         beat = obs.get("heartbeat_age_seconds")
         if beat is not None and beat <= HEARTBEAT_STALE_SECONDS:
             return None
-        activity, status = _claim_activity(obs)
+        activity, status, sid = _claim_activity(obs)
         if activity == "busy":
             return None
         stale = ("no heartbeat" if beat is None
@@ -269,10 +299,29 @@ def rule_supervisor_stalled(obs, now):
             # are different remedies and the operator can only see which
             # from the page.
             seen = f"roster says {status}"
+            if sid != obs.get("claim_sid"):
+                # ...and the 2026-09-10 10:16Z shape, which is the SAME
+                # remedy but a different sentence: the live session is a
+                # pre-steer one, so an operator who greps the roster for the
+                # sid in `sup-status` will not find it and must not conclude
+                # the body is gone.
+                seen += " under a retired sid"
         elif activity == "dead":
-            seen = "claim session listed with no live process"
+            # "body", not "claim session": the rows that were listed may be
+            # retired sids, and after w63 this class means every session this
+            # body ever had is listed without a live process.
+            seen = "body listed with no live process"
+        elif obs.get("sid_union_ok"):
+            seen = "no session of this body in the roster"
         else:
-            seen = "claim session not in the roster"
+            # The union could not be resolved (`sup-status --json` published
+            # `claim_sids: null` -- unreadable registry, no claim, or an
+            # older fleet), so this observation is about ONE session and the
+            # page must not dress it up as a statement about the body. The
+            # page still FIRES: an alarm degrades loud (see `ROSTER_BUSY`),
+            # and an unreadable registry has its own page besides
+            # (`rule_registry_unreadable`).
+            seen = "claim session not in the roster, sid union unavailable"
         reason = f"{stale}, {seen}"
         # The fingerprint must NOT carry the heartbeat age (re-review minor
         # 1): the age changes every tick, so a beat-bearing fingerprint never
@@ -652,8 +701,14 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     here, which put every live supervisor into the dead-trigger set.
     `_supervisor_tier_snapshot` is the normaliser (`none`/`held`/`released`/
     `unknown`), so it is the source. `sup-status` is still read, for the
-    three things the snapshot does not carry: the pending decision, the
-    heartbeat age at claim-projection precision, and the claim's session id."""
+    FOUR things the snapshot does not carry: the pending decision, the
+    heartbeat age at claim-projection precision, the claim's session id, and
+    -- since w63 -- `claim_sids`, the claim-holder body's sid union. The
+    snapshot cannot supply that last one either: its worker rows publish no
+    sid at all and `snap["supervisor"]` is claim-FILE-only by mandate
+    (`_supervisor_tier_snapshot`: "no lock, no roster read, no probe, no
+    subprocess"), so there is no sid in `status_snapshot()`'s output to join
+    on. MEASURED at `64aa96b`, not assumed."""
     home = Path(home)
     prev_state = prev_state or {}
     snap = snapshot_fn()
@@ -667,11 +722,13 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         pending = _pending_question(status)
         claim_sid = incarnation.get("session_id")
         released_at = incarnation.get("released_at")
+        published_sids = status.get("claim_sids")
     else:
         beat = sup.get("heartbeat_age_seconds")
         pending = None
         claim_sid = None
         released_at = None
+        published_sids = None
     agents_ok, agents_missing, agent_statuses = _agents(run)
     unpushed, oldest, unpushed_ref = _git_unpushed(home, run, out=out)
     workers = [{"name": w.get("name"), "status": w.get("status"),
@@ -686,22 +743,54 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     # C swapped the set for a sid->status mapping. `claim_sid` here is the
     # same normalised value the caller reads back as `obs["claim_sid"]`.
     claim_sid = claim_sid if isinstance(claim_sid, str) and claim_sid else None
-    # C (G-K6 wave 1): the observation carries the claim row's own `status`,
-    # not merely whether a row exists. `claim_in_roster` and
-    # `claim_row_status` are separate keys because "no row" and "a row with
-    # no status" are different facts about the world -- the second is a
-    # corpse the CLI is still listing -- and `_claim_activity` is the only
-    # reader that has to tell them apart. There is no `claim_sid_live` any
-    # more: it was never a liveness fact (w61 §5), and leaving the name in
-    # place with a new meaning is how the next reader inherits this outage.
-    claim_in_roster = claim_sid is not None and claim_sid in agent_statuses
-    claim_row_status = agent_statuses.get(claim_sid) if claim_in_roster else None
+    # w63: THE JOIN IS THE BODY'S SID UNION, NOT THE CLAIM'S ONE SID.
+    # `sup-status --json` publishes `claim_sids` -- the union
+    # `session_id` u `retired_sids` of the registry record that carries the
+    # claim's holder sid (`fleet.supervisor_claim_sids`). The keeper does NOT
+    # read the registry to get it, and that is the point: it stays a narrow
+    # reader (three subprocesses and one in-process snapshot), and the union
+    # arrives already resolved against the SAME claim whose `session_id` sits
+    # beside it in the same JSON, so the two can never be a fork-steer apart.
+    #
+    # Every member is normalised the way `claim_sid` above is, and for the
+    # same reason: this is JSON from another process, `s in agent_statuses`
+    # hashes its operand, and an unhashable member would raise `TypeError`
+    # straight out of the tick. A non-list `claim_sids` degrades to the empty
+    # union rather than raising.
+    #
+    # `sid_union_ok` records whether a union was PUBLISHED, not whether it is
+    # bigger than one sid: a body that has never been fork-steered has a
+    # perfectly good one-element union. `null` means the resolution failed
+    # (unreadable registry, no claim, an older fleet), and the page says so
+    # rather than making a claim about a body it could only see one session
+    # of.
+    union = set()
+    if isinstance(published_sids, list):
+        union = {s for s in published_sids if isinstance(s, str) and s}
+    sid_union_ok = bool(union)
+    if claim_sid:
+        union.add(claim_sid)
+    # C (G-K6 wave 1) carried the claim row's own `status`, not merely whether
+    # a row existed, because "no row" and "a row with no status" are different
+    # facts about the world -- the second is a corpse the CLI is still
+    # listing. w63 keeps that distinction and widens its SUBJECT: `claim_rows`
+    # maps every union sid that HAS a row to that row's status-or-None, so
+    # "no row" is now absence from this mapping and a corpse is a `None`
+    # value. `_claim_activity` is the only reader that has to tell them apart.
+    #
+    # The keys `claim_in_roster`/`claim_row_status` are GONE rather than
+    # redefined, exactly as `claim_sid_live` was deleted rather than kept with
+    # a new meaning (w61 §5): a name whose meaning silently widened from one
+    # session to a whole body is how the next reader inherits this outage.
+    claim_rows = {sid: agent_statuses[sid]
+                  for sid in sorted(union) if sid in agent_statuses}
     return {
         "goals_active": goals_active,
         "claim_state": claim_state,
         "claim_sid": claim_sid,
-        "claim_in_roster": claim_in_roster,
-        "claim_row_status": claim_row_status,
+        "claim_sids": sorted(union),
+        "sid_union_ok": sid_union_ok,
+        "claim_rows": claim_rows,
         "released_at": released_at,
         "heartbeat_age_seconds": beat,
         "pending_decision": pending,
