@@ -2001,3 +2001,7 @@ it is the pin working.*
 released claim, so **a released supervisor cannot `sup-notify` anything** — including that it
 released. Announce, then hand off, then release only if stillborn. After a release the keeper's
 `supervisor-dead` page is the channel, which is exactly the page this wave rewrote.
+
+## 2026-09-10 — six gates ruled in one Telegram message {#2026-09-10-six-gates}
+
+Operator rulings, in-session through the interface, verbatim in `state/tasks/20260910-rulings-six-gates.md`: **G-K1 AMEND** D7 to name the keeper window, and **the keeper becomes a feature flag** for remote hosts, off by default. **G-K2 ACCEPT** the silent failures indefinitely ("I must be taking care of my remote server"). **G-K4 APPROVE** `supervisor/briefs/`. **G-K5 READING A**, plus two build items: the statusline must show which fleet home it renders, and bare `fleet init` inside a repo creates that repo's fleet home. Reading B (cwd resolution) stays unbuilt. **G-K6 C THEN B**. **Dogfood APPROVED** on a NEW sister repo only — no existing project under `/home/altai/proga/` may be touched. Settled lines in OPERATOR-GATES are the operator's to tick.

@@ -12083,3 +12083,65 @@ where the pool and the lanes are indistinguishable in `free -m`.**
 Wave 61 pushed through `4a07c68`, `rev-list --count HEAD --not --remotes` = 0, working tree clean,
 repo root clean, no worktree left, no lane running. `doctor` clean but for my own G-K6 pending
 decision. Context still below band. **I am idle-but-listed and the keeper cannot see me — G-K6.**
+
+## 2026-09-10T07:23:13Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=ed943460-640f-467d-b24f-c70933596578
+
+WAVE 62 DISPATCHED — one lane, on a NEW operator request that arrived while I was idle: *"I want
+fleet to also be able to call codex cli as its workers."*
+
+## WHAT I VERIFIED BEFORE BRIEFING, AND THE ASK WAS TOO PESSIMISTIC
+
+The interface relayed four facts and asked me to verify them. All four hold: `codex-cli 0.153.4` is
+installed; `docs/specs/providers.md:15` explicitly puts Codex OUT of scope (*"Phase 6 Reach"*), so
+this is a **new line, not an un-park**; `origin/feat/worker-providers` is merged; `docs/longcat-fleet-usage.md` exists.
+
+**One tension I passed to the lane rather than resolving from a summary:** the ask calls that branch
+*"spike-NEGATIVE for env-delivery through the `--bg` daemon"*, and its tip commit is `92fa85e
+docs(longcat): isolated-namespace path VERIFIED end-to-end`. Probably different paths — but this
+wave has already killed three inherited claims nobody re-derived (`sup-notify` unshipped, the
+repo-root attribution, `identity-witness` red), so I told the lane to read the branch and say which
+is which rather than inherit either.
+
+**And the correction that shapes the whole design.** The ask asks *"steer mid-turn has no hook
+boundary in codex — what is the honest semantics?"* and *"what artifact does codex leave that fleet
+can digest?"* MEASURED from `codex --help` / `codex exec --help`:
+
+- **`codex queue`** — *"Queue a message for an existing session"* — a `fleet send` analogue, so the
+  premise "no boundary" is not established;
+- **`codex exec --json`** (JSONL events), **`-o/--output-last-message <FILE>`**, **`--output-schema`**;
+- **`codex exec resume`** and **`codex exec fork`**; top-level `codex resume --last`;
+- **`codex agents`** — *"all agent sessions on the shared local app-server daemon"* — a `claude agents`
+  analogue, and codex has **its own daemon**;
+- **`codex archive` / `codex delete`** by id or name — husk management.
+
+**The structural match to fleet's own model is closer than anything in this repo has written down.**
+I gave that to the lane as a **hypothesis to attack, not a finding**, and named the trap explicitly:
+*a near-match is more dangerous than an obvious mismatch, because a 1:1 mapping feels obvious and the
+divergence hides under an identical verb name.*
+
+## THE TWO INVARIANTS I EXPECT TO HURT, NAMED IN THE BRIEF
+
+1. **The sid union.** `_record_sids` is `session_id ∪ retired_sids` and every ownership/claim path
+   keys on a claude sid. A second id namespace makes collision a **design question rather than an
+   accident** — which this fleet is unusually well placed to appreciate, having shipped a fix for a
+   real historical sid collision three hours ago.
+2. **The silent-limit discriminator (G11, standing goal 2).** Fleet detects claude limit-death by
+   scanning transcripts. If codex has no equivalent, **a codex worker is not limit-invulnerable**,
+   and the brief orders that stated plainly rather than discovered later. Standing goal 2 says *no
+   worker is ever silently lost*; a substrate that cannot honour it must say so at design time.
+
+## SCOPE DISCIPLINE
+
+Design + spike + DRAFT gate text. **The lane files no gates** — the `sup-decision` routing slot is
+single-occupancy and G-K6 holds it, so drafts come to me and I file them into
+`docs/OPERATOR-GATES.md`, which takes many. **No build:** if the lane edits `bin/` or `tests/` it has
+left its lane, and the brief says so. Spike is contained to a temp dir, codex's own sandbox, no
+`--dangerously-bypass-approvals-and-sandbox`, and **no `codex login`** — an unauthenticated codex is
+a MEASURED finding that stops the spike, not something a lane fixes on the operator's host.
+
+## SEQUENCING, AND WHY THIS RUNS NOW
+
+The interface's note sequences this *"after the G-K6 keeper fix once ruled"*. **G-K6 is unruled and
+the two-home dogfood is gate-blocked as destructive**, so neither predecessor is runnable; this is
+design work that needs no gate to START and produces the gates it needs as output. RAM 4.3 GB
+available, one Opus lane, well inside the ceiling. Floor at dispatch `374929b` = 4965 on both.
