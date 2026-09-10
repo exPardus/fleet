@@ -72,9 +72,14 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   at the time) rather than `available` (4147 MB, PSI zero). The two compose into a lane that is
   spawned and then immediately `stopped`: lane `mImoA8QT` died that way seconds after dispatch. The
   same guard killed two full floor runs within seconds each.
-  **RULE (interface, 2026-09-10, after accepting the measurement): lanes stay DETACHED — `mcx spawn`
-  with no `--wait`, NO background waiter at all, and no sleep loops. Poll `mcx list` / `mcx result`
-  at your natural turn points only.** A `tail --pid` waiter was the first remedy and works, but a
+  **RULE (operator, 2026-09-10T20:4xZ): DETACHED LANE + OBSERVER.** Spawn detached (no `--wait`),
+  then arm one harness-backgrounded observer per lane that owns nothing:
+  `while :; do mcx result "$id" >/dev/null 2>&1; rc=$?; [ "$rc" -eq 2 ] || break; sleep 30; done`.
+  If the guard kills the observer you get a `killed` notification and re-arm; the lane survives.
+  Re-arm after every `mcx steer`. **MEASURED exit codes — break on NOT-2, never on 0:** `mcx result`
+  is **2** while live, **0** when finished, **1** for a stopped lane or an unknown id. An
+  `until mcx result …` loop therefore spins forever on a guard-killed lane and on a typo'd id, which
+  are two of the three endings it exists to report. A `tail --pid` waiter was the first remedy and works, but a
   waiter you do not need is a shell you are paying for on a box that kills shells. Same reasoning for
   long test runs: **run the floor in the FOREGROUND, split into halves** to stay inside the tool
   timeout — and note `ls tests/test_*.py` silently misses `tests/integration` (9 skips).

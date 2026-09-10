@@ -276,10 +276,29 @@ Claude workers are dispatched, and a parked Claude lane is NOT resumed -- its br
 is re-cut for Codex against the current tree instead. Assume the freeze still holds
 after 2026-09-15 and ask through the interface before lifting it.
 
-**Dispatch mechanics on THIS host — lanes stay DETACHED (operator/interface rule,
-2026-09-10, after a lane was measured lost):** `mcx spawn -r <effort> -` with **no
-`--wait`, no background waiter of any kind, and no `mcx list` + `sleep` poll
-loop**. Check `mcx list` / `mcx result <ID>` at your natural turn points instead.
+**Dispatch mechanics on THIS host — DETACHED LANE + OBSERVER** (operator
+instruction 2026-09-10T20:4xZ: *"supervisor should use mcx spawn --wait and steer
+--wait to be notified of worker completion"*, implemented the only way that is
+safe here). Two processes, and the split is the whole point: **the thing that
+notifies you must not own the lane.**
+
+1. Spawn detached: `id=$(mcx spawn -r <effort> - <<'EOF' ... EOF)`. **No `--wait`**
+   until mcx grows an observe-only wait.
+2. Arm ONE observer per lane as a harness-backgrounded Bash command:
+
+       while :; do mcx result "$id" >/dev/null 2>&1; rc=$?; \
+         [ "$rc" -eq 2 ] || break; sleep 30; done; echo "LANE ENDED $id rc=$rc"
+
+   The observer owns nothing: if the harness guard kills it you get a `killed`
+   notification, you re-arm it, and the lane keeps running.
+3. Re-arm the observer after every `mcx steer ID …`.
+
+**Break on "not 2", never on "0" — MEASURED 2026-09-10, and the obvious loop is
+wrong.** `mcx result` exits **2** while the run is live, **0** when it finished,
+and **1** for a stopped lane OR an unknown id. So `until mcx result "$id"; do
+sleep; done` spins forever on exactly the case this exists to catch — a lane the
+low-memory guard killed (rc=1) — and forever on a typo'd id. Breaking on any
+non-2 notifies you for all three endings and reports which one in `rc`.
 
 *Why, since the shipped advice says otherwise:* `--wait` is documented to stop its
 run and children when the waiter is cancelled, and this harness kills background
