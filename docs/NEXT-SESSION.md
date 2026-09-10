@@ -1,30 +1,34 @@
 # Next session — operator board, 2026-09-10
 
-Recorded against `ed715cc`; refresh at every wave boundary (≤30 lines).
-Source: `state/tasks/20260910-standing-directive-throughput.md` in the fleet home.
-1. **Multi-fleet usable** — `init --home` (`d25f1b2`), home nameplate (`245bdf1`),
-   two-home append + proof (`aee5fdf`) all landed. **Remaining: bare `fleet init`
-   inside a repo creates a home there** — lane `w63-initrepo`, parked on the Claude
-   plan limit, resumes after 2026-09-10T14:10:00Z.
-2. **Zero downtime** — keeper C (`c6b6713`) and the sid-union join (`708fa45`)
-   landed and are PROVEN in production: at 13:54Z the keeper paged
-   `supervisor-stalled ... roster idle under a retired sid` and the guard correctly
-   declined to spawn a second body. **G-K6 wave-2 waker remains to build, and must
-   sit OUTSIDE the plan-limit blast radius** — measured 08:02Z, a waker inside the
-   limited body fired in 53s and could do nothing.
-3. **Keeper reliability** — the keeper now finds the interface by REGISTERED PANE
-   (`f0c8ebf`); pane `%3` is registered. G-K1 (keeper as an off-by-default feature
-   flag) + the D7 amendment are still open operator priority.
-4. **Codex workers** — Track 1 live: three lanes landed on `mcx` astra this wave at
-   zero Claude-plan cost. Two standing facts: **Codex cannot commit** (read-only git
-   metadata; the supervisor commits on its behalf) and **a Codex lane works on a
-   SNAPSHOT** — anything mutating a live append-only file must be re-derived at
-   landing. Track 2, native `fleet spawn --substrate codex`, is unbuilt.
-5. **fleet.py split research** — LANDED (`72aa972`). Recommends option **D** (its own
-   construction) with A meanwhile; deciding measurement is index/query's 3 external
-   direct-call targets. **Awaiting operator ratification — do not start the
-   extraction.**
+Recorded against `08b34d0`; refresh at every wave boundary (≤30 lines).
+Floor: **5216 collected, `6 failed, 5193 passed, 16 skipped, 1 xfailed`, IDENTICAL
+on 3.10 and 3.12.** The six are host assumptions (4 drive-qualified-path escapes,
+2 venv-shim re-execs), not fleet defects.
 
-Open gate: **G-K7 is annotated DISCHARGED BY DOING**, unticked; ticking is the
-operator's alone. Lanes run targeted tests; the supervisor runs the full floor once
-per interpreter on the merged tree from a fresh `git clone --no-local`.
+1. **Multi-fleet usable — DONE.** Bare `fleet init` in a repo creates a home there
+   (`2f48827`). It does NOT append to the machine-global homes list; that stays
+   `init --home`'s irreversible act. **G-K8's sibling question is drafted in
+   `docs/lanes/w64-initrepo.md`** if you want registration automatic.
+2. **Zero downtime** — G-K6 wave 2 landed OFF BY DEFAULT (`851e797`). **Blocked on
+   new gate G-K8**: waking an idle body means writing to the Claude daemon's
+   private socket, against standing goal 3's "zero writes to foreign surfaces".
+   Nothing breaks while it sits — the feature is inert until you install it.
+3. **Reaping is now a mechanism** (`f22a672`), not a supervisor chore: boot,
+   handoff-complete and release run it and print `reaped: N rows`. The merged-tree
+   floor caught it reaching around `sup-release`'s refusal to tombstone an
+   ambiguous identity; fixed, and `sup-handoff-complete` had the same hole.
+4. **Mechanise rituals** — the inventory exists: 220 rows, 167 CODE / 53 MODEL
+   (`395015c`). Turn costs are honestly UNMEASURED: transcripts are not available
+   to a lane and journal headers are record counts, not tool-call counts. **Batch 1
+   remains: `fleet wave-close`, `sup-guard`, `interface-register`, and the journal
+   board roll** — which is now a KNOWN LIVE DEFECT: `bin/fleet.py:17746` appends
+   without rolling, so the board reddens at every fourth checkpoint. Hand-rolled
+   this wave (`53b62d6`).
+5. **fleet.py split** — report landed (`72aa972`), recommends D. Still yours to
+   ratify; extraction not started.
+
+Open gates: **G-K8 (new, this wave)**, plus G-K1/G-K2/G-K4/G-K5/G-K6/G-K7 as
+recorded. G-K7 stays annotated DISCHARGED BY DOING, unticked — yours alone.
+Constraints in force: **Claude worker freeze** (zero Claude workers, Opus
+supervisor), **Codex budget** (default `gpt-5.6-luna`, astra by named exception),
+**waves of 1–2 lanes**, **3 live workers host-wide, 1.5 GB available floor**.
