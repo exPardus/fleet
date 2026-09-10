@@ -136,3 +136,13 @@ def test_keeper_pages_unregistered_interface_without_creating_window(
     sends = [argv for argv in calls if argv[:2] == ["tmux", "send-keys"]]
     assert sends and "interface is not registered" in sends[0][-1]
     assert not any(argv[1] == "new-window" for argv in calls)
+
+
+def test_board_lists_only_unruled_non_lens_tasks(tmp_path):
+    tasks = tmp_path / "state" / "tasks"
+    (tasks / "lens").mkdir(parents=True)
+    (tasks / "pending.md").write_text("# Question\n", encoding="utf-8")
+    (tasks / "answered.md").write_text("# Question\nRULED: yes\n", encoding="utf-8")
+    (tasks / "lens" / "brief.md").write_text("# Research\n", encoding="utf-8")
+
+    assert fleet._interface_pending_rulings(tmp_path) == "state/tasks/pending.md"
