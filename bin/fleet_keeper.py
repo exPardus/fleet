@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""fleet keeper -- a page-only liveness timer for a headless fleet.
+"""fleet keeper -- liveness pages and opt-in existing-body wakes.
 
 Runs from a systemd user timer every 15 minutes (`--once`). It OBSERVES
 fleet state read-only and TYPES one-line pages into the dedicated tmux
 interface pane (`state/interface-pane`, falling back to `work:fleet`),
 whose Claude session relays them to
 Telegram through the ccgram bridge. It never takes `fleet.lock`, never
-writes fleet state, and NEVER DISPATCHES A SESSION.
+writes fleet state, and NEVER DISPATCHES A SUPERVISOR SESSION. With an
+explicit --wake-socket/--wake-key pair it also sends authenticated local
+daemon replies to an existing idle claim-holder (G-K6 B). Only keeper-owned
+last-page.json changes; a reply ACK does not change C's stall observation.
 
 WHAT "never dispatches" NOW MEANS (operator ruling 2026-09-09 and its
 AMENDMENT, `state/tasks/20260909-succession-ruling.md`; it supersedes the
@@ -36,7 +39,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
+import socket
+import stat
 import subprocess
 import sys
 import time
@@ -54,6 +61,187 @@ HEARTBEAT_STALE_SECONDS = 3600
 UNPUSHED_PAGE_SECONDS = 6 * 3600
 REPAGE_SECONDS = 6 * 3600
 ANOMALOUS_STATUSES = ("dead-suspected", "limited")
+
+# B is opt-in on this same timer, so G-K1 can gate the whole tick. No second
+# service/loop survives disabling the keeper. C remains the independent alarm.
+WAKE_DELAY_SECONDS = 15 * 60
+WAKE_STATE_KEY = "_supervisor_wake"
+WAKE_TIMEOUT_SECONDS = 5
+WAKE_REPLY_LIMIT = 16 * 1024
+WAKE_LIST_LIMIT = 1024 * 1024
+
+
+def _wake_identity(status):
+    """A settled, nonce-bearing claim from the read-only projection, or None.
+
+    Unknown/missing protocol fields fail closed for this action; C's alarm
+    still fails loud. Never wake a retired sid to compensate for a missing
+    current session: it may carry stale claim context.
+    """
+    if not isinstance(status, dict) or status.get("goals_active") is not True:
+        return None
+    inc = status.get("incarnation")
+    if not isinstance(inc, dict):
+        return None
+    sid, incarnation = inc.get("session_id"), inc.get("incarnation_id")
+    if (not isinstance(sid, str)
+            or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", sid)
+            or not isinstance(incarnation, str) or not incarnation
+            or inc.get("state") not in (None, "held")
+            or inc.get("nonce_present") is not True
+            or inc.get("pending_present") is not False
+            or inc.get("handoff_pending_count") != 0
+            or status.get("handshake") is not None
+            or status.get("abort_flag") is not False
+            or _pending_question(status)):
+        return None
+    return [incarnation, sid]
+
+
+def wake_due(obs, previous, now):
+    """(due, record): 15 minutes of observed idle, then 15-minute retries.
+
+    One keeper-owned key remembers idle onset and the last ATTEMPT, including
+    refused/ambiguous deliveries. Delivery never refreshes a heartbeat or
+    clears C. Busy/claim changes reset the observation window. This records
+    transport outcomes, not proof that the model made progress.
+    """
+    identity = obs.get("wake_identity")
+    rows = obs.get("claim_rows") or {}
+    if (not identity or not obs.get("registry_ok") or not obs.get("agents_ok")
+            or not obs.get("goals_active") or obs.get("claim_state") != "held"
+            or not obs.get("sid_union_ok")
+            or rows.get(identity[1]) != "idle"
+            or any(st not in (None, "idle") for st in rows.values())):
+        return False, None
+    previous = previous if isinstance(previous, dict) else {}
+    def timestamp(value):
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value <= now)
+    if (previous.get("identity") != identity
+            or not timestamp(previous.get("idle_since"))):
+        return False, {"identity": identity, "idle_since": now}
+    record = dict(previous)
+    at = record.get("attempt_at", record["idle_since"])
+    if not timestamp(at):
+        return False, {"identity": identity, "idle_since": now}
+    beat = obs.get("heartbeat_age_seconds")
+    fresh = (isinstance(beat, (int, float)) and math.isfinite(beat)
+             and beat < WAKE_DELAY_SECONDS)
+    return (not fresh and now - max(at, record["idle_since"]) >= WAKE_DELAY_SECONDS), record
+
+
+def _wake_target(home, identity, run):
+    """Re-read claim + body union + roster immediately before local delivery."""
+    status = _sup_status(home, run)
+    if _wake_identity(status) != identity:
+        return None
+    union = status.get("claim_sids")
+    if not isinstance(union, list) or identity[1] not in union:
+        return None
+    rc, raw = _run_text(run, ["claude", "agents", "--json"])
+    if rc != 0:
+        return None
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    relevant = [r for r in rows if isinstance(r, dict) and r.get("sessionId") in union]
+    if any(r.get("status") not in (None, "idle") for r in relevant):
+        return None
+    matches = [r for r in relevant if r.get("sessionId") == identity[1]]
+    if len(matches) != 1:
+        return None
+    row = matches[0]
+    short = row.get("id")
+    if (row.get("kind") != "background" or row.get("state") != "working"
+            or row.get("status") != "idle" or type(row.get("pid")) is not int
+            or row["pid"] <= 0 or not isinstance(short, str)
+            or not re.fullmatch(r"[0-9a-f]{8}", short)):
+        return None
+    if _wake_identity(_sup_status(home, run)) != identity:
+        return None  # roster collection may have spanned a release/handoff
+    return {"short": short, "session_id": identity[1], "pid": row["pid"]}
+
+
+def _daemon_request(socket_path, request, limit):
+    """One bounded local request. Never log responses: list includes nonces."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(WAKE_TIMEOUT_SECONDS)
+        conn.connect(str(socket_path))
+        conn.sendall((json.dumps(request) + "\n").encode("utf-8"))
+        reply = bytearray()
+        deadline = time.monotonic() + WAKE_TIMEOUT_SECONDS
+        while b"\n" not in reply and len(reply) < limit:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("daemon response timeout")
+            conn.settimeout(remaining)
+            chunk = conn.recv(min(4096, limit - len(reply)))
+            if not chunk:
+                break
+            reply.extend(chunk)
+    if b"\n" not in reply:
+        raise ValueError("incomplete daemon response")
+    response = json.loads(bytes(reply).split(b"\n", 1)[0])
+    if not isinstance(response, dict):
+        raise ValueError("invalid daemon response")
+    return response
+
+
+def wake_existing(socket_path, key_path, target):
+    """Claude 2.1.267 local control protocol 1: reply to an EXISTING handle.
+
+    No CLI reply helper (it can start a daemon), no resume, no model client,
+    no fallback. Paths are explicit operator opt-in, never guessed. The
+    daemon's reply handler rejects missing/retired jobs and calls handle.reply
+    on a live one. That process makes the first model call; a plan refusal
+    cannot cancel this systemd timer. Source receipt: w64-waker report.
+    """
+    if (not isinstance(target, dict) or not isinstance(target.get("short"), str)
+            or not re.fullmatch(r"[0-9a-f]{8}", target["short"])
+            or not isinstance(target.get("session_id"), str)
+            or type(target.get("pid")) is not int or target["pid"] <= 0):
+        return "invalid-target"
+    prompt = ("Keeper wake: verify this session still holds the supervisor claim "
+              "and GOALS are active before acting. Follow the supervisor beat "
+              "procedure, refresh the heartbeat and continue the queued work. "
+              "If authority changed or an operator decision is pending, stop.")
+    try:
+        # The operator-selected socket may belong to a different config root
+        # than `claude agents`. Shorts are daemon-local: bind to sid AND pid
+        # on that exact socket before sending. The vendor API has no CAS;
+        # a process/claim transition after these reads remains possible.
+        listing = _daemon_request(socket_path, {"proto": 1, "op": "list"}, WAKE_LIST_LIMIT)
+        jobs = listing.get("jobs")
+        if listing.get("ok") is not True or listing.get("op") != "list" or not isinstance(jobs, list):
+            return "invalid-list"
+        matches = [j for j in jobs if isinstance(j, dict) and j.get("short") == target["short"]]
+        if (len(matches) != 1 or matches[0].get("sessionId") != target["session_id"]
+                or matches[0].get("pid") != target["pid"]
+                or matches[0].get("dying") or matches[0].get("outcome")):
+            return "target-changed-or-unavailable"
+        # Refuse FIFOs/devices and oversized keys, without blocking on open.
+        fd = os.open(key_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as key_file:
+            info = os.fstat(key_file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                return "invalid-key"
+            key = key_file.read(4097).strip()
+        if not key or len(key) > 4096:
+            return "invalid-key"
+        request = {"proto": 1, "op": "reply", "short": target["short"],
+                   "text": prompt, "auth": key}
+        response = _daemon_request(socket_path, request, WAKE_REPLY_LIMIT)
+        if response.get("ok") is True and response.get("op") == "reply":
+            return "accepted"
+        return "refused"
+    except (OSError, ValueError, AttributeError):
+        # Never log auth or arbitrary daemon text (which may echo a request).
+        # Timeout is ambiguous: it may have landed. Throttle every attempt.
+        return "transport-unavailable"
 
 # THE SANITISER MOVED, THE DOCTRINE DID NOT (w58/notify, 2026-09-09). Fix
 # wave 1's C4 body now lives in `fleet.one_line` / `fleet.interface_line`,
@@ -832,6 +1020,9 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     # session to a whole body is how the next reader inherits this outage.
     claim_rows = {sid: agent_statuses[sid]
                   for sid in sorted(union) if sid in agent_statuses}
+    wake_identity = _wake_identity(status)
+    if wake_identity and wake_identity[0] != sup.get("incarnation_id"):
+        wake_identity = None  # claim changed between the two read surfaces
     return {
         "goals_active": goals_active,
         "claim_state": claim_state,
@@ -839,6 +1030,7 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         "claim_sids": sorted(union),
         "sid_union_ok": sid_union_ok,
         "claim_rows": claim_rows,
+        "wake_identity": wake_identity,
         "released_at": released_at,
         "heartbeat_age_seconds": beat,
         "pending_decision": pending,
@@ -992,11 +1184,15 @@ def page(run, target, text, out=sys.stdout):
 
 def _parser():
     p = argparse.ArgumentParser(prog="fleet_keeper",
-                                description="page-only liveness tick for a headless fleet")
+                                description="liveness tick for a headless fleet")
     p.add_argument("--once", action="store_true", required=True,
                    help="run one tick and exit (the only mode; a timer supplies cadence)")
     p.add_argument("--dry-run", action="store_true",
-                   help="print what would be paged; touch neither tmux nor state")
+                   help="print pages/wakes; touch neither tmux, daemon nor state")
+    p.add_argument("--wake-socket", type=Path,
+                   help="opt in to existing-body wakes via this daemon control.sock")
+    p.add_argument("--wake-key", type=Path,
+                   help="daemon control.key (required with --wake-socket; never logged)")
     p.add_argument("--fleet-home", default=str(_INSTALL_ROOT))
     p.add_argument("--tmux-session", default="work")
     p.add_argument("--window", default="fleet")
@@ -1006,8 +1202,12 @@ def _parser():
 
 
 def main(argv=None, *, run=subprocess.run, now_fn=time.time,
-         snapshot_fn=fleet.status_snapshot, out=sys.stdout):
-    args = _parser().parse_args(argv)
+         snapshot_fn=fleet.status_snapshot, out=sys.stdout,
+         wake_fn=wake_existing):
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if bool(args.wake_socket) != bool(args.wake_key):
+        parser.error("--wake-socket and --wake-key must be supplied together")
     home = Path(args.fleet_home).resolve()
     # I3: `--fleet-home` reaches the sup-status subprocess, git's cwd and the
     # state path -- but `fleet.FLEET_HOME` is frozen at IMPORT, so
@@ -1032,6 +1232,27 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     state = load_state(state_path)
     obs = collect(home, now=now, run=run, snapshot_fn=snapshot_fn,
                   prev_state=state, out=out)
+    # The wake does not depend on a usable interface pane or a model there.
+    # Save attempts BEFORE delivery, bounding retries after a crash/timeout.
+    # The same service's systemd oneshot serialises its timer invocations.
+    if args.wake_socket:
+        due, wake_state = wake_due(obs, state.get(WAKE_STATE_KEY), now)
+        if args.dry_run:
+            print(f"[dry-run] supervisor wake {'due' if due else 'not due'}", file=out)
+        else:
+            if due:
+                wake_target = _wake_target(home, wake_state["identity"], run)
+                wake_state.update(attempt_at=now, result="attempting")
+                state[WAKE_STATE_KEY] = wake_state
+                save_state(state_path, state)
+                wake_state["result"] = (wake_fn(args.wake_socket, args.wake_key, wake_target)
+                                        if wake_target else "target-changed-or-unavailable")
+                print(f"keeper: supervisor wake {wake_state['result']}", file=out)
+            if wake_state is None:
+                state.pop(WAKE_STATE_KEY, None)
+            else:
+                state[WAKE_STATE_KEY] = wake_state
+            save_state(state_path, state)
     pages = evaluate(obs, now)
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     send, rule_state = dedup(pages, prev_rules, now)
@@ -1094,6 +1315,8 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
                 rule_state[p.rule] = previous
 
     rule_state["_hook_error_lines"] = obs["hook_error_lines"]
+    if args.wake_socket and WAKE_STATE_KEY in state:
+        rule_state[WAKE_STATE_KEY] = state[WAKE_STATE_KEY]
     save_state(state_path, rule_state)
     return 0
 
