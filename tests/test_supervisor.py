@@ -4090,3 +4090,10 @@ class TestOperatorGatesFile:
         skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
         ritual = skill.split("## Startup ritual", 1)[1].split("\n## ", 1)[0]
         assert "OPERATOR-GATES.md" in ritual
+
+
+def test_committed_journal_board_has_at_most_three_checkpoints():
+    """Pin the checked-in board; runtime rolling is owned by the build lane."""
+    board = Path(__file__).resolve().parents[1] / "supervisor/JOURNAL.md"
+    headers = re.findall(r"^## .* CHECKPOINT\b.*$", board.read_text(encoding="utf-8"), re.M)
+    assert len(headers) <= 3, f"{len(headers)} checkpoints: roll older entries into journal-history"
