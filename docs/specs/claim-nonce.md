@@ -1091,12 +1091,12 @@ exactly the coupling the original block predicted:
 # live: `git check-ignore` asks git about the WORKING repo's ignore rules; an
 # live: exported tree has no `.git` to answer with, so this one cannot be pinned.
 $ git check-ignore -v supervisor/INCARNATION.tmp
-.gitignore:15:supervisor/*.tmp	supervisor/INCARNATION.tmp
+.gitignore:16:supervisor/*.tmp	supervisor/INCARNATION.tmp
 $ echo "exit $?"
 exit 0
 
 $ git check-ignore -v supervisor/HANDSHAKE.tmp
-.gitignore:15:supervisor/*.tmp	supervisor/HANDSHAKE.tmp
+.gitignore:16:supervisor/*.tmp	supervisor/HANDSHAKE.tmp
 $ echo "exit $?"
 exit 0
 ```
