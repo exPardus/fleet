@@ -4,6 +4,8 @@ WAVE 66 CLOSED AND PUSHED (`1556986..ca41ed7`). **MECHANISE BATCH 1 IS COMPLETE.
 `gpt-5.6-luna`, both landed. Floor **5245 collected, `6 failed, 5222 passed, 16 skipped, 1 xfailed`,
 IDENTICAL on 3.10 and 3.12**.
 
+THROUGHPUT wave 67 (116860f..8ab8e08849c4dc43e3cab584cd218099b6d8cc9d): bin +346/-71, tests +323/-128, docs +2167/-145, journal +69/-40, other +247/-2881; workers: 30; tokens: UNMEASURED; reaped: 0
+
 ## SHIPPED
 - `6327ea9` **`fleet sup-guard`** — one verdict line for the two-live-body question. A stale claim
   whose body is alive and idle, **including one visible only under `retired_sids`**, yields `WAKE`,
