@@ -1,3 +1,4 @@
+# Runtime state includes the interface's launch/resume registration: state/interface-pane.
 state/
 logs/
 mailbox/

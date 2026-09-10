@@ -3,7 +3,8 @@
 
 Runs from a systemd user timer every 15 minutes (`--once`). It OBSERVES
 fleet state read-only and TYPES one-line pages into the dedicated tmux
-interface window (`work:fleet`), whose Claude session relays them to
+interface pane (`state/interface-pane`, falling back to `work:fleet`),
+whose Claude session relays them to
 Telegram through the ccgram bridge. It never takes `fleet.lock`, never
 writes fleet state, and NEVER DISPATCHES A SESSION.
 
@@ -881,6 +882,48 @@ def _panes(run, target):
     return panes
 
 
+def registered_pane(home, run):
+    """Return the registered live pane ID, or None if absent/dead/gone.
+
+    The interface writes this registration on launch AND manual resume.
+    Its command can be claude, a subprocess, or a shell: identity comes
+    from the registration, liveness from pane_dead, never a window name.
+    An unreadable registration or failed scan is not evidence of absence;
+    raise so this tick leaves both tmux and delivery state alone.
+    """
+    try:
+        pane = (home / "state" / "interface-pane").read_text(
+            encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    if not (pane.startswith("%") and pane[1:].isascii()
+            and pane[1:].isdecimal()):
+        raise ValueError("state/interface-pane must contain a tmux pane ID")
+    rc, text = _run_text(run, ["tmux", "list-panes", "-a", "-F",
+                               "#{pane_id} #{pane_current_command} #{pane_dead}"])
+    if rc != 0:
+        raise ValueError("tmux pane scan failed")
+    for line in text.splitlines():
+        parts = line.split()
+        if parts and parts[0] == pane:
+            if len(parts) < 3 or parts[-1] not in ("0", "1"):
+                raise ValueError("tmux pane liveness unreadable")
+            return pane if parts[-1] == "0" else None
+    return None
+
+
+def report_interface_candidates(run, target, pane, out):
+    """Warn once per tick if the named window is a different candidate.
+
+    Listing pane IDs distinguishes a second window from the registered
+    pane's own window (including splits). Neither candidate is recycled.
+    """
+    rc, text = _run_text(run, ["tmux", "list-panes", "-t", target, "-F",
+                               "#{pane_id}"])
+    if rc == 0 and pane not in text.split():
+        print("keeper: two interface candidates", file=out)
+
+
 def window_alive(run, target):
     panes = _panes(run, target)
     return bool(panes) and any(cmd == "claude" and not dead for cmd, dead in panes)
@@ -993,9 +1036,23 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     send, rule_state = dedup(pages, prev_rules, now)
 
+    try:
+        pane = registered_pane(home, run)
+    except (OSError, ValueError) as exc:
+        print(f"keeper: interface pane unavailable ({exc}); deferring tick",
+              file=out)
+        return 0
+    if pane:
+        report_interface_candidates(run, target, pane, out)
+        target = pane
+
     if args.dry_run:
         for p in pages:
             print(f"[dry-run] {p.rule}: {_page_line(p.text)}", file=out)
+        if pane:
+            print(f"[dry-run] interface pane {pane}; would not create a window",
+                  file=out)
+            return 0
         # Mirror `ensure_window`'s own verdict (via the same classifier)
         # instead of asking only "is it alive" (re-review minor 3): a busy
         # non-claude pane reads not-alive too, but `ensure_window` refuses
@@ -1009,8 +1066,9 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
             print(f"[dry-run] would create {target}: {launch}", file=out)
         return 0
 
-    created = ensure_window(run, session=args.tmux_session, window=args.window,
-                            cwd=str(home), launch=launch, out=out)
+    created = False if pane else ensure_window(
+        run, session=args.tmux_session, window=args.window,
+        cwd=str(home), launch=launch, out=out)
     if created:
         # I6: nothing is paged into a window created this tick, and the dedup
         # record is left exactly as the previous tick wrote it -- so the next
