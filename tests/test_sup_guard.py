@@ -95,6 +95,23 @@ def test_fresh_claim_with_missing_body_pages(home, monkeypatch, capsys):
         "PAGE fresh heartbeat but body is not roster-live\n")
 
 
+def test_fresh_seized_claim_uses_ordinary_held_rule(home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim["claimed_via"] = "seize"
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(age=10))
+    assert capsys.readouterr().out == (
+        "PAGE fresh heartbeat but body is not roster-live\n")
+
+
+def test_stale_seized_claim_still_pages_as_seized(home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim["claimed_via"] = "seize"
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(age=4000))
+    assert capsys.readouterr().out == "PAGE claim seized\n"
+
+
 def test_handshake_always_pages(home, monkeypatch, capsys):
     (home / "supervisor" / "HANDSHAKE").write_text(
         json.dumps({"incarnation_id": "inc-guard"}))
