@@ -12456,3 +12456,118 @@ rotated body is not an incident; recording it because the sid union is what make
 G-K1 waits on `w62-keeperc`'s report (predecessor's instruction: read it before briefing). G-K5's two
 build items are the ruling's "after". RAM ceiling is a lane count and it is full at three. No gates
 ticked, and none may be — the boxes and the `## Settled` move are the operator's alone.
+
+## 2026-09-10T10:27:09Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=42445477-de98-4813-937a-e18c965de740
+
+WAVE 62 LANDED — three lanes merged, one gate filed, and the day's second false-alarm class turns
+out to be the more dangerous one. All three lanes corrected their briefs; mine was wrong in both
+places it predicted plus three more.
+
+## LANDED
+
+`6df3161` codex-substrate, `a3c8ef0` dogfood, `afa51a8` keeper-c — no conflicts on any branch.
+**Floor predicted in writing BEFORE the run and DERIVED, not guessed:** every file the three
+branches ADD is exempt from `CHECK_COUNT_DOCS` (`docs/lanes/` and `docs/superpowers/` are both in
+`_HISTORICAL_PREFIXES`), and `docs/operator/keeper-soak-2026-09.md` is MODIFIED not added, so no
+parametrized case joins. **Prediction: 4978 collected, `6 failed, 4955 passed, 16 skipped,
+1 xfailed`** — unchanged from `w62-keeperc`'s own measured floor. Both interpreters running now from
+separate `git clone --no-local` trees; nothing was run in the main checkout.
+
+`w62-keeperc` is exemplary work: floor 4978 predicted and hit on BOTH interpreters, the `374929b`
+baseline **re-measured in a third clone** rather than trusted (so "+13 landed" could be told apart
+from "+13 landed and something else vanished"), six mutants all RED, and a planter that proves its
+own patch applied before running one test — with both refusal paths exercised, not merely written.
+
+## THE FINDING THAT MATTERS MOST TODAY — AND IT IS NOT THE ONE I WOKE UP WITH
+
+The 10:16Z keeper page was a FALSE `supervisor-dead` on a live body. I traced it to the join and the
+interface then measured the mechanism, which is worse than I had it:
+
+```
+claim:    session_id = 42445477…                       (3rd fork)
+registry: session_id = 42445477…, retired_sids = [37e5c61c…, d605e989…]
+roster, turn RUNNING: 37e5c61c… idle pid 434832  AND  42445477… busy pid 515437
+roster, turn ENDED:   37e5c61c… idle pid 434832  ONLY
+```
+
+**Every `fleet send` to an idle body fork-steers it (G2b) and moves the claim to the fork sid. A
+fork's roster row exists ONLY WHILE ITS TURN RUNS; the ORIGINAL dispatch sid keeps an `idle` row
+with a live pid for the body's whole life.** So *"the claim sid is absent from the roster"* is **not
+an edge case — it is the STEADY STATE of every live supervisor that has ever been steered, between
+turns.** I had this as a fork-time divergence; it is the normal resting condition. That changes it
+from tidy to urgent.
+
+`bin/fleet_keeper.py:668` takes the bare `incarnation["session_id"]` and `:697` joins it directly.
+**`retired_sids` is never consulted** — though claim-nonce §18 ratifies the union as the only sound
+identity channel and the registry already carries it.
+
+**One term, both errors, one day apart: the FALSE page today, and the MISSED 8h10m stall yesterday.**
+
+**C does not close it and I am not reverting C.** C replaces the membership predicate with *row
+exists AND `status == "busy"`*; for a forked body **there is no row at all**, so C pages exactly as
+before. C fixed the false negative and inherited the false positive. Also worth flagging: w61's
+*"pid/status presence is a perfect live/dead discriminator, 27/27"* cannot have included a forked
+body — neither field exists to read for one.
+
+**THE PART THAT IS A SAFETY DEFECT, NOT A NUISANCE.** `docs/operator/server-interface-profile.md`
+guard step 2 says a claim's `session_id` still listed means a live body. For a forked body that is
+FALSE while the body is alive — **so the written two-live-body guard would have authorised a second
+body over one `supervisor/GOALS.md` today.** It did not happen only because the interface overrode
+its own written rule by judgement. **A guard that works because the reader distrusts it is not a
+guard.** I notified the interface immediately; it has an interim union-based rule in force and
+supplied the precise C-rule formulation. Brief written: `state/tasks/lens/w63-sidunion.md`, and it
+names `sup-status --json` publishing the union as a first-class option, because that may be the
+cheapest correct fix AND keeps the keeper narrow under D4.
+
+## G-K7 FILED, AND THE DOGFOOD APPEND IS HELD
+
+`w62-dogfood` built and proved the second home, then **declined the one remaining step** — the
+append — under my brief's own stop condition, and it was right to. The append arms multi-fleet §5's
+wrong-home guard for the WHOLE MACHINE, after which every bare DESTRUCTIVE verb from a session with
+no registry membership refuses. **The interface tier is exactly such a session** (`fleet_keeper.py:704`
+launches it as a bare `claude`, never through `fleet spawn`) and its profile runs bare `fleet
+autoclean` and bare `fleet sup-spawn`. **Post-append the supervisor-revival path refuses.** Measured
+by the lane in a sealed sandbox — scratch `HOME` *and* a copied install root, both homes throwaways.
+
+The operator ruled that a second home may be CREATED. **They did not rule that the revival path may
+be put behind a refusal**, so this is a different question and a gate, not a step. Filed as **G-K7**,
+untickable by me, carrying the lane's four readings and its recommendation (A) verbatim.
+
+**I am holding the append, and the ordering is worse than even the lane's report states.** The lane
+recommends landing the interface-profile edit first. Necessary but NOT sufficient: **the profile is
+read at interface STARTUP, so the session running right now is already on the old text.** Landing
+the edit protects a FUTURE interface, not the one that would have to revive me. On a fleet that has
+gone dark four times in two days, appending now would put the revival path behind a refusal for
+precisely the session that performs revivals. Held pending G-K7 **and** an interface restart.
+
+## THE OTHER TWO LANES, BRIEFLY
+
+`w62-codex` **refuted its brief's headline hypothesis.** `codex exec` does NOT block on an approval
+prompt — its rollout records `approval_policy: "never"` and it runs headless rc=0. **It blocks on
+stdin**, which it reads to EOF *even when a PROMPT argument is supplied*. That is what froze the
+earlier body 25 minutes, and it predicts a nasty build-time symptom: **spawn hangs, respawn works.**
+The brief's prescription (`timeout`, `< /dev/null`, redirect to a file) was exactly right while its
+diagnosis was wrong — worth keeping as a pattern: a correct precaution can survive a wrong reason.
+Four draft gates sit in its §7; its sandbox claims are `NOT MEASURED` by its own labelling and I have
+not promoted any of them.
+
+`w62-dogfood` corrected my brief in both predicted places plus three more. The two that generalise:
+**`--fleet-home` is NOT sufficient from a fleet-launched session** — `env -u CLAUDE_CODE_SESSION_ID`
+is required on every verb, and the refusal's own remedy advises dropping the flag, the opposite of
+what a dogfooder wants; and **§2's "gate every step on `fleet home`" is unsatisfiable for the
+creating call** and would have stopped the lane at step one. **Both belong in
+`docs/lanes/BRIEF-TEMPLATE.md`, not in one report** — every brief on this machine that hands out
+`--fleet-home <other home>` inherits the defect. Not yet applied; it is a wave-63 item.
+
+## A CORRECTION TO MY OWN MITIGATION CLAIM, SECOND TIME
+
+My watcher `bf4lsaqxo` did not complete — it was **STOPPED**, dying with the session fork. So the
+`fleet wait` mitigation is weaker than I have now claimed twice: **it is bound to the harness
+session, and the harness session rotates on a limit, so the watcher dies exactly when the body
+rotates.** A wait-based mitigation cannot survive the event it guards against. Stall #4's cause.
+
+## STATE
+`ea22902` tip, three merges + journal + two gate commits, NOT yet pushed (waiting on both floors).
+Three lanes idle, RAM 3.6 GB available. Context 200,280 — BELOW-BAND against 350,000. `doctor`
+unchanged. **G-K7 open and untickable by me or any lane.** Wave 63 queued in priority order: the
+sid-union fix (brief written), the BRIEF-TEMPLATE correction, then G-K1 and G-K5's two build items.
