@@ -13,11 +13,12 @@ import fleet
 
 def test_parser_requires_base_and_changelog():
     parser = fleet.build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["wave-close", "--base", "1556986"])
+    args = parser.parse_args(["wave-close", "--changelog", "@landing.md"])
+    assert args.command == "wave-close"
+    assert args.base is None
     args = parser.parse_args(["wave-close", "--base", "1556986",
                               "--changelog", "@landing.md"])
-    assert args.command == "wave-close"
+    assert args.base == "1556986"
     assert args.changelog == "@landing.md"
 
 
@@ -42,11 +43,69 @@ def test_numstat_uses_non_overlapping_buckets(tmp_path):
 
 def test_roster_tokens_are_unmeasured_when_roster_omits_usage():
     assert fleet._wave_roster_claude_tokens([]) == "0"
-    assert fleet._wave_roster_claude_tokens([{"sessionId": "sid"}]) == "UNMEASURED"
+    assert fleet._wave_roster_claude_tokens([{"sessionId": "sid"}]) == \
+        "UNMEASURED (roster has no token field)"
     assert fleet._wave_roster_claude_tokens([
         {"usage": {"input_tokens": 11, "output_tokens": 7}},
         {"usage": {"input_tokens": 3, "output_tokens": 2}},
     ]) == "23"
+    assert fleet._wave_roster_claude_tokens([
+        {"tokens": "tokens:in=11 out=7"},
+    ]) == "18"
+
+
+def test_codex_result_usage_is_summed_without_double_counting_events(tmp_path):
+    job = tmp_path / ".mcx" / "codex-job"
+    job.mkdir(parents=True)
+    (job / "result").write_text("tokens:in=11 out=7\n", encoding="utf-8")
+    (job / "events.jsonl").write_text(
+        '{"type":"turn.completed","usage":{"input_tokens":99,"output_tokens":99}}\n',
+        encoding="utf-8")
+    assert fleet._wave_codex_tokens(tmp_path) == "18"
+    assert fleet._wave_codex_tokens(tmp_path / "missing") == \
+        "UNMEASURED (mcx result files missing)"
+
+
+def test_default_base_is_newest_wave_close_commit(tmp_path):
+    def run(argv, **kwargs):
+        assert argv[:3] == ["git", "log", "--format=%H%x09%s"]
+        return subprocess.CompletedProcess(
+            argv, 0,
+            "deadbeef1234567\tfleet wave-close: wave 68\n"
+            "old0000\tfleet wave-close: wave 67\n", "")
+
+    assert fleet._wave_previous_close(tmp_path, run=run) == "deadbeef1234567"
+
+
+def test_landed_lanes_are_merge_branches_with_substrate(tmp_path):
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge(w68/alpha): landed\n", "")
+        return subprocess.CompletedProcess(
+            argv, 0, "Substrate: codex\n", "")
+
+    assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
+        ("w68/alpha", "codex", "abcdef1")]
+
+
+def test_changelog_gate_names_merge_without_a_line(tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "CHANGELOG.md").write_text(
+        "- `good123` landed\n", encoding="utf-8")
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "bad456789abcdef\n", "")
+
+    assert fleet._wave_changelog_gaps(tmp_path, "base", run=run) == ["bad4567"]
+
+
+def test_reap_accounting_exposes_unread_mail_protection():
+    assert fleet._wave_protected_unread_mail({
+        "mail": (False, "unread-mail"),
+        "landed": (True, "lane-landed"),
+        "live": (False, "roster-live"),
+    }) == 1
 
 
 def test_pytest_parser_counts_and_failure_nodes():
