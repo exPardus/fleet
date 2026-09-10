@@ -521,7 +521,7 @@ RATIFIED_BUT_UNBUILT = ()
 # `sup-spawn` in DESTRUCTIVE. So DISRUPTIVE is the shape the derivation
 # suggests. It is written here as a recommendation for the operator, in the
 # tuple that exists to force that escalation -- not as a classification.
-UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify",)
+UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close")
 
 
 def _classified_verbs():

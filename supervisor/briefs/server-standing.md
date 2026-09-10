@@ -16,7 +16,7 @@ Fleet runs the same reap pass at successful boot, handoff completion and release
 
 - Spawn every worker with `--setting-sources project,local` (this host's user-level settings carry a foreign Stop hook that misattributes fleet sessions to a tmux window).
 - Workers are Opus or Sonnet per `supervisor/GOALS.md` tier policy; cwd is the target repo under `/home/altai/proga/`.
-- At the wave boundary: `fleet sup-checkpoint @file`, fold lessons (`knowledge/lessons.md`, the project file, one `knowledge/INDEX.md` line), commit, then `git push`; on rc≠0 retry three times over five minutes, then checkpoint the failure. Unpushed work is what the keeper pages about after six hours.
+- At the wave boundary: run `fleet wave-close --base <sha> --changelog @<sentences> --nonce <value>`. It runs the shared reap and both-interpreter fresh-clone floor, derives THROUGHPUT, prepends the supplied landing sentences and accounting line, rolls the board, commits, pushes with three retries over five minutes, and relays the exact line through `sup-notify`. A mismatched floor aborts before landing; a failed push is checkpointed. The supervisor supplies only the base SHA and CHANGELOG sentences. Unpushed work is what the keeper pages about after six hours.
 - Check `fleet sup-context`. At **350k** — or at a clean task boundary you choose to stop at — run the graceful end below.
 
 ## The graceful end of your generation — four steps, in order
