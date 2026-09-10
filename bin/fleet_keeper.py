@@ -548,9 +548,31 @@ def _pending_question(status):
 
 def _agents(run):
     """(ok, missing, {sessionId: status-or-None}). `claude agents --json`,
-    with NO `--all` -- the two spellings are different lists (the plain one
-    omits `done`/`failed`/`stopped` rows) and a claim about one is not a
-    claim about the other. Name the spelling beside any count taken from it.
+    with NO `--all` -- the two spellings are different lists and a claim about
+    one is not a claim about the other. Name the spelling beside any count
+    taken from it.
+
+    WHAT THE PLAIN SPELLING ACTUALLY OMITS (MEASURED, w63, 2026-09-10T10:56Z,
+    18 plain rows against 32 with `--all`). The inherited sentence here said it
+    "omits `done`/`failed`/`stopped` rows". That is not what this host does:
+    the plain list CONTAINED three `state: "done"` rows, each with a live pid
+    and `status: "idle"`. Every one of the 14 rows `--all` added was in a
+    terminal state AND carried neither `pid` nor `status` -- their key set is
+    exactly `['cwd','id','kind','name','sessionId','startedAt','state']`. So
+    the omission is keyed on the PROCESS being gone, not on the state word
+    alone, and a terminal-state row hangs around in the plain list for as long
+    as its process does.
+
+    THAT IS ALSO THE MECHANISM BEHIND THE 10:16Z FALSE PAGE, and it is worth
+    stating where the reader is. A fork-steer's session takes its turn, exits,
+    goes `done`, and LEAVES the plain list -- MEASURED on the very body:
+    `d605e989...` (an earlier fork of `sup|inc-20260910T075355Z-4f99|
+    successor`) was `--all`-only at 10:56Z while its two sibling sids were in
+    the plain list, and `ed943460...` -- the CURRENT `session_id` of
+    `sup|inc-20260910T041459Z-2382|boot` -- was `--all`-only while both of
+    that body's RETIRED sids sat in the plain list as pid-less corpses. A
+    reader joining on one sid sees a body appear and disappear; only the union
+    sees the body.
 
     THE OLD DOCSTRING SAID THIS LISTS "the ACTIVE sessions". IT IS FALSE, AND
     IT WAS LOAD-BEARING (`docs/lanes/w61-keeperblind.md` §6, MEASURED on this
