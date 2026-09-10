@@ -1,0 +1,52 @@
+## 2026-09-10T15:49:25Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
+
+WAVE 64 MID — three operator rulings arrived mid-wave and are adopted; lane 1 landed; three lanes
+live, which is the new ceiling exactly.
+
+## THE RULINGS, AS THEY NOW STAND (later ones supersede earlier)
+1. **Reap at every wave boundary** (15:5xZ) — SUPERSEDED IN PART by its own AMENDMENT.
+2. **AMENDMENT (16:0xZ): reaping is a FLEET MECHANISM, not a supervisor chore.** *"autoclean should
+   just run when doing the supervisor stand down or supervisor boot process, not be done by the
+   supervisor itself."* Supersedes rules 1 and 4. **Until it ships the supervisor does NOT reap by
+   hand** — so my boot `autoclean` (archived 0, skipped 30) is the last one I run. Rules 2 and 3
+   STAND: **max 3 live worker sessions, Claude and Codex counted together; no dispatch under 1.5 GB
+   available.** Checked before both dispatches this segment: 5030 MB available.
+3. **Standing directive (16:1xZ): mechanise every ritual.** *"everything that can be handled by
+   scripts and code should not be done by the harness or model."* Default is CODE; MODEL needs a
+   written justification.
+
+## THE OOM IS THE REASON, AND THE NUMBERS MATTER
+15:18:08Z, OOM killer on the claude daemon scope: daemon down (`cause=signal`, `live_workers=12`),
+every Claude session dead including the supervisor body — **that is what I seized from.** The 12 were
+4 retired supervisor bodies + 8 idle finished workers at ~350 MB each. **`fleet autoclean` is 0-for-30
+on exactly those rows** (measured by the interface): `--ttl-hours` defaults to 24 and every corpse was
+younger. The mechanism needs its own criterion; that is the lane's hardest part, and it is briefed.
+
+## LANDED
+- `2f48827` / merge `ef35df1` — **bare `fleet init` creates a home in the cwd** (G-K5 Reading A).
+  171 targeted tests per interpreter on 3.10.21/3.12.14, plus real-subprocess smoke in /tmp repos
+  including a path with spaces. **`resolve_home` and `apply_resolved_home` proved byte-identical to
+  `47b8e69` by whole-function source comparison** — Reading B stays unbuilt, and the lane proved it
+  rather than asserting it. Conservative branch taken on the one real decision: **bare init does NOT
+  append to the machine-global homes list**, because multi-fleet §Definitions makes a home initialized
+  by a parsing `state/fleet.json`, not by list membership. Gate drafted below, not raised.
+- **MERGED LOCALLY, NOT PUSHED.** The floor runs on the merged tree at wave close and the push
+  follows it. Wave 63 pushed a red by chaining `pytest && git push`; verification cannot gate an
+  action it is chained to.
+
+## LIVE (3 = the ceiling)
+- `MTHXKmsn` w64-waker — G-K6 wave 2, the wake mechanism outside the plan-limit blast radius.
+- `yTsyPhu4` w64-reap — the AMENDMENT's mechanism. Fenced hard off `sup-boot` against the live home:
+  that verb mints a claim and would seize it from me.
+- `oKE6prPc` w64-rituals — the CODE/MODEL audit table, docs-only, so it cannot collide with the two
+  lanes editing `bin/`.
+
+## GATE DRAFTED, NOT RAISED (mine to carry)
+Does G-K5 Reading A mean bare `fleet init` creates an initialized cwd home **without** machine
+registration, leaving registration to `init --home` / `homes --add`? If automatic registration is
+intended, its irreversible E2 tier and command shape need ratifying plus a §5 table amendment.
+
+## NEXT
+`wave-close`, `sup-guard`, `interface-register` and the journal board roll are batch-1 items not yet
+dispatched — they all edit `bin/fleet.py`, so they queue behind `w64-reap` rather than fight it.
+

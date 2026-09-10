@@ -1,55 +1,3 @@
-## 2026-09-10T15:49:25Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
-
-WAVE 64 MID — three operator rulings arrived mid-wave and are adopted; lane 1 landed; three lanes
-live, which is the new ceiling exactly.
-
-## THE RULINGS, AS THEY NOW STAND (later ones supersede earlier)
-1. **Reap at every wave boundary** (15:5xZ) — SUPERSEDED IN PART by its own AMENDMENT.
-2. **AMENDMENT (16:0xZ): reaping is a FLEET MECHANISM, not a supervisor chore.** *"autoclean should
-   just run when doing the supervisor stand down or supervisor boot process, not be done by the
-   supervisor itself."* Supersedes rules 1 and 4. **Until it ships the supervisor does NOT reap by
-   hand** — so my boot `autoclean` (archived 0, skipped 30) is the last one I run. Rules 2 and 3
-   STAND: **max 3 live worker sessions, Claude and Codex counted together; no dispatch under 1.5 GB
-   available.** Checked before both dispatches this segment: 5030 MB available.
-3. **Standing directive (16:1xZ): mechanise every ritual.** *"everything that can be handled by
-   scripts and code should not be done by the harness or model."* Default is CODE; MODEL needs a
-   written justification.
-
-## THE OOM IS THE REASON, AND THE NUMBERS MATTER
-15:18:08Z, OOM killer on the claude daemon scope: daemon down (`cause=signal`, `live_workers=12`),
-every Claude session dead including the supervisor body — **that is what I seized from.** The 12 were
-4 retired supervisor bodies + 8 idle finished workers at ~350 MB each. **`fleet autoclean` is 0-for-30
-on exactly those rows** (measured by the interface): `--ttl-hours` defaults to 24 and every corpse was
-younger. The mechanism needs its own criterion; that is the lane's hardest part, and it is briefed.
-
-## LANDED
-- `2f48827` / merge `ef35df1` — **bare `fleet init` creates a home in the cwd** (G-K5 Reading A).
-  171 targeted tests per interpreter on 3.10.21/3.12.14, plus real-subprocess smoke in /tmp repos
-  including a path with spaces. **`resolve_home` and `apply_resolved_home` proved byte-identical to
-  `47b8e69` by whole-function source comparison** — Reading B stays unbuilt, and the lane proved it
-  rather than asserting it. Conservative branch taken on the one real decision: **bare init does NOT
-  append to the machine-global homes list**, because multi-fleet §Definitions makes a home initialized
-  by a parsing `state/fleet.json`, not by list membership. Gate drafted below, not raised.
-- **MERGED LOCALLY, NOT PUSHED.** The floor runs on the merged tree at wave close and the push
-  follows it. Wave 63 pushed a red by chaining `pytest && git push`; verification cannot gate an
-  action it is chained to.
-
-## LIVE (3 = the ceiling)
-- `MTHXKmsn` w64-waker — G-K6 wave 2, the wake mechanism outside the plan-limit blast radius.
-- `yTsyPhu4` w64-reap — the AMENDMENT's mechanism. Fenced hard off `sup-boot` against the live home:
-  that verb mints a claim and would seize it from me.
-- `oKE6prPc` w64-rituals — the CODE/MODEL audit table, docs-only, so it cannot collide with the two
-  lanes editing `bin/`.
-
-## GATE DRAFTED, NOT RAISED (mine to carry)
-Does G-K5 Reading A mean bare `fleet init` creates an initialized cwd home **without** machine
-registration, leaving registration to `init --home` / `homes --add`? If automatic registration is
-intended, its irreversible E2 tier and command shape need ratifying plus a §5 table amendment.
-
-## NEXT
-`wave-close`, `sup-guard`, `interface-register` and the journal board roll are batch-1 items not yet
-dispatched — they all edit `bin/fleet.py`, so they queue behind `w64-reap` rather than fight it.
-
 ## 2026-09-10T15:52:19Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
 
 WAVE 64 — TWO MORE RULINGS ADOPTED, AND ONE DECISION OF MINE THE OPERATOR MAY OVERTURN.
@@ -159,3 +107,55 @@ THROUGHPUT wave 64 (`47b8e69..e7ab9ec`): bin +522/-95, tests +961/-30, docs +901
 +421/-242, other +145/-1; codex 4 lanes (1 steered), all landed; claude worker tokens: 0; operator
 items advanced: 1 (DONE), 2, 3, 4; gates raised: 1 (G-K8); reaped: 0 rows (the mechanism ships this
 wave; the supervisor no longer reaps by hand).
+
+## 2026-09-10T17:35:08Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
+
+WAVE 65 CLOSED AND PUSHED (`07042d5..c50258a`). One lane, on the CHEAPER default model, both its
+deliverables landed. Floor **5228 collected, `6 failed, 5205 passed, 16 skipped, 1 xfailed`,
+IDENTICAL on 3.10 and 3.12** (+12 collected, all from the new verbs' own tests).
+
+## SHIPPED — `5d659ad`
+- **`fleet journal-roll`, CALLED BY `sup-checkpoint`.** The board self-maintains now. Losslessness is
+  done by partitioning the ORIGINAL BYTES, and the roll REFUSES on malformed UTF-8 or unparseable
+  headers rather than reshaping a file it could not read. History goes to a new stable sink
+  `supervisor/journal-history/journal-roll.md`; this wave's two hand-rolls are in `2026-07-to-09.md`.
+  Two append-only files, no lost bytes — worth knowing before someone greps one and thinks it is all.
+- **`fleet interface-register`** — idempotent, accepts only the keeper's `%<decimal>` pane shape,
+  writes `state/interface-pane` ONLY after tmux succeeds, refuses clearly with no tmux.
+- The lane ran the citation fixpoint ITSELF (36 of 48 against `07042d5`) instead of leaving it for
+  landing. First lane on `gpt-5.6-luna` under the budget ruling and it needed no steering.
+
+## THE HOST FACT THAT COST A LANE, AND THE RULE THAT REPLACED MY REMEDY
+I followed the 16:4xZ notice and backgrounded `mcx spawn --wait`. **The lane was spawned and read
+`stopped` seconds later.** Two documented facts compose: cancelling a `--wait` waiter stops its run
+and children, and **this harness kills background commands on a guard keyed on `free` (253 MB), not
+`available` (4147 MB, PSI zero)** — the same guard that killed two full floor runs within seconds.
+I reported it with the measurement; **the interface accepted it and tightened the rule past my own
+remedy**: not merely "drop `--wait`" but **no background waiter at all** — lanes stay DETACHED and
+are polled with `mcx list` / `mcx result` at natural turn points. *A waiter you do not need is a
+shell you are paying for on a box that kills shells.* Folded into both surfaces a fresh generation
+reads (`b2ba94a`) and into the host file (`f0f0ee8`).
+
+## STANDING REMEDIES NOW WRITTEN DOWN, BECAUSE EACH COST ME A RUN
+- **Run the floor in the FOREGROUND, split into halves.** Backgrounded full runs die to the guard.
+- **`ls tests/test_*.py` silently misses `tests/integration`** — 9 skips, and their absence made my
+  first split total exactly 9 short of the full-suite figure. Always append `tests/integration`.
+- **The split is alphabetical, so new test files move the boundary**: `head -46` covered 2671 tests
+  last wave and 2269 this one. Use `tail -n +47`, never a second fixed count.
+
+## STATE
+Tree clean, nothing unpushed, no lane running. Board at 3 checkpoints and now self-maintaining.
+Context ~2xx k, below the 350k band.
+
+## SUCCESSOR QUEUE — in priority order
+1. **`fleet wave-close`** (directive batch 1, the big one): reap pass, floor per interpreter from a
+   fresh clone, THROUGHPUT computed from `git diff --numstat`, CHANGELOG + JOURNAL prepends, commit,
+   push with the 3-retry rule, notify. The supervisor would supply only a base sha and the CHANGELOG
+   sentences. **Note for whoever briefs it: the floor half must use the foreground/split/integration
+   discipline above, or the verb will inherit the bug that cost this generation four runs.**
+2. **`fleet sup-guard`** — the interface's two-live-body guard as one verdict line, with `--do`.
+3. G-K8 is open and blocks nothing; G-K1 (keeper as a feature flag) is still unbuilt.
+
+THROUGHPUT wave 65 (`07042d5..c50258a`): bin +223/-30, tests +325/-4, docs +140/-12; codex 1 lane on
+`gpt-5.6-luna` (astra: 0), landed without steering; claude worker tokens: 0; lanes lost to the
+harness guard: 1, cause found and ruled; operator items advanced: 4 (two batch-1 verbs).
