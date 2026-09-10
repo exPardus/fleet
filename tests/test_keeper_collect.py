@@ -396,14 +396,24 @@ def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, monkeypa
     claim that passes by accident: no registry file exists in `home` at all
     and `collect` still produces a full observation; the argv list is exactly
     one plain `claude agents` call and nothing naming `fleet.json`; and BOTH
-    of fleet's registry readers fail the test if the keeper reaches them --
+    of fleet's registry readers are RECORDED and asserted unreached --
     `load_registry` because it quarantines, `_read_registry_readonly` because
     reaching even the safe one would mean the keeper had grown a registry read
-    of its own."""
+    of its own.
+
+    THE RECORDING IS NOT DECORATION, and the first draft of this pin was
+    unsound. A `pytest.fail(...)` stub raises `Failed`, which derives from
+    `Exception` -- and `fleet.supervisor_claim_sids` (like every reader on a
+    view path) ends in `except Exception: return None`. So a keeper that HAD
+    grown its own registry read swallowed the stub's failure and this test
+    stayed green; MEASURED by planting exactly that keeper (mutant M10) and
+    watching all 48 tests pass. A recorded call cannot be swallowed."""
     import fleet
+    reached = []
     for name in ("load_registry", "_read_registry_readonly"):
-        monkeypatch.setattr(fleet, name, lambda *a, _n=name, **k: pytest.fail(
-            f"the keeper reached fleet.{_n} -- it has grown a registry read"))
+        real = getattr(fleet, name)
+        monkeypatch.setattr(fleet, name, lambda *a, _n=name, _r=real, **k: (
+            reached.append(_n), _r(*a, **k))[1])
     run = _runner(_table(sup=_fork_sup()))
     obs = _collect(home, run)
     assert not (home / "state" / "fleet.json").exists()
@@ -412,6 +422,8 @@ def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, monkeypa
     assert ["claude", "agents", "--json"] in argvs
     assert sum(1 for a in argvs if a[:2] == ["claude", "agents"]) == 1
     assert not any("fleet.json" in " ".join(argv) for argv, _ in run.calls)
+    assert reached == [], (
+        f"the keeper reached fleet.{reached} -- it has grown a registry read")
 
 
 def test_the_keeper_asks_the_plain_spelling_and_never_all(home):
