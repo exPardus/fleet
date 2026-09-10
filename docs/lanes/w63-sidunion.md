@@ -1,7 +1,9 @@
 # w63-sidunion — the claim→roster join is now the BODY's sid union, in the keeper and in the guard
 
-**Lane:** build (keeper + operator surface). Branch `w63/sid-union` from `64aa96b`;
-the change is `ba7fc40`, `72f1975`, `c41e451`.
+**Lane:** build (keeper + operator surface). Branch `w63/sid-union` from `64aa96b`, six commits:
+`ba7fc40` (the build), `72f1975` (pin 1 end to end), `c41e451` (the plain-spelling measurement),
+`b6a2beb` (the rule docstring), `338fc86` (pass the claim to the resolver), `1b76726` (the
+`claim_sid`-unknown guard).
 **Every line below is tagged MEASURED (I ran it, on this host, today, 2026-09-10) or
 BELIEVED (inference, code reading, or someone else's report).** Host `kz-work`, Linux 6.8.0-139,
 `claude` 2.1.267-era roster shapes.
@@ -9,8 +11,8 @@ BELIEVED (inference, code reading, or someone else's report).** Host `kz-work`, 
 **Scope built:** the union join at TWO sites — `bin/fleet_keeper.py` and
 `docs/operator/server-interface-profile.md` — plus the read that makes it possible,
 `fleet.supervisor_claim_sids()` published by `sup-status --json`. **No spec edits**
-(MEASURED: `git diff --stat 64aa96b..c41e451 -- docs/specs/` is empty). **No gate box ticked**
-(MEASURED: `docs/OPERATOR-GATES.md` is not in the diff). C is not reverted (§4).
+(MEASURED: `git diff --stat 64aa96b..HEAD -- docs/specs/ docs/OPERATOR-GATES.md` is **empty** —
+neither the specs nor the gate file is touched). C is not reverted (§4).
 
 ---
 
@@ -33,20 +35,21 @@ already has (`fleet.status_snapshot()`) publishes **no session id whatsoever**.
 
 ## 1. WHAT CHANGED
 
-MEASURED, `git diff --numstat 64aa96b..c41e451` — 7 files, 925 insertions, 150 deletions:
+MEASURED, `git diff --numstat 64aa96b..HEAD` — 8 files (this report included), 1436 insertions,
+154 deletions. Excluding the report:
 
 | file | +/− | what |
 |---|---|---|
-| `bin/fleet.py` | +129/−23 | `supervisor_claim_sids()`; `claim_sids` in `sup-status --json`; the retired-sid line in its human form; 39 self-citations re-pointed (§8) |
-| `bin/fleet_keeper.py` | +157/−46 | the join, the grading, the reason clauses |
+| `bin/fleet.py` | +135/−23 | `supervisor_claim_sids()`; `claim_sids` in `sup-status --json`; the retired-sid line in its human form; 39 self-citations re-pointed (§8) |
+| `bin/fleet_keeper.py` | +186/−50 | the join, the grading, the reason clauses |
 | `docs/operator/server-interface-profile.md` | +16/−4 | guard steps 1/2/3 and the page's reason-clause list |
 | `tests/test_supervisor_claim_sids.py` | +251 (new) | 17 pins on the resolver and the publish |
-| `tests/test_keeper_rules.py` | +189/−52 | the 10:16Z pins; the efa0 pins re-checked under the union; fixture migration |
+| `tests/test_keeper_rules.py` | +202/−52 | the 10:16Z pins; the efa0 pins re-checked under the union; fixture migration |
 | `tests/test_keeper_collect.py` | +181/−24 | the join, end to end |
 | `tests/test_keeper_dedup.py` | +2/−1 | fixture migration |
 
-Most of `bin/fleet_keeper.py`'s +157 is docstring and comment; the behaviour is the two-line join
-below, `_claim_activity`'s eight-line body, and four reason clauses.
+Most of `bin/fleet_keeper.py`'s +186 is docstring and comment; the behaviour is the two-line join
+below, `_claim_activity`'s ten-line body, and four reason clauses.
 
 ### The join, in one pair of lines
 
@@ -200,9 +203,12 @@ pid:
   `status` either. `pid` and `status` presence moved together on all 18. **So the discriminator
   itself survives contact with a forked body — 2/2 over the 4f99 body's own listed sids.**
 - **But it answers the wrong question, and that is the finding.** The 4f99 body had **two live
-  processes and two roster rows at once** — `37e5c61c…` idle at pid 434832 (`claude bg-spare`,
-  started 12:51:54 local) and `42445477…` busy at pid 515437 (a *different* `claude bg-spare`,
-  started 14:57:10, unrelated ppid). A per-ROW discriminator cannot be wrong about a body it
+  processes and two roster rows at once** — `37e5c61c…` idle at pid 434832 and `42445477…` busy at
+  pid 515437. Both are `claude bg-spare` processes taken from the daemon's pre-warm pool, with
+  **unrelated parents** (ppids 434816 and 515425) and elapsed times of `02:44:42` and `39:26` at
+  the sample — so ~07:54Z and ~09:59Z starts (derived from `etime`, not read off a clock). A
+  fork-steer does not re-enter the old process; it claims a NEW spare and leaves the old one
+  alive and idle. A per-ROW discriminator cannot be wrong about a body it
   models as one row. **w61's figure is fine; the frame around it is what the fork breaks**, and
   the brief's instinct that 27/27 "cannot have included a forked body" is right for a reason it
   did not state: a forked body is not one row, so it is not one sample.
@@ -215,13 +221,16 @@ row at all. That body is dead and must page. It does: all-corpse unions grade `d
 
 ---
 
-## 5. THE MUTANTS — EIGHT, EACH IN A SEPARATE CLONE
+## 5. THE MUTANTS — NINE, EACH IN A SEPARATE CLONE
 
-**MEASURED, re-run against the FINAL commit `338fc86`.** Every mutant was planted in
+**MEASURED, re-run against the tip `1b76726`.** Every mutant was planted in
 `$CLAUDE_JOB_DIR/tmp/mutant`, a separate `git clone --no-local` of the branch — never in this
 worktree, never in the floor clone — and reverted with `git checkout --` before the next. The
-battery runs the five keeper test files plus the new one (155 tests); **all eight go RED and none
-is redundant** — no two mutants redden the same set.
+battery runs the five keeper test files plus the new one (156 tests); **all nine go RED and none
+is redundant** — no two mutants redden the same set. Two of the nine were caught by the harness
+itself: M7's and M8's anchors stopped matching when later commits touched those lines, and the
+script **fails loudly on a non-unique anchor** rather than reporting a green mutant, which is the
+only reason this table is not quietly two rows short.
 
 | # | mutation | reddens |
 |---|---|---|
@@ -233,6 +242,7 @@ is redundant** — no two mutants redden the same set.
 | M6 | read the registry with `load_registry` | 2, incl. the non-quarantine pin |
 | M7 | drop the `under a retired sid` clause | 2 — the 10:16Z reason clause, both pins |
 | M8 | publish `claim_sids: null` unconditionally | 2 — the JSON and the human form |
+| M9 | drop the claim-sid-known guard on the retired-sid clause | 1 — `test_a_live_row_is_not_called_retired_when_the_claim_sid_is_unknown` |
 
 M1 and M2 are the two the brief names. **M1's verbatim output** (MEASURED):
 
@@ -261,12 +271,15 @@ correct; what it must never say is that the session is gone. Pinned in both dire
 `"roster says idle under a retired sid" in text` and `"not in the roster" not in text`,
 `"no live process" not in text`, `"dead" not in text`.
 
-**Pin 2 — yesterday's true stall must still page.**
-`test_the_efa0_stall_still_pages_seven_hours_later` and the pre-existing efa0 replay are green
-under the union, and `test_the_efa0_stall_still_pages_once_the_body_has_a_union` gives efa0's body
-a union (its own row idle + a retired corpse) and asserts the page still lands at the first stale
-tick, still on `roster says idle`, and **without** the retired-sid clause — because efa0's live row
-is its own.
+**Pin 2 — yesterday's true stall must still page.** The two pre-existing efa0 replays
+(`test_the_efa0_observation_pages_at_the_first_stale_tick` and
+`…_still_pages_seven_hours_later`, plus the mechanical pre-C reconstruction) are green under the
+union — I migrated their fixtures to `claim_rows` rather than leaving them on keys the code no
+longer reads, so they still measure the outage and not a dead shape. On top of them,
+`test_the_efa0_stall_still_pages_once_the_body_has_a_union` gives efa0's body a union it never had
+(its own row idle + a retired corpse) and asserts the page still lands at the first stale tick,
+still on `roster says idle`, and **without** the retired-sid clause — because efa0's live row is
+its own.
 
 **The corrected arithmetic is used, not the old figure.** Detection moves earlier by **7h09m59s**
 (w62-keeperc §8.2), not 7h10m51s; the page is recorded at `04:14:35.385Z` while the journal tick
@@ -319,8 +332,10 @@ done by hand:
   went red naming the missing line (`:2896`) — my own new call site. Fourteen → fifteen, with the
   fifteenth named in prose.
 
-This is the harness working, not incidental churn, and a reviewer should read those 44 numbers as
-**mechanically derived, not hand-typed**.
+That is **40 changed numbers in one lane** (39 re-pointed, 1 added, 1 range end), and a reviewer
+should read them as **mechanically derived, not hand-typed**: the mapping came from `difflib` over
+the base blob, and every one of them is re-checked by a test that resolves it against the source.
+This is the harness working, not incidental churn.
 
 ---
 
@@ -443,21 +458,26 @@ main checkout** — the floor ran in `$CLAUDE_JOB_DIR/tmp/floor`, the branch in 
 `6 failed, 4955 passed, 16 skipped, 1 xfailed`, identical on 3.10 and 3.12; and after the change,
 collected rises by exactly the tests added with the same six ids.
 
-MEASURED, `uv run --no-project --python 3.1x --with pytest python -m pytest -q --color=no`:
+MEASURED, `uv run --no-project --python 3.1x --with pytest python -m pytest -q --color=no`, each
+in its own `git clone --no-local`:
 
-| tree | interpreter | result | wall |
-|---|---|---|---|
-| `64aa96b` (floor clone) | 3.12 | `6 failed, 4955 passed, 16 skipped, 1 xfailed` | 337.38 s |
-| `64aa96b` (floor clone) | 3.10 | `6 failed, 4955 passed, 16 skipped, 1 xfailed` | 436.83 s |
-| `c41e451` (branch clone) | 3.12 | *(see below)* | |
-| `c41e451` (branch clone) | 3.10 | *(see below)* | |
+| tree | py | result | collected | wall |
+|---|---|---|---|---|
+| `64aa96b` FLOOR | 3.12 | `6 failed, 4955 passed, 16 skipped, 1 xfailed` | 4978 | 337.38 s |
+| `64aa96b` FLOOR | 3.10 | `6 failed, 4955 passed, 16 skipped, 1 xfailed` | 4978 | 436.83 s |
+| `c41e451` | 3.12 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 343.79 s |
+| `338fc86` | 3.12 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 425.12 s |
+| `338fc86` | 3.10 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 490.50 s |
+| **`1b76726` TIP** | 3.12 | *(filled in below)* | | |
+| **`1b76726` TIP** | 3.10 | *(filled in below)* | | |
 
-**The floor's failure SETS are byte-identical between interpreters** (MEASURED: `diff` of the
-sorted `FAILED` lines is empty), all six the known host assumptions — four Windows
-drive-qualified-path escapes in `test_fleet_index.py`/`test_fleet_q.py` and two venv-shim
-re-execs in `test_terminal_surface.py`. No `skipif` added, none removed.
+**The floor prediction held exactly, on both interpreters.** So did the branch prediction: I wrote
+"+32 tests → 5010 collected, `6 failed, 4987 passed, 16 skipped, 1 xfailed`" into the journal
+before that run finished, and that is what came back on both. The tip adds exactly one more test
+(the `claim_sid`-unknown guard), so **5011** is the predicted tip count.
 
-**Predicted branch delta, written before the branch run finished:** +32 tests (95 → 127 collected
-across `test_keeper_rules.py`, `test_keeper_collect.py`, `test_keeper_dedup.py` and the new
-`test_supervisor_claim_sids.py`), so **5010 collected, `6 failed, 4987 passed, 16 skipped,
-1 xfailed`**, same six ids.
+**Every failure SET is byte-identical** — floor↔floor, tip↔tip, and floor↔tip (MEASURED: `diff` of
+the sorted `FAILED` lines is empty in all three comparisons). All six are the known host
+assumptions: four Windows drive-qualified-path escapes in
+`test_fleet_index.py`/`test_fleet_q.py`, two venv-shim re-execs in `test_terminal_surface.py`.
+**No `skipif` added, none removed; skips and the one xfail are unmoved.**

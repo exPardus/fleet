@@ -386,13 +386,24 @@ def test_the_claim_sid_is_never_dropped_from_the_union(home):
     assert obs["claim_rows"] == {F4_CLAIM_SID: "busy"}
 
 
-def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home):
+def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, monkeypatch):
     """THE NARROW-READER PIN (terminal-surface D4, CLAUDE.md's standing RULE).
     w63 could have taught the keeper to read `state/fleet.json`. It did not:
     the union arrives inside the `sup-status --json` it already ran, so the
-    keeper's subprocess set is UNCHANGED and it opens no registry file. Pinned
-    by argv and by the absence of the file -- `home` here has no registry at
-    all, and `collect` must still produce a full observation."""
+    keeper's subprocess set is UNCHANGED and it reaches no registry reader.
+
+    Pinned FOUR ways, because "it does not read the registry" is the kind of
+    claim that passes by accident: no registry file exists in `home` at all
+    and `collect` still produces a full observation; the argv list is exactly
+    one plain `claude agents` call and nothing naming `fleet.json`; and BOTH
+    of fleet's registry readers fail the test if the keeper reaches them --
+    `load_registry` because it quarantines, `_read_registry_readonly` because
+    reaching even the safe one would mean the keeper had grown a registry read
+    of its own."""
+    import fleet
+    for name in ("load_registry", "_read_registry_readonly"):
+        monkeypatch.setattr(fleet, name, lambda *a, _n=name, **k: pytest.fail(
+            f"the keeper reached fleet.{_n} -- it has grown a registry read"))
     run = _runner(_table(sup=_fork_sup()))
     obs = _collect(home, run)
     assert not (home / "state" / "fleet.json").exists()
