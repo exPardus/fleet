@@ -911,12 +911,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11786) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11792) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:12946) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:12952) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17683) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17689) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -932,7 +932,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17404) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17410) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4137) -- the VIEW surface's copy of the same
@@ -941,7 +941,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13484) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13490) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -953,8 +953,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:7671) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:17840) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7677) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:17846) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3173,7 +3173,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17683`), where it costs the §6.5 gate nothing.
+    (`:17689`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -4240,17 +4240,11 @@ def home_is_initialized(home) -> bool:
     §5 step 1's `--fleet-home` validation (*"resolve, `is_dir`, initialized"*),
     and the `fleet homes` view's rendered state word.
 
-    NOTE THE RATIFIED CONSEQUENCE, which is surprising and is pinned rather than
-    softened: `fleet init` writes `state/worker-settings.json` and does NOT
-    create `state/fleet.json` (the registry appears on the first
-    `save_registry`), so a home that has been `fleet init`-ed but never spawned
-    into is NOT initialized by this definition. That is the spec's call, and it
-    is why BARE `fleet init` still does not make a home initialized -- slice (b)
-    did not change that line. The verb whose contract is creation is
-    `init --home` (BUILT 2026-09-09), and it is the one that must leave a home
-    satisfying this predicate before listing it: `_init_named_home` re-reads
-    this predicate off the disk between writing the registry and appending to
-    the machine list, and refuses the append if it is still False."""
+    G-K5 Reading A (operator, 2026-09-10): bare `fleet init` now creates
+    `state/fleet.json` in cwd as well as rendering settings, so it satisfies
+    this predicate before any spawn. Settings alone still do not initialize a
+    home. `_init_named_home` re-reads this predicate after creation; only the
+    explicit `--home` form then records the home in the machine list."""
     return read_registry_at(home)[0]
 
 
@@ -4645,9 +4639,9 @@ TERMINUS_EXEMPT_VERBS = ("homes",)
 
 # ...AND THE SAME EXEMPTION AT FLAG GRANULARITY (multi-fleet slice (b)).
 #
-# `init` cannot join the tuple above: bare `fleet init` renders
-# `state/worker-settings.json` into the home §5 resolved for it, so it acts on a
-# home like every other verb and must keep the order. `fleet init --home <PATH>`
+# `init` cannot join the tuple above: explicit `--fleet-home` and statusline
+# setup still act on the resolved home. G-K5's bare cwd creation is dispatched
+# separately in `main`, before resolution. `fleet init --home <PATH>`
 # does not -- it NAMES the home it creates, and its second effect is on
 # `~/.claude/fleet-homes.list`, which belongs to the machine.
 #
@@ -5131,7 +5125,7 @@ VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
                            # E2 ground reaching the SECOND writer of the same
                            # machine-global list. `init --home` appends to
                            # `~/.claude/fleet-homes.list`; bare `fleet init`
-                           # writes only inside the home it resolved and is the
+                           # writes only inside its creation target and is the
                            # residual below. The ruling names the shape as well
                            # as the tier: *"the `w47-homes` idiom: flagged
                            # tokens in the destructive tuple, the bare verb in
@@ -5190,9 +5184,9 @@ VERB_EFFECT_TIERS = ("ordinary", "disruptive", "destructive")
 #     ruling too: 2026-08-10, `docs/OPERATOR-GATES.md` `## Settled`, *"split
 #     `init` the same way. `init --home` is a second writer of the same
 #     machine-global `fleet-homes.list` whose append E2 already ruled
-#     irreversible."* Bare `fleet init` renders `state/worker-settings.json` into
-#     the home §5 already resolved and touches nothing outside it -- the same
-#     read/write asymmetry `homes` has, with the write behind a flag.
+#     irreversible."* G-K5 Reading A (2026-09-10) changes bare init's creation
+#     target to cwd and also creates its registry; it still writes only inside
+#     that home. Registration remains behind `--home`, so this tier is unchanged.
 VERB_EFFECT_RESIDUAL = {"doctor": "ordinary", "sup-decision": "ordinary",
                         "homes": "ordinary", "init": "ordinary"}
 
@@ -6859,7 +6853,7 @@ def cmd_knowledge(args) -> int:
 # and before this verb nothing on the CLI could produce one on purpose:
 # `--fleet-home <fresh dir>` refuses `not_initialized` (`validate_named_home`),
 # `homes --add` refuses the same and says so in its own words (*"lists an
-# existing fleet home and never creates one"*), and bare `fleet init` writes
+# existing fleet home and never creates one"*), and bare `fleet init` then wrote
 # `state/worker-settings.json` ONLY -- the registry appeared on the first
 # `save_registry`, i.e. on the first spawn. So a second home could not be
 # brought into existence except as a side effect of using it.
@@ -7032,8 +7026,12 @@ def _record_home_on_this_machine(target: Path) -> tuple:
     return ident, True
 
 
-def _init_named_home(args) -> int:
-    """`fleet init --home <PATH>`: the composition, and it writes nothing itself.
+def _init_named_home(args, *, local_home=None) -> int:
+    """Create a home, registering it only for explicit `init --home <PATH>`.
+
+    `local_home` is the bare-init creation default supplied by `main`, never a
+    resolver result. G-K5 Reading A authorizes creation there; automatic global
+    registration is not assumed. The E2 append stays behind explicit `--home`.
 
     ORDER IS THE FAILURE CONTRACT. The home is made initialized FIRST and only
     then listed, because the append is the irreversible half: a failure before
@@ -7053,7 +7051,7 @@ def _init_named_home(args) -> int:
             "`fleet init --home <PATH>` first, then `fleet init --statusline` "
             "on its own.")
 
-    target = _home_to_create(args.home)
+    target = _home_to_create(args.home if local_home is None else local_home)
 
     template_path = template_settings_path()
     if not template_path.exists():
@@ -7071,7 +7069,8 @@ def _init_named_home(args) -> int:
             f"registry -- refusing to append it to the machine's homes list, "
             f"which §4's reader would drop. Nothing was appended.")
 
-    ident, appended = _record_home_on_this_machine(target)
+    if local_home is None:
+        ident, appended = _record_home_on_this_machine(target)
 
     # THE WORD `home` BETWEEN THE TWO INTERPOLATIONS IS load-BEARING, and it is
     # not style. `tests/test_rendered_command_quoting.py`'s census reads rule
@@ -7089,26 +7088,33 @@ def _init_named_home(args) -> int:
     print(f"  registry:    {registry_path_at(target).as_posix()}")
     print(f"  settings:    {(target / 'state' / 'worker-settings.json').as_posix()}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
-    print(f"  homes list:  {homes_list_path()} "
-          f"({'appended' if appended else 'already listed'}: {ident})")
-    if appended:
-        print("  note:        that append is permanent -- the list is "
-              "append-only and only `fleet homes --retire` folds it out.")
+    if local_home is None:
+        print(f"  homes list:  {homes_list_path()} "
+              f"({'appended' if appended else 'already listed'}: {ident})")
+        if appended:
+            print("  note:        that append is permanent -- the list is "
+                  "append-only and only `fleet homes --retire` folds it out.")
+    else:
+        print("  registration: unchanged -- use `fleet homes --add <PATH>` "
+              "to register this home on the machine.")
     return 0
 
 
-def cmd_init(args) -> int:
-    """`fleet init` (SPEC §14, §5 command surface): render the
-    machine-local worker-settings.json instance from the git-tracked
-    template. Idempotent -- always safe to re-run (e.g. after editing the
-    template or moving the repo); never refuses. Uses sys.executable as
+def cmd_init(args, *, create_in=None) -> int:
+    """`fleet init` (SPEC §14, §5 command surface): create a cwd home by
+    default; explicit `--home` also registers it on the machine. `main` supplies
+    `create_in` for default creation only, before §5 resolution. Explicit
+    `--fleet-home` and statusline setup keep rendering settings in the resolved
+    home. Existing registries are preserved; corrupt registries refuse creation.
+    Settings re-render on every successful run. Uses sys.executable as
     {{PYTHON}} -- the absolute path of the interpreter running `fleet init`
     itself, which is what every worker turn's hook subprocess must invoke
     (hooks run outside fleet.py, spawned by `claude`, so they cannot fall
     back to a bare `py`/`python3` on PATH).
 
-    `fleet init` writes NOTHING outside the repo except `--statusline`, which
-    is what that flag is for. It once also stamped the global
+    Bare `fleet init` writes nothing outside cwd. Explicit `--home` registers
+    the home globally and `--statusline` installs the machine statusline.
+    It once also stamped the global
     `~/.claude/fleet-home` marker (removed 2026-07-22 with the marker's only
     reader) and once installed a Scheduled Task under `--autoclean`.
 
@@ -7116,8 +7122,8 @@ def cmd_init(args) -> int:
     `--autoclean-interval-hours` and `--autoclean-remove` are gone, and with
     them the home guard (N1) that existed only to keep a scheduled task from
     being pinned at a linked worktree it would outlive. `init` now creates no
-    state that outlives the shell, so there is nothing left for that guard to
-    protect. The `fleet autoclean` VERB is untouched: the supervisor runs it
+    scheduled task, so there is nothing left for that scheduler guard to protect.
+    The `fleet autoclean` VERB is untouched: the supervisor runs it
     on its watchtower beat and the interface runs it in its startup ritual
     (`skills/fleet/supervisor.md`, `skills/fleet/SKILL.md`). Rationale: a
     timer sweeps when the clock says so, which on a machine that loses power
@@ -7141,8 +7147,8 @@ def cmd_init(args) -> int:
     # sid-bearing caller against a live local supervisor is still refused, which
     # is why the operator recipe runs `init` from a shell with no
     # `CLAUDE_CODE_SESSION_ID`.
-    if getattr(args, "home", None) is not None:
-        return _init_named_home(args)
+    if getattr(args, "home", None) is not None or create_in is not None:
+        return _init_named_home(args, local_home=create_in)
     template_path = template_settings_path()
     if not template_path.exists():
         raise FleetCliError(
@@ -9853,7 +9859,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9747` / `cmd_respawn:9360`, before
+    # resolution that runs from `cmd_kill:9753` / `cmd_respawn:9366`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9916,10 +9922,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9747` / `cmd_respawn:9360`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9753` / `cmd_respawn:9366`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:9384-9386` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:9390-9392` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -16269,8 +16275,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the fifteen other sites that already key on the union
-    (`:2825, :2896, :2969, :3230, :3380, :4880, :9887, :10207, :10488, :10719,
-    :10806, :11029, :11815, :16140, :18974`). The thirteenth is multi-fleet §5 step 2's
+    (`:2825, :2896, :2969, :3230, :3380, :4874, :9893, :10213, :10494, :10725,
+    :10812, :11035, :11821, :16146, :18980`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16294,8 +16300,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8648, :9187, :13980,
-    :19637), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8654, :9193, :13986,
+    :19643), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16985,8 +16991,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8648, :9187, :13980,
-    #     :19637) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8654, :9193, :13986,
+    #     :19643) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17019,7 +17025,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1066`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16068`). A `None` here
+        #     this and names this gate as its reason (`:16074`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -17661,7 +17667,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11779`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11785`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -22554,7 +22560,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="append a retirement record for <PATH> "
                                   "(the home need not still exist)")
 
-    p_init = sub.add_parser("init", help="render the machine-local worker-settings.json instance from the template")
+    p_init = sub.add_parser("init", help="create a fleet home in cwd without "
+                            "registering it; --home also registers a named home")
     p_init.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
     # multi-fleet slice (b). NO `dest=` OVERRIDE, deliberately: the verb-effect
     # table's token is `init --home` and `_verb_effect_index` derives its dest
@@ -22998,6 +23005,14 @@ def main(argv=None) -> int:
         return 1
     args = parser.parse_args(_absorb_minted_flag_values(stripped))
     try:
+        # G-K5 Reading A (operator, 2026-09-10) is a CREATION default, not
+        # another resolver step. Only the default init form creates in cwd;
+        # explicit selection and statusline setup still take §5's order.
+        # Do not synthesize args.home: that flag carries E2's irreversible
+        # machine-list append and destructive tier, neither of which is bare init.
+        if (args.command == "init" and args.home is None
+                and home_flag is None and not args.statusline):
+            return cmd_init(args, create_in=Path.cwd())
         # §5's resolution order, applied before dispatch. Returns an exit code
         # only at the terminus (§5 step 5: views render and exit 0); every other
         # outcome either sets FLEET_HOME or refuses.

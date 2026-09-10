@@ -7,6 +7,7 @@ The M-track in `docs/SPEC.md` §18 remains the milestone plan.
 
 | Wave / lane | Status | Evidence / remaining work |
 |---|---|---|
+| w64 / initrepo | verified, supervisor commit pending | G-K5 Reading A: bare init creates an initialized cwd home without global registration; §5 resolver byte-identical. 171 targeted tests per Python 3.10/3.12 plus isolated CLI smoke pass. `docs/lanes/w64-initrepo.md`; registration clarification drafted, not raised. |
 | w63 / doctrine | verified, commit blocked | `docs/lanes/w63-doctrine.md`: currency lint, rules 3–12, journal split, current board and changelog; sandbox makes linked Git metadata read-only; fresh supervisor boot token measurement still owed after landing. |
 
 ## Historical C-track and earlier wave ledger
