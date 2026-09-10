@@ -175,8 +175,10 @@ with D4's narrow-reader rule. It does not collide. What I owe instead is the hon
    the union exists to bridge.
 2. **The keeper stays narrow.** MEASURED and pinned by
    `test_the_keeper_reads_no_registry_of_its_own_to_get_the_union`: its subprocess set is
-   unchanged, it opens no registry file, and the test's `home` has **no registry at all** while
-   `collect` still produces a full observation.
+   unchanged, the test's `home` has **no registry at all** while `collect` still produces a full
+   observation, no argv names `fleet.json`, and both of fleet's registry readers are recorded and
+   asserted unreached. That last clause had to be rebuilt after a mutant showed the first version
+   of it was unsound — see M10 in §5, which is worth reading before trusting any other pin here.
 3. **One resolver, one identity concept.** `supervisor_claim_sids` resolves through `_record_sids`,
    the same union `_caller_holds_supervisor_claim` uses. Two spellings of one identity concept is
    the defect class this repo keeps re-finding; the `_record_sids` enumeration comment now cites
@@ -221,7 +223,7 @@ row at all. That body is dead and must page. It does: all-corpse unions grade `d
 
 ---
 
-## 5. THE MUTANTS — NINE, EACH IN A SEPARATE CLONE
+## 5. THE MUTANTS — NINE, PLUS THE ONE THAT FOUND AN UNSOUND PIN
 
 **MEASURED, re-run against the tip `1b76726`.** Every mutant was planted in
 `$CLAUDE_JOB_DIR/tmp/mutant`, a separate `git clone --no-local` of the branch — never in this
@@ -243,6 +245,29 @@ only reason this table is not quietly two rows short.
 | M7 | drop the `under a retired sid` clause | 2 — the 10:16Z reason clause, both pins |
 | M8 | publish `claim_sids: null` unconditionally | 2 — the JSON and the human form |
 | M9 | drop the claim-sid-known guard on the retired-sid clause | 1 — `test_a_live_row_is_not_called_retired_when_the_claim_sid_is_unknown` |
+
+### M10 — the mutant that proved a pin of mine was worthless, and is the most useful thing here
+
+I claimed in §3 that the keeper reads no registry of its own, and pinned it. **M10 is the keeper
+the brief's option (a) would have produced** — `collect` resolving the union itself through
+`fleet.supervisor_claim_sids()` — planted precisely to check that the pin fires. MEASURED, in
+order:
+
+1. The pin's first draft stubbed fleet's registry readers with `pytest.fail(...)`. **M10 passed
+   all 48 tests.** `pytest.fail` raises `Failed`, which derives from `Exception`, and
+   `supervisor_claim_sids` — like every reader on a view path — ends in
+   `except Exception: return None`. **The mutant swallowed the pin's own failure.** A pin that a
+   view-path `except Exception` can eat is not a pin.
+2. Rewritten to RECORD the call and delegate, then assert nothing was recorded (`cc7f59a`).
+3. Re-run against a **second** M10 variant that reaches the registry read (the first passed the
+   claim through, and without it `read_incarnation()` returns `None` in a tmp home and the
+   function short-circuits before ever touching the registry — so that green was CORRECT and the
+   seed was the weak thing, not the code). **The pin goes RED**:
+   `FAILED …::test_the_keeper_reads_no_registry_of_its_own_to_get_the_union`.
+
+The lesson generalises past this lane: **any pin implemented by raising inside a function the
+system-under-test wraps in `except Exception` is silently dead.** This repo has a lot of
+`except Exception: return None` on its view paths.
 
 M1 and M2 are the two the brief names. **M1's verbatim output** (MEASURED):
 
@@ -410,12 +435,22 @@ comment at `bin/fleet.py:16174` now lists **fifteen** union-keyed identity sites
 union-keyed is precisely one that does not appear there. B6 (`_releaser_is_roster_live`) was the
 last such site found, by councilor 1, and it took a wedge to find it.
 
-**Unmeasured, and named:** I never produced a live turn-END transition. A bounded roster sampler
-ran 10:38Z→10:56Z at 60 s (18 samples) and the 4f99 body was `busy` throughout, so I did not watch
-the fork row drop in real time. The drop is nonetheless MEASURED **structurally** — `d605e989…`
-and `ed943460…` are `--all`-only right now, with the exact pid-less terminal shape — which is the
-same fact one turn later. The keeper was never run against the live home, in any mode, `--dry-run`
-included.
+**Unmeasured, and named: I never watched a turn END.** A bounded roster sampler ran
+**10:38:58Z → 11:20:36Z, 42 samples at 60 s**, and the 4f99 body read `status: "busy"` at every
+one of them, with a heartbeat ~45 min stale — the legitimate-long-turn case C suppresses on
+purpose, live, for the whole of this lane. So I did not see the fork row drop in real time. Two
+things I did see:
+
+- **exactly one transition, at 11:18:35Z: the claim row's `state` moved `blocked` → `working`
+  while `status` stayed `busy` and the pid did not move.** `state` and `status` are independent
+  fields that move at different times; C's choice to arm on `status` (and w61's measurement behind
+  it) is untouched by this, but it is worth knowing that `state` alone would have been a different
+  and noisier signal.
+- the drop itself, MEASURED **structurally** rather than temporally: `d605e989…` (a prior fork of
+  this very body) and `ed943460…` are `--all`-only right now with the exact pid-less terminal
+  shape, which is the same fact one turn later.
+
+The keeper was never run against the live home, in any mode, `--dry-run` included.
 
 **Considered and deliberately NOT changed: the dedup fingerprint.** It stays
 `held:stale:<claim_sid>`, and `claim_sid` **rotates on every fork-steer** — so two stalls either
@@ -468,13 +503,17 @@ in its own `git clone --no-local`:
 | `c41e451` | 3.12 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 343.79 s |
 | `338fc86` | 3.12 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 425.12 s |
 | `338fc86` | 3.10 | `6 failed, 4987 passed, 16 skipped, 1 xfailed` | 5010 | 490.50 s |
-| **`1b76726` TIP** | 3.12 | *(filled in below)* | | |
-| **`1b76726` TIP** | 3.10 | *(filled in below)* | | |
+| `1b76726` | 3.12 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 370.86 s |
+| `1b76726` | 3.10 | `6 failed, 4988 passed, 16 skipped, 1 xfailed` | 5011 | 404.85 s |
+| **`cc7f59a` TIP** | 3.12 | *(filled in below)* | | |
+| **`cc7f59a` TIP** | 3.10 | *(filled in below)* | | |
 
-**The floor prediction held exactly, on both interpreters.** So did the branch prediction: I wrote
-"+32 tests → 5010 collected, `6 failed, 4987 passed, 16 skipped, 1 xfailed`" into the journal
-before that run finished, and that is what came back on both. The tip adds exactly one more test
-(the `claim_sid`-unknown guard), so **5011** is the predicted tip count.
+**Three predictions, all held, all written down first.** (1) The floor, from the brief, before any
+run: 4978 / `6 failed, 4955 passed, 16 skipped, 1 xfailed`, identical on both — exact, on both.
+(2) The branch, written into the journal before that run finished: +32 tests → 5010 /
+`…4987 passed…` — exact, on both. (3) The `1b76726` tip: one more test → 5011 — exact, on both.
+The tip commits after it are test-only and add no test, so **5011 is the predicted count for
+`cc7f59a` too**.
 
 **Every failure SET is byte-identical** — floor↔floor, tip↔tip, and floor↔tip (MEASURED: `diff` of
 the sorted `FAILED` lines is empty in all three comparisons). All six are the known host
