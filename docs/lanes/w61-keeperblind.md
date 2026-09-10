@@ -63,8 +63,8 @@ JSON of every row.
 ### 1b. The 8-vs-24 count gap is the terminal-state rows, and it is a stable rule (MEASURED)
 
 `claude agents --json` (10 rows) vs `claude agents --json --all` (26 rows), 04:27:35Z, ten seconds
-apart. **MEASURED, exact membership predicate, 0 mismatches over 14 samples × ~27 rows
-(`roster-samples.jsonl`, 45 s cadence, 04:29Z–04:40Z):**
+apart. **MEASURED, exact membership predicate, 0 mismatches over 38 samples / 1020 rows examined
+(`roster-samples.jsonl`, 45 s cadence, 04:29:03Z–04:57:34Z):**
 
 ```
 plain  =  { rows with state ∈ {"blocked", "working"} }  ∪  { kind == "interactive" }
@@ -126,6 +126,12 @@ All 26 rows of `claude agents --json --all` at 2026-09-10T04:27:36Z, plus the `w
 | `state == "blocked"` ⇒ ? | 5 rows, **all 5 dead** here | **AMBIGUOUS by contract** — see below |
 | `sessionId` present (**what the keeper uses**) | **0/27.** Every row has one. | **no information at all** |
 | `startedAt`, `cwd`, `kind`, `name`, `id` | 0/27 | no information |
+
+**One precision the next implementer needs (MEASURED):** on a dead row the `status` and `pid` keys are
+**absent from the object**, not present-and-null. All five `blocked` rows carry exactly
+`['cwd','id','kind','name','sessionId','startedAt','state']`. So `"status" in e` (the predicate
+`fleet.py` already uses) is correct, and `e["status"] is None` would raise. The interface's report of
+`status: null` was a rendering of absence, not a value in the JSON.
 
 **Why `state` alone is unsafe, three ways, all with receipts:**
 
@@ -548,7 +554,9 @@ session was killed (`state: "stopped"`, §3); it is the only row I added to the 
 it is terminal.
 
 **Artefacts** (outside the repo, `$CLAUDE_JOB_DIR/tmp/w61/`): `plain.json`, `all.json`,
-`roster-samples.jsonl` (14 samples), `rule-audit.txt`, `drive_rules.py`, `sample.py`.
+`roster-samples.jsonl` (38 samples), `rule-audit.txt`, `drive_rules.py`, `sample.py`, and the three
+suite logs `base-312.txt` / `lane-312.txt` / `lane-310.txt`. The sampler (a read-only 45 s
+`claude agents --json` poller, PID 304534) was **stopped at 04:58Z**; nothing of mine is still running.
 
 ---
 
@@ -560,5 +568,20 @@ only tracked change on this branch is this file, and `docs/lanes/` is a member o
 `tests/test_doc_claims.py:447 _HISTORICAL_PREFIXES`, exempt by path prefix — an exemption itself pinned
 at `tests/test_doc_claims.py:761-763`. No test enumerates `docs/lanes/` contents.
 
-Measured (each from a separate `git clone --no-local`, never from the tree being edited; results in
-`state/journals/w61-keeperblind.md`).
+**MEASURED. Prediction held exactly, three runs, each from its own `git clone --no-local` — never
+from the tree being edited.**
+
+| tree | commit | interpreter | result |
+|---|---|---|---|
+| `clone A` | `036b21f` (baseline) | 3.12 | `6 failed, 4923 passed, 16 skipped, 1 xfailed in 313.84s` |
+| `clone B` | `60f73e6` (this lane) | 3.12 | `6 failed, 4923 passed, 16 skipped, 1 xfailed in 321.09s` |
+| `clone B` | `60f73e6` (this lane) | 3.10 | `6 failed, 4923 passed, 16 skipped, 1 xfailed in 359.81s` |
+
+**4946 collected in all three. The floor did not move, and the baseline I took from a clean clone
+reproduces the brief's stated `036b21f` baseline exactly.** The six failures are the same six ids in
+all three runs, and they are this host's assumptions, not fleet defects — four drive-qualified-path
+escapes (`test_fleet_index::TestPathContainment` ×3, `test_fleet_q::TestOutlinePathContainment` ×1)
+and two venv-shim re-execs (`test_terminal_surface::TestCollaboratorInstall` ×2).
+
+Command, verbatim: `uv run --no-project --python 3.1x --with pytest python -m pytest -q`, with `HOME`
+pinned to the operator's real home (w60's `$HOME`-redirect fixture, `tests/conftest.py:115`).
