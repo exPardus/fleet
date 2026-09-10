@@ -1,7 +1,9 @@
 """w68: the interface role is durable home state, not session context."""
 
 import io
+import json
 import subprocess
+from datetime import datetime, timezone
 
 import pytest
 
@@ -16,6 +18,51 @@ def _prepare_repo(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     fleet.template_settings_path().write_text(TEMPLATE, encoding="utf-8")
     monkeypatch.delenv("TMUX_PANE", raising=False)
+
+
+def _plant_fresh_claim(home):
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    supervisor = home / "supervisor"
+    supervisor.mkdir(parents=True, exist_ok=True)
+    (supervisor / "INCARNATION").write_text(json.dumps({
+        "incarnation_id": "inc-test",
+        "session_id": "supervisor-session",
+        "claimed_at": stamp,
+        "heartbeat_at": stamp,
+        "claimed_via": "fresh",
+        "nonce_hash": fleet.nonce_digest("test-generation"),
+        "nonce_seq": 1,
+        "lineage_id": "lineage-test",
+    }), encoding="utf-8")
+
+
+def test_bare_init_in_unrelated_repo_ignores_claim_in_other_home(
+        tmp_path, monkeypatch, capsys):
+    claimed_home = tmp_path / "claimed-home"
+    claimed_home.mkdir()
+    _plant_fresh_claim(claimed_home)
+    target = tmp_path / "new-repo"
+    target.mkdir()
+    _prepare_repo(target, monkeypatch)
+    monkeypatch.setattr(fleet, "FLEET_HOME", claimed_home)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "new-interface")
+
+    assert fleet.main(["init"]) == 0
+    assert (target / "state/interface-session").read_text() == \
+        "new-interface\n"
+    assert "startup ritual" in capsys.readouterr().out
+
+
+def test_bare_init_in_claimed_home_keeps_continuity_gate(
+        tmp_path, monkeypatch, capsys):
+    _prepare_repo(tmp_path, monkeypatch)
+    _plant_fresh_claim(tmp_path)
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "different-session")
+
+    assert fleet.main(["init"]) == fleet.SUPERVISOR_CONTINUITY_RC
+    assert "claim-nonce §7" in capsys.readouterr().err
+    assert not (tmp_path / "state/fleet.json").exists()
 
 
 def test_bare_init_registers_caller_and_prints_startup_ritual(

@@ -19,17 +19,20 @@ fields: none; missing evidence is rendered `UNMEASURED`, never guessed.
 
 Checks: `py_compile` passed on Python 3.10 and 3.12; throwaway-home init,
 outside-tmux registration, idempotent second init, and no-registration keeper
-drive passed. Requested keeper suites plus interface pins: 32 passed on Python
-3.10 and 32 passed on Python 3.12. Complete `tests/test_keeper*.py` glob plus
-interface pins: 226 passed, 1 skipped on each interpreter. `tools/repoint_self_citations.py 116860f` passed (51 citations checked).
+drive passed. The requested `-k init` command: 9 passed, 105 deselected on
+both Python 3.10 and 3.12. Complete `tests/test_keeper*.py` glob plus
+interface pins: 228 passed, 1 skipped on each interpreter. The new pins plant
+both an unrelated fresh claim (init succeeds) and a target-home fresh claim
+(§7 continuity refusal); results do not depend on an ambient claim.
+
+Init gate rule: §7 evaluates the home being initialized; a different new home
+is ungated, while init of the claim-holding home remains gated unchanged.
 
 Initialized homes with no registration page through `work:fleet` without
 calling `ensure_window`; legacy homes lacking `state/interface/` retain their
 pre-interface fallback while init upgrades them.
 
-Full logs: `/tmp/w68-iface-py310-interface-state.log`,
-`/tmp/w68-iface-py312-interface-state.log`,
-`/tmp/w68-iface-py310-keeper-followup.log`,
-`/tmp/w68-iface-py312-keeper-followup.log`,
-`/tmp/w68-iface-py310-all-keeper.log`, `/tmp/w68-iface-py312-all-keeper.log`,
-`/tmp/w68-iface-repoint-regression.log`.
+Full logs: `/tmp/w68-iface-py310-init-followup.log`,
+`/tmp/w68-iface-py312-init-followup.log`, `/tmp/w68-iface-py310-keeper-final.log`,
+`/tmp/w68-iface-py312-keeper-final.log`, and `/tmp/w68-iface-repoint-final.log`
+(repointed 39/51 citations; citation suites: 26 passed on each interpreter).
