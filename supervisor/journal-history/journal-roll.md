@@ -50,3 +50,43 @@ intended, its irreversible E2 tier and command shape need ratifying plus a §5 t
 `wave-close`, `sup-guard`, `interface-register` and the journal board roll are batch-1 items not yet
 dispatched — they all edit `bin/fleet.py`, so they queue behind `w64-reap` rather than fight it.
 
+## 2026-09-10T15:52:19Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
+
+WAVE 64 — TWO MORE RULINGS ADOPTED, AND ONE DECISION OF MINE THE OPERATOR MAY OVERTURN.
+
+## RULINGS
+- **mcx 0.2.0 (16:4xZ)** — `mcx spawn --wait` backgrounded by the harness replaces every poll loop.
+  I had three `mcx list`+`sleep 60` loops alive; killed them and re-armed on blocking `tail --pid`
+  waits against each lane's `mcx _run` pid, which is what the already-running lanes allow (`--wait`
+  attaches at spawn only). No new dispatch of mine will use a poll loop.
+- **Codex budget (16:5xZ)** — *"dont spam astra ... we burned also 75% of the codex weekly limit
+  too."* Default is now `gpt-5.6-luna` at `-r medium`; `-r high` only for a build lane touching
+  `bin/fleet.py`; astra only where failure on 5.6 is nameable in advance, with the reason in the
+  dispatch line; never for docs, tests, receipts, reports, folds. **Waves are 1-2 lanes.**
+
+## DECIDED (OVERTURNABLE) — I have THREE astra lanes live, against the new 1-2 wave rule
+All three were dispatched BEFORE the 16:5xZ ruling. Rule 4 exempts in-flight astra lanes by name but
+names only two of mine (the operator wrote the list from what they could see; `w64-reap` and
+`w64-rituals` went out at ~16:3xZ). **I am letting all three finish rather than killing two.**
+Reason: killing a lane mid-run discards every astra token it has already spent and buys nothing back
+-- the spend is sunk, the remaining spend is the tail. Re-dispatching them on 5.6 would cost MORE
+total Codex budget than letting them land. **I am dispatching nothing further this wave**, so the
+wave ends at 3 and the next one starts at 1-2 on 5.6. If the operator would rather I stop two now,
+say so and I will.
+
+## HOST WARNING RAISED, NOT ACTIONED — IT IS NOT MINE TO ACTION
+`pgrep` shows **9 mcx lanes live on this 8 GB box: 3 mine, and 6 in `/home/altai/proga/tap`** which
+belong to another session. 506 MB free, 4496 MB available. **The 15:18Z OOM happened at 12 sessions.**
+The operator's 3-lane ceiling is a HOST ceiling, but `fleet status` cannot see the tap lanes and I
+have no authority over that directory -- so I notified `work:fleet` and stopped dispatching. Folded
+into `knowledge/projects/claude-fleet.md` as a standing fact, because the next generation will read
+`fleet status`, see three rows, and believe it has headroom it does not have.
+
+## SHIPPED THIS SEGMENT
+`a737fa8` doctrine fold: `skills/fleet/supervisor.md` (freeze supersedes the Opus/Codex split; mcx
+0.2.0 mechanics; the model budget) + `knowledge/projects/claude-fleet.md` (the OOM with its measured
+numbers, autoclean 0-for-30 and WHY -- `--ttl-hours` defaults to 24 and every corpse was younger, so
+an age-based sweeper cannot reap the only kind of corpse that can OOM you).
+
+Still merged-not-pushed: `ef35df1` (init-in-repo). Floor and push at wave close, in that order.
+
