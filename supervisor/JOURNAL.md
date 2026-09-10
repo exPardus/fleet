@@ -1,57 +1,3 @@
-## 2026-09-10T17:35:08Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
-
-WAVE 65 CLOSED AND PUSHED (`07042d5..c50258a`). One lane, on the CHEAPER default model, both its
-deliverables landed. Floor **5228 collected, `6 failed, 5205 passed, 16 skipped, 1 xfailed`,
-IDENTICAL on 3.10 and 3.12** (+12 collected, all from the new verbs' own tests).
-
-THROUGHPUT wave 67 (593e927..e4222e138094e676aef9578ac8d33247cdfec9f9): bin +35/-6, tests +84/-0, docs +40/-1, journal +0/-0, other +37/-8; workers: 30; tokens: UNMEASURED; reaped: 0
-
-## SHIPPED — `5d659ad`
-- **`fleet journal-roll`, CALLED BY `sup-checkpoint`.** The board self-maintains now. Losslessness is
-  done by partitioning the ORIGINAL BYTES, and the roll REFUSES on malformed UTF-8 or unparseable
-  headers rather than reshaping a file it could not read. History goes to a new stable sink
-  `supervisor/journal-history/journal-roll.md`; this wave's two hand-rolls are in `2026-07-to-09.md`.
-  Two append-only files, no lost bytes — worth knowing before someone greps one and thinks it is all.
-- **`fleet interface-register`** — idempotent, accepts only the keeper's `%<decimal>` pane shape,
-  writes `state/interface-pane` ONLY after tmux succeeds, refuses clearly with no tmux.
-- The lane ran the citation fixpoint ITSELF (36 of 48 against `07042d5`) instead of leaving it for
-  landing. First lane on `gpt-5.6-luna` under the budget ruling and it needed no steering.
-
-## THE HOST FACT THAT COST A LANE, AND THE RULE THAT REPLACED MY REMEDY
-I followed the 16:4xZ notice and backgrounded `mcx spawn --wait`. **The lane was spawned and read
-`stopped` seconds later.** Two documented facts compose: cancelling a `--wait` waiter stops its run
-and children, and **this harness kills background commands on a guard keyed on `free` (253 MB), not
-`available` (4147 MB, PSI zero)** — the same guard that killed two full floor runs within seconds.
-I reported it with the measurement; **the interface accepted it and tightened the rule past my own
-remedy**: not merely "drop `--wait`" but **no background waiter at all** — lanes stay DETACHED and
-are polled with `mcx list` / `mcx result` at natural turn points. *A waiter you do not need is a
-shell you are paying for on a box that kills shells.* Folded into both surfaces a fresh generation
-reads (`b2ba94a`) and into the host file (`f0f0ee8`).
-
-## STANDING REMEDIES NOW WRITTEN DOWN, BECAUSE EACH COST ME A RUN
-- **Run the floor in the FOREGROUND, split into halves.** Backgrounded full runs die to the guard.
-- **`ls tests/test_*.py` silently misses `tests/integration`** — 9 skips, and their absence made my
-  first split total exactly 9 short of the full-suite figure. Always append `tests/integration`.
-- **The split is alphabetical, so new test files move the boundary**: `head -46` covered 2671 tests
-  last wave and 2269 this one. Use `tail -n +47`, never a second fixed count.
-
-## STATE
-Tree clean, nothing unpushed, no lane running. Board at 3 checkpoints and now self-maintaining.
-Context ~2xx k, below the 350k band.
-
-## SUCCESSOR QUEUE — in priority order
-1. **`fleet wave-close`** (directive batch 1, the big one): reap pass, floor per interpreter from a
-   fresh clone, THROUGHPUT computed from `git diff --numstat`, CHANGELOG + JOURNAL prepends, commit,
-   push with the 3-retry rule, notify. The supervisor would supply only a base sha and the CHANGELOG
-   sentences. **Note for whoever briefs it: the floor half must use the foreground/split/integration
-   discipline above, or the verb will inherit the bug that cost this generation four runs.**
-2. **`fleet sup-guard`** — the interface's two-live-body guard as one verdict line, with `--do`.
-3. G-K8 is open and blocks nothing; G-K1 (keeper as a feature flag) is still unbuilt.
-
-THROUGHPUT wave 65 (`07042d5..c50258a`): bin +223/-30, tests +325/-4, docs +140/-12; codex 1 lane on
-`gpt-5.6-luna` (astra: 0), landed without steering; claude worker tokens: 0; lanes lost to the
-harness guard: 1, cause found and ruled; operator items advanced: 4 (two batch-1 verbs).
-
 ## 2026-09-10T18:51:39Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=849fc7ef-b8aa-47d2-bad2-ba896aa0deab
 
 WAVE 66 OPEN. Woken by the interface on a keeper `supervisor-stalled` page (heartbeat 73 min stale,
@@ -155,3 +101,62 @@ interface's side of the page one command instead of five.
 THROUGHPUT wave 66 (`1556986..ca41ed7`): bin +651/-31, tests +245/-3, docs +94/-3, other +81/-41;
 codex 2 lanes on `gpt-5.6-luna` (astra 0), both landed unsteered; claude worker tokens: 0; merge
 conflicts 9 (8 citation, 1 content); operator items advanced: 4 — **batch 1 complete**.
+
+## 2026-09-10T21:01:09Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=524b9901-f57c-4726-b95f-b89b42c0c5c0
+
+WAVE 67 CLOSED AND PUSHED (`593e927..713f058`). One lane landed, and **`fleet wave-close` ran for
+real for the first time and produced three defects** — which is exactly why it was queued to be run
+rather than trusted.
+
+## SHIPPED
+- `a1b04cb` **`sup-guard`: a seize is an EVENT IN THE PAST, not a state.** It was printing
+  `PAGE claim seized` against a healthy fleet — my claim was seized at 15:30Z, so every verdict for
+  five hours would have paged. Now seized+fresh flows through the ordinary held-claim rules;
+  seized+stale still pages; both directions pinned. The lane answered the sibling-clause question
+  instead of skipping it: no other branch treats a past event as a state.
+- `8a8d086` + `713f058` **the wave-close repairs** (below).
+
+## THE THREE DEFECTS, IN THE ORDER THEY SURFACED
+1. **The floor never ran.** It invoked `python3.10 -m pytest` directly; NO interpreter on this host
+   has pytest importable. **My briefing defect** — I gave the lane six hard-won findings about
+   foreground-vs-background, the recursive walk and the moving split boundary, and omitted
+   `CLAUDE.md`'s FIRST rule, how the suite is invoked at all. The lane had even set `UV_OFFLINE` and
+   `UV_CACHE_DIR`, so it knew uv was in the picture; nothing told it the interpreter alone cannot work.
+2. **A floor that never ran was indistinguishable from a floor that ran clean.** A half with no
+   pytest summary parsed as zero of everything, and zero failures compares EQUAL to an empty expected
+   set. It aborted only because the expected set is the six host assumptions — **had it been empty,
+   the push would have been licensed by a floor that never executed.** Now it raises and names the log.
+3. **`git commit` died on an unset committer identity**, after the reap and both floors — twelve
+   minutes of work with the landing prepared and staged. Every commit this generation made passed
+   `-c user.name=...`, so nothing had ever exercised the repo config. Repo identity set; and the verb
+   now checks `git var GIT_COMMITTER_IDENT` with the cheap preconditions. **Same lesson as moving the
+   `uv` lookup ahead of the clone, arriving twelve minutes later and more expensively: check what the
+   expensive work depends on BEFORE doing the expensive work.**
+
+**The abort is what makes this a good story rather than a bad one.** At every step the verb refused
+to land on a result it could not reconcile. Nothing wrong was pushed.
+
+## WHAT IT GOT RIGHT, MEASURED
+- **The reap ran for real: 24 rows** — retired supervisor bodies and finished lane workers back to
+  w58, including the 15:18Z OOM corpses. First live exercise of the operator's amendment.
+- Both floors ran, matched, and the THROUGHPUT line computed with **`tokens: UNMEASURED`** rather
+  than a fabricated zero. The rule held under machine authorship.
+
+## A DESIGN FINDING THE NEXT BODY MUST PLAN AROUND
+**`wave-close` takes ~12 minutes, longer than the 600s tool timeout**, so from a Claude Code session
+it is ALWAYS pushed to background — which is where the harness low-memory guard lives. It survived
+this time. It needs to be resumable, or to run its floors concurrently, or the close needs to be
+split. It is also **not idempotent across a failed close**: it had already prepended and staged the
+CHANGELOG and JOURNAL, so re-running would have duplicated them. I committed its prepared content by
+hand instead.
+
+## PINS ADDED
+Three, on the floor arm, because every pre-existing wave-close test injects `run` and neither defect
+was reachable from them. **A verb whose expensive arm is only ever mocked is a verb whose expensive
+arm is unpinned.**
+
+## NEXT
+Batch 2 directive received (five verbs, prose caps, `tokens_per_bin_line` and `external_lines` in
+THROUGHPUT). G-K8 ruled **option C**: the socket path comes out, the waker goes through `fleet send`
+built on `sup-guard --do`, keeper wake on by default — one astra lane, wave 68. Tier policy stays
+**top=opus** per the correction; no PROPOSAL to move it.
