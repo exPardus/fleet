@@ -120,7 +120,12 @@ class TestTheView:
 
         rc, out = _run(["homes"], capsys)
         assert rc == 0
-        lines = {ln.split()[0]: ln for ln in out.out.splitlines() if ln.startswith("  ")}
+        # Keyed by the PATH token rather than by the first one: since G-K5
+        # item 1 (2026-09-10) each row opens with the home's statusline tag,
+        # and a positional key would have to be re-guessed every time the view
+        # gains a column. `_ident` is a whole whitespace-free token in the row.
+        lines = {tok: ln for ln in out.out.splitlines() if ln.startswith("  ")
+                 for tok in ln.split()}
         assert "ok" in lines[_ident(good)] and "2 worker" in lines[_ident(good)]
         assert "not initialized" in lines[_ident(bare)]
         assert "unreadable" in lines[_ident(broken)]
