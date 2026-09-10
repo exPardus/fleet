@@ -240,3 +240,91 @@ alerting path — recorded in the commit; next keeper lane pins it.
 THROUGHPUT wave 63 (708fa45..fb2a863): bin +61/-3, tests +378, docs +291/-202, journal +12624/-12574
 (the board roll); codex: 3 workers, 2 landed; claude lane tokens: 0 new (all three lanes were Codex).
 Operator items advanced: 3 (keeper-pane fix), and the twelve efficiency rules are now doctrine.
+
+## 2026-09-10T13:57:41Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=8aecbcb7-d029-408f-8b8c-33ed75b1ad56
+
+WAVE 63 CLOSED. Board and CHANGELOG refreshed, pushed `798daf0`, THROUGHPUT typed to `work:fleet`.
+Woken by the interface on a keeper page that the wave's own fix made safe.
+
+## THE SID-UNION JOIN IS PROVEN IN PRODUCTION, BY THE THING IT WAS BUILT FOR
+At 13:54Z the keeper paged `supervisor-stalled ... roster idle under a retired sid` — the NEW reason
+clause — and the interface guard correctly read my body as ALIVE and woke me **instead of spawning a
+second body**. Twelve hours ago that same shape was a false `supervisor-dead` page whose written
+guard would have authorised two live bodies over one GOALS.md. Built, landed, and exercised in
+anger inside one wave.
+
+## SHIPPED THIS SEGMENT
+- `798daf0` board refresh (30 lines, against `ed715cc`) + CHANGELOG gains keeper-pane and the split
+  report. Also scoped `dispatched_tasks` to exclude `sup~<inc>~*.md`.
+- `ed715cc` the split report's own DONE line (see below).
+
+## TWO PIN CORRECTIONS, BOTH MINE TO OWN
+1. **I pushed a red.** I chained `pytest && git push` in one command, so the push ran regardless of
+   the result and `4ec3608` reached the remote with `test_new_lane_documents_have_done` failing.
+   Fixed two minutes later in `ed715cc`. **Verification cannot gate an action it is chained to** —
+   third time this wave I have collapsed measure-and-act into one motion.
+2. **Rule 7's pin covers lane REPORTS, not just briefs.** My brief carried `DONE means:`; the Codex
+   worker's report did not. A briefing defect, not a worker defect: **every Codex brief must say the
+   REPORT carries the line.** Now in the record.
+
+## DECIDED (overturnable)
+`dispatched_tasks` now excludes `sup~<inc>~*.md`. That file is the task dispatched TO a supervisor
+body — machine-rendered by `_render_successor_task`/`sup-spawn` with a fixed preamble, not a brief
+anyone authors. Rule 7 binds *"every task the supervisor dispatches"*, so this is faithful to the
+rule, not a weakening; without it the pin reddens on every boot on a file no lane can edit.
+
+## STATE
+Floor **5087, `6 failed, 5064 passed, 16 skipped, 1 xfailed`, identical on 3.10/3.12**. Tree clean,
+nothing unpushed. `pending_present` was my own heartbeat rotating the generation (age 5s, not the
+3610s the interface saw) — nothing to clear. Interface pane `%3` registered, so the keeper-pane fix
+is live. `w63-initrepo` resumes at 14:10:30Z (armed, harness-tracked).
+
+## WAVE 64 — ONE OPERATOR ITEM, HALF ON CODEX
+Item 1 finishes with `w63-initrepo` (in-repo `fleet init`). Then item 2's **G-K6 wave-2 waker, which
+must sit OUTSIDE the plan-limit blast radius** — measured 08:02Z, a waker inside the limited body
+fired in 53s and could do nothing; the keeper's systemd timer makes no model calls and is the only
+tier that survives. Codex takes the docs/receipt half. **Not starting the fleet.py extraction: the
+report recommends D and that is the operator's to ratify.**
+
+THROUGHPUT wave 63: bin +592/-84, tests +1574/-81, docs +2117/-210; codex 3 workers all landed,
+claude lanes 3; operator items advanced: 1, 2, 3, 5.
+
+## 2026-09-10T15:30:11Z SEIZED inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
+
+seized from inc-20260910T075355Z-4f99: holder roster-gone, heartbeat stale (5550s > 3600s)
+
+## 2026-09-10T15:31:32Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
+
+WAVE 64 OPENS. GEN-0 of this generation booted by SEIZE, not a handoff: `inc-20260910T075355Z-4f99`
+was roster-gone with a 5550s stale heartbeat (> 3600s). Nothing was in flight on its side — its last
+checkpoint (13:57Z) closed wave 63, board and CHANGELOG pushed at `798daf0`, tree clean but for its
+own uncommitted journal appends, which this body inherits and will commit at the wave boundary.
+
+## INBOX DRAINED — THE CLAUDE FREEZE IS ADOPTED
+`state/inbox/20260910-claude-freeze.md` → `state/inbox/done/`, campaign line appended. Operator
+ruling 2026-09-10T14:2xZ, verbatim: *"opus as supervisor, no more anthropic workers, use mcx for now
+only ... weekly limit will only reset on the 15th, we are already at 77% usage"*. Binding on this
+generation and every successor until the operator lifts it through the interface:
+1. Supervisor Opus; successors Opus.
+2. **Every lane on mcx `gpt-6-astra`. No `fleet spawn` of a Claude worker, no `resume-limited`.**
+   `w63-initrepo` STAYS PARKED — its brief is re-dispatched on mcx from the current tree instead.
+3. Codex cannot commit; the supervisor commits on its behalf. A Codex lane works on a SNAPSHOT, so
+   anything mutating a live append-only file is re-derived at landing, never merged.
+4. Supervisor turns are the scarce resource: dispatch, review, land, push, checkpoint. No essays.
+Rule 5's lessons half already landed at `47b8e69` (`#2026-09-10-claude-freeze`, committed by the
+interface); this checkpoint is its JOURNAL half.
+
+## STATE AS FOUND
+- `autoclean` (with `--fleet-home`, two fleets on this host): archived 0, skipped 30, 0 errors.
+- Roster 36 entries / 3 live; no mcx worker running in any wave-63 worktree.
+- Floor of record: **5087 collected, `6 failed, 5064 passed, 16 skipped, 1 xfailed`, identical on
+  3.10/3.12** at `fb2a863`. Unmeasured since; re-measured at this wave's merge.
+- Open from wave 63: interface pane `%3` registered (keeper-pane path live).
+
+## WAVE 64 PLAN
+1. **Item 1's last piece** — bare `fleet init` inside a repo creates a home there. `w63-initrepo`'s
+   brief re-cut for mcx against `47b8e69`, run from a fresh worktree.
+2. **Item 2 — G-K6 wave-2 waker**, which must sit OUTSIDE the plan-limit blast radius: measured
+   08:02Z, a waker inside a limited body fired in 53s and could do nothing. The keeper's systemd
+   timer makes no model calls and is the only tier that survives.
+3. Not started: the `fleet.py` extraction (report recommends D — operator's to ratify) and G-K1.
