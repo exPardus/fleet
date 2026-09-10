@@ -1070,10 +1070,10 @@ def _quarantine_artifacts() -> list:
 
       * `_sweep_husks` (:12143) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:13350) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:13354) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:18187) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:18191) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -1089,7 +1089,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17908) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17912) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4294) -- the VIEW surface's copy of the same
@@ -1098,7 +1098,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13888) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13892) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -1111,7 +1111,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:7893) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:18960) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:18964) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3330,7 +3330,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18187`), where it costs the §6.5 gate nothing.
+    (`:18191`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -12392,7 +12392,11 @@ SUPERVISOR_REAP_RULE = (
     "Before any dispatch, allow at most 3 live worker sessions total across Claude "
     "and Codex (a Codex lane counts as one), and require at least 1.5 GB available "
     "memory. Reaping is automatic; supervisors do not run fleet autoclean or fleet "
-    "archive by hand."
+    "archive by hand. "
+    "Output is compressed: facts, numbers, paths, commands. No preamble, recap, "
+    "tool narration or essays; one line per finding. A checkpoint is at most three "
+    "model-written lines plus computed state; a lane report is the structured "
+    "result plus at most 40 lines; errors are quoted exact, shortest line only."
 )
 
 
@@ -16768,7 +16772,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2982, :3053,
     :3126, :3387, :3537, :5032, :10109, :10429, :10710, :10941, :11028, :11184,
-    :11196, :11207, :11356, :12173, :16638, :19417, :19418, :19451, :20396`). The thirteenth is multi-fleet §5 step 2's
+    :11196, :11207, :11356, :12173, :16642, :19421, :19422, :19455, :20400`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16792,8 +16796,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8870, :9409, :14384,
-    :21059), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8870, :9409, :14388,
+    :21063), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17489,8 +17493,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8870, :9409, :14384,
-    #     :21059) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8870, :9409, :14388,
+    #     :21063) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17523,7 +17527,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1223`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16566`). A `None` here
+        #     this and names this gate as its reason (`:16570`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
