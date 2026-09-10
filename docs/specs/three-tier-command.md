@@ -1562,9 +1562,13 @@ persistent session and is never recycled by fleet for context reasons, while the
 swappable layer between it and the workers, so a generation ending is the design working. The band now
 drives a **four-step** graceful end: (1) checkpoint with the successor queue; (2) **notify the interface**
 — one `SUPERVISOR:`-prefixed line typed into the ccgram-bound `work:fleet` window with the keeper's own
-sanitising *(verb `fleet sup-notify`; **NAME UNSHIPPED — reconcile at merge**, `grep -rn "sup.notify"
-bin/ tests/ docs/` returned nothing at `2a15dec`; the behaviour binds, the spelling is a sibling lane's
-to fix)*; (3) the handoff protocol below, run WITH the interface — **`sup-handoff-begin` dispatches the
+sanitising *(verb `fleet sup-notify`. The pinned past-tense clause stays and is still true:
+`grep -rn "sup.notify" bin/ tests/ docs/` **returned nothing at `2a15dec`**. **The present-tense
+consequence drawn from it — `NAME UNSHIPPED — reconcile at merge` and "the spelling is a sibling
+lane's to fix" — is corrected 2026-09-10 at `036b21f`: the verb IS SHIPPED**, 8 hits in
+`bin/fleet.py`, 30 under `tests/`, 3 in `fleet --help`, and run in anger twice (2026-09-09T20:05Z,
+2026-09-10T04:2xZ). Same disposition `docs/SPEC.md` §18 clause 1 argued and ratified for its own
+copy — keep the pin verbatim, correct the inference beside it)*; (3) the handoff protocol below, run WITH the interface — **`sup-handoff-begin` dispatches the
 successor itself**, so the interface WATCHES `sup-status --json` rather than `sup-spawn`ing a second body
 *(the ruling's own step 3 says the interface `sup-spawn`s the successor; that is wrong about shipped code
 and is corrected here — see `docs/lanes/w58-docs.md`)*; (4) only if the handoff is stillborn,

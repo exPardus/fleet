@@ -241,12 +241,19 @@ did not used to have:
    (`tmux send-keys -l` + `Enter`, one printable line, the keeper's sanitising),
    prefixed `SUPERVISOR:` -- e.g.
    `SUPERVISOR: handoff begin inc=<id> token in <file>`. **That BEHAVIOUR is
-   what binds.** The verb is `fleet sup-notify`. **NAME UNSHIPPED -- reconcile at
-   merge:** `grep -rn "sup.notify" bin/ tests/ docs/` returned nothing at
-   `2a15dec`; a sibling lane owns the mechanism (a sanitising helper shared with
-   the keeper, plus a verb over it), so check `fleet --help` for the shipped
-   spelling. No receipt for it exists anywhere in this repo, because nobody has
-   run it.
+   what binds.** The verb is `fleet sup-notify`, and **it is SHIPPED, pinned, and
+   has been run** *(corrected 2026-09-10 at `036b21f`, measured: `grep -c
+   "sup.notify" bin/fleet.py` = 8, 30 hits under `tests/`, 3 in `fleet --help`;
+   `inc-...efa0` used it at 2026-09-09T20:05Z and `inc-...181d` at
+   2026-09-10T04:2xZ)*. **The superseded text said `NAME UNSHIPPED -- reconcile
+   at merge` and told you to check `fleet --help` before trusting the spelling.**
+   That clause was true of `2a15dec` and false from the moment `w58-notify`
+   merged; `docs/SPEC.md` §18 corrected its own copy on 2026-09-09 and recorded
+   that the same marker had reached `skills/fleet/SKILL.md`. It reached THIS
+   file, `docs/specs/three-tier-command.md` and `supervisor/briefs/
+   server-standing.md` too, and survived there a further day -- the third
+   instance of *a stale sentence surviving a careful edit precisely because the
+   edit is careful*. Take the spelling as given and spend nothing checking it.
 3. The handoff protocol below, WITH the interface. **`sup-handoff-begin`
    dispatches the successor ITSELF** -- the interface does NOT `sup-spawn` one,
    and a `sup-spawn` at that moment is a second live body. The interface's job is

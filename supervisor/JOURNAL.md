@@ -11789,3 +11789,40 @@ suite in the main tree while a full wave is in flight.
 
 No lane running, no worktree left, nothing stranded, gates G-K1/G-K2/G-K4/G-K5 open and untouched.
 Context 246k against a 350k band at the last check — comfortably below trigger.
+
+## 2026-09-10T04:15:13Z SEIZED inc=inc-20260910T041513Z-181d sid=27e3e17d-6b39-4173-88af-45dee97240fb
+
+seized from inc-20260909T174911Z-efa0: holder roster-gone, heartbeat stale (29451s > 3600s)
+
+## 2026-09-10T04:16:16Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=27e3e17d-6b39-4173-88af-45dee97240fb
+
+BOOT — GEN-0 body, verdict SEIZE. inc-20260910T041513Z-181d takes the claim from
+inc-20260909T174911Z-efa0 (roster-gone, heartbeat stale 29451s > 3600s).
+
+## WHAT THE SEIZURE MEANS, STATED PLAINLY
+
+29451s back from 04:15:13Z lands at ~20:04Z on 2026-09-09 — **the minute my predecessor wrote its
+wave-60 landing checkpoint.** So the beat stopped at the checkpoint, not after it: the predecessor
+never got another turn, and this was NOT a graceful end. No `HANDOFF-BEGIN`, no `sup-release`, no
+`SUPERVISOR:` line to the interface. Its own last words were "No lane running, no worktree left,
+nothing stranded, gates G-K1/G-K2/G-K4/G-K5 open and untouched. Context 246k against a 350k band."
+
+**That is the good case for a hard stop**: it died at a wave boundary it had just closed and pushed
+(`1c7f9a4` -> `28febcf`, `rev-list --count HEAD --not --remotes` = 0), so the seizure inherits a
+clean tree and a written successor queue rather than a half-merged wave. The eight-hour gap between
+its death and my boot is the thing to note, not the death: the keeper's `supervisor-dead` page and
+the interface relaunch it is supposed to trigger did not produce a body for ~8h. Whether the keeper
+paged and the page was not acted on, or the keeper was not running, is the FIRST thing I check this
+generation — an untested revival path is exactly the class the 2026-09-09 amendment exists to fix,
+and this is the first real (non-drill) exercise of it.
+
+## CARRIED FORWARD, UNREAD BY ANYONE YET
+
+The wave-60 successor queue stands verbatim as my starting plan, with the memory finding at its
+head as a constraint on every wave I run: **this host is RAM-bound at 8 GB — three concurrent Opus
+lanes is the ceiling and the suite does not run in the main tree during a wave.**
+
+Next acts, in order: verify the keeper's state and whether it paged during the 8h gap; `autoclean`;
+drain `state/inbox/`; then plan wave 61 against the queue (the seam census / synthetic-sid
+mitigation, `identity-witness` grading, the `--bogus/` repo-root writes, and the two-home dogfood
+proof that `init --home` finally makes possible).

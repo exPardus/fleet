@@ -1,6 +1,8 @@
 # Operator docket — the durable digest
 
-**For: Altai, on his return. FOUR gates are open. None of them is blocking any work — but G-K5 is the one you will care about, because it is about the priority you sent today.**
+**For: Altai. FIVE gates are open. None of them is blocking any work — but read G-K6 FIRST: it was raised on 2026-09-10 out of an outage that had your fleet dark for 8h10m overnight while the keeper, watching, paged nothing. G-K5 is still the one about the priority you sent on 2026-09-09.**
+
+*(Count corrected 2026-09-10 from FOUR to FIVE by supervisor `inc-20260910T041513Z-181d`, in the same turn that raised G-K6 — the digest going stale at the moment a gate is filed is the precise failure root `CLAUDE.md` warns about, and the previous digest was allowed to sit stale at three gates while four were open.)*
 
 **THIS FILE IS NOT THE RECORD.** The record is [`docs/OPERATOR-GATES.md`](../OPERATOR-GATES.md) —
 tracked, authoritative, carrying every open gate in full with its filer's own reasoning, plus every
@@ -57,7 +59,9 @@ template, skill, or instruction surface ever pointed a reader at that path.
 
 ---
 
-## The four open gates
+## The five open gates
+
+*(G-K6 is written up in full in the record, `docs/OPERATOR-GATES.md`; the one-line ask is at the bottom of this file. It is deliberately not re-narrated here — this digest is pointers and the filer's own recommendation, never a second copy of the gate text.)*
 
 | # | In one line | Blocks | Recommendation on file |
 |---|---|---|---|
@@ -285,6 +289,10 @@ alternative readings are unbuilt.
 4. **G-K5** — "independent per repo/dir": is `--fleet-home`/`FLEET_HOME` per repo (built today)
    what you meant, or do you want cwd to decide the home with nothing typed? *(the second needs a
    new §5 step and your ratification)*
+5. **G-K6** — the keeper cannot see a supervisor that has stopped acting but whose session is still
+   listed: drop the roster arm so a stale heartbeat alone pages, or give the supervisor a wake
+   mechanism so it never sits idle-but-listed? *(this is the one that already fired — 8h10m dark,
+   ~30 silent keeper ticks, and it makes G-K2's list of "two silent failures" a list of three)*
 
 Answer any of them in one line in `docs/OPERATOR-GATES.md`, or through
 `fleet sup-decision --answer <text>` for whatever is occupying the supervisor's decision slot.
