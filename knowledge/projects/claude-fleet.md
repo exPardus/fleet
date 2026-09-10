@@ -85,3 +85,8 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   supervisor committing on its behalf, so every brief must say so and ask for a PATH LIST.
 - **A Codex lane works on a SNAPSHOT** — anything mutating a live append-only file (`JOURNAL.md`,
   `lessons.md`, `CHANGELOG.md`) must be re-derived at landing, never merged.
+
+## Keeper wake transport on kz-work (2026-09-10)
+- MEASURED from installed Claude 2.1.267 binary: local daemon protocol-1 `reply` targets an existing handle; the higher-level vendor reply helper may bootstrap a daemon, so keeper B uses the direct socket. `list` binds daemon-local short ID to the observed session ID/PID before `reply`; there is no atomic compare-and-deliver API. See `docs/operator/keeper-wake.md` for explicit socket/key opt-in and config-root path derivation. Never log the key or full daemon list (which contains nonces).
+- MEASURED source limitation: normal idle retirement uses eight hours, but low-memory retirement can use 60 seconds. Fifteen-minute keeper ticks beat the ordinary timeout, not every retirement cause. Actual wake/model progress and real plan-limit refusal remain unmeasured by this fenced lane.
+- MEASURED lane sandbox: creating/binding AF_UNIX sockets returns EPERM, including socketpair; deterministic transport tests run, while the isolated real-wire test explicitly skips. Full logs: `state/receipts/w64-waker/` in the w64-waker worktree, not the live fleet home.
