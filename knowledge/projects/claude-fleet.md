@@ -58,6 +58,12 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   *An age-based sweeper cannot reap a fresh corpse, which is the only kind that can OOM you.*
 - **Ceiling, operator ruling: at most 3 live worker sessions on the host at once, Claude and Codex
   counted together (a Codex lane counts as one); do not dispatch under 1.5 GB available** (`free -m`).
+  **The metric is the `available` column, NEVER `free`** — corrected by the interface 2026-09-10 after
+  this supervisor raised a host warning leading with `506 MB free` while `available` read 4783 MB and
+  PSI was zero. `free` excludes reclaimable page cache and on this box runs low as a matter of course;
+  a warning keyed on it is a false alarm. Check PSI before escalating. **There is no swap on this
+  box**, which is why the OOM killer arrives with no warning shoulder once `available` really does
+  run out.
   Note the ceiling is about the HOST, not about one fleet: lanes running in the operator's other
   projects count against the same 8 GB, and are not visible in `fleet status`.
 - **mcx 0.2.0** (installed 2026-09-10T16:4xZ): `mcx spawn --wait` prints the ID, stays alive for that
