@@ -314,6 +314,12 @@ class TestTheCensus:
         censused = {
             "_roster_live_sids", "_releaser_live_sids", "_releaser_is_roster_live",
             "_roster_entry_has_life_signal", "_record_is_live",
+            # `sup-guard`'s own liveness reader (w66). It IS a Q1 reader: it
+            # decides which roster sids are alive, and the whole two-live-body
+            # guard rests on its answer. Note it requires a non-empty pid and
+            # ignores rows marked `done` -- status alone is not evidence of
+            # life, which is the w61 finding arriving at a new caller.
+            "_sup_guard_live_rows",
             "recompute_worker_native", "native_epoch_suspicious",
             "supervisor_epoch_check", "_investigate_no_outcome",
             "_supervisor_tier_snapshot", "_dispatch_grace_active",
@@ -325,6 +331,13 @@ class TestTheCensus:
         excluded = {
             # roster PLUMBING, not a liveness verdict
             "_fetch_agents_roster", "_roster_entry_for",
+            # `wave-close`'s THROUGHPUT accounting (w66): it walks the roster to
+            # SUM token usage and answers `UNMEASURED` when any entry lacks the
+            # field. `roster_` in the name is the shape matching, not a liveness
+            # question -- it never asks whether anything is alive. Another
+            # name-shaped false positive, kept listed for the same reason
+            # `_multi_fleet_population_is_live` is.
+            "_wave_roster_claude_tokens",
             # claim/identity predicates that consume a liveness answer rather
             # than producing one
             "_releaser_body_is_tombstoned", "_claim_resume_allowed",
