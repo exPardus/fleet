@@ -92,8 +92,8 @@ def is_an_issuable_sid(value) -> bool:
 # `_never_touch_the_real_install` (which redirects `fleet.INSTALL_ROOT`), so a
 # real sid there resolves against a tmp population and can retarget nothing. A
 # subprocess re-imports `fleet` and gets neither redirect. There ARE real-shaped
-# v4 sids left in `monkeypatch.setenv` calls elsewhere in this tree (measured:
-# 5 files, 9 constants) and they are deliberately not touched here.
+# v4 sids left in `monkeypatch.setenv` callers elsewhere in this tree (measured:
+# 8 `*_SID` constants across 6 files) and they are deliberately not touched here.
 
 
 class Site:
