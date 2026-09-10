@@ -56,8 +56,7 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
   8. **A SECOND INSTANCE, THE SAME DAY, WITH A DIFFERENT CAUSE.** The supervisor body that filed this gate then hit `API Error: Server error mid-response` mid-turn and **sat idle-but-listed itself** until the interface woke it by hand. So the condition is not limited to a clean wave boundary where a body finishes its work — **any turn that ends without scheduling the next one produces it**, including one that ends in an error. That is two occurrences in one day, and neither was detected by the keeper.
 
 
-- [ ] **G-K7 — The first append to `~/.claude/fleet-homes.list` arms §5's wrong-home guard for the
-  whole machine, and the interface tier is what it breaks. Rule before the append is made.**
+- [ ] **G-K7 — The first append to `~/.claude/fleet-homes.list` arms multi-fleet §5's wrong-home guard for the WHOLE MACHINE, after which the interface tier's bare `fleet autoclean` and `fleet sup-spawn` — the supervisor-revival path — are REFUSED: take the lane's reading A (land the interface-profile edit first, then append), or one of readings B/C/D**?
 
   *(Raised 2026-09-10 by lane `w62-dogfood`, which was licensed by the DOGFOOD ruling to make that
   append and declined to, under brief §5's own stop condition. Report: `docs/lanes/w62-dogfood.md`.
