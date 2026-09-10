@@ -24,7 +24,7 @@ because the INTERFACE runs
 `sup-spawn` on that line without waiting for the operator. Revival is
 therefore no longer a human message from the phone, and the keeper still
 runs no `sup-spawn` itself. The two-live-body guard the amendment asks for
-lives on the interface, in docs/operator/server-interface-profile.md, not
+lives on the interface, in skills/fleet/SKILL.md, not
 here.
 
 Exit codes: 0 for every observed fleet state (a dead fleet is news, not an
@@ -559,7 +559,7 @@ def rule_supervisor_stalled(obs, now):
     # THE TWO-LIVE-BODY GUARD IS DELIBERATELY NOT IN THIS PAGE. The amendment
     # puts it on the interface -- *"check `sup-status` and the roster before
     # dispatching, and page the operator instead when the state is
-    # ambiguous"* -- and `docs/operator/server-interface-profile.md` is where
+    # ambiguous"* -- and `skills/fleet/SKILL.md` is where
     # it is written, because it is a procedure and this is 200 characters
     # shared with a worker-writable `released_at`. A page that spends its
     # budget restating a checklist truncates the verb it exists to name.
@@ -1234,7 +1234,7 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
               f"home {imported_home}; refusing", file=out)
         return 1
     profile = Path(args.profile) if args.profile else (
-        home / "docs" / "operator" / "server-interface-profile.md")
+        home / "skills" / "fleet" / "SKILL.md")
     launch = ('claude --permission-mode bypassPermissions '
               f'"Read {profile} and follow it exactly."')
     target = f"{args.tmux_session}:{args.window}"

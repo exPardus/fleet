@@ -42,8 +42,13 @@ def test_claude_md_cap():
     assert _line_count(ROOT / "CLAUDE.md") <= 60
 
 
-def test_server_interface_profile_cap():
-    assert _line_count(ROOT / "docs/operator/server-interface-profile.md") <= 100
+def test_server_interface_profile_is_absorbed_into_the_skill():
+    """The profile was deleted into skills/fleet/SKILL.md, which has its own cap.
+
+    Pinned as an absence so the file cannot come back as a second place for the
+    interface role to be described.
+    """
+    assert not (ROOT / "docs/operator/server-interface-profile.md").exists()
 
 
 @pytest.mark.parametrize("path", _files(ROOT / "supervisor/briefs"))

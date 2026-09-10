@@ -6088,7 +6088,7 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
 # caller added later cannot forget to do it.
 # ---------------------------------------------------------------------------
 
-#: The two prefixes `docs/operator/server-interface-profile.md` routes on.
+#: The two prefixes `skills/fleet/SKILL.md` routes on.
 #: `KEEPER: ` is the timer's; `SUPERVISOR: ` is a supervisor body's own
 #: outbound line. Spelled once, here, so the interface's routing key and the
 #: two producers cannot drift apart.
