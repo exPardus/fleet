@@ -7,10 +7,12 @@ You are a supervisor body dispatched by the interface tier on a headless Linux s
 ## Boot
 
 1. `fleet sup-boot` (redirect to the boot bundle file as the sup-spawn task instructs). Read the journal tail it prints; the last CHECKPOINT is your plan.
-2. `fleet autoclean`.
+2. The boot command runs the reap pass itself and prints `reaped: N rows`. Read the automatic reap rule and dispatch limits in the bundle; no hand-run autoclean/archive step is needed.
 3. Drain `state/inbox/*.md`: each file is a task the operator queued while no supervisor was live. Turn each into a campaign entry in your plan, move the file to `state/inbox/done/<name>.md` with a `campaign:` line appended, and checkpoint.
 
 ## Every wave
+
+Fleet runs the same reap pass at successful boot, handoff completion and release. It ignores age for landed/abandoned idle lanes, daemon-confirmed dead rows and retired supervisor bodies; unread mail and a live PID protect a row. Record landing as registry `lane_state: landed|abandoned` or a matching outcome kind; a result alone is not a landing. Before any dispatch, count Claude and Codex together: **3 live worker sessions max**, each Codex lane counts as one, and **1.5 GB available memory minimum**. Do not run `fleet autoclean` or `fleet archive` as supervisor chores.
 
 - Spawn every worker with `--setting-sources project,local` (this host's user-level settings carry a foreign Stop hook that misattributes fleet sessions to a tmux window).
 - Workers are Opus or Sonnet per `supervisor/GOALS.md` tier policy; cwd is the target repo under `/home/altai/proga/`.

@@ -10,6 +10,12 @@ The M-track in `docs/SPEC.md` §18 remains the milestone plan.
 | w64 / initrepo | verified, supervisor commit pending | G-K5 Reading A: bare init creates an initialized cwd home without global registration; §5 resolver byte-identical. 171 targeted tests per Python 3.10/3.12 plus isolated CLI smoke pass. `docs/lanes/w64-initrepo.md`; registration clarification drafted, not raised. |
 | w63 / doctrine | verified, commit blocked | `docs/lanes/w63-doctrine.md`: currency lint, rules 3–12, journal split, current board and changelog; sandbox makes linked Git metadata read-only; fresh supervisor boot token measurement still owed after landing. |
 
+## Wave 64 lifecycle reaping
+
+| Lane | Status | Evidence | Date |
+|---|---|---|---|
+| w64-reap | Built; 695 targeted passed on each of 3.10/3.12 (one unrelated journal-board test deselected); supervisor landing/live receipt pending | Shared autoclean pass in boot/handoff-complete/release; age-independent criteria, boot count/rule and resource limits. `docs/lanes/w64-reap.md`. | 2026-09-10 |
+
 ## Historical C-track and earlier wave ledger
 
 > **⛔ RETIRED CURSOR — 2026-07-24.** This is the cursor for the C1→C8 plan, which was **retired as superseded history** on 2026-07-24 (settled gate *"Two roadmaps, no crosswalk"*, `docs/OPERATOR-GATES.md`). **The plan of record is the M-track — `docs/SPEC.md` §18.** Every `GATED` row below (C3+, the Phase-1.5 build) blocks on a `SOAK GATE 1 SIGNED` line that was **never written and is now retired** — those rows are **historical, not live blockers**: no live milestone gates on the soak framing. Read this file for the C1→C2 record; do not resume against it.
