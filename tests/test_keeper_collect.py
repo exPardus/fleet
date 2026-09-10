@@ -55,8 +55,14 @@ def _snapshot(**over):
 # and the fixture states it rather than an idealised shape.
 HELD_PROJECTION = {"incarnation_id": "inc-x", "session_id": SUP_SID,
                    "state": None, "released_at": None}
+# `claim_sids` is w63's additive publish: the claim-holder BODY's sid union
+# (`session_id` u `retired_sids` of its registry record), resolved inside
+# `sup-status --json` so it can never be a fork-steer apart from the
+# `session_id` beside it. A body that has never been fork-steered publishes a
+# one-element union -- which is what this fixture is.
 SUP_STATUS = json.dumps({"goals_active": True, "incarnation": HELD_PROJECTION,
-                         "heartbeat_age_seconds": 30.0, "pending_decision": None})
+                         "heartbeat_age_seconds": 30.0, "pending_decision": None,
+                         "claim_sids": [SUP_SID]})
 AGENTS = json.dumps([{"name": "sup|l1|boot", "sessionId": SUP_SID,
                       "kind": "background", "status": "busy"},
                      {"name": "w1", "sessionId": "w1-sid",
@@ -98,8 +104,8 @@ def test_happy_path_observation(home):
     assert obs["goals_active"] is True
     assert obs["claim_state"] == "held"
     assert obs["claim_sid"] == SUP_SID
-    assert obs["claim_in_roster"] is True
-    assert obs["claim_row_status"] == "busy"
+    assert obs["claim_rows"] == {SUP_SID: "busy"}
+    assert obs["claim_sids"] == [SUP_SID] and obs["sid_union_ok"] is True
     assert obs["heartbeat_age_seconds"] == 30.0
     assert obs["pending_decision"] is None
     assert obs["agents_ok"] is True and obs["agents_missing"] is False
@@ -141,8 +147,8 @@ def test_sup_status_garbage_falls_back_to_the_snapshot(home):
                        "incarnation_id": None, "heartbeat_age_seconds": None}))
     assert obs["claim_state"] == "released"
     assert obs["pending_decision"] is None
-    assert obs["claim_sid"] is None and obs["claim_in_roster"] is False
-    assert obs["claim_row_status"] is None
+    assert obs["claim_sid"] is None and obs["claim_rows"] == {}
+    assert obs["sid_union_ok"] is False
 
 
 def test_the_released_timestamp_is_carried_for_the_since_clause(home):
@@ -165,7 +171,7 @@ def test_the_claim_session_is_looked_up_by_sid_not_by_name(home):
     renamed = json.dumps([{"name": "Investigating the flaky pin",
                            "sessionId": SUP_SID, "status": "busy"}])
     obs = _collect(home, _runner(_table(agents=renamed)))
-    assert obs["claim_in_roster"] is True and obs["claim_row_status"] == "busy"
+    assert obs["claim_rows"] == {SUP_SID: "busy"}
 
 
 def test_a_supervisor_shaped_name_from_another_launch_is_not_the_claim(home):
@@ -173,7 +179,7 @@ def test_a_supervisor_shaped_name_from_another_launch_is_not_the_claim(home):
                          "sessionId": "some-other-sid", "status": "busy"}])
     obs = _collect(home, _runner(_table(agents=other)))
     assert obs["claim_sid"] == SUP_SID
-    assert obs["claim_in_roster"] is False and obs["claim_row_status"] is None
+    assert obs["claim_rows"] == {}
 
 
 def test_a_non_string_session_id_is_normalised_before_the_roster_test(home):
@@ -192,15 +198,14 @@ def test_a_non_string_session_id_is_normalised_before_the_roster_test(home):
                         "heartbeat_age_seconds": 30.0, "pending_decision": None})
     obs = _collect(home, _runner(_table(sup=weird)))
     assert obs["claim_sid"] is None
-    assert obs["claim_in_roster"] is False and obs["claim_row_status"] is None
+    assert obs["claim_rows"] == {}
 
 
 def test_an_absent_claim_sid_is_never_live(home):
     no_sid = json.dumps({"goals_active": True, "incarnation": None,
                          "heartbeat_age_seconds": None, "pending_decision": None})
     obs = _collect(home, _runner(_table(sup=no_sid)))
-    assert obs["claim_sid"] is None and obs["claim_in_roster"] is False
-    assert obs["claim_row_status"] is None
+    assert obs["claim_sid"] is None and obs["claim_rows"] == {}
 
 
 # --- C (G-K6 wave 1): the row's `status`, not merely the row ---------------
@@ -214,8 +219,7 @@ def test_the_claim_rows_status_reaches_the_observation(home):
                         "kind": "background", "state": "working",
                         "status": "idle", "pid": 303182}])
     obs = _collect(home, _runner(_table(agents=idle)))
-    assert obs["claim_in_roster"] is True
-    assert obs["claim_row_status"] == "idle"
+    assert obs["claim_rows"] == {SUP_SID: "idle"}
     stale = {**obs, "heartbeat_age_seconds": 29451.0}
     assert "supervisor-stalled" in [p.rule for p in k.evaluate(stale, NOW)]
 
@@ -232,8 +236,7 @@ def test_a_dead_row_keeps_its_sid_and_carries_no_status_key(home):
                           "cwd": "/home/altai/proga/fleet",
                           "startedAt": "2026-09-09T16:29:31Z"}])
     obs = _collect(home, _runner(_table(agents=corpse)))
-    assert obs["claim_in_roster"] is True
-    assert obs["claim_row_status"] is None
+    assert obs["claim_rows"] == {SUP_SID: None}
     stale = {**obs, "heartbeat_age_seconds": 29451.0}
     assert "supervisor-stalled" in [p.rule for p in k.evaluate(stale, NOW)]
 
@@ -245,15 +248,192 @@ def test_a_non_string_status_on_the_claim_row_is_not_a_working_body(home):
     for bad in ({"x": 1}, [], 7, "", None):
         weird = json.dumps([{"name": "s", "sessionId": SUP_SID, "status": bad}])
         obs = _collect(home, _runner(_table(agents=weird)))
-        assert obs["claim_in_roster"] is True, bad
-        assert obs["claim_row_status"] is None, bad
+        assert obs["claim_rows"] == {SUP_SID: None}, bad
+
+
+# --- w63: the join is the BODY's sid union, published by `sup-status --json` -
+#
+# The 2026-09-10 10:16Z false page, end to end through `collect`. The real
+# sids, from the real body.
+
+F4_CLAIM_SID = "42445477-de98-4813-937a-e18c965de740"
+F4_RETIRED_1 = "37e5c61c-cf8f-4fea-9b7b-61f2b22acc60"
+F4_RETIRED_2 = "d605e989-91e1-4640-850b-8548e000328f"
+
+
+def _fork_sup(sids=(F4_CLAIM_SID, F4_RETIRED_1, F4_RETIRED_2)):
+    """`sup-status --json` for the fork-steered body: the claim names the fork,
+    `claim_sids` names every session the body has been."""
+    return json.dumps({"goals_active": True,
+                       "incarnation": {"incarnation_id": "inc-4f99",
+                                       "session_id": F4_CLAIM_SID,
+                                       "state": None, "released_at": None},
+                       "heartbeat_age_seconds": 3700.0,
+                       "pending_decision": None,
+                       "claim_sids": list(sids)})
+
+
+def test_the_pre_steer_row_is_what_the_join_finds(home):
+    """THE EVENT. Between turns the fork's row is gone and the PRE-STEER sid
+    holds an `idle` row with a live pid. Joining the bare claim sid finds
+    nothing; joining the union finds the body, alive."""
+    roster = json.dumps([{"name": "sup|inc-4f99|successor",
+                          "sessionId": F4_RETIRED_1, "kind": "background",
+                          "state": "blocked", "status": "idle", "pid": 434832}])
+    obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
+    assert obs["claim_sid"] == F4_CLAIM_SID
+    assert obs["claim_sid"] not in obs["claim_rows"], "the fork row is gone"
+    assert obs["claim_rows"] == {F4_RETIRED_1: "idle"}
+    assert obs["sid_union_ok"] is True
+    assert k._claim_activity(obs)[0] == "quiet"
+
+
+def test_the_10_16Z_false_page_does_not_fire_end_to_end(home):
+    """PIN 1, WHOLE. `collect` -> `evaluate` -> the page an operator reads, on
+    the roster and the `sup-status` of 2026-09-10T10:16Z. The body is alive and
+    idle, so `supervisor-stalled` is CORRECT and stays; what must never appear
+    is the sentence that its session is gone, about a body that visibly IS in
+    the roster under another sid. That sentence is what sends the interface to
+    `sup-spawn` and puts a second body over one `supervisor/GOALS.md`.
+
+    The rules-level twin (`test_the_4f99_observation_never_pages_that_the_
+    session_is_gone`) pins the reason CLAUSE from a hand-built observation;
+    this one pins the JOIN, because the join lives in `collect` and a
+    rules-level fixture cannot exercise it."""
+    roster = json.dumps([{"name": "sup|inc-4f99|successor",
+                          "sessionId": F4_RETIRED_1, "kind": "background",
+                          "state": "blocked", "status": "idle", "pid": 434832}])
+    obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
+    pages = k.evaluate(obs, NOW)
+    stalled = [p for p in pages if p.rule == "supervisor-stalled"]
+    assert len(stalled) == 1, [p.rule for p in pages]
+    text = stalled[0].text
+    assert "roster says idle under a retired sid" in text, text
+    assert "not in the roster" not in text, text
+    assert "no live process" not in text, text
+    assert "dead" not in text, text
+
+
+def test_both_rows_reach_the_observation_during_a_turn(home):
+    """MEASURED 2026-09-10T10:38Z: one body, two roster rows, two live
+    processes -- `37e5c61c...` idle at pid 434832 and `42445477...` busy at
+    pid 515437."""
+    roster = json.dumps([
+        {"name": "sup|inc-4f99|successor", "sessionId": F4_RETIRED_1,
+         "kind": "background", "state": "blocked", "status": "idle", "pid": 434832},
+        {"name": "sup|inc-4f99|successor", "sessionId": F4_CLAIM_SID,
+         "kind": "background", "state": "working", "status": "busy", "pid": 515437},
+    ])
+    obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
+    assert obs["claim_rows"] == {F4_CLAIM_SID: "busy", F4_RETIRED_1: "idle"}
+    assert k._claim_activity(obs)[0] == "busy"
+
+
+def test_a_row_for_a_sid_outside_the_union_never_enters_claim_rows(home):
+    """The union is ONE record's. Another supervisor body's `busy` row must
+    not reach the mapping the alarm grades, or any live supervisor anywhere
+    would suppress the page for this one -- C2's name-prefix defect, re-made
+    out of sids."""
+    roster = json.dumps([{"name": "sup|inc-other|boot",
+                          "sessionId": "a-different-body", "kind": "background",
+                          "status": "busy", "pid": 999}])
+    obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
+    assert obs["claim_rows"] == {}
+    assert "a-different-body" not in obs["claim_sids"]
+
+
+def test_an_older_sup_status_without_claim_sids_degrades_to_the_bare_sid(home):
+    """`claim_sids` is additive. A `sup-status` that does not publish it (an
+    older fleet, or an unreadable registry -> `null`) must leave the keeper
+    doing exactly what it did before, and SAYING that it did."""
+    for sup in (SUP_STATUS.replace(f', "claim_sids": ["{SUP_SID}"]', ""),
+                json.dumps({"goals_active": True, "incarnation": HELD_PROJECTION,
+                            "heartbeat_age_seconds": 30.0,
+                            "pending_decision": None, "claim_sids": None})):
+        obs = _collect(home, _runner(_table(sup=sup)))
+        assert obs["sid_union_ok"] is False, sup
+        assert obs["claim_sids"] == [SUP_SID], sup
+        assert obs["claim_rows"] == {SUP_SID: "busy"}, sup
+
+
+def test_a_malformed_claim_sids_can_never_kill_the_tick(home):
+    """`claim_sids` crosses a process boundary and its members are used as
+    dict keys, which HASHES them. An unhashable member used to be exactly how
+    the claim sid killed a tick (re-review minor 2); the union must not
+    re-import that failure. Every bad shape degrades to the bare claim sid."""
+    for bad in ("not-a-list", {"a": 1}, 7, [None, 7, {"x": 1}, []], [""],
+                [[F4_RETIRED_1]]):
+        sup = json.dumps({"goals_active": True,
+                          "incarnation": {"session_id": SUP_SID, "state": None,
+                                          "released_at": None},
+                          "heartbeat_age_seconds": 30.0,
+                          "pending_decision": None, "claim_sids": bad})
+        obs = _collect(home, _runner(_table(sup=sup)))
+        assert obs["claim_sids"] == [SUP_SID], bad
+        assert obs["claim_rows"] == {SUP_SID: "busy"}, bad
+
+
+def test_the_claim_sid_is_never_dropped_from_the_union(home):
+    """A published union that omits the claim's own sid (a registry mid-write,
+    a hand-edited file) must widen the join, never narrow it. The keeper adds
+    the claim sid itself, so w63 can only ever find MORE of a body than C
+    did."""
+    roster = json.dumps([{"name": "s", "sessionId": F4_CLAIM_SID,
+                          "status": "busy", "pid": 515437}])
+    obs = _collect(home, _runner(_table(sup=_fork_sup(sids=[F4_RETIRED_1]),
+                                        agents=roster)))
+    assert F4_CLAIM_SID in obs["claim_sids"]
+    assert obs["claim_rows"] == {F4_CLAIM_SID: "busy"}
+
+
+def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, monkeypatch):
+    """THE NARROW-READER PIN (terminal-surface D4, CLAUDE.md's standing RULE).
+    w63 could have taught the keeper to read `state/fleet.json`. It did not:
+    the union arrives inside the `sup-status --json` it already ran, so the
+    keeper's subprocess set is UNCHANGED and it reaches no registry reader.
+
+    Pinned FOUR ways, because "it does not read the registry" is the kind of
+    claim that passes by accident: no registry file exists in `home` at all
+    and `collect` still produces a full observation; the argv list is exactly
+    one plain `claude agents` call and nothing naming `fleet.json`; and BOTH
+    of fleet's registry readers are RECORDED and asserted unreached --
+    `load_registry` because it quarantines, `_read_registry_readonly` because
+    reaching even the safe one would mean the keeper had grown a registry read
+    of its own.
+
+    THE RECORDING IS NOT DECORATION, and the first draft of this pin was
+    unsound. A `pytest.fail(...)` stub raises `Failed`, which derives from
+    `Exception` -- and `fleet.supervisor_claim_sids` (like every reader on a
+    view path) ends in `except Exception: return None`. So a keeper that HAD
+    grown its own registry read swallowed the stub's failure and this test
+    stayed green; MEASURED by planting exactly that keeper (mutant M10) and
+    watching all 48 tests pass. A recorded call cannot be swallowed."""
+    import fleet
+    reached = []
+    for name in ("load_registry", "_read_registry_readonly"):
+        real = getattr(fleet, name)
+        monkeypatch.setattr(fleet, name, lambda *a, _n=name, _r=real, **k: (
+            reached.append(_n), _r(*a, **k))[1])
+    run = _runner(_table(sup=_fork_sup()))
+    obs = _collect(home, run)
+    assert not (home / "state" / "fleet.json").exists()
+    assert obs["claim_sids"] == sorted([F4_CLAIM_SID, F4_RETIRED_1, F4_RETIRED_2])
+    argvs = [argv[:3] for argv, _ in run.calls]
+    assert ["claude", "agents", "--json"] in argvs
+    assert sum(1 for a in argvs if a[:2] == ["claude", "agents"]) == 1
+    assert not any("fleet.json" in " ".join(argv) for argv, _ in run.calls)
+    assert reached == [], (
+        f"the keeper reached fleet.{reached} -- it has grown a registry read")
 
 
 def test_the_keeper_asks_the_plain_spelling_and_never_all(home):
-    """The two spellings are different lists: `--all` adds the terminal-state
-    rows (`done`/`failed`/`stopped`). Every claim the keeper makes is about
-    the plain one, and `bin/fleet.py`'s roster call -- which DOES use
-    `--all` -- is a different surface. Pinned so nobody mixes them."""
+    """The two spellings are different lists: MEASURED 2026-09-10T10:56Z on
+    this host, 18 plain rows against 32 with `--all`, and every one of the 14
+    extra rows was in a terminal state AND carried no `pid`/`status` -- while
+    the PLAIN list held three `done` rows whose processes were still alive.
+    Every claim the keeper makes is about the plain one, and `bin/fleet.py`'s
+    roster call -- which DOES use `--all` -- is a different surface. Pinned so
+    nobody mixes them."""
     run = _runner(_table())
     _collect(home, run)
     agents = [argv for argv, _ in run.calls if argv[:2] == ["claude", "agents"]]
@@ -305,7 +485,7 @@ def test_a_missing_claude_binary_is_reported_distinctly(home):
 def test_agents_failure_is_reported_not_raised(home):
     obs = _collect(home, _runner(_table(agents="", agents_rc=1)))
     assert obs["agents_ok"] is False and obs["agents_missing"] is False
-    assert obs["claim_in_roster"] is False and obs["claim_row_status"] is None
+    assert obs["claim_rows"] == {}
 
 
 def test_a_subprocess_timeout_degrades_to_not_ok(home):
@@ -319,8 +499,7 @@ def test_a_subprocess_timeout_degrades_to_not_ok(home):
 
 def test_garbage_from_claude_agents_is_not_a_live_session(home):
     obs = _collect(home, _runner(_table(agents='{"not": "a list"}')))
-    assert obs["agents_ok"] is False and obs["claim_in_roster"] is False
-    assert obs["claim_row_status"] is None
+    assert obs["agents_ok"] is False and obs["claim_rows"] == {}
 
 
 # --- registry ---------------------------------------------------------------
@@ -485,7 +664,8 @@ def _rule_obs(n, oldest, ref):
     """A quiet observation carrying only the git half, so `evaluate` sees the
     unpushed rule and nothing else."""
     return {"goals_active": True, "claim_state": "held", "claim_sid": None,
-            "claim_in_roster": True, "claim_row_status": "busy",
+            "claim_rows": {"sid": "busy"}, "claim_sids": ["sid"],
+            "sid_union_ok": True,
             "heartbeat_age_seconds": 1.0,
             "agents_ok": True, "agents_missing": False, "registry_ok": True,
             "pending_decision": None, "workers": [],

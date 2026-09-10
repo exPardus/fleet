@@ -12665,3 +12665,51 @@ append stays HELD pending both the ruling and an interface restart** (the profil
 interface startup, so landing the edit protects a future interface, not the one that would revive
 me). Watcher armed on both lanes — **and it is still the mitigation that a fork defeats**, which is
 what `w63-sidunion` exists to make unnecessary.
+
+## 2026-09-10T11:22:16Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=42445477-de98-4813-937a-e18c965de740
+
+WAVE 63 — ITEM 1 IS DONE ON THE OPERATOR'S OWN CRITERION. Standing directive 2026-09-10 adopted:
+priority order fixed, meta-work capped, gate reflex capped, this checkpoint is short by rule.
+
+## SHIPPED
+- `1de9995` merge `w63/statusline-home` — nameplate carries a per-home tag; single-home row is
+  byte-identical (the pre-existing suite is the non-regression pin).
+- `2b0ad5a` profile(G-K7 A) — interface profile names `--fleet-home` on `autoclean` + 3 `sup-spawn`.
+- `aee5fdf` **THE APPEND IS MADE.** `fleet homes --add /home/altai/proga/fleet-dogfood`.
+
+**G-K7 DISCHARGED BY DOING, NOT BY RULING** — the directive names it by example. Box left unticked
+(operator's alone) with a dated note saying no ruling is owed.
+
+## MEASURED AFTER THE APPEND, ON THIS HOST
+```
+bare unmembered `fleet autoclean`   -> rc=1  "this machine runs 2 fleets ... name the home"
+same call WITH --fleet-home         -> archived 1, ok
+statusline live home                -> [fleet:a3ad]  sup held 44m  4 bodies ...
+statusline dogfood home             -> [fleet:c3e5]  idle 1 2h
+`fleet status` here lists df-hello? -> 0
+```
+Guard armed, revival path rescued by the profile edit, two fleets distinguishable in the bar,
+isolation holds. **That is item 1's DONE definition met, except `fleet init` in a repo (dispatched).**
+
+## RUNNING
+- `w63-sidunion` (item 2) — the sid-union join, keeper + profile guard.
+- `w63-initrepo` (item 1) — `fleet init` inside a repo creates a home there, from `aee5fdf`.
+- Floor on `aee5fdf`, both interpreters, one clone, serial. Predicted **5025 collected,
+  `6 failed, 5002 passed, 16 skipped, 1 xfailed`** (the statusline lane's measured figure; my two
+  commits touch only an already-tracked `docs/operator/` file and the exempt gates file).
+
+## NOT DISPATCHED, ON PURPOSE
+- **fleet.py split research (item 5)** — operator asked, brief is ready, but it is a report lane and
+  the directive caps me at two Opus build lanes with a third only for item 1. Goes out the moment a
+  slot frees.
+- **G-K1 (item 3)** — keeper work; `w63-sidunion` owns `bin/fleet_keeper.py` this wave.
+
+## ONE-LINE LESSONS
+- The statusline lane's first full suite was **28 failed, not 6**: 22 were line-number self-citation
+  pins and `[fleet]`-literal assertions in files that never mention the statusline. "It is a
+  renderer change" was wrong — budget re-pins on any change to a rendered literal.
+- Absence of a process is not absence of a job: I read an empty `pgrep` as a memory kill while `uv`
+  was still building the env, and ran two suites in one clone. Third run proved the overlap harmless.
+
+THROUGHPUT wave 62-63: bin +414/-68, tests +833/-93, docs +2407/-10, journal +433; operator items
+advanced: 1 (statusline home tag, the append, guard verified), 2 (sid-union dispatched).
