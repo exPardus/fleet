@@ -56,6 +56,74 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
   8. **A SECOND INSTANCE, THE SAME DAY, WITH A DIFFERENT CAUSE.** The supervisor body that filed this gate then hit `API Error: Server error mid-response` mid-turn and **sat idle-but-listed itself** until the interface woke it by hand. So the condition is not limited to a clean wave boundary where a body finishes its work — **any turn that ends without scheduling the next one produces it**, including one that ends in an error. That is two occurrences in one day, and neither was detected by the keeper.
 
 
+- [ ] **G-K7 — The first append to `~/.claude/fleet-homes.list` arms §5's wrong-home guard for the
+  whole machine, and the interface tier is what it breaks. Rule before the append is made.**
+
+  *(Raised 2026-09-10 by lane `w62-dogfood`, which was licensed by the DOGFOOD ruling to make that
+  append and declined to, under brief §5's own stop condition. Report: `docs/lanes/w62-dogfood.md`.
+  The second home at `/home/altai/proga/fleet-dogfood` is built, proven and waiting; the append is
+  the only step not taken, and it is one command.)*
+
+  **What was measured, in a sealed sandbox — scratch `HOME` *and* a copied install root, so both
+  homes in the population were throwaways and no live home was read or written:**
+
+  ```text
+  $ fleet archive no-such-worker-xyz          # ONE home in the population
+  fleet: unknown worker: 'no-such-worker-xyz'
+
+  $ fleet init --home <second>                # ...then, verbatim the same command:
+  $ fleet archive no-such-worker-xyz
+  fleet: `archive` destroys evidence or sessions and nothing recovers it, this machine runs 2
+  fleets, and no `--fleet-home` and no session membership chose this home: […]
+  Name the home you mean with `--fleet-home <PATH>`.
+  ```
+
+  `multi_fleet_arming` moves `population_below_two` → `population_at_least_two`;
+  `_apply_wrong_home_guard` then refuses every DESTRUCTIVE verb resolved at §5 step 3 (env) or
+  step 4 (legacy). That tuple is `clean`, `archive`, `autoclean`, `doctor --repair`, `sup-boot`,
+  `sup-spawn`, `sup-checkpoint`, `sup-release`, `sup-handoff-{begin,complete,abort}`,
+  `sup-decision --clear`, `homes --add/--retire`, `init --home`.
+
+  **Only one of the brief's two clauses fires, and the distinction should survive into the ruling.**
+  `fleet home` printed the legacy install root before *and* after the append — what a bare `fleet`
+  **resolves to** is unchanged. What changes is whether the verb is **allowed to run**.
+
+  **Who is hit.** Not workers: a fleet-spawned worker's sid is in the registry, so §5 step 2 answers
+  and *"lookup-hit resolutions are exempt"*. Not the keeper: its systemd unit passes
+  `--fleet-home /home/altai/proga/fleet` and the only verb it shells out to is `sup-status`, which
+  is ORDINARY. **The INTERFACE tier is hit.** `bin/fleet_keeper.py:704` launches it as a bare
+  `claude --permission-mode bypassPermissions "Read <profile> …"` — never through `fleet spawn` — so
+  it holds no registry membership, step 2 cannot exempt it, and it lands on step 4. Its own profile
+  has it run `fleet autoclean` as startup ritual step 1
+  (`docs/operator/server-interface-profile.md:9`) and `fleet sup-spawn` on every `supervisor-dead`
+  page (`:31`, `:45`, `:51`). **Both are DESTRUCTIVE. Post-append, both refuse.** Given G-K6, the
+  supervisor-revival path is the one thing on this host that most needs to keep working.
+
+  **And the append is not merely a cost — it is also the containment mechanism.** Measured with a
+  real worker in the second home: a bare `fleet` call carrying that worker's sid resolves to the
+  **live** home while the second home is unlisted (step 2 misses, because the population is
+  `listed ∪ legacy`), and to its **own** home once listed. So *not* appending leaves the second
+  home's own sessions leaking into the live fleet on any bare call. The two effects are one
+  ruling, not two.
+
+  **Readings.**
+  - **A — append, and fix the interface.** Add `--fleet-home /home/altai/proga/fleet` to the
+    interface profile's `autoclean` and `sup-spawn` lines (step 1 exempts both the terminus and the
+    guard). Cost: an edit to a live operator surface, and every future surface that types a bare
+    destructive verb inherits the same trap. This is the reading the design intends — §5's arming
+    paragraph exists precisely to make a two-fleet machine demand an explicit home.
+  - **B — append, and give the interface membership.** Make the keeper launch the interface through
+    a path that registers it, so step 2 exempts it the way it exempts workers. Cost: new mechanism;
+    the interface is deliberately not a worker.
+  - **C — do not append; reach the second home by `--fleet-home` only.** Cost: measured above —
+    the second home's own workers are not contained, and `fleet homes` never lists it.
+  - **D — append, and narrow the arming rule** so a home with no live workers does not count.
+    Cost: an edit to a ratified section of `docs/specs/multi-fleet.md`, and it re-opens
+    *"indeterminacy never selects the permissive branch"*. Recommended by nobody here.
+
+  **The lane's recommendation: A**, with the interface-profile edit landed *before* the append, not
+  after — the window between them is exactly when a `supervisor-dead` page would fail to revive.
+
 ## Settled
 
 - [x] **kz-work server fleet — revival actor, notification path, and interface permission mode?** *(2026-09-08 by Altai, in-session.)* Answer: **the keeper timer PAGES ONLY and never dispatches; outbound notification goes ONLY through the ccgram-bound `work:fleet` window (no direct Bot API, no second bot); the server interface session runs `bypassPermissions`.** Design: `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`.
