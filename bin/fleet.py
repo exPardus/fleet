@@ -16455,9 +16455,16 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is councilor 1's half of the same ruling. A bare `released_by_sid in
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
-    (ND4a)"* -- for the fifteen other sites that already key on the union
+    (ND4a)"* -- for the eighteen other sites that already key on the union
     (`:2826, :2897, :2970, :3231, :3381, :4875, :9894, :10214, :10495, :10726,
-    :10813, :11141, :11957, :16327, :19168`). The thirteenth is multi-fleet §5 step 2's
+    :10813, :10969, :10981, :10992, :11141, :11957, :16327, :19168`). The
+    sixteenth, seventeenth and eighteenth are the reap pass's identity veto
+    (2026-09-10, `_reap_protection`): the caller's own union, the candidate
+    row's union, and every OTHER row whose union overlaps it. They joined this
+    enumeration because the merged-tree floor caught the reap pass reaching
+    around `sup-release`'s refusal to tombstone an ambiguous identity -- which
+    is exactly the fail-open shape `_record_sids` exists to prevent, arriving
+    at a new caller. The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is

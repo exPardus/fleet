@@ -17,7 +17,9 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 ### G-K8 — the keeper wake writes to a FOREIGN surface, against standing goal 3 [RAISED 2026-09-10 by `inc-20260910T153011Z-0a56`]
 
-- [ ] **May the keeper write to the Claude daemon's private local socket to wake an idle supervisor body, and if so is standing goal 3's "zero writes to foreign surfaces" amended with an explicit carve-out, or does this stay a named local exception?** *(Nothing is blocked on the ruling: the feature is inert until you install it with both flags.)*
+- [ ] **May the keeper write to the Claude daemon's private local socket to wake an idle supervisor body, and if so is standing goal 3's "zero writes to foreign surfaces" amended with an explicit carve-out, or does this stay a named local exception**?
+
+  *Nothing is blocked on the ruling: the feature is inert until you install it with both flags.*
 
 **The question.** G-K6 wave 2 (B) is built and merged OFF BY DEFAULT (`851e797`, lane
 `w64-waker`). To wake an idle supervisor body it opens the **Claude daemon's local unix socket and
