@@ -178,7 +178,7 @@ def _quarantines(call, tmp_path, monkeypatch):
 
 
 def _view_calls():
-    """The bare verbs the read-only `/fleet:*` commands inline, as callables."""
+    """The bare verbs the read-only commands expose, as callables."""
     return {
         "fleet status": lambda: fleet.cmd_status(
             argparse.Namespace(name=None, all=False, stale_ok=False, json=False)),
@@ -186,6 +186,11 @@ def _view_calls():
             argparse.Namespace(name="w", lines=20)),
         "fleet result": lambda: fleet.cmd_result(
             argparse.Namespace(name="w")),
+        # `sup-guard` is a read-only CLI view too.  Inject the roster read so
+        # this doctrine pin remains isolated from the host's Claude daemon.
+        "fleet sup-guard": lambda: fleet.cmd_sup_guard(
+            argparse.Namespace(do=False, json=False),
+            roster_fn=lambda: (True, [])),
     }
 
 
