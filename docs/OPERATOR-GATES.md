@@ -15,6 +15,45 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 ## Open
 
+### G-K8 — the keeper wake writes to a FOREIGN surface, against standing goal 3 [RAISED 2026-09-10 by `inc-20260910T153011Z-0a56`]
+
+- [ ] **Ruling owed.** Nothing is blocked on it: the feature is inert until you install it.
+
+**The question.** G-K6 wave 2 (B) is built and merged OFF BY DEFAULT (`851e797`, lane
+`w64-waker`). To wake an idle supervisor body it opens the **Claude daemon's local unix socket and
+issues a protocol-1 `reply`**, using a key you supply. `supervisor/GOALS.md` standing goal 3 says
+integration depth means **"zero writes to foreign surfaces (CLI + `--json` only)"**. This is a write
+to a foreign surface, and a private, undocumented one. **May the keeper do it, and if so, is goal 3
+amended to carve it out, or does the carve-out stay a local exception?**
+
+**Why the lane did not raise it.** Its brief asked for a G-K1 collision check and it did one
+faithfully; nothing asked it to check goal 3, and a lane cannot be blamed for a question nobody put
+to it. Found at landing review. *A brief's checklist is a claim about which invariants can collide,
+and it is the supervisor's claim, not the lane's.*
+
+**What is actually at stake, stated fairly.**
+- FOR: the lane measured that every CLI-only option fails the case B exists for — an idle
+  `fleet send` FORKS, and a mailbox write needs an existing turn or hook to consume it. There is no
+  supported CLI path that hands a turn to an already-idle body. If goal 3 binds absolutely here,
+  **B cannot be built at all** and the 2026-09-09 eight-hour outage shape stays open, mitigated only
+  by C's page and your manual choice.
+- AGAINST: the contract was measured against **installed Claude 2.1.267** and is private, so a
+  Claude update can break or silently change it. That version fragility is precisely what goal 3
+  exists to prevent, and the pin-test discipline that protects our `--json` reads does not cover a
+  socket protocol.
+- MITIGATIONS ALREADY IN THE BUILD: off unless you pass BOTH `--wake-socket` and `--wake-key`; no
+  daemon-start fallback; the daemon's short id, session id and pid are all re-verified against the
+  claim before anything is sent; the key and the full daemon list (which carries nonces) are never
+  logged; an ACK never refreshes the heartbeat and never suppresses C's page.
+
+**If you rule NO**, B stays merged and inert and we lose nothing built; the remedy for an idle
+supervisor stays C's page plus your call. **If you rule YES**, goal 3 needs an explicit carve-out
+naming the daemon socket, and the wake path needs a pin test against the daemon version it was
+measured on, so a Claude update fails loudly instead of silently.
+
+**Context:** `docs/lanes/w64-waker.md`, `docs/operator/keeper-wake.md`, `supervisor/GOALS.md:28`.
+
+
 > **ALL FIVE OPEN GATES WERE RULED BY THE OPERATOR ON 2026-09-10** (Telegram, relayed in-session by the interface). **No box below is ticked and none may be:** ticking and the `## Settled` move are the operator's alone, and the proposed Settled text has been sent back via checkpoint for that pass. **This note is here so the rulings are not lost if the supervisor is swapped before the boxes move** — the gate text below is unedited. Verbatim operator words: `state/tasks/20260910-rulings-six-gates.md`. Dispositions, in the operator's own order:
 >
 > - **G-K1 — AMEND, and the keeper becomes a FEATURE FLAG.** *"keeper is just a system existing for when fleet is on remote devices, make keeper a feature flag."* D7 gains an explicit clause naming the keeper's dedicated window as the one permitted typing surface; the keeper is a remote-host feature, **OFF by default**, turned on per host, with `doctor` reporting the flag state and a stray tick on an off host exiting 0 quietly. Shape is the building lane's to propose. **UNBUILT.**
