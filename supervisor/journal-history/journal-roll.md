@@ -214,3 +214,43 @@ THROUGHPUT wave 65 (`07042d5..c50258a`): bin +223/-30, tests +325/-4, docs +140/
 `gpt-5.6-luna` (astra: 0), landed without steering; claude worker tokens: 0; lanes lost to the
 harness guard: 1, cause found and ruled; operator items advanced: 4 (two batch-1 verbs).
 
+## 2026-09-10T18:51:39Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=849fc7ef-b8aa-47d2-bad2-ba896aa0deab
+
+WAVE 66 OPEN. Woken by the interface on a keeper `supervisor-stalled` page (heartbeat 73 min stale,
+roster idle) — the guard correctly read this body as ALIVE and woke it instead of spawning a second.
+
+## THE PAGE IS THE SYMPTOM OF SOMETHING I CAN FIX WITHOUT WAITING FOR G-K6
+Same shape as 13:54Z: **a generation closes a wave and nothing gives it the next turn.** I closed
+wave 65 with a THROUGHPUT notify and ended my turn — correct by the old rule, and it produced 73
+minutes of dark fleet and a page. The interface's instruction, adopted now and carried in my body
+journal: **end every wave close with `sup-notify "SUPERVISOR: wave N closed, idle until woken"`** so
+the interface wakes me deliberately rather than the keeper discovering it. That is a stopgap until
+G-K6's waker is ruled (G-K8), and it costs one line per wave.
+
+## DISPATCHED — 2 lanes, both `gpt-5.6-luna` `-r high`, both DETACHED
+- `mkWzhGsK` **w66-guard** — `fleet sup-guard` with `--do`. Briefed hard on the one behaviour that
+  matters: **a body that is alive and listed must never produce `DISPATCH`.** Pointed at the
+  interface profile as the SPECIFICATION to mechanise rather than a policy to reinvent, at
+  `rule_supervisor_stalled`'s reason clauses as the verdicts to correspond to, and at the views
+  doctrine — bare `sup-guard` is a VIEW: no lock, no probe, no write, no quarantine. Asked it to say
+  whether it must join `tests/test_views_doctrine.py`'s scope list.
+- `WGSE2Pvv` **w66-wave-close** — the big one. Its floor arm carries the six things this generation
+  lost four runs learning, written into the brief so the verb does not ship the bug: foreground not
+  background, split in halves, `tests/integration` is missed by the obvious glob, the split boundary
+  moves as files are added, fresh `git clone --no-local`, both interpreters identical — and
+  **verification cannot gate an action it is chained to**, so its push arm must be gated on a PARSED
+  floor result and abort rather than warn.
+
+Both edit `bin/fleet.py`. **The merge owes ONE citation fixpoint pass, not two** — each lane runs the
+tool against `1556986` itself and hands over which citations it touched.
+
+## NOT STARTED, ON PURPOSE
+G-K8, the `fleet.py` split pilot and G-K1 are with the operator. The interface named them; I am not
+touching them.
+
+## STATE
+Floor of record **5228 collected, `6 failed, 5205 passed, 16 skipped, 1 xfailed`, identical on
+3.10/3.12** at `1556986`. Tree clean, nothing unpushed. Memory 5076 MB available at dispatch, above
+the 1.5 GB floor; 2 fleet lanes live, under the 3-lane ceiling. Body journal now exists at
+`state/journals/sup~inc-20260910T152948Z-f976~boot.md` per the task file.
+
