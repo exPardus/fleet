@@ -11826,3 +11826,85 @@ Next acts, in order: verify the keeper's state and whether it paged during the 8
 drain `state/inbox/`; then plan wave 61 against the queue (the seam census / synthetic-sid
 mitigation, `identity-witness` grading, the `--bogus/` repo-root writes, and the two-home dogfood
 proof that `init --home` finally makes possible).
+
+## 2026-09-10T04:29:41Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=27e3e17d-6b39-4173-88af-45dee97240fb
+
+WAVE 61 DISPATCHED, G-K6 FILED AND PUSHED (`036b21f` -> `9391f3f`). And the thing I most need my
+successor to understand is that **the outage that created me is a shape I am currently in.**
+
+## THE HEADLINE: NOTHING FAILED, AND THE FLEET WAS DARK FOR 8h10m
+
+Reconstructed from the transcript, the unit log, `state/keeper/last-page.json` and the rule itself,
+not from the registry's verdict. `inc-...efa0` finished wave 60, `sup-notify`d the interface, and
+**ended its turn normally at 20:05:25Z** — 246k against a 350k band, no error, no limit, no crash,
+no handoff owed. Correct behaviour. Then nothing ever gave it another turn. Its session sat idle
+until ~04:05Z, when the process exited; the next keeper tick paged, and the interface relaunched me
+in 23 seconds.
+
+**A supervisor's heartbeat only refreshes when it TAKES A TURN.** So the beat was stale from 21:05Z
+and the keeper — healthy, ticking every ~16 minutes, ~30 ticks — said nothing, because
+`rule_supervisor_dead` ANDs a stale heartbeat with roster-ABSENCE and an idle-but-alive session is
+PRESENT. I drove that rather than deducing it: same observation, `claim_sid_live` flipped, and the
+rule pages `supervisor dead since 490 min ago`. Filed as **G-K6**, parked on the operator, with the
+two readings (drop the roster arm / give the supervisor a wake mechanism).
+
+**The interface tier independently reached the same rule from its own side and added the fact I did
+not have:** dead and retired bodies stay listed with `status: null, state: "blocked"` while a live
+one reads `busy`. If that holds, the roster arm can be REPAIRED rather than dropped and reading A
+gets cheap — which is exactly why `w61-keeperblind` is a measurement lane and not a fix lane. Note
+one contradiction I handed it deliberately: my probe of the non-`--all` roster showed **no `state`
+key at all**, the interface's showed one. One of us is reading a different surface; resolving that
+comes before anything downstream.
+
+**A method note worth more than the finding:** I briefly believed I was watching the roster collapse
+from 24 entries to 8, which is the "suspicious roster" condition doctrine says to freeze on. It was
+my own measurement error — `bin/fleet.py` calls `claude agents --json --all`, the keeper and I called
+it without `--all`. I checked the spelling before raising an alarm. **Two surfaces, two counts, and
+the doctrine that would have fired is the expensive one.**
+
+## WHAT I DISPATCHED (2 lanes, not 3 — 5.8 GB free, and the RAM ceiling is 3)
+
+- **`w61-keeperblind`** (research, `w61/keeperblind`): serve G-K6 with measurement, build neither
+  reading. Priority order: a liveness truth table over every roster field including `pid`; what
+  REMOVES an entry and why efa0's vanished at ~04:05Z (**if entries expire on a timer, the keeper's
+  blindness has a bounded duration, and that number is the most decision-relevant thing in the
+  wave**); an audit of EVERY other keeper rule for the same AND-shaped blindness; and a grading of
+  the two docstrings whose premise this outage inverts.
+- **`w61-sidcollision`** (build, `w61/sidcollision`): part 1 is *drive the collision*, part 2 is the
+  synthetic-sid mitigation **only if part 1 reproduces**. My predecessor proposed that mitigation
+  and explicitly flagged it as an undriven hunch; I passed that warning through as binding rather
+  than laundering it into an instruction. Measured for the brief: all three hardcoded sids occur **0
+  times** in the live registry today, which carries 20 records and **no populated `retired_sids` at
+  all** — so the miss holds today by luck, exactly as described.
+
+Both briefs order the report to `docs/lanes/<name>.md` committed on the branch, both carry the full
+safety stanza, both are told to lead with where the brief was wrong.
+
+## ALSO LANDED — THIRD INSTANCE OF ONE CLASS
+
+`fleet sup-notify` IS shipped (8/30/3 hits at `036b21f`, run in anger twice). SPEC §18 corrected its
+own copy yesterday and recorded that the stale `NAME UNSHIPPED` marker had also reached
+`skills/fleet/SKILL.md`. **It had reached three more surfaces and survived a further day — including
+`supervisor/briefs/server-standing.md`, the standing brief that dispatched me.** So the correction
+loop fixed the two surfaces someone thought to grep and missed the one that briefs every future
+supervisor. Corrected in all three, the spec one in SPEC's own ratified disposition (keep the pinned
+past-tense clause, correct the inference beside it). Docket moved FOUR -> FIVE in the same turn the
+fifth was filed.
+
+## THE THING I AM DOING ABOUT MY OWN TURN, AND WHY IT IS NOT A FIX
+
+I am holding this turn on `fleet wait` for the two lanes rather than ending it. **That is a
+mitigation for tonight, not a repair**, and my successor should not mistake it for one: it works
+only while I have something to wait ON. The moment a wave ends and I have nothing dispatched, I am
+`efa0` at 20:05Z again — a correct, under-band, non-failing body that will never get another turn,
+with the keeper blind to it for as long as my session lingers in the roster. **That is the real
+content of G-K6 and the reason I filed it ahead of every item on the wave-60 queue.**
+
+## CARRIED, UNTOUCHED
+
+Wave-60 successor queue items 2 (`identity-witness` grading), 3 (repo-root `--bogus/` writes —
+handed to `w61-sidcollision` as a secondary, explicitly "measure and recommend, do not silently add
+`skipif`"), 4 (`sup-recover` unbuilt), 6 (two-home dogfood proof, now unblocked and the natural next
+wave for the operator's stated priority), 7 (the 1.9 MB journal is load-bearing evidence with
+nothing enforcing append-only). Gates G-K1/G-K2/G-K4/G-K5 open and untouched; G-K5 still blocks
+multi-fleet BUILD work and no lane this wave goes near it.

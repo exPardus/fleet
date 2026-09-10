@@ -290,9 +290,14 @@ alternative readings are unbuilt.
    what you meant, or do you want cwd to decide the home with nothing typed? *(the second needs a
    new §5 step and your ratification)*
 5. **G-K6** — the keeper cannot see a supervisor that has stopped acting but whose session is still
-   listed: drop the roster arm so a stale heartbeat alone pages, or give the supervisor a wake
-   mechanism so it never sits idle-but-listed? *(this is the one that already fired — 8h10m dark,
-   ~30 silent keeper ticks, and it makes G-K2's list of "two silent failures" a list of three)*
+   listed. **Now a choice of THREE, not two** — the lane sent to measure it refuted my framing:
+   **C (recommended)** arm the rule on `status == "busy"` instead of on mere presence (would have
+   paged 7h10m51s earlier, no new false positive, keeps C2's guard); **A** drop the roster arm
+   (= C minus the safety); **B** give the supervisor a wake mechanism (prevents rather than detects;
+   do C first, because B's own failure is silent). *(This is the one that already fired — twice in
+   one day. And eight hours was the LUCKY case: a body retired `idle-prompt` stays in the keeper's
+   list with no expiry observed, and 2 of 3 retired supervisors here did. It also makes G-K2's list
+   of "two silent failures" a list of three.)*
 
 Answer any of them in one line in `docs/OPERATOR-GATES.md`, or through
 `fleet sup-decision --answer <text>` for whatever is occupying the supervisor's decision slot.
