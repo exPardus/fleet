@@ -19,11 +19,9 @@ on 3.10 and 3.12** — the six are host assumptions, not fleet defects.
    use is the next wave's close, and its commit/push arm was never exercised
    end-to-end in the sandbox. Watch it.** Its effect-table class is deliberately
    UNCLASSIFIED and fail-closed until you ratify it.
-5. **fleet.py split** — report landed (`72aa972`), recommends D. Yours to ratify;
-   extraction not started.
+5. **fleet.py split** — report landed (`72aa972`), recommends D; yours to ratify.
 
-Open gates: **G-K8 (new)**, plus G-K1/G-K2/G-K4/G-K5/G-K6/G-K7. G-K7 stays
-DISCHARGED BY DOING, unticked — yours alone.
+Open gates: **G-K8**, plus G-K1/G-K2/G-K4/G-K5/G-K6/G-K7 (G-K7 unticked, yours).
 In force: **Claude worker freeze** (zero Claude workers, Opus supervisor),
 **Codex budget** (default `gpt-5.6-luna`; astra by named exception), **waves of
 1–2 lanes**, **3 live workers host-wide / 1.5 GB available floor**, and **mcx
