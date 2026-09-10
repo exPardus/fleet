@@ -11908,3 +11908,89 @@ handed to `w61-sidcollision` as a secondary, explicitly "measure and recommend, 
 wave for the operator's stated priority), 7 (the 1.9 MB journal is load-bearing evidence with
 nothing enforcing append-only). Gates G-K1/G-K2/G-K4/G-K5 open and untouched; G-K5 still blocks
 multi-fleet BUILD work and no lane this wave goes near it.
+
+## 2026-09-10T05:47:54Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=65602a07-06d0-47b9-85e7-68c1158c4d8a
+
+WAVE 61 LANDED AND PUSHED — `036b21f` -> `f1f6d92`, 8 commits. **4965 collected, identical on 3.10
+and 3.12**, predicted in writing before the merge and hit to the digit, then re-measured after the
+docs fold and unchanged. Same six host-assumption ids on both floors, **no `skipif` added to any of
+them**. `rev-list --count HEAD --not --remotes` = **0**. Repo root clean.
+
+## I WAS WRONG ABOUT THE THING I FILED THE GATE ON, AND BOTH LANES SAID SO
+
+**The supervisor was never dead.** It held a live pid for the whole 8h10m and exited at 04:05:58Z,
+nine minutes before the page. The rule is named `rule_supervisor_dead`; the failure mode this fleet
+actually has is **`supervisor_stalled`** — alive, listed, holding the claim, not taking turns — and
+**the keeper has no rule for it at all.**
+
+I built G-K6 around a liveness question: *is there anything in the roster that distinguishes a live
+body from a dead one? If so the arm can be repaired.* `pid`/`status`-presence **is** a perfect
+discriminator, 27/27 — **and repairing the arm that way would not have shortened the outage by one
+second.** *Framing an idleness failure as a liveness failure makes every later measurement answer
+the wrong question correctly.* The cut that works is `status == "busy"` — already in the JSON the
+keeper parses, already in `native-substrate.md` — and it would have paged **7h10m51s earlier**.
+
+**And eight hours was the LUCKY case.** I asked for the bound on the blindness believing there was
+one. The daemon retires an idle bg session at 8h, but only a `settled` retirement leaves the
+keeper's list; an `idle-prompt` retirement becomes `blocked` and **stays, no expiry observed**
+(oldest 22h05m; a `done` row 39h old still in `--all`). 11/11, no exceptions. **2 of the 3 retired
+supervisor bodies on this host retired `idle-prompt`.** efa0 drew the disposition that ended it.
+
+G-K6 is amended by APPENDING (the original text stays — how it was wrong is the record), the docket
+ask is now a choice of THREE with the lane's recommendation (C first, then B; A is C minus the
+safety), and it is pushed. **The ruling is this wave's real deliverable and it must not rest on my
+framing.**
+
+## THE CONDITION FIRED AGAIN, ON ME, WHILE I WAS WRITING THE GATE ABOUT IT
+
+My turn died mid-sentence on `API Error: Server error mid-response` and I **sat idle-but-listed until
+the interface woke me by hand.** Two occurrences in one day, two different causes, neither detected.
+So it is not a property of clean wave boundaries: **any turn that ends without scheduling the next
+one produces it.** Folded into the gate as amendment 8.
+
+**What I am doing about it is a mitigation and my successor must not mistake it for a fix.** A
+harness-tracked background task (`fleet wait`, a backgrounded floor run) gives me a turn when it
+completes. That works only while there is something to wait on. **The moment this checkpoint is
+written and nothing is dispatched, I am efa0 at 20:05Z.**
+
+## LANE B — THE COLLISION REPRODUCES, THE SEAM DOES NOT CLOSE
+
+Four sid sites in TWO files, not three in one, and the fourth is handed to a CHILD. The write needs
+**three** coincidences (hit + same-named worker + that worker owned by the colliding sid), not one;
+one coincidence gets a retarget and red tests. Retired to synthetic non-RFC-4122 values `claude` can
+never issue, pinned by an AST census over every `CLAUDE_CODE_SESSION_ID` assignment in `tests/`,
+mutant-verified. **`INSTALL_ROOT` is still `__file__`-derived and unoverridable and every subprocess
+drive still reads the install-root home's registry** — the lane found no cheap fence and refused to
+propose one. *Removing a collision is not closing a seam.*
+
+**And it killed an inherited claim three successor queues had carried:** *"the six host-assumption
+failures WRITE INTO THE REPO ROOT."* FALSE — `--bogus/` and the newline-named directory are created
+by tests that **PASS**, so the `skipif`-or-fix decision I framed would have missed it entirely. Fixed
+at the cause (`cwd=tmp_path`) and pinned. I removed the pre-existing debris by hand this turn after
+verifying it was untracked and synthetic; the fix prevents new pollution, it does not sweep old.
+
+## SUCCESSOR QUEUE, IN ORDER
+
+1. **G-K6 is the top of the docket and the operator's to rule.** If it is answered while you hold the
+   claim: C is small and testable and both A and B need it; B without C is B unmonitored.
+2. **`INSTALL_ROOT` is still open** and now the only remaining term. Two candidate fences considered
+   and rejected with reasons in `docs/lanes/w61-sidcollision.md` §7. Do not re-derive them.
+3. **Eight v4-shaped `*_SID` constants in six other files**, three of which look like real captured
+   sids — inert today because they are in-process only, one `INSTALL_ROOT` change from armed.
+4. **`identity-witness` grading** (w60 queue item 2) and **`sup-recover` still UNBUILT** (item 4),
+   both untouched.
+5. **The two-home dogfood proof** (w60 item 6) — still the natural operator-visible next wave for the
+   multi-fleet priority, and still NOT blocked by G-K5, which blocks only BUILD work on the cwd
+   reading.
+6. **G-K1/G-K2/G-K4/G-K5 carried, none ticked. G-K2's premise is now known incomplete** — it asks the
+   operator to accept a list of two silent failures and the true count is three.
+7. **`supervisor/JOURNAL.md` is load-bearing evidence with nothing enforcing append-only** (w60 item
+   7), unchanged.
+
+## WHAT I EXPECT TO GET WRONG
+
+That the gate as amended is now right. My first framing survived a night's thought, a checkpoint, a
+commit message and a notify before a lane took one measurement and dissolved it — and the lane that
+did it was one I had told to attack its own brief. **Four waves running, both lanes have corrected
+their supervisor on the point the brief called most likely. That is not luck and it is not a lane
+property; it is what instructing them to attack buys, and it is the cheapest thing this fleet does.**
