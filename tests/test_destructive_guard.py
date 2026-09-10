@@ -154,7 +154,16 @@ class TestAWorkerIsNotExempt:
     """
 
     MANAGER = "manager-sid"
-    WORKER_SID = "820762d0-5298-4b1b-9471-4048ea27e278"
+    # SYNTHETIC, and it must stay synthetic -- see `tests/test_sid_collision.py`.
+    # The sid the receipt above quotes is a REAL historical session id of this
+    # project, and a caller sid that a fleet home's registry can actually carry
+    # is a live retarget: `resolution_population()` is the folded homes list
+    # UNION the `INSTALL_ROOT` home, `INSTALL_ROOT` is `__file__`-derived and
+    # NOT env-overridable, so a suite run from a checkout that is itself a live
+    # fleet home resolves this sid against that home's registry. UUID-SHAPED so
+    # `_SID_SHAPE_RE` behaviour is unchanged, but version nibble 0 / NCS variant,
+    # which is not an RFC-4122 v4 and so is not a sid `claude` can issue.
+    WORKER_SID = "fa15e51d-0000-0000-0000-000000000003"
 
     def _in_worker(self, monkeypatch):
         # A worker's real environment, as measured: its own session id (stamped
@@ -562,9 +571,26 @@ class TestAWorkerCallerIsNotExempt:
     session id when FLEET_WORKER is set) goes red instead of quietly shipping.
     """
 
-    # The measured pair, kept verbatim so the receipt above stays checkable.
-    WORKER_SID = "1a9374bd-df92-42ad-972a-06693aeef272"
-    MANAGER_SID = "20fee653-f07e-4208-8c0e-1c737f9119f7"
+    # SYNTHETIC, DELIBERATELY NOT THE MEASURED PAIR -- and this is the one place
+    # the file diverges from its own receipt on purpose. These two values reach a
+    # CHILD process's `CLAUDE_CODE_SESSION_ID`, and `_run` below drives the real
+    # `fleet kill`, so the value is not decoration: §5 step 2 resolves it against
+    # every home in `resolution_population()` BEFORE `FLEET_HOME` is consulted,
+    # and step 2 OUTRANKS steps 3/4. The population always contains the
+    # `INSTALL_ROOT` home (`__file__`-derived, not env-overridable), so on a
+    # checkout that is itself a live fleet home a caller sid that home's registry
+    # carries -- in `session_id` or in an archived record's `retired_sids`, since
+    # `_record_sids` is the union -- RETARGETS this kill onto that home. Measured
+    # end to end in `docs/lanes/w61-sidcollision.md` §2: the bystander's worker
+    # went idle -> dead while the fixture home was left untouched.
+    #
+    # The two sids the receipt above quotes are real historical session ids of
+    # this project. They miss today by luck, not by design. These replacements
+    # are UUID-SHAPED (so `_SID_SHAPE_RE` sees what it always saw) but carry
+    # version nibble 0 and the NCS variant, so they are not RFC-4122 v4 and
+    # cannot be a sid `claude` issued. `tests/test_sid_collision.py` pins it.
+    WORKER_SID = "fa15e51d-0000-0000-0000-000000000001"
+    MANAGER_SID = "fa15e51d-0000-0000-0000-000000000002"
 
     def _seed(self, tmp_path, spawned_by, session_id="sid-1"):
         for sub in ("state", "mailbox", "logs"):
