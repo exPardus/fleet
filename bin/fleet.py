@@ -193,16 +193,19 @@ def _interface_pending_rulings(home):
         return "UNMEASURED"
     found = []
     try:
-        paths = sorted(root.rglob("*.md"))
+        paths = sorted(path for path in root.rglob("*") if path.is_file())
     except OSError:
         return "UNMEASURED"
     for path in paths:
+        relative = path.relative_to(root)
+        # Lens briefs are research inputs, not operator decision slots.
+        if relative.parts and relative.parts[0].lower() == "lens":
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             return "UNMEASURED"
-        name = path.name.lower()
-        if "ruling" in name or "operator ruling" in text.lower():
+        if not re.search(r"(?m)^\s*RULED\s*:", text):
             found.append(path.relative_to(Path(home)).as_posix())
     return ", ".join(found) if found else "none"
 
@@ -11971,6 +11974,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
     stats = getattr(args, "reap_stats", None)
     if stats is not None:
         stats["archived"] = archived_count
+        stats["protected_unread_mail"] = _wave_protected_unread_mail(verdicts)
     print(f"archived {archived_count} worker(s), skipped {skipped_count}")
     return 0
 
@@ -12392,7 +12396,8 @@ SUPERVISOR_REAP_RULE = (
 )
 
 
-def _supervisor_reap(run=subprocess.run, which=shutil.which, caller_sid=None) -> tuple:
+def _supervisor_reap(run=subprocess.run, which=shutil.which, caller_sid=None,
+                     reap_stats=None) -> tuple:
     """Best-effort lifecycle maintenance, after the claim lock is released.
 
     Never strand a minted nonce because maintenance failed, or quarantine an
@@ -12402,7 +12407,7 @@ def _supervisor_reap(run=subprocess.run, which=shutil.which, caller_sid=None) ->
     ok, reason, data = _read_registry_readonly()
     if not ok:
         return 0, f"registry {reason}"
-    stats = {}
+    stats = {} if reap_stats is None else reap_stats
     args = argparse.Namespace(reap=True, reap_stats=stats, dry_run=False,
                               reap_caller_sid=caller_sid)
     try:
@@ -18317,6 +18322,51 @@ def _wave_repo_root(run=subprocess.run):
     return root
 
 
+def _wave_previous_close(repo, run=subprocess.run):
+    """Find the newest prior close commit for the default accounting base."""
+    result = _wave_git(repo, "log", "--format=%H%x09%s", "HEAD", run=run)
+    for line in result.stdout.splitlines():
+        commit, _, subject = line.partition("\t")
+        if re.fullmatch(r"fleet wave-close: wave \d+", subject.strip()):
+            return commit
+    raise FleetCliError(
+        "wave-close: no previous `fleet wave-close: wave N` commit found; "
+        "supply --base explicitly")
+
+
+def _wave_merge_commits(repo, base, run=subprocess.run):
+    result = _wave_git(repo, "log", "--merges", "--format=%H",
+                       f"{base}..HEAD", run=run)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _wave_changelog_gaps(repo, base, extra="", run=subprocess.run):
+    """Return merge SHAs since base that have no CHANGELOG line."""
+    path = Path(repo) / "docs" / "CHANGELOG.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    text += "\n" + (extra or "")
+    gaps = []
+    for commit in _wave_merge_commits(repo, base, run=run):
+        short = commit[:7]
+        if not any(re.search(rf"(?<![0-9a-f]){re.escape(token)}"
+                            rf"(?![0-9a-f])", text, re.IGNORECASE)
+                   for token in (commit, short)):
+            gaps.append(short)
+    return gaps
+
+
+def _wave_protected_unread_mail(verdicts):
+    """Count rows whose reap veto specifically says unread mail."""
+    if not isinstance(verdicts, dict):
+        return 0
+    return sum(1 for verdict in verdicts.values()
+               if isinstance(verdict, tuple) and len(verdict) >= 2
+               and not verdict[0] and verdict[1] == "unread-mail")
+
+
 def _wave_numstat(repo, base, run=subprocess.run):
     """Return additions/deletions in the five non-overlapping accounting buckets."""
     result = _wave_git(repo, "diff", "--numstat", f"{base}..HEAD", run=run)
@@ -18377,8 +18427,54 @@ def _wave_id(repo, run=subprocess.run):
     return "UNMEASURED"
 
 
+def _wave_token_pair(value):
+    """Read one ``(input, output)`` pair from a durable usage shape."""
+    if isinstance(value, dict):
+        candidates = (
+            ("input_tokens", "output_tokens"),
+            ("input", "output"),
+            ("in", "out"),
+        )
+        for incoming, outgoing in candidates:
+            pair = (value.get(incoming), value.get(outgoing))
+            if all(isinstance(item, int) and not isinstance(item, bool)
+                   and item >= 0 for item in pair):
+                return pair
+    if isinstance(value, str):
+        match = re.search(
+            r"tokens\s*:\s*in\s*=\s*(\d+)\s+out\s*=\s*(\d+)",
+            value, re.IGNORECASE)
+        if match:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def _wave_roster_claude_tokens(entries):
+    """Sum Claude roster usage, or name the missing roster field.
+
+    The Claude CLI has exposed both ``usage``/``input_tokens`` and the compact
+    ``tokens:in=X out=Y`` row shape.  Missing usage is not zero: it is an
+    honest, source-specific measurement gap.
+    """
+    if not isinstance(entries, list):
+        return "UNMEASURED (roster has no token field)"
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return "UNMEASURED (roster has no token field)"
+        pair = None
+        for candidate in (entry.get("usage"), entry.get("tokens"), entry):
+            pair = _wave_token_pair(candidate)
+            if pair is not None:
+                break
+        if pair is None:
+            return "UNMEASURED (roster has no token field)"
+        total += sum(pair)
+    return str(total)
+
+
 def _wave_registry_worker_count():
-    """Count worker records without assigning semantic status to them."""
+    """Legacy reader retained for callers; wave-close no longer uses it."""
     try:
         data = read_registry_no_repair(hint=False)
     except Exception:  # noqa: BLE001 - accounting must never invent a count
@@ -18387,28 +18483,103 @@ def _wave_registry_worker_count():
     return str(len(workers)) if isinstance(workers, dict) else "UNMEASURED"
 
 
-def _wave_roster_claude_tokens(entries):
-    """Sum roster usage when every roster entry supplies integer usage.
+def _wave_landed_lanes(repo, base, run=subprocess.run):
+    """Return merge-commit lanes in ``base..HEAD`` with their substrate."""
+    result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
+                       f"{base}..HEAD", run=run)
+    lanes = []
+    for line in result.stdout.splitlines():
+        commit, _, subject = line.partition("\t")
+        match = re.search(r"^merge\(([^)]+)\):", subject, re.IGNORECASE)
+        if not match:
+            continue
+        body = _wave_git(repo, "show", "-s", "--format=%B", commit,
+                         run=run).stdout
+        substrate = "UNMEASURED"
+        if re.search(r"substrate\s*[:=]\s*codex|\bcodex\b|gpt-\d",
+                     body, re.IGNORECASE) or "codex" in match.group(1).lower():
+            substrate = "codex"
+        elif re.search(r"substrate\s*[:=]\s*claude|\bclaude\b|claude-session",
+                       body, re.IGNORECASE) or "claude" in match.group(1).lower():
+            substrate = "claude"
+        lanes.append((match.group(1), substrate, commit[:7]))
+    return lanes
 
-    Native roster versions do not all expose token usage.  A missing field is
-    therefore ``UNMEASURED``, never a fabricated zero.  The walker accepts the
-    two observed shapes: a top-level usage object and a direct token object.
+
+def _wave_codex_tokens(repo):
+    """Sum Codex usage from local mcx result records.
+
+    Completed mcx jobs conventionally leave a text ``result`` plus an
+    ``events.jsonl`` containing the final usage object.  Prefer the result and
+    consult its event log only when the result has no machine-readable usage,
+    so one job cannot be counted twice.
     """
-    if not isinstance(entries, list):
-        return "UNMEASURED"
+    root = Path(repo) / ".mcx"
+    try:
+        result_paths = sorted(root.glob("*/result"))
+    except OSError:
+        result_paths = []
+    if not result_paths:
+        return "UNMEASURED (mcx result files missing)"
     total = 0
-    for entry in entries:
-        if not isinstance(entry, dict):
-            return "UNMEASURED"
-        usage = entry.get("usage")
-        if not isinstance(usage, dict):
-            usage = entry
-        values = [usage.get("input_tokens"), usage.get("output_tokens")]
-        if not all(isinstance(value, int) and not isinstance(value, bool)
-                   for value in values):
-            return "UNMEASURED"
-        total += sum(values)
-    return str(total)
+    measured = 0
+    missing = []
+    for result_path in result_paths:
+        try:
+            text = result_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            missing.append(result_path.as_posix())
+            continue
+        pairs = []
+        pair = _wave_token_pair(text)
+        if pair is not None:
+            pairs.append(pair)
+        else:
+            try:
+                payload = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                payload = None
+            if payload is not None:
+                pending = [payload]
+                while pending:
+                    item = pending.pop()
+                    if isinstance(item, dict):
+                        pair = _wave_token_pair(item)
+                        if pair is not None:
+                            pairs.append(pair)
+                        else:
+                            pending.extend(item.values())
+                    elif isinstance(item, list):
+                        pending.extend(item)
+            if pairs:
+                total += sum(sum(pair) for pair in pairs)
+                measured += 1
+                continue
+            try:
+                events = result_path.with_name("events.jsonl").read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                events = ""
+            for line in events.splitlines():
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                usage = event.get("usage") if isinstance(event, dict) else None
+                if usage is None and isinstance(event, dict):
+                    item = event.get("item")
+                    usage = item.get("usage") if isinstance(item, dict) else None
+                pair = _wave_token_pair(usage)
+                if pair is not None:
+                    pairs.append(pair)
+        if pairs:
+            total += sum(sum(pair) for pair in pairs)
+            measured += 1
+        else:
+            missing.append(result_path.as_posix())
+    if missing:
+        return "UNMEASURED (mcx usage missing: " + ", ".join(missing) + ")"
+    return str(total) if measured else "UNMEASURED (mcx usage missing)"
 
 
 _WAVE_PYTEST_COUNT_RE = re.compile(
@@ -18590,7 +18761,9 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                    sleep=time.sleep) -> int:
     """Close one wave from a clean checkout after a strict two-interpreter floor."""
     repo = _wave_repo_root(run=run)
-    base = str(args.base).strip()
+    raw_base = getattr(args, "base", None)
+    base = (_wave_previous_close(repo, run=run) if raw_base is None
+            else str(raw_base).strip())
     if not re.fullmatch(r"[0-9a-fA-F]{7,64}", base):
         raise FleetCliError("wave-close: --base must be a commit SHA")
     _wave_git(repo, "rev-parse", "--verify", f"{base}^{{commit}}", run=run)
@@ -18600,6 +18773,11 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     changelog = _read_task_arg(args.changelog)
     if not changelog.strip():
         raise FleetCliError("wave-close: --changelog must contain at least one sentence")
+    gaps = _wave_changelog_gaps(repo, base, extra=changelog, run=run)
+    if gaps:
+        raise FleetCliError(
+            "wave-close: CHANGELOG coverage missing for merge commit(s) since "
+            f"{base}: {', '.join(gaps)}")
     # Checked here, with the other cheap preconditions, because the reap and the
     # two-interpreter floor between this point and the commit take about twelve
     # minutes. On the verb's first real run an unset committer identity was not
@@ -18622,19 +18800,36 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     _deliver_notices(notices)
 
     wave_id = _wave_id(repo, run=run)
-    reap_count, reap_error = _supervisor_reap(caller_sid=caller)
+    reap_stats = {}
+    reap_count, reap_error = _supervisor_reap(caller_sid=caller,
+                                              reap_stats=reap_stats)
     if reap_error:
         print(f"wave-close: reap note: {reap_error}", file=sys.stderr)
     floor, tree = _wave_floor(repo, wave_id, run=run, which=which)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
-    claude_tokens = _wave_roster_claude_tokens(roster) if roster_ok else "UNMEASURED"
-    worker_count = _wave_registry_worker_count()
+    claude_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
+                     f"UNMEASURED (roster unavailable: {roster})")
+    lanes = _wave_landed_lanes(repo, base, run=run)
+    lane_text = ", ".join(f"{name}: {substrate}" for name, substrate, _sha in lanes)
+    if not lane_text:
+        lane_text = "none"
+    codex_tokens = (_wave_codex_tokens(repo)
+                    if any(substrate == "codex" for _name, substrate, _sha in lanes)
+                    else "0")
+    token_values = [claude_tokens, codex_tokens]
+    unknown = [value for value in token_values
+               if value.startswith("UNMEASURED")]
+    token_text = ("UNMEASURED (" + "; ".join(value[len("UNMEASURED ("):-1]
+                                                for value in unknown) + ")"
+                  if unknown else str(sum(int(value) for value in token_values)))
+    protected = reap_stats.get("protected_unread_mail", 0)
     throughput = (
         f"THROUGHPUT wave {wave_id} ({base}..{tree}): "
         + ", ".join(f"{name} +{values[0]}/-{values[1]}"
                      for name, values in buckets.items())
-        + f"; workers: {worker_count}; tokens: {claude_tokens}; reaped: {reap_count}")
+        + f"; workers: {len(lanes)} ({lane_text}); tokens: {token_text}; "
+        f"reaped: {reap_count}; protected: {protected} (unread mail)")
 
     # Re-check immediately before landing the append-only boundary.  The
     # floor is intentionally outside the lock, so the original claim cannot
@@ -24060,8 +24255,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_wave = sub.add_parser(
         "wave-close",
         help="reap, floor, account, land, push, and notify one wave boundary")
-    p_wave.add_argument("--base", required=True,
-                        help="base commit SHA for the throughput diff")
+    p_wave.add_argument("--base", required=False, default=None,
+                        help="base commit SHA for the throughput diff (default: previous wave-close commit)")
     p_wave.add_argument("--changelog", required=True,
                         help="CHANGELOG sentences, or @file containing them")
     p_wave.add_argument("--sid", help="override caller session id")
