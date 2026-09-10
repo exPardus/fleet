@@ -18358,15 +18358,22 @@ def _wave_id(repo, run=subprocess.run):
     match = re.search(r"(?:^|/)w(\d+)(?:[-/]|$)", branch)
     if match:
         return match.group(1)
-    for path in (Path(repo) / "supervisor" / "JOURNAL.md",
-                 Path(repo) / "docs" / "CHANGELOG.md"):
+    # Every source, and the MAX across all of them -- not the first file that
+    # happens to match. The board rolls, so the highest wave number migrates out
+    # of JOURNAL.md into journal-history/ and a first-match scan then reads a
+    # stale low number and reuses a wave id that is already spent.
+    sources = [Path(repo) / "supervisor" / "JOURNAL.md",
+               Path(repo) / "docs" / "CHANGELOG.md"]
+    sources.extend(sorted((Path(repo) / "supervisor" / "journal-history").glob("*.md")))
+    found = []
+    for path in sources:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        found = [int(value) for value in re.findall(r"THROUGHPUT wave (\d+)", text)]
-        if found:
-            return str(max(found) + 1)
+        found.extend(int(value) for value in re.findall(r"THROUGHPUT wave (\d+)", text))
+    if found:
+        return str(max(found) + 1)
     return "UNMEASURED"
 
 
