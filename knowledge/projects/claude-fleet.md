@@ -66,8 +66,20 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   run out.
   Note the ceiling is about the HOST, not about one fleet: lanes running in the operator's other
   projects count against the same 8 GB, and are not visible in `fleet status`.
+- **DO NOT background `mcx spawn --wait` ON THIS HOST — it loses the lane. MEASURED 2026-09-10.**
+  `--wait` is documented to stop its run and children when the waiter is cancelled, and this host's
+  HARNESS kills background commands on its own low-memory guard, which appears keyed on `free` (253 MB
+  at the time) rather than `available` (4147 MB, PSI zero). The two compose into a lane that is
+  spawned and then immediately `stopped`: lane `mImoA8QT` died that way seconds after dispatch. The
+  same guard killed two full floor runs within seconds each.
+  **The safe pair on this host: `mcx spawn` WITHOUT `--wait` (the lane detaches and survives), then a
+  separate blocking `tail --pid=<mcx _run pid> -f /dev/null` as the harness-backgrounded waiter** —
+  killing THAT waiter is harmless, because it owns nothing. Get the pid with
+  `pgrep -af "mcx _run.*<ID>"`. Same reasoning for long test runs: **run the floor in the FOREGROUND,
+  split into halves** to stay inside the tool timeout.
 - **mcx 0.2.0** (installed 2026-09-10T16:4xZ): `mcx spawn --wait` prints the ID, stays alive for that
-  one run and exits with its status — background THAT and let the harness notify you. **Poll loops
+  one run and exits with its status — sound on a host without a background-kill guard, but see the
+  entry above for why it is not used here. **Poll loops
   (`mcx list` + `sleep`) are retired**: each costs a shell and they are what a low-memory kill reaches
   first. `mcx steer --wait ID` tracks a resumed run, one waiter per run; TERM/INT/HUP on a waiter
   stops its run and children, so never `&` or `nohup` one. Approval modes `never` (default,
