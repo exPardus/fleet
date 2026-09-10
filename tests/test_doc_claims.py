@@ -161,9 +161,9 @@ nothing makes them agree tomorrow -- a check defined and never wired in would
 inflate the grep and not the output. `_registered_doctor_checks()` below reads
 the list itself.
 
-WHY THERE IS A SEED TEST. Root `CLAUDE.md`: "a verifier without its own seed
-test proves nothing." A detector that silently matches nothing is green for the
-same reason a correct doc is green, and this one lives or dies on its regexes.
+WHY THERE IS A SEED TEST. A detector that silently matches nothing is green for
+the same reason a correct doc is green, so this one lives or dies on its
+regexes.
 `test_the_detector_catches_planted_drift` plants each of the three drifts in a
 synthetic document and asserts the detector reports it.
 """
@@ -608,8 +608,7 @@ def test_the_registered_doctor_check_count_is_derivable():
 def test_the_detector_catches_planted_drift():
     """The seed test: plant each drift and assert the detector reports it.
 
-    Root `CLAUDE.md`: a verifier without its own seed test proves nothing. All
-    three detectors here are regex-based, and a regex that matches nothing is
+    All three detectors here are regex-based, and a regex that matches nothing is
     green for the same reason a correct document is green.
     """
     shipped = _shipped_verbs()
