@@ -7,6 +7,13 @@ bodies. Current claim/incarnation, live PID/busy status and unread/claimed mail
 remain protected (including retired sids). Result-only idle is not proof of
 landing; registry `lane_state` or matching outcome kind records it. The older TTL
 policy remains a fallback, and the archive verb itself retains its TTL contract.
+The validated lifecycle caller's current/retired SID union is protected for the
+entire pass, including after release or handoff transfers away its holdership.
+Overlapping SID ownership between any registry rows independently protects all
+involved rows, including dead/archived candidates. Both vetoes live in the shared
+reap predicate and apply to fresh archives, resumed archives and husk removal;
+no tier may resolve an ambiguous identity by guessing. A later body's pass can
+still reap a uniquely owned dead predecessor; caller protection is not persisted.
 See `docs/SPEC.md` §11 for the executable contract and §12 for the claim protocol.
 The 2026-07-27 beat-driven trigger below is historical; supervisors no longer run
 manual autoclean/archive steps. Boot prints the reap count and the 3-session /

@@ -299,6 +299,15 @@ daemon-dead evidence. The legacy TTL fallback remains for ordinary older complet
 workers, with the same stronger PID/mail protections in autoclean. Manual archive
 keeps its existing TTL contract. Crash-resumes and husks share the same whole-row protection. Automatic archive
 leaves mailbox files in place, including mail that arrives during evidence moves.
+Lifecycle calls explicitly carry the validated caller SID through the pass:
+the caller's whole current/retired SID union is protected even after release or
+handoff removes its claim holdership. Any overlap in SID ownership between
+registry rows also vetoes reaping for every involved row, including dead/archived
+rows that the identity resolver may otherwise deprioritize. This shared veto
+covers eligibility, pre-commit checks, archive resumes and husk removal; reaping
+must not undo an ambiguous-identity abstention by the release path. Caller
+protection lasts for that pass only, so a later body's pass can reap a uniquely
+owned dead predecessor. Unreadable ownership evidence defers removal.
 `reaped` counts newly archived registry rows, not retries or duplicate husk removals.
 The rendered roster/status portion is the pre-pass snapshot; use the post-boot
 roster for the after receipt. Non-native Codex rows are not archived by this native
