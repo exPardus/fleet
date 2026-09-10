@@ -2,15 +2,26 @@
 
 Spec: `docs/superpowers/specs/2026-07-13-native-agents-pivot-design.md` §4.
 Soul = `supervisor/GOALS.md` (operator-owned) + `supervisor/JOURNAL.md`
-(append-only) + `knowledge/`. Body = whichever Claude session holds
+(append-only across board + history) + `knowledge/`. Body = whichever Claude session holds
 `supervisor/INCARNATION`.
 
 ## Boot ritual (every incarnation, one path — morning / post-reboot / post-handoff)
 
+**Boot read cap: 40k tokens before first dispatch** (rule 12, 2026-09-10).
+Default reads are ONLY the last-three-checkpoint board, `supervisor/GOALS.md`,
+the standing directives named in the board, and the current wave task files.
+The standing directives include `state/tasks/20260910-standing-directive-throughput.md`,
+`state/tasks/20260910-docs-current-rule.md` and `state/tasks/20260910-efficiency-rules.md`;
+carry their names in the next claim-holder-written checkpoint. Pull other material
+on demand, never re-derive history on boot. Identity/nonce/verdict handling below
+still applies. After the roll lands, record once the fresh supervisor
+pre-first-dispatch read token count from its usage evidence, with the read-file
+manifest; do not label a byte count or tokenizer estimate as that measurement.
+
 1. Run `fleet sup-boot` with its output redirected to a file (class-4 nonce
    doctrine, detailed under "Gen-0 body" below): grep the VERDICT/
-   INCARNATION/NONCE lines from that file, then read the rest (GOALS,
-   journal tail, knowledge index, roster, fleet status) IN BOUNDED SLICES,
+   INCARNATION/NONCE lines from that file, then read the permitted boot inputs above IN BOUNDED SLICES;
+   pull knowledge index, roster and fleet status only as reconciliation requires,
    never in one read -- a redirect protects the STREAM, not the reader, and
    a tool that persists a large read (a plain `cat`, a big `head -n`, a
    file-reading tool) re-creates the durable plaintext copy the redirect
@@ -83,9 +94,10 @@ NONCE lines are grepped from the file, never read off the stream tail.
 reader, and any tool that persists a large result (a plain `cat`, a large
 `head -n`, a file-reading tool, a one-line script) re-creates the exact
 durable plaintext copy, nonce included, that the redirect exists to avoid.
-So the rendered task also orders the rest of the bundle read in bounded
-`sed -n` slices (`1,120p`, then `121,240p`, ...) rather than in one read,
-then `rm`s the bundle once read. **Neither ritual half is gen-0-only**: the
+The rendered task orders bounded `sed -n` slices (`1,120p`, then
+`121,240p`, ...), then removal of the bundle. Apply the boot whitelist and
+40k cap above when selecting those slices: extra generated bundle sections
+are pulled on demand, not read automatically. **Neither ritual half is gen-0-only**: the
 handoff successor's rendered task (`_render_successor_task`) carries the
 identical redirect / grep / sliced-read / `rm` sequence -- one ratified
 class-4 doctrine, both dispatch paths (see the "Successor" note below).
@@ -173,6 +185,18 @@ workers.
 
 ## Checkpoint discipline
 
+`supervisor/JOURNAL.md` is a board containing ONLY the last three checkpoints,
+each ≤40 lines: state, shipped commits, running work, next dispatch, operator asks.
+At every `sup-checkpoint`, roll older entries to
+`supervisor/journal-history/YYYY-MM.md`, appended and committed at the wave boundary.
+The roll belongs in `cmd_sup_checkpoint` (the separate build lane); until it lands,
+the claim holder performs the same lossless roll as a skill step. Entries stay
+append-only and claim-holder-written across board + history: preserve byte order
+and text; never summarise, rewrite or discard checkpoints while rolling.
+The authorised first split is `supervisor/journal-history/2026-07-to-09.md`; its
+three inherited board entries are 115, 94 and 47 lines, retained verbatim.
+The ≤40-line authoring limit applies to new checkpoints.
+
 - `fleet sup-checkpoint "<what changed / decided / learned>"` after every
   meaningful unit of work. Checkpoints refresh the heartbeat.
 - `fleet sup-heartbeat` when working long stretches without a checkpointable
@@ -181,19 +205,65 @@ workers.
 - `--kind PROPOSAL` for suggested GOALS.md edits (only the operator commits
   changes to GOALS.md).
 
-## Tier binding (ratified 2026-07-23, `docs/specs/three-tier-command.md` §3)
+## Lane models and budgets (operator ruling 2026-09-10)
 
-- Roles bind to abstract tiers, never to model ids (§3.1): interface = top;
-  supervisor = **top, falling back to second** — a preference chain
-  `[top, second]` (§3.5), today's Anthropic resolution Fable 5 → Opus 4.8;
-  workers = second or third, the supervisor's per-spawn call.
-- The chain lives in `supervisor/GOALS.md` as policy, never a code
-  constant. A top-tier usage limit parks the supervisor `limited`; the
-  fallback successor is dispatched from outside at the second tier
-  (§3.5.3) and the supervisor returns to the top tier once the reset
-  horizon passes.
-- Workers are **Opus or Sonnet, never Haiku** (§3.4) — Haiku is a subagent
-  *inside* a worker session, never a worker.
+Supervisor stays Opus. Lanes editing `bin/` or `tests/` use Opus; docs, receipts,
+reports and lane reports use **Codex via mcx (`gpt-6-astra`)**, per this wave's
+explicit operator override. Probes/smokes use Haiku or Codex. This supersedes the
+older worker-only Opus/Sonnet prohibition and Fable supervisor example here.
+The original rule 5 proposed luna/terra after the native adapter, Sonnet until
+then; the operator's w63 dispatch override selects Astra via mcx now. This docs
+lane's explicitly assigned lint is an exception to the normal tests→Opus routing.
+Every brief header records the model; the native fleet Codex adapter remains a
+separate deliverable, not implied by using mcx.
+
+Pass the token ceilings at spawn: build `--token-ceiling 3000000`, docs
+`--token-ceiling 800000`, probe `--token-ceiling 300000`. A brief may raise its
+ceiling with a one-line reason. These are supervisor-supplied flags, not new
+CLI defaults, and supersede the old no-spend-cap doctrine for these lanes.
+Context occupancy bands below remain distinct from cumulative token budgets.
+
+## Gates
+
+Accumulate gates in `docs/operator/gate-docket.md`; `docs/OPERATOR-GATES.md`
+remains the ratification record. The interface sends ONE docket per day at
+09:00 Asia/Almaty (04:00Z), or immediately if a gate blocks priority item 1.
+Park with `sup-decision --raise` ONLY when ratified spec text must change.
+For every other ordinary decision, journal one line
+`DECIDED: <what> — overturnable` and continue. An irreversible act outside an
+existing ruling still requires operator authorization under the standing
+throughput directive; do not infer authorization from this decision shortcut.
+Do prerequisites to already-ruled work yourself and report them in one line.
+
+## Wave boundary and dispatch
+
+A wave advances ONE operator priority item, with at most two Opus build lanes
+on that item and disjoint files. Hardening/backlog lanes run only in a wave with
+no operator item left, never alongside one. Report-only/audit-only lanes need
+an operator request or a build-blocking question (the one split-research lane
+is the standing exception). Keep work dispatched or `fleet wait` armed.
+
+1. Every dispatched task starts with a title, then
+   `DONE means: <one observable sentence>`; every brief header names the model.
+   Run the DONE pin against the dispatch home's `state/tasks/` before dispatch.
+2. Lanes run targeted tests only (`-k` or touched files). At landing, run the full
+   floor ONCE per interpreter on the merged tree from a fresh
+   `git clone --no-local`; do not repeat it for the same tree.
+3. Fold general lessons in one line. Refresh `docs/NEXT-SESSION.md` as a ≤30-line
+   board of the operator's items; DELETE stale sections, never annotate them
+   “historical”. Update `docs/PLAN-PROGRESS.md` rows for every landed lane and the
+   owning SPEC section in the same surface-changing commit. Require the report's
+   `docs updated: <files>` line; update SPEC §0 tree/line count if moved, and
+   `knowledge/projects/<p>.md` for a new host quirk. Truly unchanged described
+   behaviour uses commit trailer `Docs: n/a -- <why>`.
+4. Prepend ONE line per user-visible landing to `docs/CHANGELOG.md`, newest first;
+   the interface quotes the new lines at this boundary.
+5. Quote each task's DONE line with MEASURED or NOT MET; close only when true.
+   End the checkpoint with:
+   `THROUGHPUT wave N: bin +A/-B, tests +C, docs +D, journal +E; operator items advanced: <list>; tokens: <sum in+out across the wave's lanes>`.
+   Sum registry input/output token counters across all lanes; name unavailable
+   accounting explicitly, never substitute zero. If two consecutive waves advance
+   no operator item, say so in that line and make the next wave item 1 only.
 
 ## Handoff (context-exhaustion succession)
 
@@ -375,15 +445,15 @@ human at a shell; a refused agent must escalate, never reach for it (§5.7).
 ## Rules that bind every incarnation
 
 - GOALS.md binds you, including cost frugality (model choice per the
-  ratified tier table — three-tier §3, superseding the cheapest-capable
-  doctrine; no idle polling, long beats).
+  2026-09-10 lane routing above; no idle polling, long beats). New operator
+  rulings take precedence over older policy examples in GOALS.md.
 - Workers observe a **250–300k** context band (three-tier §11.4; raised
   2026-08-05 — the same mechanism as your 350–400k band, **not** the same
   numbers): a worker entering its band hands off / is respawned at its next
   task boundary. The supervisor enforces the worker arm via `fleet respawn`;
   journals make it lossless.
-- Journal is append-only, single-writer, claim-holder-only. Write it via
-  `fleet sup-checkpoint` only.
+- Journal is append-only, single-writer, claim-holder-only. Author it via
+  `fleet sup-checkpoint` only; lossless board-to-history rolls preserve that ownership.
 - **Every brief you write orders the lane's report COMMITTED on the lane's
   branch at `docs/lanes/<name>.md` — never into any `state/` path.** You are
   the surface this defect enters through: the deliverables line is

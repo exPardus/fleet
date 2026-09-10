@@ -1,11 +1,29 @@
 # claude-fleet
 
+**A change to a surface is not done until the document that describes that surface says so.**
+A commit touching `bin/`, `skills/` or `commands/` also updates its owning
+`docs/SPEC.md` §N or `docs/specs/<x>.md`, and its `docs/PLAN-PROGRESS.md` row;
+a new host quirk also updates `knowledge/projects/<p>.md`. If no described behaviour
+changes, carry the commit trailer `Docs: n/a -- <why>`. Report `docs updated: <files>`.
+`tests/test_docs_currency.py` checks the last 20 non-merge commits after the adoption
+base `708fa45` for `bin/*.py` changes with `docs/` or a `Docs: n/a` trailer.
+
+Efficiency doctrine (operator, 2026-09-10): tasks start with `DONE means:` immediately
+after the title; every brief names its model. Lanes run targeted tests only. The supervisor
+runs the full floor once per interpreter on the merged tree in a fresh
+`git clone --no-local`, refreshes the ≤30-line `docs/NEXT-SESSION.md` board and progress
+rows, and prepends one line per user-visible landing to `docs/CHANGELOG.md`.
+The dispatch, gate, journal, token-budget and boot-cap rules live in
+`skills/fleet/supervisor.md`; interface delivery lives in
+`docs/operator/server-interface-profile.md`. Do discovered prerequisites and report
+them in one line; throughput caps essays, not documentation currency.
+
 System-wide tool: one Claude Code manager session spawns, monitors, steers, and hands off multiple worker sessions across projects on this machine.
 
 **Start here: `docs/SPEC.md`** — the v3 spec of record, descriptive of the post-pivot `bin/fleet.py` (the v1→v2.3 body, including the F1–F33 finding record, is moved verbatim to `docs/SPEC-v2-history.md` — do not re-litigate it). Milestones are §18, and it is **more current than this line used to claim** *(corrected 2026-08-09, measured against §18 itself)*: it records M-0/M-A/M-B/M-C **and M-D (SHIPPED 2026-07-18) and M-E (SHIPPED 2026-07-21)**, plus the post-M-E entries — reconcile, M-F (specced/unbuilt), three-tier + claim-nonce (ratified and built), the supervisor tombstone, and M-G (draft). The superseded sentence said M-D and M-E were "not yet folded into §18", which sent readers past the section that answers them; found by the wave-48 install rehearsal, which had inherited the error into `docs/launch-readiness.md`. Read `docs/PLAN-PROGRESS.md` and `docs/NEXT-SESSION.md` for work **past** what §18 records. Open operator decisions live in `docs/OPERATOR-GATES.md` — **that file is the record**; `docs/operator/` carries the tracked one-screen digest of what is open (`gate-docket.md`) and prepared operator recipes, and is never the record. *(Added 2026-08-09: the digest previously lived only at the gitignored, untracked `state/w48-operator-docket.md`, which is now superseded — and had gone stale at three gates while four were open.)*
 
 Rules:
-- **Run the suite with `uv run --no-project --python 3.1x --with pytest python -m pytest -q`** *(corrected 2026-09-09, measured on this host)*. The superseded line said Python is `py -3.13` and that changes must run on 3.10 via `py -3.10 -m pytest -q`; **`py` is the WINDOWS launcher and that sentence was a fact about the retired Windows host** — on this box `py` is absent and **no interpreter on `PATH` has pytest importable, the china-infra venv included**, so the documented command could not run at all. Two lanes rediscovered the `uv` workaround independently in one hour before anyone wrote it down. **The DOCTRINE is unchanged and still binds:** the floor is `fleet.MIN_PYTHON_VERSION` (3.10), declared once and checked everywhere by `TestInterpreterFloor`; `bin/hooks/run_py.sh` may select any interpreter at or above it, so **changes must run on 3.10**, not only on the newer one. `bin/fleet.py` is stdlib-only, single file. Baseline **4880 collected, identical on 3.10 and 3.12** at `1294920`; the six failures are host assumptions (four Windows drive-qualified-path escapes, two venv-shim re-execs), not fleet defects, and carry no `skipif`.
+- **Run the suite with `uv run --no-project --python 3.1x --with pytest python -m pytest -q`** *(corrected 2026-09-09, measured on this host)*. The superseded line said Python is `py -3.13` and that changes must run on 3.10 via `py -3.10 -m pytest -q`; **`py` is the WINDOWS launcher and that sentence was a fact about the retired Windows host** — on this box `py` is absent and **no interpreter on `PATH` has pytest importable, the china-infra venv included**, so the documented command could not run at all. Two lanes rediscovered the `uv` workaround independently in one hour before anyone wrote it down. **The DOCTRINE is unchanged and still binds:** the floor is `fleet.MIN_PYTHON_VERSION` (3.10), declared once and checked everywhere by `TestInterpreterFloor`; `bin/hooks/run_py.sh` may select any interpreter at or above it, so **the supervisor checks the merged tree on 3.10**, not only on the newer one; lanes run targeted checks only. `bin/fleet.py` is stdlib-only, single file. Baseline **4880 collected, identical on 3.10 and 3.12** at `1294920`; the six failures are host assumptions (four Windows drive-qualified-path escapes, two venv-shim re-execs), not fleet defects, and carry no `skipif`.
 - Hook commands in `worker-settings.json` use FORWARD slashes (Git Bash `sh -c` eats backslashes).
 - Never launch background processes via Git-Bash `&` — detached Popen flags or Start-Process only.
 - Runtime dirs `state/`, `logs/`, `mailbox/` are gitignored; `knowledge/` is git-tracked.
