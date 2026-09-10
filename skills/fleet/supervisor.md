@@ -138,6 +138,93 @@ sessions max** across Claude and Codex (each Codex lane counts as one) and
 require **1.5 GB available memory**. These dispatch limits are instructions in
 the boot context; this reap change does not add a dispatch resource probe.
 
+### SUPERSEDED 2026-09-10 by the reap mechanism — kept because HOW it was won is the finding
+
+The block below described the beat when **`fleet autoclean` was the supervisor's own
+job**. The operator's 2026-09-10 amendment moved reaping into `sup-boot`,
+`sup-handoff-complete` and `sup-release`, so the *instruction* is dead and the
+paragraph above replaces it. **It is kept, unedited, for three findings that are still
+true and were expensive to learn**, and that a summary silently discarded:
+
+1. **The §7 exemption must be carried explicitly at every frame, never inherited from
+   the call graph.** Between 2026-07-27 and 2026-07-28 the exemption stopped at
+   `cmd_autoclean`'s own frame while tier 1 delegated to the gated `cmd_archive`, so
+   every beat-driven sweep lost its archive pass — and tiers 2 and 3 kept working, so
+   the run still *reported* mostly-successful. What accumulated was unarchived terminal
+   registry records, not husks. Ratified shape:
+   `cmd_archive(..., as_autoclean_tier=True)` (four-councilor ruling,
+   `docs/decisions/W9-section7-council-synthesis.md`, Verdict A rider 1).
+2. **A bare `fleet archive` on the beat is a byte-identical repeat of the line above it**
+   and re-introducing one is a regression — `cmd_autoclean` hands
+   `Namespace(name=None, ttl_hours=None, dry_run=False)` to the same `cmd_archive`.
+3. **`--dry-run` does not disarm §7**: the gate is a policy on the CALLER, not on the
+   effect. That is why `autoclean` could never have been fixed with a flag, and it is
+   the same reasoning the new automatic pass depends on.
+
+*A deletion is not a supersession. The text that records why a mechanism has the shape
+it has outlives the instruction it was wrapped in.*
+
+<details>
+<summary>The superseded beat text, verbatim</summary>
+
+Each beat: `fleet status` (runs the outcome discriminator + the silent-limit
+transcript scan -- a rate-limit wall shows as `limited`, contract G11, never
+`dead-suspected`), then **`fleet autoclean`** (below) — which is what retires
+idle/dead/interrupted native workers past the TTL into tombstoned history —
+then `fleet resume-limited` for any worker whose reset horizon has passed,
+then a checkpoint/heartbeat (below).
+
+**There is no `fleet archive` step on the beat, and adding one back is a
+regression.** The beat used to run a bare `fleet archive` immediately after
+`fleet autoclean`. Since tier 1 of the sweep actually runs (2026-07-28) that
+is a *byte-identical repeat of the command one line above it*:
+`cmd_autoclean` builds `Namespace(name=None, ttl_hours=None, dry_run=False)`
+and hands it to the same `cmd_archive` a bare `fleet archive` reaches, so
+everything eligible was archived a moment earlier and the second call can only
+re-fetch the roster and print `archived 0`. Worse than a wasted subprocess:
+**the beat runs a §7-gate-armed verb one line above the paragraph explaining
+that its predecessor is exempt from that gate** — and the beat is by
+definition holding a fresh claim, so the armed call is refused while the
+exempt one it duplicates succeeds. If you want to see what the sweep is about
+to retire, `fleet archive --dry-run` remains available as an explicit
+preview — it mutates nothing. **From the beat it still needs your generation**
+(`fleet archive --dry-run --nonce <gen>`): §7 is a policy on the caller, not on
+the effect, so `--dry-run` does not disarm it. You hold a generation and can
+present one, which is exactly the difference between this preview and the
+sweep — the interface tier holds none, which is why `autoclean` could never
+have been fixed with a flag. What must not come back is the unconditional
+armed call.
+
+**`fleet autoclean` is YOUR job, not a timer's** (operator ruling
+2026-07-27). It used to run from a Windows Scheduled Task every 6h; that is
+being retired. A timer sweeps when the clock says so, which on a machine
+that loses power means **it does not sweep at all** -- the task carried
+`StartWhenAvailable: False`, so the missed occurrence was dropped and
+nothing caught up at boot, leaving an 18-hour gap in a 6-hourly guard that
+nobody noticed. Running it on the beat ties the sweep to *the fleet being
+alive*, which is the condition that actually makes sweeping necessary. The
+interface tier runs it too, in its startup ritual, so a fleet with no
+supervisor still gets swept. `autoclean` is exempt from §7's claim gate, so
+it needs no `--nonce` from either caller — and it has no `--nonce` flag to
+give one, so if you ever see the sweep refused by the gate that is a BUG in
+fleet, not something you can work around from the beat. **It was exactly that
+bug between 2026-07-27 and 2026-07-28**: the exemption stopped at
+`cmd_autoclean`'s own frame while tier 1 delegated to `cmd_archive`, which is
+gated, so every beat-driven sweep lost its archive pass — 2 of 38 recorded
+`autoclean_run` events carry the gate error, and the reason it is not all of
+them is that only a beat-driven run holds a fresh claim. Note the shape of how
+that read on the surface: tiers 2 and 3 are isolated from tier 1's failure and
+kept working, so the sweep still reported a mostly-successful run. What
+accumulated was *unarchived terminal registry records*, not husks. The
+exemption now travels explicitly into the tier call, as
+`cmd_archive(..., as_autoclean_tier=True)` — ratified as **the** correct shape
+by the four-councilor §7 ruling of 2026-07-28
+(`docs/decisions/W9-section7-council-synthesis.md`, Verdict A rider 1: the
+exemption is carried explicitly at every frame and never inherited from the
+call graph). Report a recurrence rather than routing around it.
+
+</details>
+
 `limited` is a
 sticky park: the boot reconcile and the epoch freeze never demote it --
 `fleet resume-limited` clears a parked worker via fork-steer (M-B T6);
