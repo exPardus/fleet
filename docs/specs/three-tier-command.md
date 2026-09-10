@@ -1788,12 +1788,12 @@ path, and cost/token *counting* demoted to a flag, default off
 
 **This is decided, not pending** — and the decision is witnessed in-tree, not by this document. The
 manager's reading was put to the operator and **confirmed**; the ruling is recorded as the **third
-addendum** to `knowledge/lessons.md#2026-07-23-three-tier-inputs` (the same anchor whose earlier text
+addendum** to `docs/archive/lessons-history.md#2026-07-23-three-tier-inputs` (the same anchor whose earlier text
 said the operator *"rules on it at ratification"* — this addendum is that ruling):
 
 ```
 # live: a claim about the working tree's recorded operator decisions, not about this spec's pinned commit
-$ grep -c "Third addendum (2026-07-23, operator ruling on the cap-doctrine reading)" knowledge/lessons.md
+$ grep -c "Third addendum (2026-07-23, operator ruling on the cap-doctrine reading)" docs/archive/lessons-history.md
 1
 ```
 
