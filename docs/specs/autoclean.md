@@ -1,5 +1,18 @@
 # Spec: Autoclean — staleness is cleaned up without anyone remembering
 
+**2026-09-10 lifecycle mechanism:** successful supervisor boot, handoff completion
+and release invoke autoclean internally. Tier 1 now ignores age for explicit
+landed/abandoned idle lanes, daemon-confirmed dead rows and predecessor supervisor
+bodies. Current claim/incarnation, live PID/busy status and unread/claimed mail
+remain protected (including retired sids). Result-only idle is not proof of
+landing; registry `lane_state` or matching outcome kind records it. The older TTL
+policy remains a fallback, and the archive verb itself retains its TTL contract.
+See `docs/SPEC.md` §11 for the executable contract and §12 for the claim protocol.
+The 2026-07-27 beat-driven trigger below is historical; supervisors no longer run
+manual autoclean/archive steps. Boot prints the reap count and the 3-session /
+1.5 GB dispatch instructions without changing nonce publication.
+
+
 **Status:** **BUILT AND SHIPPED, WITH ITS TRIGGER RETIRED** (mc-autoclean, designed 2026-07-16;
 shipped in M-C, POSIX backend added by the 2026-07-23 reconcile campaign). Status corrected
 2026-07-27 by the `unbuilt-sweep` pass — it still read `ready-for-build` long after the verb, the

@@ -273,6 +273,9 @@ class TestRegistryFailOpen:
 
     def test_run_a_intact_registry_spares_protected(self, home):
         roster = self._seed(home)
+        # A daemon-dead worker now reaps without TTL/outcome. Keep this F1
+        # control protected by actual unfinished work, not by the old TTL.
+        (home / "mailbox" / f"{SID_LIVE}.md").write_text("unread work", encoding="utf-8")
         calls = []
         rc = fleet.cmd_autoclean(_autoclean_args(),
                                  run=fake_run_factory(roster, calls=calls),
