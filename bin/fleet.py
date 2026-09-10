@@ -4283,6 +4283,61 @@ def home_identity(text) -> str:
     return s
 
 
+# --- THE HOME'S SHORT NAME (G-K5 item 1) -----------------------------------
+#
+# `home_identity` is a home's identity and is an absolute PATH -- the right key
+# for a machine-global list and far too wide for a one-line surface. The
+# statusline needs the same identity in five characters, so an operator running
+# two fleets can tell the two rows apart in the bar.
+#
+# WHY A DIGEST AND NOT A NAME. Bounded width forces non-injectivity on EVERY
+# scheme -- there are more absolute paths than four-character strings -- so the
+# question is not "can it collide" but "what does each character buy". A digest
+# spends every character on entropy; a human-readable abbreviation spends them
+# on whatever the paths have in common, and on THIS tool the paths have the
+# name in common: a fleet home is a clone or worktree of this repo, so
+# `/home/a/proga/fleet`, `/srv/fleet` and `/mnt/w/fleet` all abbreviate to
+# `fleet` and the tag would render identical bytes for three different homes.
+# That is P1-13 -- two distinct states, one byte sequence -- on the one field
+# added to stop exactly that confusion.
+#
+# AND IT LAUNDERS FOREIGN TEXT. A member path comes out of
+# `~/.claude/fleet-homes.list`, which since multi-fleet slice (d) is not
+# necessarily text the reader wrote. A name-shaped tag would need the
+# statusline's `_safe` sanitiser and its bracket-stripping on a NEW field --
+# inside the nameplate, which is the one token `_safe` exists to protect. Hex
+# digits cannot carry an escape, a CR or a bracket at all.
+
+#: Tag width, in hex digits. 65 536 buckets: with five homes on a machine the
+#: chance that any two share a tag is ~1.5e-4, and a collision is visible in
+#: `fleet homes`, which renders the tags next to their paths. Three digits
+#: (4096) puts that at ~2.4e-3 and buys one column; five buys nothing an
+#: operator can use.
+HOME_TAG_HEX = 4
+
+
+def home_tag(home) -> str:
+    """A home's short name: `HOME_TAG_HEX` hex digits, for one-line surfaces.
+
+    DERIVED FROM `home_identity`, NOT FROM THE PATH AS TYPED, and that is the
+    load-bearing half. `C:\\f`, `C:/f/` and `C:/f` are ONE home to the homes
+    list's fold, so they must be one tag here too -- otherwise the same fleet
+    would wear two names depending on how a spelling reached this function, and
+    "one home never looks different from itself" is the whole point of the
+    field.
+
+    A PURE FUNCTION OF THE HOME AND NOTHING ELSE. Not the session, not the
+    population, not the registry: two sessions reading one home must render one
+    tag, and a home must not be renamed by an unrelated home joining the list.
+
+    TOTAL. `home_identity` stringifies, and `backslashreplace` cannot raise on
+    a `str`, so there is no input shape that turns the tag into a traceback on
+    a surface whose exception handler renders a BLANK line."""
+    ident = home_identity(home)
+    digest = hashlib.sha256(ident.encode("utf-8", "backslashreplace")).hexdigest()
+    return digest[:HOME_TAG_HEX]
+
+
 def parse_homes_list_line(line) -> tuple:
     """`(kind, identity)` for one line. kind is
     "blank" | "invalid" | "add" | "retire".
@@ -6514,10 +6569,35 @@ def _install_statusline(force: bool = False, chain: bool = False) -> None:
 
 
 def cmd_home(args) -> int:
-    """`fleet home`: print the resolved FLEET_HOME.
+    """`fleet home [--tag]`: print the resolved FLEET_HOME, or its tag.
 
     The skill, the slash commands and any collaborator script need the fleet
-    root without hardcoding one developer's absolute path (SPEC §14)."""
+    root without hardcoding one developer's absolute path (SPEC §14).
+
+    THE BARE FORM IS UNTOUCHED AND MUST STAY THAT WAY. `$(fleet home)` is
+    substituted into paths by the skill, the slash commands and the briefs; one
+    extra word on that line breaks every one of them, which is why the tag is a
+    FLAG and not a second column.
+
+    `--tag` ANSWERS THE QUESTION THE STATUSLINE ASKS (G-K5 item 1): the bar
+    renders `[fleet:9c3a]` and this is how a session finds out whether `9c3a`
+    is the home it is standing in. `fleet homes` is the other half -- it maps
+    tags to paths for the LISTED homes, and an install-root home that was never
+    added to the list appears in neither, so this is the only surface that can
+    name it. Same pure function, so the two can never disagree.
+
+    `--tag` TAGS `FLEET_HOME` RAW, NOT THE `.resolve()`d PATH THE BARE FORM
+    PRINTS, and the asymmetry is deliberate. The tag's job is to match the
+    NAMEPLATE, and the statusline tags `fleet.FLEET_HOME` exactly as it stands;
+    `home_identity` is ratified as *"deliberately not `Path.resolve()`"* for the
+    homes-list fold, so resolving here would make this the one surface in the
+    multi-fleet machinery that keys a home differently from every other. The
+    two spellings coincide whenever `$FLEET_HOME` is unset -- the default is
+    already `.resolve()`d at import -- and where they diverge it is the raw one
+    that agrees with the bar and with the list."""
+    if getattr(args, "tag", False):
+        print(home_tag(FLEET_HOME))
+        return 0
     print(Path(FLEET_HOME).resolve().as_posix())
     return 0
 
@@ -6566,14 +6646,32 @@ def render_homes_view() -> str:
         out.append("  (no homes listed -- this machine runs a single fleet)")
     else:
         width = max(len(h["path"]) for h in pop["homes"])
-        for entry in pop["homes"]:
+        # THE TAG COLUMN IS THE STATUSLINE'S LEGEND (G-K5 item 1). The bar
+        # renders `[fleet:9c3a]` and four hex digits name no directory on their
+        # own, so the tag has to be readable NEXT TO its path somewhere, and
+        # this is the view whose subject is exactly "which homes are there".
+        # No extra read: the population is already in hand and `home_tag` is a
+        # pure string function.
+        tags = [home_tag(h["path"]) for h in pop["homes"]]
+        for entry, tag in zip(pop["homes"], tags):
             if entry["ok"]:
                 n = entry["workers"]
                 state = f"ok ({n} worker{'' if n == 1 else 's'})"
             else:
                 state = {"not_initialized": "not initialized"}.get(
                     entry["reason"], entry["reason"])
-            out.append(f"  {entry['path']:<{width}}  {state}")
+            out.append(f"  {tag}  {entry['path']:<{width}}  {state}")
+        # A COLLISION IS NAMED, NEVER SILENT. Four hex digits are 65 536
+        # buckets, so this is rare -- and the whole value of the tag is that
+        # two homes never render the same bar, so the one surface that can see
+        # a collision must say so rather than let the operator keep trusting a
+        # nameplate that has stopped separating them.
+        clash = sorted({t for t in tags if tags.count(t) > 1})
+        if clash:
+            out.append(
+                f"  note: {len(clash)} tag(s) shared by two or more homes "
+                f"({', '.join(clash)}) -- those homes render the same "
+                f"statusline nameplate and cannot be told apart in the bar")
     if pop["retired"]:
         out.append(f"  ({len(pop['retired'])} retired)")
     if pop["invalid_lines"]:
@@ -22326,7 +22424,10 @@ def build_parser() -> argparse.ArgumentParser:
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("home", help="print the resolved FLEET_HOME path")
+    p_home = sub.add_parser("home", help="print the resolved FLEET_HOME path")
+    p_home.add_argument("--tag", action="store_true",
+                        help="print the home's statusline tag instead of its "
+                             "path (the `9c3a` in the bar's `[fleet:9c3a]`)")
 
     sub.add_parser("knowledge", help="print knowledge/INDEX.md")
 
