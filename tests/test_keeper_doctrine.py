@@ -76,6 +76,7 @@ ALLOWED_FLEET_ATTRIBUTES = {
     "status_snapshot", "MIN_PYTHON_VERSION", "FLEET_HOME",
     "KEEPER_LINE_PREFIX", "INTERFACE_LINE_LIMIT",
     "one_line", "interface_line", "tmux_command", "type_interface_line",
+    "append_interface_log",
 }
 
 
