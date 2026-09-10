@@ -320,3 +320,67 @@ def test_mail_arriving_during_archive_moves_stays_in_inbox_and_prevents_rm(home,
     fleet._supervisor_reap(run=runner([entry(status='idle')], calls), which=lambda _: 'claude')
     assert inbox.read_text() == 'concurrent unread work'
     assert not any(argv[1] == 'rm' for argv in calls)
+
+
+@pytest.mark.parametrize('transition', ['release', 'handoff'])
+@pytest.mark.parametrize('forked', [False, True])
+@pytest.mark.parametrize('ambiguous', [False, True])
+def test_exit_reap_spares_caller_union_and_ambiguous_twins(home, transition, forked,
+                                                         ambiguous):
+    old_name = 'sup|inc-current|boot'
+    old_sid = SID if forked else CURRENT
+    before = seed(old_name, old_sid, retired_sids=[CURRENT] if forked else [])
+    twin = seed('twin', CURRENT) if ambiguous else None
+    other_sid = 'dddd4444-1111-2222-3333-444455556666'
+    seed('other-finished', other_sid, lane_state='landed')
+    task = fleet.task_file_path(old_name)
+    task.parent.mkdir(parents=True, exist_ok=True)
+    task.write_text('caller evidence', encoding='utf-8')
+    nonce = claim(handoff_token_hash=fleet.nonce_digest('token'))
+    calls = []
+    run = runner([entry(old_sid), entry(CURRENT), entry(other_sid)], calls)
+    args = SimpleNamespace(sid=CURRENT, nonce=nonce, expect_inc='inc-next')
+    if transition == 'release':
+        assert fleet.cmd_sup_release(args, run=run, which=lambda _: 'claude') == 0
+    else:
+        fleet.write_handshake('inc-next', RETIRED,
+                              handoff_token_hash=fleet.nonce_digest('token'),
+                              nonce_hash=fleet.nonce_digest('next-generation'))
+        assert fleet.cmd_sup_handoff_complete(args, run=run, which=lambda _: 'claude') == 0
+    workers = fleet.load_registry()['workers']
+    assert workers[old_name]['archived_at'] is None
+    if ambiguous:
+        assert workers[old_name] == before
+        assert workers['twin'] == twin
+    assert task.read_text() == 'caller evidence'
+    assert workers['other-finished']['archived_at']
+    removed = {argv[2] for argv in calls if argv[1] == 'rm'}
+    assert old_sid[:8] not in removed and CURRENT[:8] not in removed
+    assert other_sid[:8] in removed
+    if not ambiguous:
+        # Caller protection belongs to this pass, not to the released claim:
+        # the next body can reap its now-dead predecessor without a TTL wait.
+        count, error = fleet._supervisor_reap(run=run, which=lambda _: 'claude',
+                                             caller_sid=RETIRED)
+        assert count == 1 and error is None
+        assert fleet.load_registry()['workers'][old_name]['archived_at']
+
+
+@pytest.mark.parametrize('archived', [False, True])
+@pytest.mark.parametrize('twin_status', ['idle', 'dead'])
+def test_reap_ambiguity_veto_covers_archive_resumes_and_husks(home, archived, twin_status):
+    # Shared retired SID makes ownership overlap even with different current
+    # SIDs, or when the ordinary resolver prefers one live row over a husk.
+    stamp = fleet.now_iso() if archived else None
+    first = seed('first', SID, retired_sids=[CURRENT], archived_at=stamp)
+    second = seed('second', RETIRED, retired_sids=[CURRENT],
+                  status=twin_status, archived_at=stamp)
+    task = fleet.task_file_path('first')
+    task.parent.mkdir(parents=True, exist_ok=True)
+    task.write_text('ambiguous evidence', encoding='utf-8')
+    calls = []
+    fleet._supervisor_reap(run=runner([entry(), entry(RETIRED), entry(CURRENT)], calls),
+                           which=lambda _: 'claude')
+    assert fleet.load_registry()['workers'] == {'first': first, 'second': second}
+    assert task.read_text() == 'ambiguous evidence'
+    assert not any(argv[1] == 'rm' for argv in calls)

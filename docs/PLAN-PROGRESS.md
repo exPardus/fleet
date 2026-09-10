@@ -14,7 +14,7 @@ The M-track in `docs/SPEC.md` §18 remains the milestone plan.
 
 | Lane | Status | Evidence | Date |
 |---|---|---|---|
-| w64-reap | Built; 695 targeted passed on each of 3.10/3.12 (one unrelated journal-board test deselected); supervisor landing/live receipt pending | Shared autoclean pass in boot/handoff-complete/release; age-independent criteria, boot count/rule and resource limits. `docs/lanes/w64-reap.md`. | 2026-09-10 |
+| w64-reap | Regression fixed; 85 release/lifecycle + 152 autoclean/archive tests passed on each of 3.10/3.12, no deselections; supervisor commit/merged floor pending | Shared reap veto now protects the calling body after release/handoff and all rows with overlapping SID ownership, including archive resumes and husks. `docs/lanes/w64-reap.md` regression follow-up. | 2026-09-10 |
 
 ## Historical C-track and earlier wave ledger
 
