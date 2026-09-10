@@ -75,9 +75,6 @@ def home(tmp_path, monkeypatch):
     (tmp_path / "state").mkdir()
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin" / "fleet.py").write_text("", encoding="utf-8")
-    (tmp_path / "docs" / "operator").mkdir(parents=True)
-    (tmp_path / "docs" / "operator" / "server-interface-profile.md").write_text(
-        "# profile\n", encoding="utf-8")
     # I3: `fleet.FLEET_HOME` is frozen at import, and `main` now refuses when
     # it disagrees with `--fleet-home`. A TEST may move it; the keeper may
     # not (pinned by tests/test_keeper_doctrine.py).
@@ -165,7 +162,7 @@ def test_a_created_window_defers_its_pages_to_the_next_tick(home):
     assert argv[argv.index("-c") + 1] == str(home)
     launch = argv[-1]
     assert launch.startswith("claude --permission-mode bypassPermissions ")
-    assert "server-interface-profile.md" in launch
+    assert "Read" in launch and "follow it exactly" in launch
     assert r.tmux("send-keys") == []
     assert "pages deferred to next tick" in out
     # dedup state untouched, so the next tick pages what is still true

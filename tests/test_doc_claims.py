@@ -494,7 +494,14 @@ def _tracked_markdown():
         f"population is derived, never listed -- a harness that cannot derive "
         f"it must fail, not silently hold nothing."
     )
-    return tuple(sorted(p for p in proc.stdout.split("\0") if p))
+    deleted = subprocess.run(
+        ["git", "diff", "HEAD", "--name-only", "--diff-filter=D", "--", "*.md"],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    assert deleted.returncode == 0, deleted.stderr
+    deleted_paths = set(deleted.stdout.splitlines())
+    return tuple(sorted(p for p in proc.stdout.split("\0")
+                        if p and p not in deleted_paths))
 
 
 def current_tree_docs():
@@ -528,8 +535,8 @@ def test_fleet_verbs_written_as_commands_in_entry_docs_are_shipped(rel):
     form. This module's docstring lists the holes.
 
     The expensive precedent (2026-07-27, day-5 interface tier): the manager
-    skill was missing four shipped verbs and `supervisor.md` carried two
-    `[UNBUILT]` tags on BUILT features. Six drifts, found by one `--help`.
+    the entry skill was missing shipped verbs and mixed operational guidance
+    with unsupported claims. Re-derive its command list from `--help`.
     """
     text = (REPO_ROOT / rel).read_text(encoding="utf-8")
     bogus = find_bogus_verbs(text, _shipped_verbs())
