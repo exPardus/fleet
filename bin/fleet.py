@@ -16772,7 +16772,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2982, :3053,
     :3126, :3387, :3537, :5032, :10109, :10429, :10710, :10941, :11028, :11184,
-    :11196, :11207, :11356, :12173, :16642, :19421, :19422, :19455, :20400`). The thirteenth is multi-fleet §5 step 2's
+    :11196, :11207, :11356, :12173, :16642, :19421, :19422, :19473, :20419`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16797,7 +16797,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8870, :9409, :14388,
-    :21063), the same safety invariant §7.1's send carve-out rests on. That
+    :21082), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17494,7 +17494,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8870, :9409, :14388,
-    #     :21063) -- so the sid union can never make one body answer for another.
+    #     :21082) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -19423,6 +19423,24 @@ def _sup_guard_body_sids(claim):
     return [sid]
 
 
+def _seize_settled_by_a_heartbeat(claim):
+    """True once the seizing body has beaten at least once after claiming.
+
+    `sup-boot` writes `claimed_at` and `heartbeat_at` together, so they are
+    equal for exactly one moment: the seizure. Any later beat moves
+    `heartbeat_at` past it and settles the takeover -- the body proved it is
+    the holder. After that the claim is ordinary and the stale/idle rules
+    decide; a seize hours old is not evidence about now.
+    """
+    claimed, beat = claim.get("claimed_at"), claim.get("heartbeat_at")
+    if not claimed or not beat:
+        return False
+    try:
+        return _parse_iso(beat) > _parse_iso(claimed)
+    except (ValueError, TypeError):
+        return False
+
+
 def _sup_guard_live_rows(entries):
     """Map live roster sids to their rows using PID presence as liveness.
 
@@ -19545,7 +19563,8 @@ def _sup_guard_decide(observation):
     claim = obs.get("claim") or {}
     if (state == "held" and
             (claim.get("claimed_via") == "seize" or
-             claim.get("state") == "seized")):
+             claim.get("state") == "seized")
+            and not _seize_settled_by_a_heartbeat(claim)):
         age = obs.get("heartbeat_age_seconds")
         if (not isinstance(age, (int, float))
                 or age > SUPERVISOR_CLAIM_STALE_SECONDS):
