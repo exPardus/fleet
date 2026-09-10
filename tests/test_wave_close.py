@@ -139,3 +139,25 @@ class TestTheFloorActuallyRuns:
                               which=lambda name: None if name == "uv" else "/usr/bin/x",
                               log_root=tmp_path / "logs")
         assert "uv" in str(excinfo.value)
+
+
+def test_wave_id_survives_the_journal_board_roll(tmp_path, monkeypatch):
+    """The board roll migrates the highest wave number out of JOURNAL.md.
+
+    A first-match scan then reads a stale low number from the board and reuses a
+    wave id that is already spent -- measured on wave 68, which closed labelled
+    67. The derivation takes the MAX across the board, the changelog and every
+    history file.
+    """
+    (tmp_path / "supervisor" / "journal-history").mkdir(parents=True)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "supervisor" / "JOURNAL.md").write_text(
+        "THROUGHPUT wave 66 (aaa..bbb): bin +1/-0\n", encoding="utf-8")
+    (tmp_path / "supervisor" / "journal-history" / "roll.md").write_text(
+        "THROUGHPUT wave 67 (bbb..ccc): bin +1/-0\n", encoding="utf-8")
+    (tmp_path / "docs" / "CHANGELOG.md").write_text("no throughput here\n", encoding="utf-8")
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "detached\n", "")
+
+    assert fleet._wave_id(tmp_path, run=fake_run) == "68"
