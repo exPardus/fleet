@@ -12,11 +12,31 @@
 
 Everything here is **descriptive of `bin/fleet.py` at `c63d7dd`** unless tagged `[PRESCRIPTIVE]` or `[DRAFT — not specced]`. The v2.x doctrine stands: any claim that code exists or is absent must be verifiable by grep at a stated commit — enumeration by inspection is a defect (the C4/spec-unbuilt-audit lesson, recorded in full in `docs/SPEC-v2-history.md` §4). Line numbers below are at `c63d7dd` and will drift; the function names are the durable anchors.
 
-> **PIN STALENESS — read this before trusting a line number** *(measured 2026-07-23)*. `c63d7dd` is **2026-07-17**. Four milestones have landed since: M-D, M-E, the reconcile campaign, and the doc passes. `bin/fleet.py` is **9091 lines at `230803a`** against the 7378 this document's §3 records at the pin — so **every `@NNNN` anchor below is off by hundreds of lines.** Grep the function name; never seek to the number.
+> **CURRENT TREE / LINE COUNT — measured 2026-09-10 with `wc -l bin/fleet.py`: 23,100 lines at `708fa45`.** The §3 tree line below uses that measurement. Older function-line anchors remain pinned to `c63d7dd` (2026-07-17), when the file was 7,378 lines; this count update does not re-pin those receipts. Grep the function name before reading an old line number.
 >
 > Deltas known to contradict the pinned body, each already corrected in place: §13's check count (21 at the pin, corrected to 23 in the 2026-07-23 doc pass, **28** on 2026-08-09 and **29 checks** as of 2026-09-09 — this line itself said "21 → 23" until 2026-08-09, so read it as the history it is and take §13's own count history as the current statement), the header's claimed pin-tested `claude` version, the portability gap list (`_PosixPlatform` was a raising stub at the pin and is a real backend now), and §18's milestone list. §6.1 is pinned separately to the branch `me/defects`, which has since merged.
 >
-> **Re-pinning this document wholesale is a campaign, not an edit** — every receipt has to be re-executed at the new commit, which is exactly the work `tools/verify_receipts.py` exists to make cheap and which `docs/SPEC.md` does not yet participate in (only `docs/specs/claim-nonce.md` carries `# at <sha>` blocks today). Until that runs, this banner is the honest statement of how much drift a reader should expect.
+> **Re-pinning this document wholesale is a campaign, not an edit** — every receipt has to be re-executed at the new commit, which is exactly the work `tools/verify_receipts.py` exists to make cheap and which `docs/SPEC.md` does not yet participate in (the enforced `docs/specs/` receipts carry `# at <sha>` blocks). Until that runs, this banner is the honest statement of how much drift a reader should expect.
+
+### Documentation currency and operator efficiency (2026-09-10)
+
+A surface change is done only when its describing SPEC section and
+`docs/PLAN-PROGRESS.md` row change in the same commit; new host quirks also go to
+`knowledge/projects/<p>.md`. No described behaviour change uses the commit trailer
+`Docs: n/a -- <why>`. `tests/test_docs_currency.py` checks the last 20 non-merge
+commits after adoption base `708fa45` for direct `bin/*.py` edits with `docs/` or
+that trailer; ancestors are excluded so pre-rule history is not retroactively red.
+The same file pins DONE placement on new lane documents and post-cutoff runtime
+tasks; cutoff details live in `docs/lanes/BRIEF-TEMPLATE.md`.
+
+The supervisor procedure is `skills/fleet/supervisor.md`: last three journal
+checkpoints (≤40 lines for new entries), lossless monthly history rolls, 40k-token
+boot-read cap, one priority item per wave, model routing and spawn token ceilings,
+targeted lane checks, one merged floor per interpreter, and current boards plus
+one-line changelog and throughput accounting at landing. Gate batching and the
+interface's one feature offer are in `docs/operator/server-interface-profile.md`.
+These are operator-adopted procedures; the checkpoint verb's automatic roll is
+a separate build deliverable, not claimed by this documentation change.
 
 ## 1. Problem, decision, architecture
 
@@ -49,7 +69,7 @@ supervisor = claim-holding session               ← identity in supervisor/ fil
 ```
 C:\proga\claude-fleet\
   bin\
-    fleet.py                 # single-file CLI, py -3.13, stdlib only (7378 lines @ c63d7dd)
+    fleet.py                 # single-file CLI, Python >=3.10, stdlib only (23100 lines @ 708fa45; §0)
     fleet_statusline.py      # statusline renderer (imports fleet.py; read-only view)
     fleet.cmd / fleet        # PATH shims (cmd.exe + POSIX sh)
     hooks\

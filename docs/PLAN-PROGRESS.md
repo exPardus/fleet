@@ -1,5 +1,16 @@
 # PLAN-PROGRESS — wave ledger (cross-session cursor)
 
+## Current operator wave ledger (2026-09-10 onward)
+
+Update each landed lane here at every wave boundary; the C-track below stays retired.
+The M-track in `docs/SPEC.md` §18 remains the milestone plan.
+
+| Wave / lane | Status | Evidence / remaining work |
+|---|---|---|
+| w63 / doctrine | verified, commit blocked | `docs/lanes/w63-doctrine.md`: currency lint, rules 3–12, journal split, current board and changelog; sandbox makes linked Git metadata read-only; fresh supervisor boot token measurement still owed after landing. |
+
+## Historical C-track and earlier wave ledger
+
 > **⛔ RETIRED CURSOR — 2026-07-24.** This is the cursor for the C1→C8 plan, which was **retired as superseded history** on 2026-07-24 (settled gate *"Two roadmaps, no crosswalk"*, `docs/OPERATOR-GATES.md`). **The plan of record is the M-track — `docs/SPEC.md` §18.** Every `GATED` row below (C3+, the Phase-1.5 build) blocks on a `SOAK GATE 1 SIGNED` line that was **never written and is now retired** — those rows are **historical, not live blockers**: no live milestone gates on the soak framing. Read this file for the C1→C2 record; do not resume against it.
 
 The mutable cursor against `docs/PLAN.md` (**both retired to history 2026-07-24 — see banner above**). A resuming manager reads this **first** (runbook step 2). Status vocab: `pending | dispatched | done | blocked | deferred`. Updated at each task close + gate; committed in every campaign's knowledge-loop step (§0.3h).

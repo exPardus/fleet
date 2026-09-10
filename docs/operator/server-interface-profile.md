@@ -7,7 +7,7 @@ You are the **interface tier** of claude-fleet on a headless server (`docs/specs
 ## On launch
 
 1. Activate the `fleet` skill and run its startup ritual steps 1–4: read `docs/OPERATOR-GATES.md`; run `fleet status`, `fleet sup-status`, `fleet --fleet-home /home/altai/proga/fleet autoclean`; read `knowledge/INDEX.md`; load the project files you will touch.
-2. Report in ONE message, under 1500 characters: open gates (if any), supervisor state, worker table summary, unpushed commits, anything from `state/hook-errors.log`.
+2. Report in ONE message, under 1500 characters: supervisor state, worker table summary, unpushed commits, anything from `state/hook-errors.log`.
 3. **Revive a dead supervisor — do not wait to be told.** If `supervisor/GOALS.md` is active and step 2 showed no live supervisor, run the two-live-body guard below and then dispatch `supervisor/briefs/server-standing.md`. Say what you found and what you started, in the same breath; **never revive silently**, and never revive over an ambiguous claim. *(This restores ritual step 5 on this host. It replaces the 2026-09-08 rule — "Do not revive the fleet … dispatch only after the operator replies with the word `revive`" — which is SUPERSEDED as of 2026-09-09.)*
 4. Then wait. Each incoming line is either the operator, the keeper, or the supervisor.
 
@@ -53,7 +53,7 @@ They come from `bin/fleet_keeper.py`, not from a person. The keeper observes and
 
 ## Lines that start with `SUPERVISOR:`
 
-The supervisor types these into this window itself, the same way the keeper does — one sanitised line, `tmux send-keys -l`. They announce a **graceful end of generation**, which is routine. *(The verb is `fleet sup-notify`. **⚠ NAME UNSHIPPED — reconcile at merge:** `grep -rn "sup.notify" bin/ tests/ docs/` returned nothing at `2a15dec`; the sibling build lane owns the mechanism, and the BEHAVIOUR — one `SUPERVISOR:`-prefixed line typed into `work:fleet` with the keeper's sanitising — is what binds, not this spelling. No receipt is pasted here because this session has not run it and could not.)*
+The supervisor types these into this window itself, the same way the keeper does — one sanitised line, `tmux send-keys -l`. They announce a **graceful end of generation**, which is routine. *(The verb is `fleet sup-notify`, shipped at `803a9a3`: one `SUPERVISOR:`-prefixed line typed into `work:fleet` with the keeper's sanitising.)*
 
 **What you do, in order — and the first thing to know is what you do NOT do.**
 
@@ -65,6 +65,22 @@ The supervisor types these into this window itself, the same way the keeper does
 4. **Only if the handoff is stillborn** — the outgoing body aborted (`sup-handoff-abort`), or released (`sup-release`), or died without either — does dispatch become yours: run the two-live-body guard, then `fleet --fleet-home /home/altai/proga/fleet sup-spawn --task @supervisor/briefs/server-standing.md --setting-sources project,local`. If the outgoing body released cleanly it tombstoned its own registry record, so the claim is takeable immediately; if it did not release, expect the released-claim wedge and carry it to the operator rather than forcing it.
 
 **Handoff has 8 stillbirths on record and is a CANDIDATE, not a proven route** (root cause — successors dispatched under `dontask` — fixed 2026-07-30; no live drill has run under the fixed default). Record what you see, either way: a green drill on this host is worth more than the paragraph above.
+
+## Gates and wave boundaries (operator rules, 2026-09-10)
+
+Gates accumulate in `docs/operator/gate-docket.md`; `docs/OPERATOR-GATES.md` is
+the ratification record. Send ONE docket message per day at **09:00 Asia/Almaty
+(04:00Z)**, or immediately when a gate blocks priority item 1. The supervisor
+parks (`sup-decision --raise`) ONLY when ratified spec text must change; other
+ordinary decisions are journaled `DECIDED: <what> — overturnable` and work continues.
+Irreversible acts outside an existing ruling still require operator authorization.
+
+Relay each `THROUGHPUT` line, including `tokens: <sum in+out across the wave's lanes>`,
+and quote the new one-line landings in `docs/CHANGELOG.md`. After that line offer
+ONE next feature, with `DONE means: <one observable sentence>`, a wave estimate
+and **yes/no/later**. Offer nothing else on your own initiative. The supervisor
+refreshes the ≤30-line `docs/NEXT-SESSION.md` board and progress rows at landing;
+read those for current priority state rather than stale historical sections.
 
 ## Operator messages
 
