@@ -108,15 +108,29 @@ def _clean_env(**over):
     return env
 
 
-def _drive_hook(script, argv=(), env=None, payload=None):
+def _drive_hook(script, argv=(), env=None, payload=None, cwd=None):
     """Run a hook end to end, exactly as the dispatch does: real argv, real
-    JSON payload on stdin, exit code and stderr observed."""
+    JSON payload on stdin, exit code and stderr observed.
+
+    `cwd` IS PART OF THE FIXTURE, not a convenience (w61). A hook takes
+    `--fleet-home <value>` at its word and never resolves it against anything,
+    so a RELATIVE value creates its home under the child's working directory.
+    Two of `TestHostileArgvNeverRaises.HOSTILE`'s values are relative --
+    `--bogus` and `line1\nline2` -- and with the child inheriting pytest's cwd
+    those two PASSING tests created `<repo>/--bogus/state/...` and a
+    newline-named directory beside it on every full run. Both were invisible to
+    `git status`, because a directory whose only contents are gitignored
+    (`state/`) is not reported as untracked -- while `git check-ignore` does NOT
+    ignore the directories themselves (measured, docs/lanes/
+    w61-sidcollision.md §6). The hostility under test is the ARGV; the working
+    directory is fixture, and pointing it at `tmp_path` changes no assertion."""
     if payload is None:
         payload = {"session_id": "abc12345-0000-0000-0000-00000000beef",
                    "transcript_path": "", "last_assistant_message": "hi"}
     return subprocess.run(
         [sys.executable, str(HOOKS / script), *argv],
         input=json.dumps(payload), capture_output=True, text=True, timeout=60,
+        cwd=str(cwd) if cwd is not None else None,
         env=env if env is not None else _clean_env())
 
 
@@ -270,9 +284,29 @@ class TestHostileArgvNeverRaises:
     @pytest.mark.parametrize("script", HOOK_SCRIPTS)
     @pytest.mark.parametrize("argv", HOSTILE)
     def test_the_hook_still_exits_zero(self, script, argv, tmp_path):
-        proc = _drive_hook(script, argv, env=_clean_env(FLEET_HOME=str(tmp_path)))
+        proc = _drive_hook(script, argv, env=_clean_env(FLEET_HOME=str(tmp_path)),
+                           cwd=tmp_path)
         assert proc.returncode == 0, f"{script} {argv}: {proc.stderr}"
         assert "Traceback" not in proc.stderr, f"{script} {argv}: {proc.stderr}"
+
+    @pytest.mark.parametrize("script", HOOK_SCRIPTS)
+    def test_a_relative_hostile_home_lands_in_the_cwd_not_the_repo_root(
+            self, script, tmp_path):
+        """The containment above, pinned (w61).
+
+        WHAT THIS DOES NOT COVER: it asserts about `REPO`, and pre-fix the
+        directory landed in whatever directory pytest was INVOKED from -- the
+        repo root in every documented way of running this suite, but not by
+        construction. A run started from elsewhere would have polluted there
+        and left this assertion green. The positive half (`tmp_path / value`)
+        is what makes it a containment test rather than a location test."""
+        value = "--bogus"
+        proc = _drive_hook(script, ["--fleet-home", value],
+                           env=_clean_env(FLEET_HOME=str(tmp_path)),
+                           cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        assert not (REPO / value).exists(), \
+            f"{script} created {value!r} in the repo root"
 
     @pytest.mark.parametrize("script", HOOK_SCRIPTS)
     def test_a_repeated_flag_with_two_values_degrades_it_does_not_raise(
