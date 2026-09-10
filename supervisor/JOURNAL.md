@@ -12232,3 +12232,227 @@ supervisor on the point the brief called most likely** — mine included, twice 
 gate I had already committed, pushed and announced. **Read each report's WHERE THIS BRIEF WAS WRONG
 section before its summary**, and keep instructing lanes that agreeing with the brief is not the
 deliverable. It is the cheapest thing this fleet does.
+
+## 2026-09-10T07:53:55Z HANDOFF-BEGIN inc=inc-20260910T041513Z-181d sid=ed943460-640f-467d-b24f-c70933596578
+
+successor=inc-20260910T075355Z-4f99 task=/home/altai/proga/fleet/state/supervisor-handoff-inc-20260910T075355Z-4f99.md
+
+## 2026-09-10T07:54:19Z HANDOFF-COMPLETE inc=inc-20260910T041513Z-181d sid=ed943460-640f-467d-b24f-c70933596578
+
+claim -> inc-20260910T075355Z-4f99 sid=37e5c61c-cf8f-4fea-9b7b-61f2b22acc60
+
+## 2026-09-10T07:54:46Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=37e5c61c-cf8f-4fea-9b7b-61f2b22acc60
+
+claim received via handoff from inc-20260910T041513Z-181d
+
+## 2026-09-10T07:59:00Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=37e5c61c-cf8f-4fea-9b7b-61f2b22acc60
+
+WAVE 62 CONTINUES UNDER A NEW BODY — claim taken at 07:54:19Z, beat run, dogfood dispatched as the
+third lane. Two measurements below, and BOTH correct a claim I inherited from my predecessor's own
+last two checkpoints. Neither was aimed at.
+
+## 1. I REPRODUCE THE `identity-witness` RED MY PREDECESSOR SAID COULD NOT BE REPRODUCED
+
+Its post-wave correction (05:49:21Z) recorded the row as **PASS** for itself and closed with:
+*"whoever takes it must arrange a non-founding body to see the red, because on today's daemon it
+cannot be reproduced."* **I am that body, by nothing more than being dispatched.** MEASURED on my
+first beat:
+
+```
+FLEET_WORKER=sup|inc-20260910T041459Z-2382|boot     <- the daemon's FOUNDER, two bodies ago
+registry verdict for sid 37e5c61c: sup|inc-20260910T075355Z-4f99|successor
+[FAIL] identity-witness: LEAK ...
+```
+
+**So the §18 mechanism is now confirmed from BOTH directions inside twelve hours** — my predecessor
+saw PASS because an idle_exit at 04:06:03Z made it the founder of the daemon it ran in; I see FAIL
+because I am a later `--bg` body on that same daemon, which donates its founder's env wholesale.
+The daemon has NOT restarted between us (`daemon.lock` held by pid 406757 since 07:27:06Z).
+
+**The grading question is unchanged and still owed, and it is now cheap to answer** — demote to NOTE
+when the disagreement is fully explained by §18, or accept the row is decorative on a single-daemon
+host. **Do not open it as a bug and do not close it as fixed.** What I can now add that my
+predecessor could not: the row's verdict flips between two supervisor bodies of the SAME lineage,
+minutes apart, with no code change and no daemon restart — which is about as clean a demonstration
+that it grades the TREE-AND-DAEMON rather than the body as this fleet will ever get for free.
+
+**And note the shape AGAIN, because it is now this wave's signature:** an inherited present-tense
+claim about the tree ("cannot be reproduced") was false the moment a body was dispatched. That is
+the FOURTH such claim in two days, after `sup-notify` unshipped, the repo-root attribution, and the
+identity-witness red itself. My predecessor wrote *"re-measure an inherited claim before briefing a
+lane on it"* — I did, on its own closing sentence, and it had already moved.
+
+## 2. THE PRE-WARM POOL DOUBLED WHILE THE LANE COUNT DID NOT — WAVE-SIZING ON `free -m` IS WORSE
+THAN THE 07:14Z CHECKPOINT RECORDED
+
+That checkpoint measured, on an IDLE fleet: **9 `bg-spare` procs, 1.73 GB, 22% of the box.** Its
+standing instruction was *"any future wave-sizing note should quote these numbers rather than
+re-measuring on a busy box."* MEASURED by me at 08:0xZ with the SAME two lanes running and no lane
+added since:
+
+```
+bg-spare = 18 procs, 3.41 GB      (was 9 procs, 1.73 GB)
+free -m: available 3207   (and 2439 six minutes earlier, with the same two lanes)
+```
+
+**The pool is not a fixed baseline — it roughly DOUBLED, and `available` moved 800 MB in six
+minutes in the OPPOSITE direction to the pool's growth.** So the 07:14Z numbers cannot be quoted as
+a constant the way that checkpoint asked, and I am superseding that one instruction while keeping
+its finding: **the pool is the dominant RAM consumer on an idle fleet, AND it is elastic on a
+timescale shorter than a wave.** A supervisor reading `free -m` at dispatch time is sampling a
+number that can move 800 MB before the lane starts. The practical rule survives unchanged (3 Opus
+lanes, operator-confirmed in the ruling), and it survives because it is a LANE COUNT, not a byte
+count — which is now the better reason to keep it than the one it was written with.
+
+**Still not touching the pool** — upstream of fleet, in the `claude` daemon, with an operator cost
+attached. Measured and stopped, same as my predecessor.
+
+## 3. WAVE 62 IS NOW THREE LANES — DOGFOOD DISPATCHED, THE OPERATOR'S #1
+
+`w62-dogfood` (branch `w62/dogfood`, worktree `/home/altai/proga/fleet-w62-dogfood`, from
+`294315d`, Opus). The ruling's own sequencing authorises it: *"G-K6 C and dogfood can run in
+parallel (disjoint: keeper vs init/statusline docs)"*, and G-K6 C is `w62-keeperc`, already live.
+
+**The brief leads with the machine fence, and names all 19 protected directories explicitly rather
+than saying "the operator's other projects"** — a ruling that names a directory has made a claim
+about a machine, and the enumeration is what makes it checkable by the lane instead of judged by it.
+
+**MEASURED before briefing, so the lane inherits facts and not assumptions:**
+- `~/.claude/fleet-homes.list` **does not exist** — the "first real append" framing is true, not
+  inherited. Confirmed by `cat`, rc-checked.
+- **Nothing in `bin/fleet.py` globs `fleet-*` siblings** — I checked because the interface's
+  suggested name `fleet-dogfood` sits beside three real `fleet-w62-*` worktrees and `fleet-wt`, and
+  a sibling sweep would have made that name a landmine. The only state-path glob is
+  `fleet.json.corrupt.*` at `:982`. The lane is told to re-derive it rather than trust me.
+
+**The prohibition every other brief carries — never append to `~/.claude/fleet-homes.list` — is
+explicitly LIFTED for this lane, once, for one path, and the brief says so in those words.** That
+is the whole point of the dogfood and it is RATIFIED DESTRUCTIVE; a lane that fenced itself with a
+temp `HOME` out of habit would produce a receipt proving nothing. The brief orders every run
+labelled sandboxed-or-real, because an unlabelled mix is exactly the worthless artifact here.
+
+**Scope discipline held:** the statusline-differs-per-home proof is item 4 of six, and the brief
+says that building it is G-K5's lane and that editing `bin/` means the lane has left its lane. It
+MEASURES today's behaviour to arm that later lane. The lane files no gates — drafts come to me.
+
+## STATE
+
+Claim `inc-20260910T075355Z-4f99`, generation held in context only. `doctor` all PASS except
+`identity-witness` (§1 above) — pending-decision slot is CLEAR, so a gate can be filed again.
+`autoclean` archived 9, skipped 16, husks 0, errors 0. Three lanes live: `w62-keeperc`,
+`w62-codex`, `w62-dogfood`. Working tree clean before the worktree add; `294315d` is still tip and
+`rev-list --count HEAD --not --remotes` was 0 at handoff.
+
+**G-K6 mitigation ARMED, and I am writing down that it is a mitigation:** a harness-tracked
+background `fleet wait --any --timeout 5400` on the live lanes, so a lane finishing gives me a turn.
+Until C lands, that is the only thing standing between this body and the 8h10m my predecessor's
+predecessor spent idle-but-listed. **It works only while there is something to wait on** — which
+means the dangerous moment for me is the one AFTER the last lane lands, not before.
+
+## THE TWO REMAINING RULED ITEMS
+
+G-K1 (keeper becomes an off-by-default feature flag + the D7 amendment) waits on `w62-keeperc`'s
+report by my predecessor's explicit instruction — *"read its report before briefing this one"* —
+and G-K5's two build items are the ruling's own "after". Neither is dispatched and neither should
+be until a lane frees; RAM ceiling is a lane count and it is full at three.
+
+## 2026-09-10T09:15:40Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=d605e989-91e1-4640-850b-8548e000328f
+
+PLAN LIMIT TOOK THE WHOLE OF WAVE 62 AT ~08:02Z; ALL THREE LANES RESUMED AT 09:11Z PAST THE 09:10Z
+HORIZON. The recovery was routine and worked exactly as specified. **What is worth the journal is
+that my G-K6 mitigation fired correctly, on time, with the right payload — and was useless.**
+
+## THE RECOVERY, MEASURED BEFORE ACTING
+
+The interface's wake carried three claims and I re-derived all three rather than acting on them,
+which is this fleet's own doctrine after four inherited claims died in two days:
+
+```
+w62-codex     limited ... (resets 2026-09-10T09:10:00Z),resume-eligible
+w62-dogfood   limited ... (resets 2026-09-10T09:10:00Z),resume-eligible
+w62-keeperc   limited ... (resets 2026-09-10T09:10:00Z),resume-eligible
+now 2026-09-10T09:11:57Z          <- horizon PASSED
+heartbeat_age_seconds: 4376.9     <- 73m stale, nag armed for seizure
+```
+
+All three true. Heartbeat first (a stale claim is seizable and the nag said so), then
+`resume-limited` — no `--force-now`, because the horizon had genuinely passed and forcing would
+have thrown away the one guard that makes the park safe. **All three verified `working`, turns=2,
+`[PASS] limited-parks`.** Standing goal 2's WORKER arm did its whole job: detect, park, resume.
+
+## THE MITIGATION FIRED, AND THAT IS THE BAD NEWS
+
+My last checkpoint armed a background `fleet wait --any` as the G-K6 stopgap and said *"it works
+only while there is something to wait on."* **That was the wrong thing to worry about.** MEASURED
+from the watcher's own output file, mtime and content:
+
+```
+08:02:53Z   w62-codex: limited -- (no result event)
+            w62-keeperc: limited -- (no result event)
+            [exited with code 0]
+```
+
+**It exited ~53 seconds after the limit, correctly naming the condition, and delivered me a turn.
+The turn accomplished nothing, because the same plan limit that parked the lanes had disabled the
+body the wake was delivered to.** I then sat idle-but-listed for 69 minutes until a human-tier
+session that had waited out the horizon woke me.
+
+**This is a constraint G-K6 wave 2 (B) does not currently carry, and it should before anyone builds
+it.** The gate's amendment §6 already says *"B is a new always-on mechanism whose own failure is
+silent"* and *"B without C is B unmonitored."* Add the third: **a waker that runs inside the
+supervisor's own plan-limit blast radius is defeated by the exact failure it is built for.** At a
+plan limit every model-calling tier on that plan is down at once — supervisor, lanes, and the
+interface alike. The only things that can act are those that make no model calls (the keeper's
+systemd timer) or that wait out the horizon (`resume-limited`'s own logic, which already exists and
+already works — for workers).
+
+## WHY THE SUPERVISOR WAS NEVER PARKED `limited` — TRACED TO THE LINE, AND IT IS G-K6 AGAIN
+
+The interface asked me to note that the detector did not mark me. It did not, and the mechanism is
+not an oversight about supervisors — **there is no supervisor special-case anywhere in the scan.**
+The limit scan runs from exactly one production path: `_limit_scan_hook` inside
+`_investigate_no_outcome` (`bin/fleet.py:3694`), which `recompute_worker_native` reaches **only for
+a record with no fresh outcome for its sid** — the roster-idle and roster-dead-or-gone branches.
+
+**My body was `working` and PRESENT in the roster the entire 69 minutes.** It was never routed to
+that branch, so it was never scanned, so it could never be parked.
+
+**That is the SAME structural blindness as G-K6, in a second detector.** `rule_supervisor_dead` ANDs
+a stale heartbeat with roster-ABSENCE; `_investigate_no_outcome` gates the limit scan on
+outcome-ABSENCE. Both are correct code doing their stated job, and both are blind to the identical
+failure mode: **a body that is present and simply not taking turns.** Wave 61 named that mode
+`supervisor_stalled` and the fleet has now seen it three times in two days from three DIFFERENT
+causes — clean wave-boundary turn end, API error mid-turn, and now a plan limit.
+
+**The ruled G-K6 fix (C: arm on `status == "busy"`) is the same cut that repairs standing goal 2's
+supervisor arm.** One idea, two detectors. That is a wave-63 item, and it is the strongest argument
+yet that C was the right ruling.
+
+**I did NOT steer `w62-keeperc` with this.** It is briefed to build wave 1 only, it has just been
+resumed, and widening a live lane's scope mid-flight to chase an adjacent defect is how a clean
+build turns into an unreviewable one. The finding goes to the successor queue, not into a running
+lane.
+
+## A CORRECTION TO MY OWN LAST CHECKPOINT, SO IT DOES NOT PROPAGATE
+
+I wrote that the dangerous moment *"is the turn AFTER the last lane lands, not before."* **False, and
+this outage is the counterexample: the dangerous moment is any moment the plan limit lands**, which
+is a clock the fleet does not control and which cares nothing for lane boundaries. The watcher was
+armed and healthy and the fleet still went dark for 69 minutes.
+
+## STATE
+
+Claim `inc-20260910T075355Z-4f99` held, generation in context only, heartbeat fresh. `doctor`:
+`[PASS] limited-parks`, `[PASS] supervisor-claim`, `[PASS] permission-stalls`; `identity-witness`
+still red per my last checkpoint's §1 and still correctly a NOTE-vs-decorative grading question.
+Three lanes `working` at turns=2. Watcher re-armed over all three (bg id `bf4lsaqxo`).
+
+**Note for whoever reads the registry: my harness sid rotated to `d605e989-…` across the limit while
+the claim still records `37e5c61c-…`.** The nonce channel carried the continuity exactly as
+claim-nonce §6.2 intends — every verb this turn was accepted on the generation, not on the sid. A
+rotated body is not an incident; recording it because the sid union is what makes it readable.
+
+## UNCHANGED, AND STILL THE PLAN
+G-K1 waits on `w62-keeperc`'s report (predecessor's instruction: read it before briefing). G-K5's two
+build items are the ruling's "after". RAM ceiling is a lane count and it is full at three. No gates
+ticked, and none may be — the boxes and the `## Settled` move are the operator's alone.
