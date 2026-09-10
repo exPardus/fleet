@@ -344,6 +344,19 @@ def _gated_argv(verb, home):
             "init": ["init"]}[verb]
 
 
+def _chdir_for_verb(verb, home, monkeypatch):
+    """Bare `init` targets CWD, so the gate it must satisfy is CWD's home.
+
+    G-K5 Reading A made bare init a creation verb whose target is the current
+    directory; §7 is therefore evaluated against that directory rather than the
+    ambient home. Running it from anywhere else is genuinely ungated -- a new
+    home elsewhere is not a mutation of the claimed one -- so the gated case is
+    the one where CWD *is* the claimed home.
+    """
+    if verb == "init":
+        monkeypatch.chdir(home)
+
+
 class TestEveryMutatingVerbIsGated:
     """§7's taxonomy is binding. Each mutating lifecycle verb refuses under an
     armed gate with no generation; `autoclean` (the gate's own primary caller)
@@ -355,6 +368,7 @@ class TestEveryMutatingVerbIsGated:
     def test_verb_is_refused_under_an_armed_gate(self, gate_home, monkeypatch, verb):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-sup")
         _fresh_claim()
+        _chdir_for_verb(verb, gate_home, monkeypatch)
         assert fleet.main(_gated_argv(verb, gate_home)) == fleet.SUPERVISOR_CONTINUITY_RC
 
     def test_the_taxonomy_covers_every_call_site_in_fleet(self):
@@ -436,6 +450,7 @@ class TestEveryMutatingVerbIsGatedByTheWedge:
                                  "released_by_sid": "sid-releaser", "state": "released"})
         monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (
             True, [{"sessionId": "sid-releaser", "status": "idle", "pid": 4242}]))
+        _chdir_for_verb(verb, gate_home, monkeypatch)
         assert fleet.main(_gated_argv(verb, gate_home)) == fleet.SUPERVISOR_CONTINUITY_RC
 
 
