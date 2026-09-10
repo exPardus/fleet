@@ -7,7 +7,7 @@ WHAT THE VERB IS FOR. §Definitions makes an initialized home *"a directory whos
 before this slice NOTHING on the CLI could produce one deliberately:
 `--fleet-home <fresh dir>` refuses `not_initialized`, `fleet homes --add` refuses
 the same and says *"lists an existing fleet home and never creates one"*, and
-bare `fleet init` writes `state/worker-settings.json` only -- the registry
+bare `fleet init` then wrote `state/worker-settings.json` only -- the registry
 appeared on the first `save_registry`, i.e. as a side effect of the first spawn.
 So a second home could not be brought into existence except by using it.
 §Definitions answers that in its own sentence: *"verbs whose contract is creation
@@ -47,6 +47,15 @@ import pytest
 import fleet
 
 REAL_LIST = Path.home() / ".claude" / "fleet-homes.list"
+
+
+@pytest.fixture(autouse=True)
+def isolated_cwd(tmp_path, monkeypatch):
+    """Bare init creates in cwd; never let that mean the source checkout."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    return repo
 
 
 @pytest.fixture(autouse=True)
@@ -278,10 +287,9 @@ class TestTheExemptionAndTheTierAgree:
         assert fleet.machine_exempting_flags("homes", _ns()) == ()
 
     def test_the_whole_verb_tuple_still_only_names_homes(self):
-        """`init` must NOT join `TERMINUS_EXEMPT_VERBS`: bare `fleet init` acts
-        on the home §5 resolved for it and has to keep taking the order. The
-        exemption this slice adds is at FLAG granularity for exactly that
-        reason."""
+        """Explicit --fleet-home and statusline setup still take §5's order.
+        Bare cwd creation has its own dispatch path, not a whole-verb exemption.
+        The machine exemption stays at FLAG granularity for --home."""
         assert fleet.TERMINUS_EXEMPT_VERBS == ("homes",)
         assert "init" in fleet.TERMINUS_EXEMPT_FLAGS
 
@@ -314,18 +322,24 @@ class TestTheVerbCannotBeDeadlockedByTheResolver:
         assert rc == 0, out.err
         assert fleet.home_is_initialized(target)
 
-    def test_bare_init_still_takes_the_order_at_the_terminus(
-            self, monkeypatch, capsys, initialized, sandboxed_list):
-        """THE HALF THE EXEMPTION MUST NOT EAT. Bare `fleet init` writes into
-        the home §5 resolved, so at the terminus it must still refuse: there is
-        no home to write into. A whole-verb exemption would have silently
-        changed this."""
+    def test_bare_init_creates_here_even_at_the_terminus(
+            self, monkeypatch, capsys, initialized, sandboxed_list, isolated_cwd):
+        """G-K5 Reading A inverts the old refusal: init creates its subject.
+        The resolver itself still reaches the terminus before AND after init.
+        Creating a cwd home neither registers it nor selects it for other verbs.
+        """
         monkeypatch.setattr(fleet, "FLEET_HOME", fleet.INSTALL_ROOT)
         sandboxed_list.write_text(
             f"{fleet.home_identity(initialized('L'))}\n", encoding="utf-8")
+        before = sandboxed_list.read_bytes()
+        assert fleet.resolve_home()["step"] is None
         rc, out = _run(["init"], monkeypatch, capsys)
-        assert rc == 1
-        assert "no home" in (out.err + out.out).lower()
+        assert rc == 0, out.err
+        assert fleet.home_is_initialized(isolated_cwd)
+        assert sandboxed_list.read_bytes() == before
+        assert fleet.resolve_home()["step"] is None
+        rc, out = _run(["home"], monkeypatch, capsys)
+        assert rc == 0 and "[fleet]: no home" in out.out
 
     def test_it_runs_on_an_armed_machine_resolved_by_the_legacy_default(
             self, monkeypatch, capsys, fresh, initialized, sandboxed_list):
@@ -397,10 +411,8 @@ class TestItCreatesAnInitializedHome:
 
     def test_it_renders_the_worker_settings_into_the_NAMED_home(
             self, monkeypatch, capsys, fresh, initialized):
-        """The placeholder that decides whether the new home is usable. Bare
-        `init` renders `{{FLEET_HOME}}` from the module global; with `--home` it
-        must render the TARGET, or the new home's hook commands would point at
-        whichever home happened to be ambient."""
+        """Both creation forms render the TARGET, or the new home's hook
+        commands would point at whichever home happened to be ambient."""
         ambient = initialized("ambient")
         monkeypatch.setattr(fleet, "FLEET_HOME", ambient)
         target = fresh("new")
@@ -643,3 +655,127 @@ class TestNoCwdResolutionWasAdded:
         back."""
         src = Path(fleet.__file__).read_text(encoding="utf-8")
         assert 'Path.home() / ".claude" / "fleet-home"' not in src
+
+
+class TestBareInitCreatesHere:
+    @pytest.mark.parametrize("source", ["env", "legacy"])
+    def test_creation_ignores_ambient_selection_without_changing_resolution(
+            self, source, monkeypatch, capsys, initialized, sandboxed_list,
+            isolated_cwd):
+        ambient = initialized("ambient", workers={"w": {"session_id": "S"}})
+        monkeypatch.setattr(fleet, "FLEET_HOME", ambient)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        if source == "env":
+            monkeypatch.setenv("FLEET_HOME", str(ambient))
+        else:
+            monkeypatch.delenv("FLEET_HOME", raising=False)
+        sandboxed_list.write_text("".join(
+            f"{fleet.home_identity(initialized(n))}\n" for n in "AB"),
+            encoding="utf-8")
+        before = sandboxed_list.read_bytes()
+        roster = (ambient / "state" / "fleet.json").read_bytes()
+        assert fleet.multi_fleet_arming()["armed"]
+        assert fleet.resolve_home()["step"] == source
+
+        assert fleet.main(["init"]) == 0, capsys.readouterr().err
+        assert json.loads((isolated_cwd / "state" / "fleet.json").read_text(
+            encoding="utf-8")) == {"workers": {}}
+        settings = json.loads((isolated_cwd / "state" / "worker-settings.json")
+                              .read_text(encoding="utf-8"))
+        assert settings["home"] == isolated_cwd.resolve().as_posix()
+        assert settings["install"] == fleet.INSTALL_ROOT.resolve().as_posix()
+        assert (ambient / "state" / "fleet.json").read_bytes() == roster
+        assert not (ambient / "state" / "worker-settings.json").exists()
+        assert sandboxed_list.read_bytes() == before
+        assert fleet.FLEET_HOME == ambient
+        assert fleet.resolve_home()["home"] == ambient
+        capsys.readouterr()
+        assert fleet.main(["home"]) == 0
+        assert capsys.readouterr().out.strip() == ambient.as_posix()
+
+    def test_new_home_is_accepted_by_a_later_global_flag_without_registration(
+            self, monkeypatch, capsys, isolated_cwd, sandboxed_list):
+        assert _run(["init"], monkeypatch, capsys)[0] == 0
+        assert not sandboxed_list.exists()
+        rc, out = _run(["--fleet-home", str(isolated_cwd), "home"],
+                       monkeypatch, capsys)
+        assert rc == 0, out.err
+        assert out.out.strip() == isolated_cwd.as_posix()
+        assert not sandboxed_list.exists()
+
+    def test_rerun_preserves_roster_and_refreshes_settings(
+            self, monkeypatch, capsys, isolated_cwd, sandboxed_list):
+        assert _run(["init"], monkeypatch, capsys)[0] == 0
+        registry = isolated_cwd / "state" / "fleet.json"
+        registry.write_text('{"workers":{"w":{"session_id":"S"}}}\n',
+                            encoding="utf-8")
+        before = registry.read_bytes()
+        settings = isolated_cwd / "state" / "worker-settings.json"
+        settings.write_text("stale", encoding="utf-8")
+        rc, out = _run(["init"], monkeypatch, capsys)
+        assert rc == 0, out.err
+        assert registry.read_bytes() == before
+        assert json.loads(settings.read_text(encoding="utf-8"))["home"] == \
+            isolated_cwd.as_posix()
+        assert not sandboxed_list.exists()
+
+    def test_corrupt_registry_is_preserved_and_settings_are_not_written(
+            self, monkeypatch, capsys, isolated_cwd, sandboxed_list):
+        (isolated_cwd / "state").mkdir()
+        registry = isolated_cwd / "state" / "fleet.json"
+        registry.write_text("{broken", encoding="utf-8")
+        rc, out = _run(["init"], monkeypatch, capsys)
+        assert rc == 1 and "refusing to overwrite" in out.err
+        assert registry.read_text(encoding="utf-8") == "{broken"
+        assert not (isolated_cwd / "state" / "worker-settings.json").exists()
+        assert not sandboxed_list.exists()
+
+    def test_missing_template_creates_nothing(
+            self, monkeypatch, capsys, isolated_cwd, planted_template):
+        planted_template.unlink()
+        rc, out = _run(["init"], monkeypatch, capsys)
+        assert rc == 1 and "template not found" in out.err
+        assert not (isolated_cwd / "state").exists()
+
+    def test_creation_uses_exact_cwd_without_a_repo_root_walk(
+            self, monkeypatch, capsys, isolated_cwd):
+        (isolated_cwd / ".git").mkdir()
+        nested = isolated_cwd / "src"
+        nested.mkdir()
+        monkeypatch.chdir(nested)
+        assert _run(["init"], monkeypatch, capsys)[0] == 0
+        assert fleet.home_is_initialized(nested)
+        assert not (isolated_cwd / "state").exists()
+
+    def test_global_flag_still_selects_existing_home_for_settings_render(
+            self, monkeypatch, capsys, initialized, isolated_cwd, sandboxed_list):
+        selected = initialized("selected")
+        rc, out = _run(["init", "--fleet-home", str(selected)],
+                       monkeypatch, capsys)
+        assert rc == 0, out.err
+        assert (selected / "state" / "worker-settings.json").exists()
+        assert not (isolated_cwd / "state").exists()
+        assert not sandboxed_list.exists()
+
+    def test_statusline_setup_keeps_using_the_resolved_home(
+            self, monkeypatch, capsys, initialized, isolated_cwd):
+        ambient = initialized("ambient")
+        monkeypatch.setattr(fleet, "FLEET_HOME", ambient)
+        calls = []
+        monkeypatch.setattr(fleet, "_install_statusline",
+                            lambda **kw: calls.append((fleet.FLEET_HOME, kw)))
+        rc, out = _run(["init", "--statusline", "--chain"], monkeypatch, capsys)
+        assert rc == 0, out.err
+        assert calls == [(ambient, {"force": False, "chain": True})]
+        assert (ambient / "state" / "worker-settings.json").exists()
+        assert not (isolated_cwd / "state").exists()
+
+    def test_creation_still_passes_the_supervisor_gate_before_writing(
+            self, monkeypatch, capsys, isolated_cwd):
+        def refuse(command, *, nonce=None):
+            assert command == "init" and nonce == "proof"
+            raise fleet.FleetCliError("gate refused")
+        monkeypatch.setattr(fleet, "_supervisor_gate", refuse)
+        rc, out = _run(["init", "--nonce", "proof"], monkeypatch, capsys)
+        assert rc == 1 and "gate refused" in out.err
+        assert not (isolated_cwd / "state").exists()

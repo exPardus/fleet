@@ -278,11 +278,13 @@ class TestCmdInit:
         assert rc == 0
         assert fleet.instance_settings_path().exists()
 
-    def test_main_dispatches_init_command(self, isolated_home):
+    def test_main_dispatches_init_command(self, isolated_home, monkeypatch):
+        monkeypatch.chdir(isolated_home)
         fleet.template_settings_path().write_text(_TEMPLATE_JSON, encoding="utf-8")
         rc = fleet.main(["init"])
         assert rc == 0
         assert fleet.instance_settings_path().exists()
+        assert fleet.home_is_initialized(isolated_home)
 
     def test_main_dispatches_resume_limited_command(self, isolated_home, monkeypatch):
         # UL1 (item 11 / F31): main() routes `resume-limited` to
