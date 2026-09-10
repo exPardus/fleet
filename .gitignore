@@ -18,3 +18,4 @@ supervisor/*.tmp
 # Scratch state from the `remember` tool: session-scoped notes plus a pid file.
 # Arrived as an untracked add on `feat/worker-providers`; nothing in this repo reads it.
 .remember/
+.mcx/
