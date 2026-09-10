@@ -1104,6 +1104,18 @@ def registered_pane(home, run):
     return None
 
 
+def registered_session(home):
+    """Return a non-tmux interface session registration, if present."""
+    path = Path(home) / "state" / "interface-session"
+    try:
+        sid = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    if not sid or any(ch in sid for ch in "\r\n"):
+        raise ValueError("state/interface-session must contain a session id")
+    return sid
+
+
 def report_interface_candidates(run, target, pane, out):
     """Warn once per tick if the named window is a different candidate.
 
@@ -1228,6 +1240,7 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     target = f"{args.tmux_session}:{args.window}"
     state_path = home / "state" / "keeper" / "last-page.json"
     now = float(now_fn())
+    interface_state = (home / "state" / "interface").is_dir()
 
     state = load_state(state_path)
     obs = collect(home, now=now, run=run, snapshot_fn=snapshot_fn,
@@ -1247,6 +1260,11 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
                 save_state(state_path, state)
                 wake_state["result"] = (wake_fn(args.wake_socket, args.wake_key, wake_target)
                                         if wake_target else "target-changed-or-unavailable")
+                try:
+                    fleet.append_interface_log(
+                        "WAKE", f"result={wake_state['result']}", home=home)
+                except OSError:
+                    pass
                 print(f"keeper: supervisor wake {wake_state['result']}", file=out)
             if wake_state is None:
                 state.pop(WAKE_STATE_KEY, None)
@@ -1255,23 +1273,58 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
             save_state(state_path, state)
     pages = evaluate(obs, now)
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
-    send, rule_state = dedup(pages, prev_rules, now)
+    interface_notice = None
 
     try:
         pane = registered_pane(home, run)
     except (OSError, ValueError) as exc:
-        print(f"keeper: interface pane unavailable ({exc}); deferring tick",
-              file=out)
-        return 0
+        if not interface_state:
+            print(f"keeper: interface pane unavailable ({exc}); deferring tick",
+                  file=out)
+            return 0
+        interface_notice = ("KEEPER: interface registration unavailable "
+                            f"({exc}); page delivered to {target}")
+        print(interface_notice, file=out)
+        pane = None
     if pane:
         report_interface_candidates(run, target, pane, out)
         target = pane
+    elif interface_state:
+        try:
+            interface_session = registered_session(home)
+        except (OSError, ValueError) as exc:
+            interface_notice = ("KEEPER: interface registration unavailable "
+                                f"({exc}); page delivered to {target}")
+            print(interface_notice, file=out)
+            interface_session = None
+        if interface_session and interface_notice is None:
+            print(f"KEEPER: interface session {interface_session} is registered "
+                  f"outside tmux; page delivered to {target}", file=out)
+            interface_notice = ("KEEPER: interface session is registered "
+                                f"outside tmux; page delivered to {target}")
+        elif interface_notice is None:
+            interface_notice = ("KEEPER: interface is not registered; "
+                                f"page delivered to {target}")
+            print(interface_notice, file=out)
+
+    if interface_notice:
+        if pages:
+            first = pages[0]
+            pages[0] = Page(first.rule, first.fingerprint,
+                            f"{first.text} [{interface_notice}]")
+        else:
+            pages = [Page("interface-status", interface_notice, interface_notice)]
+    send, rule_state = dedup(pages, prev_rules, now)
 
     if args.dry_run:
         for p in pages:
             print(f"[dry-run] {p.rule}: {_page_line(p.text)}", file=out)
         if pane:
             print(f"[dry-run] interface pane {pane}; would not create a window",
+                  file=out)
+            return 0
+        if interface_notice:
+            print(f"[dry-run] {interface_notice}; would not create a window",
                   file=out)
             return 0
         # Mirror `ensure_window`'s own verdict (via the same classifier)
@@ -1287,7 +1340,7 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
             print(f"[dry-run] would create {target}: {launch}", file=out)
         return 0
 
-    created = False if pane else ensure_window(
+    created = False if (pane or interface_notice) else ensure_window(
         run, session=args.tmux_session, window=args.window,
         cwd=str(home), launch=launch, out=out)
     if created:

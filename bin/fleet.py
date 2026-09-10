@@ -120,6 +120,158 @@ def state_dir() -> Path:
     return FLEET_HOME / "state"
 
 
+def interface_dir(home=None) -> Path:
+    """The interface role's durable, per-home state directory."""
+    root = FLEET_HOME if home is None else Path(home)
+    return root / "state" / "interface"
+
+
+def interface_board_path(home=None) -> Path:
+    return interface_dir(home) / "board.md"
+
+
+def interface_log_path(home=None) -> Path:
+    return interface_dir(home) / "log.md"
+
+
+def _interface_supervisor_state(home):
+    path = Path(home) / "supervisor" / "INCARNATION"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "none"
+    except (OSError, ValueError):
+        return "UNMEASURED"
+    if not isinstance(value, dict):
+        return "UNMEASURED"
+    state = value.get("state")
+    if state == "released":
+        return "released"
+    if isinstance(value.get("incarnation_id"), str):
+        return state or "held"
+    return "UNMEASURED"
+
+
+def _interface_lanes(home):
+    path = Path(home) / "state" / "fleet.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        return "UNMEASURED"
+    workers = value.get("workers") if isinstance(value, dict) else None
+    if not isinstance(workers, dict):
+        return "UNMEASURED"
+    names = sorted(name for name, row in workers.items()
+                   if isinstance(row, dict) and row.get("status") == "working")
+    return ", ".join(names) if names else "none"
+
+
+def _interface_last_throughput(home):
+    matches = []
+    paths = [Path(home) / "supervisor" / "JOURNAL.md"]
+    history = Path(home) / "supervisor" / "journal-history"
+    try:
+        paths.extend(sorted(history.glob("*.md")))
+    except OSError:
+        return "UNMEASURED"
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError, UnicodeError):
+            continue
+        for line in lines:
+            if "THROUGHPUT" in line:
+                match = re.search(r"THROUGHPUT\s+wave\s+(\d+)", line)
+                if match:
+                    matches.append((int(match.group(1)), line.strip()))
+    return max(matches, key=lambda item: item[0])[1] if matches else "UNMEASURED"
+
+
+def _interface_pending_rulings(home):
+    root = Path(home) / "state" / "tasks"
+    if not root.exists():
+        return "UNMEASURED"
+    found = []
+    try:
+        paths = sorted(root.rglob("*.md"))
+    except OSError:
+        return "UNMEASURED"
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return "UNMEASURED"
+        name = path.name.lower()
+        if "ruling" in name or "operator ruling" in text.lower():
+            found.append(path.relative_to(Path(home)).as_posix())
+    return ", ".join(found) if found else "none"
+
+
+def _interface_last_relayed(home):
+    path = interface_log_path(home)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return "UNMEASURED"
+    except (OSError, UnicodeError):
+        return "UNMEASURED"
+    waves = []
+    for line in lines:
+        match = re.search(r"RELAY.*?wave\s+(\d+)", line, re.IGNORECASE)
+        if match:
+            waves.append(int(match.group(1)))
+    return str(max(waves)) if waves else "UNMEASURED"
+
+
+def render_interface_board(home=None) -> str:
+    """Render the deterministic portion of the interface's home board.
+
+    Inputs not represented by durable fleet files remain ``UNMEASURED``;
+    this function never fills an operational gap with a guess.
+    """
+    root = FLEET_HOME if home is None else Path(home)
+    rulings = _interface_pending_rulings(root)
+    return "\n".join([
+        "# Fleet interface board",
+        "",
+        f"Supervisor: {_interface_supervisor_state(root)}",
+        f"Lanes in flight: {_interface_lanes(root)}",
+        f"Last THROUGHPUT: {_interface_last_throughput(root)}",
+        f"Pending operator rulings (task paths): {rulings}",
+        f"Last relayed wave: {_interface_last_relayed(root)}",
+        "",
+        "Human fields: UNMEASURED when no durable source exists.",
+        "",
+    ])
+
+
+def ensure_interface_state(home=None) -> None:
+    """Create the interface board/log without treating absence as an error."""
+    directory = interface_dir(home)
+    directory.mkdir(parents=True, exist_ok=True)
+    board = interface_board_path(home)
+    if not board.exists():
+        board.write_text(render_interface_board(home), encoding="utf-8")
+    log = interface_log_path(home)
+    if not log.exists():
+        log.write_text("", encoding="utf-8")
+
+
+def refresh_interface_board(home=None) -> None:
+    ensure_interface_state(home)
+    interface_board_path(home).write_text(
+        render_interface_board(home), encoding="utf-8")
+
+
+def append_interface_log(kind, detail, home=None) -> None:
+    """Append one durable, single-line interface event."""
+    ensure_interface_state(home)
+    clean = str(detail).replace("\r", " ").replace("\n", " ").strip()
+    line = f"{now_iso()} {kind} {clean}\n"
+    _atomic_append_bytes(interface_log_path(home), line.encode("utf-8", "replace"))
+    refresh_interface_board(home)
+
+
 def logs_dir() -> Path:
     return FLEET_HOME / "logs"
 
@@ -913,12 +1065,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11948) -- a rename can hide live worker records from
+      * `_sweep_husks` (:12126) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:13154) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:13332) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17991) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:18169) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -928,22 +1080,22 @@ def _quarantine_artifacts() -> list:
     read and described, and the question only arises when there is no file to
     answer for itself.
 
-      * `_acting_worker_identity` (:3225) -- `not_initialized` stays the
+      * `_acting_worker_identity` (:3377) -- `not_initialized` stays the
         affirmative *"there are no records"* only with no artifact beside it.
         SCOPED TO THE ABSENT CASE ON PURPOSE: this resolver is shared with the
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17712) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17890) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
-      * `_read_registry_readonly` (:4139) -- the VIEW surface's copy of the same
+      * `_read_registry_readonly` (:4291) -- the VIEW surface's copy of the same
         question, and the last reader to get it (P1-13, 2026-07-31). Until then
         every view described a just-quarantined fleet with the identical string
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13692) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13870) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -955,8 +1107,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:7699) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:18567) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7877) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:18745) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3175,7 +3327,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17991`), where it costs the §6.5 gate nothing.
+    (`:18169`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -3191,7 +3343,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     THE READ IS NEVER `load_registry`, and that distinction is the whole reason
     `_registry_records_or_none` exists (this site uses its `(ok, reason, data)`
     source directly, for the paragraph above). `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1068`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1220`) -- and
     its docstring is explicit that *"callers must abort, not catch-and-
     continue."* The first version of this function did catch and continue: the
     exception was swallowed, the rename was not, so on a corrupt registry every
@@ -7013,6 +7165,7 @@ def _write_new_home_state(target: Path, template_text: str) -> bool:
         template_text, sys.executable, target, fleet_install=INSTALL_ROOT)
     (target / "state" / "worker-settings.json").write_text(
         rendered, encoding="utf-8")
+    ensure_interface_state(target)
     return created
 
 
@@ -7093,6 +7246,30 @@ def _init_named_home(args, *, local_home=None) -> int:
 
     if local_home is None:
         ident, appended = _record_home_on_this_machine(target)
+
+    if local_home is not None:
+        try:
+            cmd_interface_register(SimpleNamespace(), home=target)
+        except FleetCliError as exc:
+            # A shell outside tmux and outside Claude has no caller identity.
+            # Keep bare init useful there, but never hide a malformed tmux
+            # registration or a failed tmux operation.
+            if "CLAUDE_CODE_SESSION_ID is unset" not in str(exc):
+                raise
+            print("  interface:  UNMEASURED (no tmux pane or session id)")
+        print("  startup ritual:")
+        print(f"    board:     {interface_board_path(target).as_posix()}")
+        print(f"    sup-status: {_interface_supervisor_state(target)}")
+        inbox = target / "state" / "inbox"
+        try:
+            inbox_count = sum(1 for path in inbox.iterdir() if path.is_file())
+        except FileNotFoundError:
+            inbox_count = 0
+        except OSError:
+            inbox_count = "UNMEASURED"
+        print(f"    inbox:     {inbox_count}")
+        print(f"    rulings:   {_interface_pending_rulings(target)}")
+        refresh_interface_board(target)
 
     # THE WORD `home` BETWEEN THE TWO INTERPOLATIONS IS load-BEARING, and it is
     # not style. `tests/test_rendered_command_quoting.py`'s census reads rule
@@ -7187,6 +7364,7 @@ def cmd_init(args, *, create_in=None) -> int:
     instance_path = instance_settings_path()
     instance_path.parent.mkdir(parents=True, exist_ok=True)
     instance_path.write_text(rendered, encoding="utf-8")
+    ensure_interface_state(FLEET_HOME)
 
     print(f"fleet init: wrote {instance_path}")
     print(f"  python:      {Path(sys.executable).resolve().as_posix()}")
@@ -9881,7 +10059,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9775` / `cmd_respawn:9388`, before
+    # resolution that runs from `cmd_kill:9953` / `cmd_respawn:9566`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9944,10 +10122,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9775` / `cmd_respawn:9388`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9953` / `cmd_respawn:9566`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:9412-9414` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:9590-9592` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -16379,12 +16557,12 @@ def _registry_records_or_none():
 
     IT MUST NOT BE `load_registry`, and that is the whole reason this function
     exists rather than a bare try/except at each site. `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1068`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1220`) --
     which is a WRITE. `_supervisor_gate` promises "READ-ONLY: no lock, no mint,
     no write" and runs at the top of every mutating verb, so routing its
     identity read through `load_registry` would let a speed-bump shred operator
     evidence on a path that documents itself as touching nothing. This is D4's
-    rule for the view path (`:4101`) applied to the one other reader that has
+    rule for the view path (`:4253`) applied to the one other reader that has
     no business quarantining. Quarantining stays where it belongs: the
     lock-holding verbs, `cmd_sup_boot` included via `_holder_is_limited`."""
     ok, _reason, data = _read_registry_readonly()
@@ -16570,9 +16748,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is councilor 1's half of the same ruling. A bare `released_by_sid in
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
-    (ND4a)"* -- for the eighteen other sites that already key on the union (`:2827, :2898,
-    :2971, :3232, :3382, :4877, :9915, :10235, :10516, :10747, :10834, :10990,
-    :11002, :11013, :11162, :11978, :16442, :19024, :19025, :19058, :19976`). The thirteenth is multi-fleet §5 step 2's
+    (ND4a)"* -- for the eighteen other sites that already key on the union (`:2979, :3050,
+    :3123, :3384, :3534, :5029, :10093, :10413, :10694, :10925, :11012, :11168,
+    :11180, :11191, :11340, :12156, :16620, :19202, :19203, :19236, :20181`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16596,8 +16774,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8676, :9215, :14188,
-    :20639), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8854, :9393, :14366,
+    :20844), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17293,8 +17471,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8676, :9215, :14188,
-    #     :20639) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8854, :9393, :14366,
+    #     :20844) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17324,10 +17502,10 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #   * `_registry_records_or_none`, NEVER `load_registry`. This gate
         #     documents itself "READ-ONLY: no lock, no mint, no write" and
         #     `load_registry` QUARANTINES a corrupt registry -- it RENAMES the
-        #     file aside (`:1068`), which is a write. Routing the identity read
+        #     file aside (`:1220`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16370`). A `None` here
+        #     this and names this gate as its reason (`:16548`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -17969,7 +18147,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11941`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:12119`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -19371,50 +19549,72 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
             f"window exist (`tmux list-windows -t {args.tmux_session}`); the "
             f"claim is untouched apart from this call's own restamp, so "
             f"re-running this verb is safe.")
+    append_interface_log("RELAY", args.text)
     print(f"notified {target} as {inc}: "
           f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
     return 0
 
 
-def cmd_interface_register(args, run=subprocess.run) -> int:
-    """Register the current interface pane and restore the canonical window.
+def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
+    """Register the current interface pane or session.
 
     The pane id comes only from ``TMUX_PANE`` and is checked in the same shape
     the keeper accepts: a percent sign followed by ASCII decimal digits.  A
-    missing or malformed environment value is a refusal, never a guessed
-    pane target or a state-file write.
+    missing or malformed environment value is a refusal, never a guessed pane
+    target or a state-file write. Outside tmux, the caller's Claude session id
+    is the interface identity; this path does not weaken the pane refusal.
     """
+    root = FLEET_HOME if home is None else Path(home)
+    ensure_interface_state(root)
     pane = os.environ.get("TMUX_PANE")
-    if pane is None:
-        raise FleetCliError(
-            "interface-register: TMUX_PANE is unset; run this verb inside tmux")
-    if not (pane.startswith("%") and pane[1:].isascii()
-            and pane[1:].isdecimal()):
-        raise FleetCliError(
-            "interface-register: TMUX_PANE must contain a tmux pane ID")
-
-    current_window = _tmux_window_name(run, pane)
-    if current_window is None:
-        raise FleetCliError(
-            "interface-register: tmux pane lookup failed; registration was not written")
-    if current_window != "fleet":
-        if not tmux_command(run, sys.stderr, "rename-window", "-t", pane,
-                            "fleet", label="interface-register"):
+    if pane is not None:
+        if not (pane.startswith("%") and pane[1:].isascii()
+                and pane[1:].isdecimal()):
             raise FleetCliError(
-                "interface-register: tmux window rename failed; registration was not written")
+                "interface-register: TMUX_PANE must contain a tmux pane ID")
+        current_window = _tmux_window_name(run, pane)
+        if current_window is None:
+            raise FleetCliError(
+                "interface-register: tmux pane lookup failed; registration was not written")
+        if current_window != "fleet":
+            if not tmux_command(run, sys.stderr, "rename-window", "-t", pane,
+                                "fleet", label="interface-register"):
+                raise FleetCliError(
+                    "interface-register: tmux window rename failed; registration was not written")
+        path = root / "state" / "interface-pane"
+        existing = None
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            pass
+        if existing != pane:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(pane + "\n", encoding="utf-8")
+            print(f"interface pane registered: {pane}")
+            append_interface_log("REGISTER", f"pane={pane}", home=root)
+        else:
+            print(f"interface pane already registered: {pane}")
+        return 0
 
-    path = state_dir() / "interface-pane"
+    sid = (getattr(args, "session_id", None)
+           or os.environ.get("CLAUDE_CODE_SESSION_ID"))
+    if sid is None or not sid.strip() or "\n" in sid or "\r" in sid:
+        raise FleetCliError(
+            "interface-register: TMUX_PANE is unset and "
+            "CLAUDE_CODE_SESSION_ID is unset; run from the interface session")
+    path = root / "state" / "interface-session"
     existing = None
     try:
         existing = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         pass
-    if existing != pane:
+    if existing != sid:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(pane + "\n", encoding="utf-8")
-        print(f"interface pane registered: {pane}")
+        path.write_text(sid + "\n", encoding="utf-8")
+        print(f"interface session registered: {sid}")
+        append_interface_log("REGISTER", f"session={sid}", home=root)
     else:
-        print(f"interface pane already registered: {pane}")
+        print(f"interface session already registered: {sid}")
     return 0
 
 
@@ -19461,6 +19661,7 @@ def cmd_sup_decision(args) -> int:
             write_incarnation(claim)   # §5.3: acknowledge + commit together
         print(f"pending-decision raised: {args.question!r} -- routed to the "
               f"interface tier; supervisor parks until answered")
+        append_interface_log("RULING", f"raised={args.question}")
         _deliver_notices(notices)
         return 0
 
@@ -19488,6 +19689,7 @@ def cmd_sup_decision(args) -> int:
             rec["answered_by_sid"] = current_caller_session()
             write_pending_decision(rec)
         print(f"pending-decision answered: {args.answer!r}")
+        append_interface_log("RULING", f"answered={args.answer}")
         return 0
 
     if clearing:
@@ -19497,6 +19699,7 @@ def cmd_sup_decision(args) -> int:
         with fleet_lock():
             clear_pending_decision()
         print("pending-decision cleared")
+        append_interface_log("RULING", "cleared")
         return 0
 
     rec = read_pending_decision()
@@ -19803,6 +20006,7 @@ def _dispatch_supervisor_body(campaign, mode, model, *, setting_sources=None,
                     save_registry(data)
                     _append_event_quiet("turn_started", name, session_id=fast_sid)
             print(f"{name} {fast_sid} (native bg, fast completion before join)")
+            append_interface_log("SPAWN", f"supervisor={name} sid={fast_sid}")
             return 0
 
         with fleet_lock():
@@ -19855,6 +20059,7 @@ def _dispatch_supervisor_body(campaign, mode, model, *, setting_sources=None,
         model_line += f"; CLAUDE_CODE_SUBAGENT_MODEL={subagent_model}"
     print(model_line)
     print(f"{name} {sid} (native bg, short id {short_id})")
+    append_interface_log("SPAWN", f"supervisor={name} sid={sid}")
     return 0
 
 
@@ -23825,8 +24030,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("journal-roll",
                    help="roll older supervisor journal entries into history")
 
-    sub.add_parser("interface-register",
-                   help="register this tmux pane as the interface (inside tmux)")
+    p_interface = sub.add_parser(
+        "interface-register",
+        help="register this tmux pane or Claude session as the interface")
+    p_interface.add_argument(
+        "--session-id", dest="session_id", default=None,
+        help="session id for registration when outside tmux (default: environment)")
 
     p_wave = sub.add_parser(
         "wave-close",
