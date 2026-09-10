@@ -105,11 +105,34 @@ def test_fresh_seized_claim_uses_ordinary_held_rule(home, monkeypatch, capsys):
 
 
 def test_stale_seized_claim_still_pages_as_seized(home, monkeypatch, capsys):
+    """Unsettled seize: claimed_at == heartbeat_at, the takeover never proved out."""
     claim = fleet.read_incarnation()
     claim["claimed_via"] = "seize"
+    claim["claimed_at"] = claim.get("claimed_at") or "2026-09-10T15:30:11Z"
+    claim["heartbeat_at"] = claim["claimed_at"]
     fleet.write_incarnation(claim)
     run_guard(monkeypatch, snapshot(age=4000))
     assert capsys.readouterr().out == "PAGE claim seized\n"
+
+
+def test_a_seize_settled_by_a_heartbeat_is_an_ordinary_stale_claim(home, monkeypatch,
+                                                                   capsys):
+    """A seize is ambiguous only until the seizing body beats once.
+
+    Measured twice on the live claim: a seizure 5h then 8h old, heartbeated many
+    times since, still returned `PAGE claim seized` -- so the interface was told
+    to page a healthy supervisor instead of waking an idle one. A seize hours old
+    is not evidence about now; only the beat that followed it is.
+    """
+    claim = fleet.read_incarnation()
+    claim["claimed_via"] = "seize"
+    claim["claimed_at"] = "2026-09-10T15:30:11Z"
+    claim["heartbeat_at"] = "2026-09-10T23:00:00Z"
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(age=4000), [row(RETIRED)])
+    out = capsys.readouterr().out
+    assert not out.startswith("PAGE claim seized"), out
+    assert out.startswith("WAKE "), out
 
 
 def test_handshake_always_pages(home, monkeypatch, capsys):
