@@ -12145,3 +12145,90 @@ The interface's note sequences this *"after the G-K6 keeper fix once ruled"*. **
 the two-home dogfood is gate-blocked as destructive**, so neither predecessor is runnable; this is
 design work that needs no gate to START and produces the gates it needs as output. RAM 4.3 GB
 available, one Opus lane, well inside the ceiling. Floor at dispatch `374929b` = 4965 on both.
+
+## 2026-09-10T07:53:37Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=ed943460-640f-467d-b24f-c70933596578
+
+HANDOFF PREP — inc-20260910T041513Z-181d stands down at ~292k against a 350k band, with TWO LANES
+IN FLIGHT and the operator's six rulings landed. **This is the routine end of a generation, not an
+incident.** I am handing off EARLY and on purpose: landing two lanes would cost ~50k and leave the
+three ruled build items undispatched at the band, where a successor booting at ~100k can land the
+lanes AND dispatch all three with room to spare.
+
+## THE SINGLE MOST IMPORTANT THING FOR YOU TO KNOW
+
+**When you finish a wave and end your turn, nothing will wake you.** That is G-K6, it happened to my
+predecessor for 8h10m, and it happened to ME once mid-turn after an API error. The keeper CANNOT see
+it (that is what `w62-keeperc` is fixing right now). **Until C lands, keep a harness-tracked
+background task pending — a `fleet wait` on a live lane — whenever you intend to still be here.** It
+is a mitigation, not a fix, and it works only while there is something to wait on.
+
+## IN FLIGHT — TWO LANES, BOTH OPUS, BOTH BRIEFED, NEITHER LANDED
+
+1. **`w62-keeperc`** (branch `w62/keeper-c`, worktree `/home/altai/proga/fleet-w62-keeperc`, from
+   `374929b`) — **G-K6 wave 1 (C), the operator's explicit priority.** Arms
+   `rule_supervisor_dead` on the claim row reading `status == "busy"` instead of on presence, keeps
+   the sid join, pins by replaying efa0 (**page at 21:04:36Z, not 04:14:36Z**), states the
+   wedged-busy residual, and may rename to `supervisor_stalled` if it agrees the name is wrong. The
+   evidence base is `docs/lanes/w61-keeperblind.md` (587 lines, already merged) — **it is thorough
+   and the lane is told not to redo it.**
+2. **`w62-codex`** (branch `w62/codex-substrate`, worktree `/home/altai/proga/fleet-w62-codex`) —
+   the operator's new request, *"I want fleet to also be able to call codex cli as its workers."*
+   **DESIGN + SPIKE ONLY, BUILD NOTHING.** **It has already been respawned once**: its first body
+   stalled 25 minutes on a `Bash` call with mode `bypass` and no deny rules, and **that stall is
+   spike finding #1** — BELIEVED, and the brief now orders it confirmed or refuted: *a headless
+   `codex exec` without an approval bypass blocks on codex's own interactive approval with no TTY.*
+   If true, the operator's `--full-auto` gate stops being a preference and becomes a precondition.
+   The amended brief requires `timeout 120`, `< /dev/null`, and output to a file on EVERY codex
+   invocation, and records the exit code every time.
+
+**What I measured that made that brief better, and it contradicts the ask:** codex's surface is far
+richer than the request assumed — **`codex queue`** (a `fleet send` analogue, so *"no hook boundary"*
+is not established), **`exec --json`** JSONL + **`-o/--output-last-message`** + `--output-schema`,
+**`exec resume`/`fork`**, **`codex agents`** (a roster over codex's OWN daemon), **`archive`/`delete`**.
+**The structural match to fleet's model is closer than anything in this repo has written down — and
+I handed it to the lane as a HYPOTHESIS TO ATTACK**, because a near-match hides divergence under
+identical verb names, which is worse than an obvious mismatch.
+
+## THE THREE RULED ITEMS I DID NOT DISPATCH — YOUR FIRST WAVE
+
+RAM ceiling is 3 Opus lanes and ~1.7 GB of this 8 GB box is a daemon pre-warm pool, so two were all
+I could safely add. In the operator's own priority order:
+
+1. **DOGFOOD, approved with a HARD MACHINE FENCE.** *"go dogfood a second sister repo of fleet, but
+   do not touch my other projects."* A NEW throwaway repo under `/home/altai/proga/` (`git init`, a
+   README). **`/home/altai/proga/` holds ~20 of the operator's real projects — Aegis, expardus_*,
+   scheduling-engine and more. NOTHING there but `fleet` and the new repo may be initialised,
+   spawned into, or written to.** Put that sentence in the brief in those words. This is **the first
+   real append to `~/.claude/fleet-homes.list`**, which is RATIFIED DESTRUCTIVE and only the fold
+   reverses. Prove end to end: `init --home`, spawn one **Sonnet** worker there, `status`,
+   statusline row showing the other home, keeper `--fleet-home`, and **that `fleet status` in THIS
+   home never shows the other fleet's worker.** Leave the second home in place when done.
+2. **G-K1 — the keeper becomes an OFF-BY-DEFAULT feature flag**, plus the D7 amendment naming the
+   keeper's window as the one permitted typing surface. `w62-keeperc` was told not to build this and
+   to flag any collision it noticed — **read its report before briefing this one.**
+3. **G-K5's two build items** — the statusline must differ per fleet home, and `fleet init` inside a
+   repo creates a home THERE (a **creation-verb default, not a resolution step**; the §5 resolver is
+   unchanged and Reading B stays unbuilt and unratified). **If either collides with §5 or with the
+   E2 destructive tier for `init --home`, the ruling says FILE A GATE, do not build around it.**
+
+## PROPOSED `## Settled` TEXT — THE OPERATOR TICKS, NOT YOU AND NOT ME
+
+I recorded all six dispositions as an unticked dated note at the top of `## Open` in
+`docs/OPERATOR-GATES.md` (`294315d`) so nothing is lost if a body is swapped mid-pass, and **ticked
+nothing** — the boxes and the `## Settled` move are the operator's alone. The interface is carrying
+the proposed Settled text back. **Do not tick, and do not let a lane tick.**
+
+## STATE AT HANDOFF
+
+`374929b` -> `294315d` pushed, `rev-list --count HEAD --not --remotes` = **0**, working tree clean,
+repo root clean. Wave 61 floor **4965, identical on 3.10 and 3.12**, and that is the baseline both
+in-flight lanes were briefed against. `doctor` clean; the pending-decision row is cleared. Three
+worktrees exist: `fleet-w62-codex`, `fleet-w62-keeperc` (both live), and none stale.
+
+## WHAT I EXPECT YOU TO FIND I GOT WRONG
+
+Something in the two briefs I just wrote. **Four waves running, every lane has corrected its
+supervisor on the point the brief called most likely** — mine included, twice today, and once on a
+gate I had already committed, pushed and announced. **Read each report's WHERE THIS BRIEF WAS WRONG
+section before its summary**, and keep instructing lanes that agreeing with the brief is not the
+deliverable. It is the cheapest thing this fleet does.
