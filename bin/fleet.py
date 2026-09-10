@@ -917,7 +917,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_autoclean` (:13152) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17984) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17989) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -933,7 +933,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17705) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17710) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4138) -- the VIEW surface's copy of the same
@@ -955,7 +955,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:7697) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:18162) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:18527) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3174,7 +3174,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17984`), where it costs the §6.5 gate nothing.
+    (`:17989`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -16171,7 +16171,7 @@ def _journal_roll_header_hint(line: str) -> bool:
         r"HANDOFF-BEGIN|HANDOFF-COMPLETE|HANDOFF-ABORT)\b)", body))
 
 
-def roll_supervisor_journal() -> dict:
+def roll_supervisor_journal(home=None) -> dict:
     """Losslessly roll old supervisor entries off the committed journal board.
 
     The board is parsed as UTF-8 lines, but the moved and retained regions are
@@ -16183,7 +16183,11 @@ def roll_supervisor_journal() -> dict:
     Returns counts and ``rolled`` status for the CLI.  The caller must hold
     ``fleet_lock`` when this is used alongside another journal write.
     """
-    board = supervisor_journal_path()
+    # ``home`` is used by wave-close, whose git target can be a checkout other
+    # than the configured runtime home.  The default remains the existing
+    # FLEET_HOME-derived behavior for every supervisor verb and test.
+    board = (Path(home) / "supervisor" / "JOURNAL.md"
+             if home is not None else supervisor_journal_path())
     try:
         raw = board.read_bytes()
     except FileNotFoundError:
@@ -16223,7 +16227,8 @@ def roll_supervisor_journal() -> dict:
     if raw[:first_entry] + moved + raw[cutoff:] != raw:
         raise ValueError("journal-roll: refusing a non-lossless board partition")
 
-    history = supervisor_journal_history_path()
+    history = (Path(home) / "supervisor" / "journal-history" / "journal-roll.md"
+               if home is not None else supervisor_journal_history_path())
     history.parent.mkdir(parents=True, exist_ok=True)
     try:
         history_before = history.read_bytes()
@@ -16565,7 +16570,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2826, :2897,
     :2970, :3231, :3381, :4875, :9913, :10233, :10514, :10745, :10832, :10988,
-    :11000, :11011, :11160, :11976, :16435, :19339`). The thirteenth is multi-fleet §5 step 2's
+    :11000, :11011, :11160, :11976, :16440, :19704`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16590,7 +16595,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8674, :9213, :14186,
-    :20002), the same safety invariant §7.1's send carve-out rests on. That
+    :20367), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17287,7 +17292,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8674, :9213, :14186,
-    #     :20002) -- so the sid union can never make one body answer for another.
+    #     :20367) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17320,7 +17325,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1067`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16363`). A `None` here
+        #     this and names this gate as its reason (`:16368`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -18073,6 +18078,366 @@ def cmd_journal_roll(args) -> int:
               f"{supervisor_journal_history_path()}")
     else:
         print(f"journal board unchanged: {result['checkpoints']} checkpoints")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI: wave-close -- one mechanically bounded wave boundary
+# ---------------------------------------------------------------------------
+
+WAVE_CLOSE_EXPECTED_FAILURES = frozenset({
+    "tests/test_fleet_index.py::TestPathContainment::test_the_choke_point_refuses_a_drive_qualified_rel_and_writes_nothing",
+    "tests/test_fleet_index.py::TestPathContainment::test_a_drive_qualified_rel_cannot_overwrite_a_file_outside_the_root",
+    "tests/test_fleet_index.py::TestPathContainment::test_the_update_library_surface_refuses_a_drive_qualified_rel",
+    "tests/test_fleet_q.py::TestOutlinePathContainment::test_an_absolute_path_outside_the_root_is_refused_too",
+    "tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces",
+    "tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command",
+})
+WAVE_CLOSE_PUSH_ATTEMPTS = 4  # initial push plus three retries
+WAVE_CLOSE_PUSH_WINDOW_SECONDS = 300.0
+
+
+def _wave_git(repo, *argv, run=subprocess.run, check=True):
+    """Run one non-shell git command for ``wave-close``.
+
+    Keeping the runner injectable is intentional: the close arm is a real
+    mutator, while its accounting and retry rules need deterministic tests.
+    """
+    try:
+        result = run(["git", *argv], cwd=str(repo), capture_output=True,
+                     text=True, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FleetCliError(f"wave-close: git {argv[0]} failed: {exc}") from exc
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise FleetCliError(f"wave-close: git {' '.join(argv)} failed"
+                            + (f": {detail[:300]}" if detail else ""))
+    return result
+
+
+def _wave_repo_root(run=subprocess.run):
+    """Resolve the checkout containing the caller's current directory."""
+    result = _wave_git(Path.cwd(), "rev-parse", "--show-toplevel", run=run)
+    root = Path(result.stdout.strip()).resolve()
+    if not root.is_dir():
+        raise FleetCliError(f"wave-close: git root is not a directory: {root}")
+    return root
+
+
+def _wave_numstat(repo, base, run=subprocess.run):
+    """Return additions/deletions in the five non-overlapping accounting buckets."""
+    result = _wave_git(repo, "diff", "--numstat", f"{base}..HEAD", run=run)
+    buckets = {name: [0, 0] for name in
+               ("bin", "tests", "docs", "journal", "other")}
+    paths = []
+    for raw in result.stdout.splitlines():
+        fields = raw.split("\t", 2)
+        if len(fields) != 3:
+            continue
+        added, removed, path = fields
+        if added.isdigit() and removed.isdigit():
+            counts = (int(added), int(removed))
+        else:
+            # Git reports binary files as ``-``.  The path is still recorded,
+            # but a line count cannot honestly be invented for it.
+            counts = (0, 0)
+        posix = path.replace("\\", "/")
+        if posix == "supervisor/JOURNAL.md" or posix.startswith(
+                "supervisor/journal-history/"):
+            bucket = "journal"
+        elif posix.startswith("bin/"):
+            bucket = "bin"
+        elif posix.startswith("tests/"):
+            bucket = "tests"
+        elif posix.startswith("docs/"):
+            bucket = "docs"
+        else:
+            bucket = "other"
+        buckets[bucket][0] += counts[0]
+        buckets[bucket][1] += counts[1]
+        paths.append(path)
+    return buckets, paths
+
+
+def _wave_id(repo, run=subprocess.run):
+    """Derive a wave number from the branch, then the current journal."""
+    branch = _wave_git(repo, "branch", "--show-current", run=run).stdout.strip()
+    match = re.search(r"(?:^|/)w(\d+)(?:[-/]|$)", branch)
+    if match:
+        return match.group(1)
+    for path in (Path(repo) / "supervisor" / "JOURNAL.md",
+                 Path(repo) / "docs" / "CHANGELOG.md"):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        found = [int(value) for value in re.findall(r"THROUGHPUT wave (\d+)", text)]
+        if found:
+            return str(max(found) + 1)
+    return "UNMEASURED"
+
+
+def _wave_registry_worker_count():
+    """Count worker records without assigning semantic status to them."""
+    try:
+        data = read_registry_no_repair(hint=False)
+    except Exception:  # noqa: BLE001 - accounting must never invent a count
+        return "UNMEASURED"
+    workers = data.get("workers") if isinstance(data, dict) else None
+    return str(len(workers)) if isinstance(workers, dict) else "UNMEASURED"
+
+
+def _wave_roster_claude_tokens(entries):
+    """Sum roster usage when every roster entry supplies integer usage.
+
+    Native roster versions do not all expose token usage.  A missing field is
+    therefore ``UNMEASURED``, never a fabricated zero.  The walker accepts the
+    two observed shapes: a top-level usage object and a direct token object.
+    """
+    if not isinstance(entries, list):
+        return "UNMEASURED"
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return "UNMEASURED"
+        usage = entry.get("usage")
+        if not isinstance(usage, dict):
+            usage = entry
+        values = [usage.get("input_tokens"), usage.get("output_tokens")]
+        if not all(isinstance(value, int) and not isinstance(value, bool)
+                   for value in values):
+            return "UNMEASURED"
+        total += sum(values)
+    return str(total)
+
+
+_WAVE_PYTEST_COUNT_RE = re.compile(
+    r"(?P<count>\d+)\s+(?P<kind>failed|passed|skipped|xfailed|xpassed|error|errors)")
+
+
+def _wave_parse_pytest_result(stdout, stderr, returncode):
+    """Parse one half's final pytest summary, including failure nodeids."""
+    counts = {key: 0 for key in
+              ("failed", "passed", "skipped", "xfailed", "xpassed", "errors")}
+    summary = "\n".join((stdout or "").splitlines()[-8:])
+    for match in _WAVE_PYTEST_COUNT_RE.finditer(summary):
+        kind = match.group("kind")
+        if kind == "error":
+            kind = "errors"
+        counts[kind] += int(match.group("count"))
+    failures = set()
+    for line in (stdout or "").splitlines():
+        if line.startswith("FAILED "):
+            failures.add(line[7:].split(" - ", 1)[0].strip())
+    counts["collected"] = sum(counts.values())
+    counts["returncode"] = returncode
+    return counts, failures
+
+
+def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
+                log_root=None):
+    """Run both foreground halves for each required interpreter in a fresh clone."""
+    clone_parent = Path(tempfile.mkdtemp(prefix="fleet-wave-close-"))
+    clone = clone_parent / "repo"
+    try:
+        _wave_git(repo, "clone", "--no-local", "--quiet", str(repo), str(clone),
+                  run=run)
+        # Walk the fresh clone itself so nested suites such as integration are
+        # included and the one derived list drives both halves.
+        files = sorted(path.relative_to(clone).as_posix()
+                       for path in clone.joinpath("tests").rglob("test_*.py"))
+        if not files:
+            raise FleetCliError("wave-close: fresh clone contains no test files")
+        midpoint = (len(files) + 1) // 2
+        halves = (files[:midpoint], files[midpoint:])
+        interpreters = ("python3.10", "python3.12")
+        results = {}
+        if log_root is None:
+            log_root = state_dir() / "wave-close" / str(wave_id)
+        Path(log_root).mkdir(parents=True, exist_ok=True)
+        for interpreter in interpreters:
+            executable = which(interpreter)
+            if executable is None:
+                raise FleetCliError(f"wave-close: required interpreter {interpreter} is unavailable")
+            aggregate = {key: 0 for key in
+                         ("failed", "passed", "skipped", "xfailed", "xpassed",
+                          "errors", "collected")}
+            failures = set()
+            for number, half in enumerate(halves, 1):
+                if not half:
+                    continue
+                env = os.environ.copy()
+                for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE",
+                            "FLEET_WORKER"):
+                    env.pop(key, None)
+                env["UV_OFFLINE"] = "1"
+                env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
+                proc = run([executable, "-m", "pytest", "-q", "--color=no", *half],
+                           cwd=str(clone), env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+                log = Path(log_root) / f"{interpreter}-half-{number}.log"
+                log.write_text((proc.stdout or "") + "\n--- stderr ---\n" +
+                               (proc.stderr or ""), encoding="utf-8")
+                parsed, half_failures = _wave_parse_pytest_result(
+                    proc.stdout, proc.stderr, proc.returncode)
+                for key in aggregate:
+                    aggregate[key] += parsed[key]
+                failures |= half_failures
+            aggregate["failures"] = sorted(failures)
+            results[interpreter] = aggregate
+        comparable = [{key: value for key, value in result.items()
+                       if key != "failures"} for result in results.values()]
+        if comparable[0] != comparable[1]:
+            raise FleetCliError(
+                f"wave-close: floor totals differ between interpreters: {results}")
+        if results["python3.12"]["failures"] != results["python3.10"]["failures"]:
+            raise FleetCliError(
+                f"wave-close: floor failure sets differ between interpreters: {results}")
+        if set(results["python3.10"]["failures"]) != WAVE_CLOSE_EXPECTED_FAILURES:
+            raise FleetCliError(
+                "wave-close: floor failure set differs from the expected host "
+                f"assumptions: {results['python3.10']['failures']}")
+        return results, _wave_git(clone, "rev-parse", "HEAD", run=run).stdout.strip()
+    finally:
+        shutil.rmtree(clone_parent, ignore_errors=True)
+
+
+def _wave_prepend_after_title(path, text):
+    """Prepend entries while preserving a markdown title and its encoding."""
+    raw = path.read_bytes() if path.exists() else b""
+    if not raw:
+        raw = b"# Operator changelog\n\n"
+    line_end = raw.find(b"\n")
+    if line_end < 0:
+        line_end = len(raw)
+    head = raw[:line_end + (1 if line_end < len(raw) else 0)]
+    tail = raw[len(head):]
+    block = text.rstrip("\n").encode("utf-8") + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(head + block + tail)
+
+
+def _wave_prepend_journal(path, line):
+    """Place the accounting line before the first parsed journal entry."""
+    raw = path.read_bytes() if path.exists() else b"# Supervisor Journal\n\n"
+    marker = b"\n## "
+    index = raw.find(marker)
+    if index < 0:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw.rstrip(b"\n") + b"\n" + line.encode() + b"\n")
+        return
+    insertion = line.encode("utf-8") + b"\n\n"
+    path.write_bytes(raw[:index + 1] + insertion + raw[index + 1:])
+
+
+def _wave_refresh_progress(repo, wave_id):
+    """Refresh only a mechanically recognizable current-wave marker.
+
+    Lane acceptance, priority advancement, and prose are model judgements;
+    this arm intentionally reports no refresh when there is no exact row to
+    update rather than manufacturing status from filenames.
+    """
+    path = Path(repo) / "docs" / "PLAN-PROGRESS.md"
+    if not path.exists() or wave_id == "UNMEASURED":
+        return 0
+    text = path.read_text(encoding="utf-8")
+    marker = f"w{wave_id}"
+    return sum(1 for line in text.splitlines() if marker in line and line.startswith("|"))
+
+
+def _wave_push(repo, run=subprocess.run, sleep=time.sleep):
+    """Push, retrying three times over five minutes, and return success/detail."""
+    delay = WAVE_CLOSE_PUSH_WINDOW_SECONDS / (WAVE_CLOSE_PUSH_ATTEMPTS - 1)
+    failures = []
+    for attempt in range(WAVE_CLOSE_PUSH_ATTEMPTS):
+        if attempt:
+            sleep(delay)
+        result = _wave_git(repo, "push", run=run, check=False)
+        if result.returncode == 0:
+            return True, attempt + 1, failures
+        failures.append((attempt + 1, (result.stderr or result.stdout or "").strip()))
+    return False, WAVE_CLOSE_PUSH_ATTEMPTS, failures
+
+
+def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
+                   sleep=time.sleep) -> int:
+    """Close one wave from a clean checkout after a strict two-interpreter floor."""
+    repo = _wave_repo_root(run=run)
+    base = str(args.base).strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}", base):
+        raise FleetCliError("wave-close: --base must be a commit SHA")
+    _wave_git(repo, "rev-parse", "--verify", f"{base}^{{commit}}", run=run)
+    status = _wave_git(repo, "status", "--porcelain", run=run).stdout
+    if status.strip():
+        raise FleetCliError("wave-close: working tree must be clean before close")
+    changelog = _read_task_arg(args.changelog)
+    if not changelog.strip():
+        raise FleetCliError("wave-close: --changelog must contain at least one sentence")
+
+    # Claim first: the reap, floor, and git operations below can take time,
+    # but an unclaimed body must not perform even the janitorial mutation.
+    with fleet_lock():
+        claim, caller, notices = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="wave-close", mint=False)
+        write_incarnation(claim)
+    _deliver_notices(notices)
+
+    wave_id = _wave_id(repo, run=run)
+    reap_count, reap_error = _supervisor_reap(caller_sid=caller)
+    if reap_error:
+        print(f"wave-close: reap note: {reap_error}", file=sys.stderr)
+    floor, tree = _wave_floor(repo, wave_id, run=run, which=which)
+    buckets, changed_paths = _wave_numstat(repo, base, run=run)
+    roster_ok, roster = _fetch_agents_roster(which=which, run=run)
+    claude_tokens = _wave_roster_claude_tokens(roster) if roster_ok else "UNMEASURED"
+    worker_count = _wave_registry_worker_count()
+    throughput = (
+        f"THROUGHPUT wave {wave_id} ({base}..{tree}): "
+        + ", ".join(f"{name} +{values[0]}/-{values[1]}"
+                     for name, values in buckets.items())
+        + f"; workers: {worker_count}; tokens: {claude_tokens}; reaped: {reap_count}")
+
+    # Re-check immediately before landing the append-only boundary.  The
+    # floor is intentionally outside the lock, so the original claim cannot
+    # be trusted blindly after a long run.
+    with fleet_lock():
+        claim, _, notices = _require_claim_holder(
+            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+            verb="wave-close", mint=False)
+        _wave_prepend_after_title(repo / "docs" / "CHANGELOG.md", changelog)
+        _wave_prepend_journal(repo / "supervisor" / "JOURNAL.md", throughput)
+        progress_rows = _wave_refresh_progress(repo, wave_id)
+        roll = roll_supervisor_journal(home=repo)
+        write_incarnation(claim)
+    _deliver_notices(notices)
+    receipt = state_dir() / "wave-close" / f"{wave_id}.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt_roll = dict(roll)
+    if "history" in receipt_roll:
+        receipt_roll["history"] = str(receipt_roll["history"])
+    receipt.write_text(json.dumps({"wave": wave_id, "base": base, "tree": tree,
+                                   "throughput": throughput, "changed_paths": changed_paths,
+                                   "floor": floor, "progress_rows": progress_rows,
+                                   "journal_roll": receipt_roll}, indent=2), encoding="utf-8")
+    _wave_git(repo, "add", "-A", run=run)
+    _wave_git(repo, "commit", "-m", f"fleet wave-close: wave {wave_id}", run=run)
+    pushed, attempts, push_failures = _wave_push(repo, run=run, sleep=sleep)
+    if not pushed:
+        with open(repo / "supervisor" / "JOURNAL.md", "a", encoding="utf-8") as stream:
+            stream.write(f"\nPUSH FAILURE wave {wave_id}: {attempts} attempts; "
+                         f"retry window {WAVE_CLOSE_PUSH_WINDOW_SECONDS:.0f}s\n")
+        _wave_git(repo, "add", "supervisor/JOURNAL.md", run=run)
+        _wave_git(repo, "commit", "-m", f"fleet wave-close: checkpoint push failure wave {wave_id}", run=run)
+        raise FleetCliError(f"wave-close: push failed after {attempts} attempts: {push_failures}")
+
+    notify_args = argparse.Namespace(text=throughput, tmux_session="work", window="fleet",
+                                     dry_run=False, sid=getattr(args, "sid", None),
+                                     nonce=getattr(args, "nonce", None))
+    cmd_sup_notify(notify_args, run=run)
+    print(throughput)
+    print(f"wave-close: floor tree={tree}; journal rolled={roll['rolled']}; "
+          f"progress rows refreshed={progress_rows}; push attempts={attempts}")
     return 0
 
 
@@ -23191,6 +23556,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("interface-register",
                    help="register this tmux pane as the interface (inside tmux)")
 
+    p_wave = sub.add_parser(
+        "wave-close",
+        help="reap, floor, account, land, push, and notify one wave boundary")
+    p_wave.add_argument("--base", required=True,
+                        help="base commit SHA for the throughput diff")
+    p_wave.add_argument("--changelog", required=True,
+                        help="CHANGELOG sentences, or @file containing them")
+    p_wave.add_argument("--sid", help="override caller session id")
+    p_wave.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+
     p_supbeat = sub.add_parser("sup-heartbeat", help="refresh the supervisor claim heartbeat (no journal write)")
     p_supbeat.add_argument("--sid", help="override caller session id")
     p_supbeat.add_argument("--nonce", help=NONCE_ARG_HELP)
@@ -23439,6 +23814,8 @@ def main(argv=None) -> int:
             return cmd_journal_roll(args)
         if args.command == "interface-register":
             return cmd_interface_register(args)
+        if args.command == "wave-close":
+            return cmd_wave_close(args)
         if args.command == "sup-heartbeat":
             return cmd_sup_heartbeat(args)
         if args.command == "sup-release":
