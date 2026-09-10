@@ -48,7 +48,8 @@ def test_a_held_stale_supervisor_stalled_page_dedups_across_a_tick():
 
     def obs(beat):
         return {"goals_active": True, "claim_state": "held", "claim_sid": sid,
-                "claim_in_roster": True, "claim_row_status": "idle",
+                "claim_rows": {sid: "idle"}, "claim_sids": [sid],
+                "sid_union_ok": True,
                 "heartbeat_age_seconds": beat}
 
     p1 = k.evaluate(obs(k.HEARTBEAT_STALE_SECONDS + 1), NOW)[0]
