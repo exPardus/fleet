@@ -77,7 +77,8 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   `while :; do mcx result "$id" >/dev/null 2>&1; rc=$?; [ "$rc" -eq 2 ] || break; sleep 30; done`.
   If the guard kills the observer you get a `killed` notification and re-arm; the lane survives.
   Re-arm after every `mcx steer`. **MEASURED exit codes — break on NOT-2, never on 0:** `mcx result`
-  is **2** while live, **0** when finished, **1** for a stopped lane or an unknown id. An
+  is **2** while live, **0** when finished, **1** for a stopped lane or an unknown id — all four
+  confirmed on this host, rc=2 against a running lane on 2026-09-10. An
   `until mcx result …` loop therefore spins forever on a guard-killed lane and on a typo'd id, which
   are two of the three endings it exists to report. A `tail --pid` waiter was the first remedy and works, but a
   waiter you do not need is a shell you are paying for on a box that kills shells. Same reasoning for
