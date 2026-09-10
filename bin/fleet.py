@@ -911,12 +911,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11625) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11723) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:12785) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:12883) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17518) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17616) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -932,7 +932,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17239) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17337) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4074) -- the VIEW surface's copy of the same
@@ -941,7 +941,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13323) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13421) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -953,8 +953,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:7510) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:17675) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7608) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:17773) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3110,7 +3110,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17518`), where it costs the §6.5 gate nothing.
+    (`:17616`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -4281,6 +4281,61 @@ def home_identity(text) -> str:
     while len(s) > 1 and s.endswith("/"):
         s = s[:-1]
     return s
+
+
+# --- THE HOME'S SHORT NAME (G-K5 item 1) -----------------------------------
+#
+# `home_identity` is a home's identity and is an absolute PATH -- the right key
+# for a machine-global list and far too wide for a one-line surface. The
+# statusline needs the same identity in five characters, so an operator running
+# two fleets can tell the two rows apart in the bar.
+#
+# WHY A DIGEST AND NOT A NAME. Bounded width forces non-injectivity on EVERY
+# scheme -- there are more absolute paths than four-character strings -- so the
+# question is not "can it collide" but "what does each character buy". A digest
+# spends every character on entropy; a human-readable abbreviation spends them
+# on whatever the paths have in common, and on THIS tool the paths have the
+# name in common: a fleet home is a clone or worktree of this repo, so
+# `/home/a/proga/fleet`, `/srv/fleet` and `/mnt/w/fleet` all abbreviate to
+# `fleet` and the tag would render identical bytes for three different homes.
+# That is P1-13 -- two distinct states, one byte sequence -- on the one field
+# added to stop exactly that confusion.
+#
+# AND IT LAUNDERS FOREIGN TEXT. A member path comes out of
+# `~/.claude/fleet-homes.list`, which since multi-fleet slice (d) is not
+# necessarily text the reader wrote. A name-shaped tag would need the
+# statusline's `_safe` sanitiser and its bracket-stripping on a NEW field --
+# inside the nameplate, which is the one token `_safe` exists to protect. Hex
+# digits cannot carry an escape, a CR or a bracket at all.
+
+#: Tag width, in hex digits. 65 536 buckets: with five homes on a machine the
+#: chance that any two share a tag is ~1.5e-4, and a collision is visible in
+#: `fleet homes`, which renders the tags next to their paths. Three digits
+#: (4096) puts that at ~2.4e-3 and buys one column; five buys nothing an
+#: operator can use.
+HOME_TAG_HEX = 4
+
+
+def home_tag(home) -> str:
+    """A home's short name: `HOME_TAG_HEX` hex digits, for one-line surfaces.
+
+    DERIVED FROM `home_identity`, NOT FROM THE PATH AS TYPED, and that is the
+    load-bearing half. `C:\\f`, `C:/f/` and `C:/f` are ONE home to the homes
+    list's fold, so they must be one tag here too -- otherwise the same fleet
+    would wear two names depending on how a spelling reached this function, and
+    "one home never looks different from itself" is the whole point of the
+    field.
+
+    A PURE FUNCTION OF THE HOME AND NOTHING ELSE. Not the session, not the
+    population, not the registry: two sessions reading one home must render one
+    tag, and a home must not be renamed by an unrelated home joining the list.
+
+    TOTAL. `home_identity` stringifies, and `backslashreplace` cannot raise on
+    a `str`, so there is no input shape that turns the tag into a traceback on
+    a surface whose exception handler renders a BLANK line."""
+    ident = home_identity(home)
+    digest = hashlib.sha256(ident.encode("utf-8", "backslashreplace")).hexdigest()
+    return digest[:HOME_TAG_HEX]
 
 
 def parse_homes_list_line(line) -> tuple:
@@ -6514,10 +6569,35 @@ def _install_statusline(force: bool = False, chain: bool = False) -> None:
 
 
 def cmd_home(args) -> int:
-    """`fleet home`: print the resolved FLEET_HOME.
+    """`fleet home [--tag]`: print the resolved FLEET_HOME, or its tag.
 
     The skill, the slash commands and any collaborator script need the fleet
-    root without hardcoding one developer's absolute path (SPEC §14)."""
+    root without hardcoding one developer's absolute path (SPEC §14).
+
+    THE BARE FORM IS UNTOUCHED AND MUST STAY THAT WAY. `$(fleet home)` is
+    substituted into paths by the skill, the slash commands and the briefs; one
+    extra word on that line breaks every one of them, which is why the tag is a
+    FLAG and not a second column.
+
+    `--tag` ANSWERS THE QUESTION THE STATUSLINE ASKS (G-K5 item 1): the bar
+    renders `[fleet:<tag>]` and this is how a session finds out whether a given
+    tag is the home it is standing in. `fleet homes` is the other half -- it maps
+    tags to paths for the LISTED homes, and an install-root home that was never
+    added to the list appears in neither, so this is the only surface that can
+    name it. Same pure function, so the two can never disagree.
+
+    `--tag` TAGS `FLEET_HOME` RAW, NOT THE `.resolve()`d PATH THE BARE FORM
+    PRINTS, and the asymmetry is deliberate. The tag's job is to match the
+    NAMEPLATE, and the statusline tags `fleet.FLEET_HOME` exactly as it stands;
+    `home_identity` is ratified as *"deliberately not `Path.resolve()`"* for the
+    homes-list fold, so resolving here would make this the one surface in the
+    multi-fleet machinery that keys a home differently from every other. The
+    two spellings coincide whenever `$FLEET_HOME` is unset -- the default is
+    already `.resolve()`d at import -- and where they diverge it is the raw one
+    that agrees with the bar and with the list."""
+    if getattr(args, "tag", False):
+        print(home_tag(FLEET_HOME))
+        return 0
     print(Path(FLEET_HOME).resolve().as_posix())
     return 0
 
@@ -6566,14 +6646,32 @@ def render_homes_view() -> str:
         out.append("  (no homes listed -- this machine runs a single fleet)")
     else:
         width = max(len(h["path"]) for h in pop["homes"])
-        for entry in pop["homes"]:
+        # THE TAG COLUMN IS THE STATUSLINE'S LEGEND (G-K5 item 1). The bar
+        # renders `[fleet:<tag>]` and four hex digits name no directory on their
+        # own, so the tag has to be readable NEXT TO its path somewhere, and
+        # this is the view whose subject is exactly "which homes are there".
+        # No extra read: the population is already in hand and `home_tag` is a
+        # pure string function.
+        tags = [home_tag(h["path"]) for h in pop["homes"]]
+        for entry, tag in zip(pop["homes"], tags):
             if entry["ok"]:
                 n = entry["workers"]
                 state = f"ok ({n} worker{'' if n == 1 else 's'})"
             else:
                 state = {"not_initialized": "not initialized"}.get(
                     entry["reason"], entry["reason"])
-            out.append(f"  {entry['path']:<{width}}  {state}")
+            out.append(f"  {tag}  {entry['path']:<{width}}  {state}")
+        # A COLLISION IS NAMED, NEVER SILENT. Four hex digits are 65 536
+        # buckets, so this is rare -- and the whole value of the tag is that
+        # two homes never render the same bar, so the one surface that can see
+        # a collision must say so rather than let the operator keep trusting a
+        # nameplate that has stopped separating them.
+        clash = sorted({t for t in tags if tags.count(t) > 1})
+        if clash:
+            out.append(
+                f"  note: {len(clash)} tag(s) shared by two or more homes "
+                f"({', '.join(clash)}) -- those homes render the same "
+                f"statusline nameplate and cannot be told apart in the bar")
     if pop["retired"]:
         out.append(f"  ({len(pop['retired'])} retired)")
     if pop["invalid_lines"]:
@@ -9692,7 +9790,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9586` / `cmd_respawn:9199`, before
+    # resolution that runs from `cmd_kill:9684` / `cmd_respawn:9297`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9755,10 +9853,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9586` / `cmd_respawn:9199`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9684` / `cmd_respawn:9297`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:9223-9225` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:9321-9323` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -16108,8 +16206,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the fourteen other sites that already key on the union
-    (`:2825, :2906, :3167, :3317, :4762, :9726, :10046, :10327, :10558, :10645,
-    :10868, :11654, :15979, :18765`). The thirteenth is multi-fleet §5 step 2's
+    (`:2825, :2906, :3167, :3317, :4817, :9824, :10144, :10425, :10656, :10743,
+    :10966, :11752, :16077, :18863`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16129,8 +16227,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8487, :9026, :13819,
-    :19428), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8585, :9124, :13917,
+    :19526), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -16820,8 +16918,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8487, :9026, :13819,
-    #     :19428) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8585, :9124, :13917,
+    #     :19526) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -16854,7 +16952,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1066`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:15907`). A `None` here
+        #     this and names this gate as its reason (`:16005`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -17496,7 +17594,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11618`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11716`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -22326,7 +22424,10 @@ def build_parser() -> argparse.ArgumentParser:
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("home", help="print the resolved FLEET_HOME path")
+    p_home = sub.add_parser("home", help="print the resolved FLEET_HOME path")
+    p_home.add_argument("--tag", action="store_true",
+                        help="print the home's statusline tag instead of its "
+                             "path -- the tag the bar shows in `[fleet:<tag>]`)")
 
     sub.add_parser("knowledge", help="print knowledge/INDEX.md")
 
