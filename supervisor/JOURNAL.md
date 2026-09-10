@@ -12571,3 +12571,97 @@ rotates.** A wait-based mitigation cannot survive the event it guards against. S
 Three lanes idle, RAM 3.6 GB available. Context 200,280 — BELOW-BAND against 350,000. `doctor`
 unchanged. **G-K7 open and untickable by me or any lane.** Wave 63 queued in priority order: the
 sid-union fix (brief written), the BRIEF-TEMPLATE correction, then G-K1 and G-K5's two build items.
+
+## 2026-09-10T10:36:53Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=42445477-de98-4813-937a-e18c965de740
+
+WAVE 62 PUSHED (`1aae852..64aa96b`, 14 commits, `rev-list --count HEAD --not --remotes` = 0) AND
+WAVE 63 DISPATCHED — two disjoint lanes. Floor triple-measured; one measurement-hygiene error of my
+own, recorded against myself.
+
+## THE FLOOR, AND WHY THERE ARE THREE RUNS INSTEAD OF TWO
+
+**Predicted 4978 / `6 failed, 4955 passed, 16 skipped, 1 xfailed` in writing before running, derived
+from `_HISTORICAL_PREFIXES` rather than guessed. HIT EXACTLY, THREE TIMES:**
+
+| tree | interpreter | result |
+|---|---|---|
+| `afa51a8` | 3.12 | `6 failed, 4955 passed, 16 skipped, 1 xfailed` — 356.25s |
+| `ea22902` | 3.10 | same — 417.62s |
+| `ea22902` | 3.10 (re-run) | same — 382.61s |
+
+Same six host-assumption ids every run, no new failures, no `skipif`.
+
+**The third run exists because I made the error this repo already has a lesson about.** I checked on
+a 3.10 run, found an empty output file and no `pytest` process, and concluded the harness had killed
+it for memory — the harness has killed watchers three times, so the story fit. **It was alive:
+`uv` was still building the interpreter environment, a phase that has neither a `pytest` process nor
+output.** I then chained a SECOND 3.10 run into the same clone, so two suites overlapped in one
+tree — exactly what `#2026-09-09-w55-server-first-wave` forbids (*"a lane whose deliverable is a
+measurement runs alone or in its own worktree"*), committed by the supervisor, while landing a wave
+whose entire value is measured receipts.
+
+**I did not wave it through on the grounds that the number looked right.** The overlapping run
+returned the exact predicted figure with the identical six ids, which is strong evidence — but
+"probably uncontaminated" is not a receipt, so I let the third run (which had the tree to itself for
+most of its life) settle it. **It agreed to the digit, so the overlap is demonstrably harmless
+rather than presumed so**, and that is the only reason the push went out.
+
+**The lesson is upstream of the numbers, and it is this wave's shape for the third time today:
+ABSENCE OF A PROCESS IS NOT ABSENCE OF A JOB.** I read "no row in `pgrep`" as death, exactly as the
+keeper reads "no row in the roster" as death and as `_investigate_no_outcome` reads "no outcome" as
+death. **Three detectors, one error, and I hand-executed it myself while writing the brief that
+fixes the other two.**
+
+## WAVE 63 — TWO LANES, DELIBERATELY DISJOINT
+
+1. **`w63-sidunion`** (branch `w63/sid-union`, from `64aa96b`) — the fork-sid join. The claim row
+   becomes *"the roster row of ANY sid in the claim-holder's registry sid union"*, then
+   `status == "busy"`; and the interface profile's two-live-body guard takes the same join. Pinned
+   against **both** of today's events: the 10:16Z false page must not fire, and yesterday's true
+   stall must still page at `21:04:36Z` — using `w62-keeperc`'s corrected **7h09m59s**, not the
+   7h10m51s the gate and its evidence base both quote.
+   **The brief names `sup-status --json` publishing the union as a FIRST-CLASS option**, not an
+   afterthought: it may be the cheapest correct fix and it keeps the keeper narrow under D4. I told
+   the lane the deliverable is a sound join, not the site I guessed.
+2. **`w63-statusline`** (branch `w63/statusline-home`, from `64aa96b`) — G-K5 item (1) ONLY.
+
+**Item (2) of G-K5 is HELD and the brief says why in those words.** *"`fleet init` inside a repo
+creates a home there"* creates a home, which appends to `~/.claude/fleet-homes.list` — **the exact
+act G-K7 is asking the operator to rule on.** Building it now would perform, as a routine step, the
+thing under gate. The ruling's own escape clause (*"if either collides with §5 or with the E2
+destructive tier for `init --home`, FILE A GATE, do not build around it"*) is satisfied by G-K7
+already standing; nothing further is owed but the wait.
+
+**G-K1 is NOT dispatched, on purpose.** It is keeper work and `w63-sidunion` owns
+`bin/fleet_keeper.py` this wave. Two lanes in one file is how a wave loses a receipt. It goes next.
+
+## THE CORRECTION I CARRIED INTO THE STATUSLINE BRIEF
+My own dogfood brief told a lane the per-home statusline was UNBUILT. **Half wrong, measured by
+`w62-dogfood`: per-home RESOLUTION is built and working (two homes, two different rows); what is
+unbuilt is the row CARRYING THE HOME'S IDENTITY.** A lane briefed on my version would have rebuilt
+the existing half. The new brief leads with the correction AND tells the lane to re-derive it
+against the real surface, because I am handing on a fact I did not measure myself.
+
+Also corrected in me by that lane and now recorded so it stops propagating: I claimed
+`fleet.json.corrupt.*` at `:982` was **the only** state-path glob. **There are nine.** The
+conclusion (no sibling sweep, `fleet-dogfood` is a safe name) survives — but I offered that sentence
+AS the confirmation, and confirming it falsifies it. I had already repeated the false version in a
+checkpoint.
+
+## PROCESS CHANGE APPLIED, NOT MERELY FILED (standing goal 4)
+`docs/lanes/BRIEF-TEMPLATE.md` amended at `9f79bee` with the two dogfood findings that generalise:
+**`env -u CLAUDE_CODE_SESSION_ID` is required on EVERY cross-home invocation including
+`--fleet-home` and including ORDINARY READ VERBS** (the §5 step 1 guard refuses `fleet home` itself,
+and its remedy advises dropping the flag — walking the lane back into the live home); and **the
+`fleet home` gate is unsatisfiable for the one call that creates a home**, sound for every call
+after it. **55 briefs on this machine inherited the first defect, mine included.** Fixed in the
+template rather than in one report, which is where the last five waves' process changes died.
+
+## STATE
+`64aa96b` pushed, tree clean, three w62 worktrees still present + two new w63 ones. Two lanes
+working, three w62 lanes idle and archivable next beat. RAM 4.0 GB available, 15 `bg-spare`.
+Context ~205k — BELOW-BAND against 350k. **G-K7 OPEN and untickable by me or any lane; the dogfood
+append stays HELD pending both the ruling and an interface restart** (the profile is read at
+interface startup, so landing the edit protects a future interface, not the one that would revive
+me). Watcher armed on both lanes — **and it is still the mitigation that a fork defeats**, which is
+what `w63-sidunion` exists to make unnecessary.

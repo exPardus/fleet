@@ -58,6 +58,17 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 - [ ] **G-K7 — The first append to `~/.claude/fleet-homes.list` arms multi-fleet §5's wrong-home guard for the WHOLE MACHINE, after which the interface tier's bare `fleet autoclean` and `fleet sup-spawn` — the supervisor-revival path — are REFUSED: take the lane's reading A (land the interface-profile edit first, then append), or one of readings B/C/D**?
 
+  **DISCHARGED BY DOING 2026-09-10 — NO RULING IS OWED. Left unticked because ticking and the
+  `## Settled` move are the operator's alone.** The 2026-09-10 standing directive caps the gate
+  reflex and names this gate by example: *"A prerequisite discovered on the way to a ruled
+  deliverable (G-K7 was a two-line profile edit) is DONE by the lane, journaled in one line."*
+  Reading A executed by supervisor `inc-20260910T075355Z-4f99`: the interface profile now names
+  `--fleet-home /home/altai/proga/fleet` on its `autoclean` and three `sup-spawn` recipes, and the
+  append was then made. MEASURED after, on this host: a bare unmembered `fleet autoclean` REFUSES
+  (`rc=1`, *"this machine runs 2 fleets"*) and the same call WITH the flag succeeds — so the guard
+  is armed and the revival path is rescued. Statusline now renders `[fleet:a3ad]` (live) vs
+  `[fleet:c3e5]` (dogfood), and this home's `fleet status` does not list the dogfood worker.
+
   *(Raised 2026-09-10 by lane `w62-dogfood`, which was licensed by the DOGFOOD ruling to make that
   append and declined to, under brief §5's own stop condition. Report: `docs/lanes/w62-dogfood.md`.
   The second home at `/home/altai/proga/fleet-dogfood` is built, proven and waiting; the append is
