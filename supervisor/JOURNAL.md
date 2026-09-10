@@ -189,3 +189,54 @@ workers and that horizon.
 THROUGHPUT wave 63: bin +531/-96, tests +1290/-93, docs +3400/-10, journal +560; codex: 2 workers;
 operator items advanced: 1 (statusline nameplate, append, guard verified — DONE but for `fleet init`
 in-repo), 2 (sid-union join landed).
+
+## 2026-09-10T12:54:35Z CHECKPOINT inc=inc-20260910T075355Z-4f99 sid=cf4ffa2b-da13-4a9d-8d0b-57656c0f572f
+
+WAVE 63 CONTINUED — doctrine + keeper-pane landed and pushed (`708fa45..fb2a863`). Three Codex
+workers ran this segment; two have landed. First real red of the wave found and fixed.
+
+## SHIPPED
+- `7ec4f87` doctrine: efficiency rules 3–12 + the docs-currency rule (`CLAUDE.md`),
+  `tests/test_docs_currency.py`, `docs/CHANGELOG.md`, SPEC §0 line-count fixed.
+- `4923e16` journal board roll: 3 checkpoints live, 12,574 lines to `journal-history/2026-07-to-09.md`.
+- `d9e8c1f`/`8e530a7` keeper finds the interface by REGISTERED PANE, never window name.
+- `fb2a863` re-pin the live `check-ignore` receipt.
+- **Floor 5087, `6 failed, 5064 passed, 16 skipped, 1 xfailed`, IDENTICAL on 3.10/3.12.**
+
+## THE RED WAS REAL AND THE HARNESS CAUGHT IT
+The keeper lane added ONE comment line to the top of `.gitignore`. `git check-ignore -v` prints the
+matching LINE NUMBER, and `docs/specs/claim-nonce.md`'s `# live:` receipt quotes
+`.gitignore:15:supervisor/*.tmp`. It became `:16`. **A one-line comment in an unrelated file
+reddened a spec receipt three files away** — sha-pinned receipts are immune by construction, `# live:`
+ones are deliberately not. Re-pinned; `verify_receipts --self-test --strict` 0 failures both seeds.
+**Note for reading future reds: my previous `7 failed` was my own contamination and the cheap
+inference was "same again". It was not — this one reproduced IDENTICALLY on both interpreters, which
+concurrent live-host mutation does not do. That difference is the discriminator.**
+
+## CODEX, MEASURED OVER THREE LANES
+- `gur6MwBB` doctrine (astra/high) — 467 checks, journal split sha-verified.
+- `gXy7yHdJ` keeper-pane (astra/high) — pin RED→GREEN, 154 keeper tests both interpreters.
+- `nSsQ6ufB` split research (astra/xhigh) — still running.
+- **CODEX CANNOT COMMIT: its sandbox makes git metadata read-only.** Every Codex lane ends with the
+  supervisor committing on its behalf. Both lanes handled it correctly *because the brief told them
+  not to fight the sandbox and to hand over a path list* — put that line in every Codex brief.
+- **A Codex lane works on a SNAPSHOT.** `gur6MwBB`'s journal split was correct and sha-verified
+  against `708fa45`, but the live journal had a later checkpoint; replaying it would have silently
+  dropped one. **Anything mutating a live append-only file must be re-derived at landing, never
+  merged.** Caught by comparing line counts against the live file, not by review.
+
+## DECIDED (overturnable)
+Accepted the keeper lane's choice to DEFER a tick and page nothing on a malformed pane registration,
+against my first instinct to make it fall back: the fallback path can `ensure_window` and recreate
+the duplicate this lane exists to prevent. It is a silent, UNPINNED branch on the keeper's only
+alerting path — recorded in the commit; next keeper lane pins it.
+
+## OPEN
+- **The interface must register its pane** (`tmux rename-window fleet && printf '%s\n' "$TMUX_PANE"
+  > state/interface-pane`) or the keeper still uses the window-name path. Notified; not yet done.
+- `w63-initrepo` LIMITED until 14:10Z — G-K5 item (2), becomes wave 64.
+- `nSsQ6ufB` split research running.
+
+THROUGHPUT wave 63 (708fa45..fb2a863): bin +61/-3, tests +378, docs +291/-202, journal +12624/-12574
+(the board roll); codex: 3 workers, 2 landed; claude lane tokens: 0 new (all three lanes were Codex).
+Operator items advanced: 3 (keeper-pane fix), and the twelve efficiency rules are now doctrine.

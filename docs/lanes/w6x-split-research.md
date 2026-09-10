@@ -1,5 +1,8 @@
 # Should bin/fleet.py stay one file?
 
+DONE means: this report is committed on `w63/split-research` with all seven sections, every
+number carrying a re-runnable receipt, and a ready-to-paste SPEC section. MEASURED.
+
 MEASURED — Baseline: 708fa45246ca957263b3ce299add6f13efb8c330, branch w63/split-research. Source measurements read that commit, not a moving HEAD. No implementation or test changes.
 
 BELIEVED — **Keep the CLI facade and stateful kernel together for now; ratify an index/query extraction pilot.** The deciding measurement is that index/query calls only **three distinct external function/class targets**: FleetCliError, _replace_with_retry and build_parser (R1). Do not authorize a wholesale split from file size alone.
