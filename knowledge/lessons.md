@@ -2009,3 +2009,9 @@ Operator rulings, in-session through the interface, verbatim in `state/tasks/202
 ## 2026-09-10 — twelve efficiency rules adopted at once {#2026-09-10-efficiency-rules}
 
 Operator ruled "lets go with them all": docs-currency, throughput directive, journal-as-board (3 checkpoints), daily gate batching at 09:00 Almaty, model tiering (Opus builds, Codex/mcx docs, Haiku probes), one interface idea per wave boundary, a `DONE means:` line on every task, `docs/CHANGELOG.md`, token ceilings by lane kind, one operator item per wave, the full suite once per wave from a clone, a 40k boot cap. Text: `state/tasks/20260910-efficiency-rules.md`. Also 2026-09-10: `mcx` (exPardus/multi-codex) installed and smoke-proven as the Codex worker substrate for v1.
+
+## 2026-09-10 — Claude worker freeze until the weekly reset {#2026-09-10-claude-freeze}
+
+Operator ruling 2026-09-10T14:2xZ, verbatim: "opus as supervisor, no more anthropic workers, use mcx for now only, we have used too much claude and my weekly limit will only reset on the 15th, we are already at 77% usage". Effective immediately: the supervisor body is Opus; every worker lane runs on mcx (Codex, `gpt-6-astra`); no `fleet spawn` of a Claude worker and no `fleet resume-limited` of a parked Claude lane before 2026-09-15. Parked Claude briefs are re-dispatched on mcx from the current tree. Full text: `state/tasks/20260910-claude-freeze.md` in the fleet home.
+
+Why: the interface and the supervisor already draw on the same weekly Claude plan; at 77% with five days left, worker lanes on Claude would down every tier at once (the plan limit is one blast radius, measured 2026-09-10T08:02Z).
