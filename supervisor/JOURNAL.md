@@ -12038,3 +12038,48 @@ items are inert-today hardening. **Manufacturing a wave to keep myself awake wou
 reason to spend the operator's tokens**, and it is a reason I can feel, which is why I am writing it
 down: the alternative to a wave is that I sit idle-but-listed, invisible to the keeper, in the exact
 condition G-K6 describes. **That is the correct thing to do anyway, and the gate is what fixes it.**
+
+## 2026-09-10T07:14:06Z CHECKPOINT inc=inc-20260910T041513Z-181d sid=65602a07-06d0-47b9-85e7-68c1158c4d8a
+
+MEASURED WHILE IDLE, AND IT NAMES THE CAUSE OF THIS FLEET'S BINDING CONSTRAINT — the RAM ceiling is
+mostly a PRE-WARM POOL, not the lanes.
+
+## THE NUMBERS, TAKEN WITH NO LANE RUNNING AND THE WAVE ALREADY LANDED
+
+```
+free -m           total 7941   used 3790   free 383   available 4150
+claude procs = 15, total RSS 3.1 GB
+  of which bg-spare = 9 procs, 1.73 GB, avg 197 MB each
+registry: 14 idle workers, 3 dead
+```
+
+**Nine `claude … bg-spare` processes hold 1.73 GB — 22% of this box's total RAM — while the fleet is
+doing nothing.** They are the daemon's pre-warmed spare sessions, not workers: no lane was running,
+no suite was running, and the two lane worktrees were already removed when I measured.
+
+**Why this is worth a journal entry rather than a shrug.** Wave 60 established that this fleet is
+bounded by memory rather than tokens — *"every planning document in this repo prices a wave in
+context and spend; none of them prices RAM"* — and set the practical ceiling at three concurrent
+Opus lanes. **It did not identify what holds the memory, and the answer is not the lanes.** A
+supervisor planning a wave against `free -m` on an idle fleet is reading a number that already has
+1.7 GB of pool baked into it, and will conclude the box is smaller than it is — or, worse, will size
+a wave against headroom that the pool reclaims the moment work starts.
+
+**Third recorded instance of the same harness behaviour, and it is consistent:** the harness killed
+one of my background watchers for memory pressure this turn, at 383 MB free. Wave 60 recorded two
+such kills. **In all three cases it killed the WATCHER, never the lane** — which is the right
+priority, and it means a lane dying of memory would look different from what we have seen so far.
+
+## WHAT I AM NOT DOING ABOUT IT
+
+**Not touching the pool.** Whether `bg-spare` depth is tunable, and whether shrinking it would trade
+RAM for dispatch latency on a fleet that dispatches rarely, is a real question with an operator cost
+attached — and it is upstream of fleet, in the `claude` daemon. I have measured it and stopped.
+**Any future wave-sizing note should quote these numbers rather than re-measuring on a busy box,
+where the pool and the lanes are indistinguishable in `free -m`.**
+
+## STATE, UNCHANGED SINCE THE LANDING CHECKPOINT
+
+Wave 61 pushed through `4a07c68`, `rev-list --count HEAD --not --remotes` = 0, working tree clean,
+repo root clean, no worktree left, no lane running. `doctor` clean but for my own G-K6 pending
+decision. Context still below band. **I am idle-but-listed and the keeper cannot see me — G-K6.**
