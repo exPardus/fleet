@@ -410,17 +410,10 @@ class TestHomeIsInitialized:
         writer(_registry(home))
         assert fleet.home_is_initialized(home) is False
 
-    def test_a_freshly_init_ed_home_with_no_registry_is_NOT_initialized(self, home):
-        """A consequence of the ratified definition, pinned because it is
-        surprising: `fleet init` writes `state/worker-settings.json` and does
-        NOT create `state/fleet.json` (the registry appears on the first
-        `save_registry`). So a home that has been `fleet init`-ed but never
-        spawned into does not satisfy §Definitions.
-
-        This is the SPEC's call, not this lane's. It is pinned rather than
-        worked around because `init --home` (slice (b)) is the verb whose
-        contract is creation, and it is the one that must leave the home
-        satisfying this predicate before adding it to the list."""
+    def test_settings_without_a_registry_are_NOT_initialized(self, home):
+        """Settings alone do not satisfy §Definitions. This is the legacy
+        settings-only layout, not the output of G-K5's bare cwd creation:
+        bare init now creates the registry, pinned in test_init_home.py."""
         (home / "state").mkdir(parents=True)
         (home / "state" / "worker-settings.json").write_text("{}", encoding="utf-8")
         assert fleet.home_is_initialized(home) is False

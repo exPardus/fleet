@@ -245,7 +245,7 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 | `archive [--ttl-hours] [--dry-run]` / `autoclean` | §11. |
 | `doctor` | §13 roster. |
 | `sup-boot / sup-checkpoint / sup-heartbeat / sup-status / sup-handoff-begin / sup-handoff-complete / sup-handoff-abort` | §12 supervisor protocol (parser rows @7266-7292). |
-| `init [--statusline [--chain\|--force]]` | Renders `state/worker-settings.json` from the template; `--statusline` installs into `~/.claude/settings.json` refusing foreign incumbents (terminal-surface D6). **`--autoclean`, `--autoclean-interval-hours` and `--autoclean-remove` were REMOVED 2026-07-27** with the Scheduled Task itself (operator ruling; `docs/specs/autoclean.md` amendment) — and with them the home guard that existed only to protect state outliving the shell. `init` now writes nothing outside the repo except `--statusline`. |
+| `init [--home PATH] [--statusline [--chain\|--force]]` | Bare `init` creates an initialized fleet home in cwd: `state/fleet.json` plus rendered `state/worker-settings.json` (G-K5 Reading A, 2026-09-10). It does not register the home globally. Explicit `--home PATH` also appends its registration (DESTRUCTIVE, E2); it refuses with `--fleet-home` or `--statusline`. Explicit `--fleet-home` keeps settings rendering in the selected initialized home; `--statusline` keeps existing resolved-home setup and installs into `~/.claude/settings.json`, refusing foreign incumbents (terminal-surface D6). Scheduler flags remain removed. |
 | `home` / `knowledge` | Print resolved `FLEET_HOME`; print `knowledge/INDEX.md`. |
 
 ## 8. Outcome store + the hook write boundary
@@ -309,6 +309,29 @@ The order above is `cmd_doctor`'s registration order, which is the order an oper
 **Known wart:** `terminal_launcher` reports `wt`-vs-detached-PowerShell fallback for an attach path that `cmd_attach` refuses outright (§7), and its message is Windows-shaped on every platform. It is note-only and harmless, but it describes behavior that does not exist. `[UNBUILT — retire it with native attach integration, or delete it sooner]`
 
 ## 14. Views / terminal surface (binding rules, unchanged)
+
+**Init creation default — G-K5 Reading A, operator ruling 2026-09-10.** Bare
+`fleet init` creates a home at the exact current directory, including inside a
+repository or its subdirectory; there is no repository-root search. The new
+registry parses as `{ "workers": {} }`, so a later `--fleet-home <that path>`
+accepts it as initialized without a spawn. Existing registries are preserved;
+corrupt registries refuse without being overwritten, and successful reruns refresh
+settings using the install-root template and the created home's state paths.
+
+Creation runs even when the ambient resolver reaches the terminus or the machine
+has multiple homes. **`docs/specs/multi-fleet.md` §5 and `resolve_home` are unchanged:**
+other commands still resolve flag → sid membership → env → legacy → terminus;
+cwd creation neither changes the ambient selection nor registers the home for
+membership lookup. This supersedes the older settings-only bare-init description,
+including the historical E2 table's explanation of the ordinary residual.
+
+The conservative implementation leaves the irreversible homes-list append behind
+explicit `init --home` or `homes --add`; bare init remains the ordinary residual.
+Whether G-K5 also intended automatic registration needs operator confirmation
+(the unraised draft is in `docs/lanes/w64-initrepo.md`). Explicit `--fleet-home`
+and `--statusline` retain their existing rendering/setup path, and the supervisor
+gate still runs before either creation form writes. Cross-home CLI calls use
+`env -u CLAUDE_CODE_SESSION_ID`, including later read-only verification.
 
 `docs/specs/terminal-surface.md` remains binding: a view (statusline, `/fleet:*` read-only commands) never takes `fleet.lock`, never probes anything live, never writes, never quarantines — it reads `fleet.status_snapshot()` and exits 0 (CLAUDE.md rule; enforced by `tests/test_terminal_surface.py`, including the no-inline-exec lint on mutating slash commands). Post-pivot the "never probes a PID" clause generalizes: the snapshot path also never fetches the roster — roster fetches belong to mutating/authoritative commands only. Since D7 (2026-07-22) the surface is also **pull-only**: fleet registers no hooks and injects context into no session, so an unrelated project sees nothing. `FLEET_WORKER` (stamped by `_worker_env` @989) originally suppressed the SessionStart briefing for workers (D5); with the briefing gone it survives for the supervisor and destructive-command guards.
 
