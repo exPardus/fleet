@@ -289,7 +289,24 @@ committed): `_HISTORICAL_PREFIXES` in `tests/test_doc_claims.py` contains **both
 `tests/test_receipts.py` globs `SPEC_DIR = REPO/docs/specs` only, and `docs/superpowers/specs/` is
 not under it. **Predicted movement: 0. Predicted floor: 4965.**
 
-**MEASUREMENT:** see §8.1, taken from a separate `git clone --no-local` on both floors, never in the
-main checkout.
+**MEASUREMENT — PREDICTION HELD, 0 movement.** Taken from a separate `git clone --no-local` of
+`w62/codex-substrate` at `7928a9f` (never in the main checkout, per the RAM fence), both floors:
 
-<!-- MEASUREMENT-PENDING -->
+| interpreter | result | wall |
+|---|---|---|
+| 3.12 | `6 failed, 4942 passed, 16 skipped, 1 xfailed` = **4965 collected** | 502.83 s |
+| 3.10 | `6 failed, 4942 passed, 16 skipped, 1 xfailed` = **4965 collected** | 445.56 s |
+
+Identical on both, and identical to the `374929b` baseline the brief supplied. The six failures are
+the same six host-assumption ids — three `test_fleet_index.py::TestPathContainment` drive-qualified
+rel cases, `test_fleet_q.py::TestOutlinePathContainment::test_an_absolute_path_outside_the_root_is_refused_too`,
+and two `test_terminal_surface.py::TestCollaboratorInstall` venv-shim re-execs — not fleet defects,
+and carrying no `skipif`.
+
+**Why the prediction held, stated so the next docs-only lane can reuse the reasoning rather than
+re-derive it:** the movement the brief warned about (wave 51 predicted none and missed by 4) comes
+from `CHECK_COUNT_DOCS = current_tree_docs()`, which parametrises **two** tests per non-exempt
+tracked `.md` — so a docs-only landing moves the floor by `2 × (new non-exempt files)`. Both files
+here are exempt by path prefix, so `2 × 0 = 0`. **The trap is not "docs never move the floor"; it is
+that the exemption is by PREFIX and a new doc one directory over would have moved it by 2.**
+
