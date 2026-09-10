@@ -1,4 +1,5 @@
 # Lane brief — deliverables stanza
+DONE means: the lane delivers its observable result, committed report, current docs and passing targeted checks.
 
 Paste this into a lane brief (`state/tasks/lens/<name>.md`) and fill the angle brackets. It exists
 because the deliverables line was hand-written fresh every wave, and 55 of the briefs on this
@@ -9,13 +10,39 @@ lane's own worktree, which is disposable. Three reports were lost that way in on
 ## The stanza
 
 ```
+# <Task title>
+DONE means: <one observable sentence>
+
+**Model:** <model; docs use Codex via mcx, gpt-6-astra>.
+**Token ceiling:** <build 3000000 | docs 800000 | probe 300000>; any increase needs a one-line reason.
 **Lane:** <build|gate|research>. Worktree `<path>`, branch `<branch>` at `<sha>`. Mode <mode>.
 **Fence:** commit to your branch only. No push, no merge to `main`, no other ref moved.
 **Deliverables:** your branch, and your report **committed on that branch** at
 `docs/lanes/<name>.md` — MEASURED/BELIEVED per line, with a WHERE THIS BRIEF WAS WRONG section.
+The report requires `docs updated: <files>`. Update the owning SPEC section and
+PLAN-PROGRESS row, and the SPEC §0 tree/line-count line if you moved it; a new host
+quirk belongs in `knowledge/projects/<p>.md`. No described behaviour change:
+commit trailer `Docs: n/a -- <why>`.
+**Checks:** targeted tests only (`-k` or touched files). The supervisor runs the full
+floor ONCE per interpreter on the merged tree from a fresh `git clone --no-local`.
 Your branch will get an adversarial gate — write for that reader.
 **Journal** (working state, not the report) at `<fleet home>/state/journals/<name>.md`.
 ```
+
+## Task convention (2026-09-10)
+
+Every brief under `docs/lanes/` and every dispatched task under `state/tasks/`
+starts with a title followed by `DONE means: <one observable sentence>` as its
+first nonblank line. Every brief header records the model. At the wave boundary
+the checkpoint quotes DONE with MEASURED or NOT MET; the wave closes only when true.
+
+`tests/test_docs_currency.py` grandfathers tracked lane documents already at
+`708fa45`; the template and all new lane documents are checked. Runtime task files
+written from 2026-09-10T11:54:00Z are checked under the tested checkout
+(or `FLEET_HOME` when supplied); run the pin against the dispatch home before dispatch.
+Old runtime task files are grandfathered by mtime; rewriting one brings it into scope.
+Task files include `.md` and `.txt`; generated boot-bundle output is not a task.
+The checks do not require old reports to masquerade as newly dispatched briefs.
 
 ## The two lines that matter, and why
 
