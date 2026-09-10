@@ -217,6 +217,40 @@ lane's explicitly assigned lint is an exception to the normal tests→Opus routi
 Every brief header records the model; the native fleet Codex adapter remains a
 separate deliverable, not implied by using mcx.
 
+**CORRECTED 2026-09-10 (operator ruling, the Claude worker freeze): EVERY lane runs
+on mcx, not only the docs ones.** The split above -- `bin/`/`tests/`
+to Opus, docs to Codex -- is the SUPERSEDED wave-63 shape. The plan sat at 77% of
+its weekly allowance with a 2026-09-15 reset, so the operator ruled *"no more
+anthropic workers, use mcx for now only"*: the supervisor body stays Opus, zero
+Claude workers are dispatched, and a parked Claude lane is NOT resumed -- its brief
+is re-cut for Codex against the current tree instead. Assume the freeze still holds
+after 2026-09-15 and ask through the interface before lifting it.
+
+**Dispatch mechanics, mcx 0.2.0 (installed 2026-09-10T16:4xZ):** spawn with
+`mcx spawn --wait -m gpt-6-astra -r high -` and run THAT as a harness-backgrounded
+Bash command -- it prints the ID, stays alive for the one run, and exits with its
+status, so the harness notifies you at completion. **Do not write `mcx list` +
+`sleep` poll loops**; each costs a shell of its own and they are what a
+low-memory kill reaches first. `mcx steer --wait ID` tracks a resumed run (one
+waiter per run); cancelling a waiter with TERM/INT/HUP stops its run and children,
+so never `&` or `nohup` a `--wait`. Keep approval mode `never` (the default
+workspace-write sandbox) -- the supervisor commits on the lane's behalf anyway.
+**Model, per the operator's 16:5xZ Codex-budget ruling: the DEFAULT is
+`gpt-5.6-luna` -- omit `-m` and take the binary default, with `-r medium`.**
+Use `-r high` only for a build lane touching `bin/fleet.py`, and `-m gpt-6-astra`
+only for a task whose failure on 5.6 you can NAME IN ADVANCE (a design-level
+research report; a multi-file refactor with cross-cutting invariants), with that
+reason written into the journal's dispatch line. **Never astra for docs, tests,
+receipts, reports or folds.** *"dont spam astra ... we burned also 75% of the codex
+weekly limit too."* Both plans are constrained at once -- Claude 77%, Codex 75%,
+both resetting around 2026-09-15 -- so **waves are 1-2 lanes**, no exploratory or
+"while we wait" lanes, and no lane whose brief is under a screen of real work.
+`.mcx/config` accepts only `approval=`; `MCX_MODEL` is the env override. `.mcx/` is
+gitignored, in worktrees too. mcx state lives in `<cwd>/.mcx/`, so spawn FROM the
+lane's worktree, and **the supervisor must never export `MCX_WORKER=1`** -- that is
+the lane-side recursion guard and setting it on yourself gets
+`mcx: workers cannot launch or steer workers`.
+
 Pass the token ceilings at spawn: build `--token-ceiling 3000000`, docs
 `--token-ceiling 800000`, probe `--token-ceiling 300000`. A brief may raise its
 ceiling with a one-line reason. These are supervisor-supplied flags, not new
