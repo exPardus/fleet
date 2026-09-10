@@ -472,8 +472,24 @@ both floors, the same six:
 ```
 
 **MEASURED.** 4942 + 16 + 1 + 6 = **4965 collected, identical on both floors.** Prediction confirmed
-exactly, including the identity of the six. Nothing in this lane moved the floor, which is what a
-docs-only diff owes.
+exactly, including the identity of the six.
+
+**MEASURED — and then re-run WITH this lane's docs present**, because the two runs above are of
+`294315d`, i.e. of the tree *before* the report existed, and "a docs-only diff does not move the
+floor" is a claim until something re-runs it. From a second `git clone --no-local` at `7c6e988`,
+the commit carrying `docs/lanes/w62-dogfood.md` and the soak append:
+
+```text
+# volatile: host state — measured 2026-09-10, from `git clone --no-local` of w62/dogfood at 7c6e988
+$ uv run --no-project --python 3.12 --with pytest python -m pytest -q
+6 failed, 4942 passed, 16 skipped, 1 xfailed in 332.15s (0:05:32)
+
+$ uv run --no-project --python 3.10 --with pytest python -m pytest -q
+6 failed, 4942 passed, 16 skipped, 1 xfailed in 348.68s (0:05:48)
+```
+
+Four runs, two commits, two floors, **one number: 4965 collected, the same six failures.** Nothing
+in this lane moved the floor, which is what a docs-only diff owes.
 
 **MEASURED.** No `verify_receipts.py` run is owed. The receipts in this lane live in
 `docs/lanes/w62-dogfood.md` and `docs/operator/keeper-soak-2026-09.md`, and
