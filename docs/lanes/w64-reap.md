@@ -80,3 +80,64 @@ Prerequisite completed: reused the prior lane's offline uv cache via a writable 
 - `state/w64-reap/pytest-3.12.log`
 - `state/w64-reap/receipt.json`
 - `state/w64-reap/receipt.py`
+
+## Regression follow-up — stand-down caller and ambiguous ownership
+
+The merged-tree floor at `53b62d6` found a real regression: release correctly
+abstained from tombstoning an ambiguous caller, then the reap pass treated that
+same body as a predecessor because its claim was already released. Handoff
+completion had the same self-reaping hole after transferring the claim. These
+are two related missing protections at one destructive boundary: caller safety
+must survive the claim transition, and ambiguous ownership must veto removal
+independently of who invokes cleanup.
+
+**Protection added:** `_reap_protection` now vetoes the calling body's entire
+current/retired SID union and any overlapping SID ownership, so fresh archives,
+archive resumes and husk removal all honor the same identity protection.
+Lifecycle verbs explicitly pass the validated caller SID, including when supplied
+through `--sid` with no caller environment. Ownership overlap includes dead or
+archived rows; preferring a live identity candidate is not evidence that another
+row's shared SID can be removed. The caller veto lasts only for its own pass;
+a subsequent body can reap a uniquely owned dead predecessor.
+
+The original ambiguous-identity test was **not edited**. The previous empty-roster
+test stub masked the defect by triggering G9 before reaping. A nonempty synthetic
+roster reproduced the original failure plus 12 new regression cases before the
+fix: **13 failed**. This covers release and handoff, current/retired caller SIDs,
+ambiguous twins, ordinary overlapping worker rows, crash-resumes and husks.
+Unrelated terminal work still reaps during stand-down, and successor cleanup
+remains possible. No live daemon or live fleet home was used.
+
+Final targeted checks, no skips/deselections: **85 passed** in the two complete
+requested files on **each of Python 3.10 and 3.12**; **152 additional targeted
+autoclean/archive tests passed on each**. `git diff --check` is clean. Commands
+used `env -u CLAUDE_CODE_SESSION_ID MCX_WORKER=1`,
+`PATH=/tmp/w64-reap-regression-bin:$PATH`, `UV_OFFLINE=1`,
+`UV_CACHE_DIR=/tmp/w64-reap-uv-cache`, and the mandated
+`uv run --no-project --python 3.1x --with pytest python -m pytest -q` invocation.
+The fake executable in `/tmp/w64-reap-regression-bin/claude` returns only a
+synthetic nonempty roster or a synthetic missing-session response. Full logs
+are listed below. No subagents were launched for this follow-up, no commit was
+attempted, and no implementation blocker remains. Supervisor commit and merged
+floor are still required. Changelog append handoff for landing:
+`2026-09-10 — Reaping preserves the releasing/handoff caller and ambiguous SID ownership across archive, resume and husk cleanup.`
+Do not rewrite a live append-only file from this snapshot.
+
+**PATH LIST — regression follow-up:**
+
+- `bin/fleet.py`
+- `tests/test_lifecycle_reap.py`
+- `docs/SPEC.md`
+- `docs/specs/autoclean.md`
+- `docs/PLAN-PROGRESS.md`
+- `docs/lanes/w64-reap.md`
+- `state/journals/w64-reap.md`
+- `state/w64-reap/regression-before-3.10.log`
+- `state/w64-reap/regression-reproduced-3.10.log`
+- `state/w64-reap/regression-fixed-3.10.log`
+- `state/w64-reap/regression-fixed-3.12.log`
+- `state/w64-reap/regression-final-3.10.log`
+- `state/w64-reap/regression-final-3.12.log`
+- `state/w64-reap/regression-archive-3.10.log`
+- `state/w64-reap/regression-archive-3.12.log`
+- `/tmp/w64-reap-regression-bin/claude` (disposable test guard)
