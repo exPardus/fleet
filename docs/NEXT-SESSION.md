@@ -1,7 +1,7 @@
 # Next session — operator board, 2026-09-10
 
-Recorded against `b2ba94a`; refresh at every wave boundary (≤30 lines).
-Floor: **5228 collected, `6 failed, 5205 passed, 16 skipped, 1 xfailed`, IDENTICAL
+Recorded against `a43331a`; refresh at every wave boundary (≤30 lines).
+Floor: **5245 collected, `6 failed, 5222 passed, 16 skipped, 1 xfailed`, IDENTICAL
 on 3.10 and 3.12** — the six are host assumptions, not fleet defects.
 
 1. **Multi-fleet — DONE.** Bare `fleet init` in a repo creates a home there
@@ -16,9 +16,12 @@ on 3.10 and 3.12** — the six are host assumptions, not fleet defects.
    `sup-release`'s refusal to tombstone an ambiguous identity; fixed, and
    `sup-handoff-complete` had the same hole.
 4. **Mechanise rituals** — inventory is 220 rows, 167 CODE / 53 MODEL (`395015c`),
-   turn costs honestly UNMEASURED. **The journal board roll and
-   `interface-register` LANDED (`5d659ad`)**: the board now rolls itself from
-   `sup-checkpoint`. **`fleet wave-close` and `fleet sup-guard` remain.**
+   turn costs honestly UNMEASURED. **BATCH 1 IS COMPLETE**: the board
+   roll and `interface-register` (`5d659ad`), then `sup-guard` and `wave-close`
+   (`a43331a`). **`wave-close` is built but has never run for real — its first
+   use is the next wave's close, and its commit/push arm was never exercised
+   end-to-end in the sandbox. Watch it.** Its effect-table class is deliberately
+   UNCLASSIFIED and fail-closed until you ratify it.
 5. **fleet.py split** — report landed (`72aa972`), recommends D. Yours to ratify;
    extraction not started.
 
