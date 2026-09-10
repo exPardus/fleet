@@ -1,4 +1,8 @@
 # Operator changelog
+- 2026-09-11 — `314ea3e`: `skills/fleet/` is now a 160-line operating manual covering the three tiers, every verb, dispatch rules and the wave boundary; `supervisor.md` and `docs/operator/server-interface-profile.md` are deleted, their current content absorbed.
+- 2026-09-11 — `efc4b5c`: the context-loaded documents are under cap with no history narrative, lessons older than 30 days are archived, and `tests/test_prose_caps.py` pins every cap — including the ones later waves must close.
+- 2026-09-11 — `b0b5370`: the interface is a role any session can take — `state/interface/board.md` and `log.md` live in the home, bare `fleet init` registers the calling session, and the §7 gate is evaluated against the home being initialised so a claim elsewhere no longer blocks `init` in an unrelated repo.
+- 2026-09-11 — `1ab7f3e`: the keeper still pages when no interface is registered instead of exiting silently, and its `--profile` default names a file that exists.
 - 2026-09-11 — `a1b04cb`: `fleet sup-guard` no longer pages on a healthy fleet — a seize is an event in the past, so a seized claim with a fresh heartbeat is an ordinary held claim; seized plus a stale heartbeat still pages.
 - 2026-09-11 — `8a8d086`: `fleet wave-close` runs its floor through `uv` (no interpreter on this host has pytest importable) and now refuses a floor that produced no pytest summary, which previously read as a clean floor.
 
