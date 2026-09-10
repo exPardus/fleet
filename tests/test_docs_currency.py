@@ -65,9 +65,19 @@ def lane_documents(repo, cutoff=ADOPTION_BASE):
 
 
 def dispatched_tasks(home):
+    """Task files the supervisor DISPATCHES, which rule 7 governs.
+
+    `sup~<inc>~{boot,successor}.md` is excluded: it is the task dispatched
+    TO a supervisor body, machine-rendered by `_render_successor_task` /
+    `sup-spawn` with a fixed preamble, not a brief anyone authors. Rule 7
+    binds "every task the supervisor dispatches"; requiring the convention
+    of the renderer's own output would redden the pin on a file no lane
+    can edit, every time a body boots.
+    """
     return [p for p in sorted((home / "state/tasks").rglob("*"))
             if p.is_file() and p.suffix in {".md", ".txt"}
             and not p.name.endswith(".boot-bundle.txt")
+            and not p.name.startswith("sup~")
             and p.stat().st_mtime >= TASK_CUTOFF]
 
 

@@ -4,6 +4,8 @@ Newest first, ONE line per user-visible change. At landing the supervisor prepen
 new lines with date and commit evidence; the interface quotes them at each wave
 boundary alongside THROUGHPUT. Seeded from reachable git history at `708fa45`.
 
+- 2026-09-10 — `f0c8ebf`: the keeper finds the interface by its registered tmux pane, so a hand-resumed session no longer gets a duplicate window created beside it.
+- 2026-09-10 — `72aa972`: research report on whether `bin/fleet.py` stays one file; recommends a bounded index/query pilot, pending operator ratification.
 - 2026-09-10 — `708fa45` / `ba7fc40`: supervisor and keeper resolve the body's current and retired session IDs together, avoiding false missing-body pages after fork-steer.
 - 2026-09-10 — `aee5fdf`: dogfood home appended to the homes list; the two-home proof showed both tags and armed the machine-wide wrong-home guard.
 - 2026-09-10 — `245bdf1` (landed `1de9995`): the statusline nameplate identifies the fleet home.

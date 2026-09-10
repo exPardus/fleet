@@ -1,24 +1,30 @@
 # Next session — operator board, 2026-09-10
 
-Recorded against `708fa45`; refresh at every wave boundary (≤30 lines).
+Recorded against `ed715cc`; refresh at every wave boundary (≤30 lines).
 Source: `state/tasks/20260910-standing-directive-throughput.md` in the fleet home.
-1. Multi-fleet usable: `init --home` landed (`d25f1b2`), home nameplate
-   (`245bdf1`) and two-home append/proof (`aee5fdf`) landed; in-repo bare
-   `fleet init` is the remaining priority-1 task, not closed by `--home`.
-2. Zero downtime: keeper C (`c6b6713`) and sid-union join (`708fa45`) landed;
-   G-K6 wave-2 waker outside the plan-limit blast radius remains to build.
-3. Keeper feature flag (G-K1) and D7 amendment: operator priority remains open;
-   consult `docs/OPERATOR-GATES.md` and `docs/operator/gate-docket.md` for rulings.
-4. Codex workers: native-substrate design/spike landed (`7928a9f`);
-   the native adapter is not shipped. This docs lane runs Codex through mcx.
-5. fleet.py split research: one operator-requested lane, once; no result claimed here.
+1. **Multi-fleet usable** — `init --home` (`d25f1b2`), home nameplate (`245bdf1`),
+   two-home append + proof (`aee5fdf`) all landed. **Remaining: bare `fleet init`
+   inside a repo creates a home there** — lane `w63-initrepo`, parked on the Claude
+   plan limit, resumes after 2026-09-10T14:10:00Z.
+2. **Zero downtime** — keeper C (`c6b6713`) and the sid-union join (`708fa45`)
+   landed and are PROVEN in production: at 13:54Z the keeper paged
+   `supervisor-stalled ... roster idle under a retired sid` and the guard correctly
+   declined to spawn a second body. **G-K6 wave-2 waker remains to build, and must
+   sit OUTSIDE the plan-limit blast radius** — measured 08:02Z, a waker inside the
+   limited body fired in 53s and could do nothing.
+3. **Keeper reliability** — the keeper now finds the interface by REGISTERED PANE
+   (`f0c8ebf`); pane `%3` is registered. G-K1 (keeper as an off-by-default feature
+   flag) + the D7 amendment are still open operator priority.
+4. **Codex workers** — Track 1 live: three lanes landed on `mcx` astra this wave at
+   zero Claude-plan cost. Two standing facts: **Codex cannot commit** (read-only git
+   metadata; the supervisor commits on its behalf) and **a Codex lane works on a
+   SNAPSHOT** — anything mutating a live append-only file must be re-derived at
+   landing. Track 2, native `fleet spawn --substrate codex`, is unbuilt.
+5. **fleet.py split research** — LANDED (`72aa972`). Recommends option **D** (its own
+   construction) with A meanwhile; deciding measurement is index/query's 3 external
+   direct-call targets. **Awaiting operator ratification — do not start the
+   extraction.**
 
-Efficiency adoption: `skills/fleet/supervisor.md`, `docs/lanes/BRIEF-TEMPLATE.md`,
-`docs/operator/server-interface-profile.md`; lane record `docs/lanes/w63-doctrine.md`.
-The journal board holds three original checkpoints; older bytes are in
-`supervisor/journal-history/2026-07-to-09.md`. New checkpoints are ≤40 lines.
-Next fresh supervisor: read board/GOALS/directives/current tasks only, measure
-pre-first-dispatch read tokens against the 40k cap, and report once.
-Lanes run targeted tests. Supervisor runs the full floor once per interpreter
-on the merged tree from a fresh `git clone --no-local`.
-Keep `docs/PLAN-PROGRESS.md` rows and `docs/CHANGELOG.md` current at landing.
+Open gate: **G-K7 is annotated DISCHARGED BY DOING**, unticked; ticking is the
+operator's alone. Lanes run targeted tests; the supervisor runs the full floor once
+per interpreter on the merged tree from a fresh `git clone --no-local`.
