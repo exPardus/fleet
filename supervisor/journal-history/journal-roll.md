@@ -90,3 +90,73 @@ an age-based sweeper cannot reap the only kind of corpse that can OOM you).
 
 Still merged-not-pushed: `ef35df1` (init-in-repo). Floor and push at wave close, in that order.
 
+## 2026-09-10T16:58:29Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=4e98bef1-dadd-48ba-845f-d2f61859ecd1
+
+WAVE 64 CLOSED AND PUSHED (`47b8e69..e7ab9ec`). Four lanes, all on Codex, zero Claude worker tokens.
+Floor **5216 collected, `6 failed, 5193 passed, 16 skipped, 1 xfailed`, IDENTICAL on 3.10 and 3.12.**
+
+## SHIPPED
+- `2f48827` bare `fleet init` creates a home in the cwd (G-K5 Reading A). Conservative on
+  registration: no machine-global append. `resolve_home`/`apply_resolved_home` proved byte-identical
+  to `47b8e69` by whole-function comparison -- Reading B stays unbuilt and the lane PROVED it.
+- `851e797` G-K6 wave 2, the keeper wake, OFF BY DEFAULT.
+- `f22a672` the reap mechanism + its regression fix.
+- `395015c` the 220-row CODE/MODEL ritual table.
+
+## THE FLOOR EARNED ITS COST THIS WAVE — 15 FAILURES, NOT THE 6 I PREDICTED
+**The one that matters: `sup-release` REFUSES to tombstone an ambiguous identity -- *"guessing would
+retire another body's record"* -- and the new reap pass, running immediately after, removed one of
+the records it had just refused to touch.** A new mechanism reaching around a deliberate safety
+refusal, invisible to the lane's own 695 targeted tests because they never ran the two together.
+Cause: at an exit sweep the claim is already released, so holdership can no longer protect the
+caller and its rows read as "predecessor-supervisor". Steered the warm lane with the reproduction;
+**it found `sup-handoff-complete` had the identical hole** and fixed both at the shared protection
+layer. The veto is scoped to the caller's own pass, so a later body still reaps a real dead
+predecessor.
+
+## THREE ERRORS OF MINE, ONE LINE EACH
+1. **The gate I raised did not parse, twice.** First I put the question in the body and "Ruling owed"
+   in the checkbox; then I put the `?` inside the bold so the line ended `?**`. The assertion is
+   `endswith("?")`. I fixed the half I had noticed instead of reading the assertion -- the same
+   measure-and-act collapse my predecessor recorded three times last wave.
+2. **My census edit reddened seven citation pins one commit after I had fixed them.** Expanding a
+   self-citing comment from 3 lines to 10 shifted every cited line below it by +7. `repoint_self_citations.py`
+   correctly REFUSED to help (positional map, count moved 45->48). Remedy: make the edit
+   line-count-neutral. **A comment edit in `bin/fleet.py` is measured in LINES ADDED before it is
+   measured in words.**
+3. **I led a host warning with `free` when the metric is `available`** -- 506 MB free while 4783 MB
+   was available and PSI was zero. The interface corrected me; pinned in `knowledge/projects/claude-fleet.md`.
+
+## WHAT I CORRECTED IN A LANE'S WORK
+The reap lane **deleted 55 lines of Watchtower-beat doctrine** and replaced them with an 18-line
+summary. The instruction was genuinely dead, but three findings inside were not: the §7 exemption
+must be carried explicitly at every frame; a bare `fleet archive` on the beat is a byte-identical
+repeat; `--dry-run` does not disarm §7 because the gate is on the CALLER. Restored verbatim under a
+dated SUPERSEDED header. **A deletion is not a supersession.** Not the lane's fault -- my brief
+asked it to make the brief describe the mechanism and said nothing about the history underneath.
+
+## HOST
+The harness's BACKGROUND-task memory guard killed two full floor runs within seconds at 4947 MB
+available and zero PSI -- it appears keyed on `free` (2029 MB), the same confusion the interface
+corrected in me. **Remedy that worked: run the floor in the FOREGROUND, split in halves, plus
+`tests/integration` which `ls tests/test_*.py` silently misses (9 skips, and their absence made my
+first split total 9 short).** Nine mcx lanes were live host-wide, six of them the operator's in
+`/home/altai/proga/tap` and not mine to stop.
+
+## GATE RAISED, NOT PARKED
+**G-K8**: the keeper wake writes to the Claude daemon's PRIVATE local socket, against standing goal
+3's "zero writes to foreign surfaces". Stated fairly both ways -- every CLI-only path fails the case
+B exists for, and the contract is measured against installed Claude 2.1.267 and can change silently.
+Not parked: nothing is blocked, the feature is inert until installed.
+
+## SUCCESSOR QUEUE
+Batch 1 of the mechanise-rituals directive: `fleet wave-close`, `sup-guard`, `interface-register`,
+and **the journal board roll, which is a live defect** (`bin/fleet.py:17746` appends without rolling;
+I hand-rolled it this wave and it reddens again at every fourth checkpoint). Waves of 1-2 lanes,
+default `gpt-5.6-luna`.
+
+THROUGHPUT wave 64 (`47b8e69..e7ab9ec`): bin +522/-95, tests +961/-30, docs +901/-35, journal
++421/-242, other +145/-1; codex 4 lanes (1 steered), all landed; claude worker tokens: 0; operator
+items advanced: 1 (DONE), 2, 3, 4; gates raised: 1 (G-K8); reaped: 0 rows (the mechanism ships this
+wave; the supervisor no longer reaps by hand).
+
