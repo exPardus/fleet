@@ -912,12 +912,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:11927) -- a rename can hide live worker records from
+      * `_sweep_husks` (:11946) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:13133) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:13152) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:17876) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:17984) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -933,7 +933,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17597) -- the same distinction, in words,
+      * `_identity_abstention_note` (:17705) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4138) -- the VIEW surface's copy of the same
@@ -942,7 +942,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13671) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13690) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -954,8 +954,8 @@ def _quarantine_artifacts() -> list:
     these two only spell the filename, because an operator cannot restore a file
     whose name they were never told.
 
-      * `_print_snapshot_table` (:7678) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:18033) -- `sup-release`, whose registry
+      * `_print_snapshot_table` (:7697) -- `fleet status --stale-ok`.
+      * `_tombstone_releasing_body` (:18162) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3174,7 +3174,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17876`), where it costs the §6.5 gate nothing.
+    (`:17984`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -5131,9 +5131,9 @@ VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
                            # as the tier: *"the `w47-homes` idiom: flagged
                            # tokens in the destructive tuple, the bare verb in
                            # NO tuple, tier carried in `VERB_EFFECT_RESIDUAL`."*
-                           "init --home")
+                           "init --home", "journal-roll")
 VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
-                          "resume-limited", "sup-heartbeat")
+                          "resume-limited", "sup-heartbeat", "interface-register")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result",
                         "home", "knowledge", "attach", "wait", "sup-status",
                         "sup-context", "q", "index")
@@ -6018,6 +6018,25 @@ def tmux_command(run, out, *args, label="fleet"):
     if rc != 0:
         print(f"{label}: tmux failed: {argv}", file=out)
     return rc == 0
+
+
+def _tmux_window_name(run, pane):
+    """Return the current window name for a validated pane, or ``None``.
+
+    Registration needs to repair a manually renamed window without making a
+    needless rename on every interface resume.  This is deliberately a
+    read-only tmux query; the caller still refuses before writing the pane
+    registration when the query cannot be completed.
+    """
+    try:
+        cp = run(["tmux", "display-message", "-p", "-t", pane,
+                  "#{window_name}"], capture_output=True, text=True,
+                 timeout=TMUX_TIMEOUT_SECONDS)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if cp.returncode != 0:
+        return None
+    return cp.stdout.strip()
 
 
 def type_interface_line(run, target, text, *, prefix, out=sys.stdout,
@@ -9860,7 +9879,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9754` / `cmd_respawn:9367`, before
+    # resolution that runs from `cmd_kill:9773` / `cmd_respawn:9386`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -9923,10 +9942,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9754` / `cmd_respawn:9367`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9773` / `cmd_respawn:9386`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:9391-9393` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:9410-9412` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -15197,6 +15216,17 @@ def supervisor_journal_path() -> Path:
     return supervisor_dir() / "JOURNAL.md"
 
 
+def supervisor_journal_history_path() -> Path:
+    """Stable append-only sink for entries rolled off the live board.
+
+    The live repository has a dated history file, but date-range selection
+    would eventually create an ambiguous boundary.  One stable file keeps
+    every future roll append-only and makes the destination independent of the
+    calendar or the current checkout.
+    """
+    return supervisor_dir() / "journal-history" / "journal-roll.md"
+
+
 def handoff_abort_flag_path() -> Path:
     """Doctor-visible flag written by sup-handoff-abort (spec §4 timeout
     branch). Lives in state/ (gitignored runtime), cleared by the next
@@ -16130,6 +16160,84 @@ def parse_supervisor_journal(text: str) -> list:
     return entries
 
 
+def _journal_roll_header_hint(line: str) -> bool:
+    """Whether a non-matching markdown heading looks like an entry header."""
+    body = line.rstrip("\r\n")
+    if not body.startswith("## "):
+        return False
+    return bool(re.match(
+        r"^## (?:\d{4}-\d{2}-\d{2}(?:T|\s)|\S+ "
+        r"(?:BOOT|CHECKPOINT|PROPOSAL|SEIZED|RELEASED|LIMIT-TRANSFER|"
+        r"HANDOFF-BEGIN|HANDOFF-COMPLETE|HANDOFF-ABORT)\b)", body))
+
+
+def roll_supervisor_journal() -> dict:
+    """Losslessly roll old supervisor entries off the committed journal board.
+
+    The board is parsed as UTF-8 lines, but the moved and retained regions are
+    byte slices of the original file.  That makes the content-preservation
+    check independent of line counts and preserves line endings and non-ASCII
+    bytes exactly.  A malformed entry-looking heading raises before either
+    file is touched.
+
+    Returns counts and ``rolled`` status for the CLI.  The caller must hold
+    ``fleet_lock`` when this is used alongside another journal write.
+    """
+    board = supervisor_journal_path()
+    try:
+        raw = board.read_bytes()
+    except FileNotFoundError:
+        return {"rolled": False, "checkpoints": 0, "entries": 0,
+                "moved_bytes": 0}
+
+    entries = []
+    offset = 0
+    for raw_line in raw.splitlines(keepends=True):
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"journal-roll: refusing malformed UTF-8 in {board}") from exc
+        header = line.rstrip("\r\n")
+        match = _SUPERVISOR_ENTRY_RE.match(header)
+        if match:
+            kind = match.group("kind")
+            if kind not in SUPERVISOR_JOURNAL_KINDS:
+                raise ValueError(
+                    f"journal-roll: refusing unknown entry kind {kind!r}")
+            entries.append({"start": offset, "kind": kind})
+        elif _journal_roll_header_hint(line):
+            raise ValueError(
+                f"journal-roll: refusing malformed entry header in {board}")
+        offset += len(raw_line)
+
+    checkpoints = [entry for entry in entries if entry["kind"] == "CHECKPOINT"]
+    if len(checkpoints) <= 3:
+        return {"rolled": False, "checkpoints": len(checkpoints),
+                "entries": len(entries), "moved_bytes": 0}
+
+    cutoff = checkpoints[-3]["start"]
+    first_entry = entries[0]["start"]
+    moved = raw[first_entry:cutoff]
+    retained = raw[:first_entry] + raw[cutoff:]
+    if raw[:first_entry] + moved + raw[cutoff:] != raw:
+        raise ValueError("journal-roll: refusing a non-lossless board partition")
+
+    history = supervisor_journal_history_path()
+    history.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        history_before = history.read_bytes()
+    except FileNotFoundError:
+        history_before = b""
+    if not history_before.endswith(moved):
+        with open(history, "ab") as stream:
+            stream.write(moved)
+    board.write_bytes(retained)
+    return {"rolled": True, "checkpoints": len(checkpoints),
+            "entries": len(entries), "moved_bytes": len(moved),
+            "history": history}
+
+
 def supervisor_journal_entries() -> list:
     try:
         text = supervisor_journal_path().read_text(encoding="utf-8")
@@ -16456,8 +16564,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2826, :2897,
-    :2970, :3231, :3381, :4875, :9894, :10214, :10495, :10726, :10813, :10969,
-    :10981, :10992, :11141, :11957, :16327, :19168`). The thirteenth is multi-fleet §5 step 2's
+    :2970, :3231, :3381, :4875, :9913, :10233, :10514, :10745, :10832, :10988,
+    :11000, :11011, :11160, :11976, :16435, :19339`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16481,8 +16589,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8655, :9194, :14167,
-    :19831), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8674, :9213, :14186,
+    :20002), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17178,8 +17286,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8655, :9194, :14167,
-    #     :19831) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8674, :9213, :14186,
+    #     :20002) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17212,7 +17320,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1067`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16255`). A `None` here
+        #     this and names this gate as its reason (`:16363`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -17854,7 +17962,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:11920`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:11939`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -17940,10 +18048,31 @@ def cmd_sup_checkpoint(args) -> int:
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-checkpoint")
         supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body)
+        roll = roll_supervisor_journal()
         claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
     print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; heartbeat refreshed")
+    if roll["rolled"]:
+        print(f"journal board rolled: {roll['moved_bytes']} bytes to "
+              f"{supervisor_journal_history_path()}")
     _deliver_notices(notices)
+    return 0
+
+
+def cmd_journal_roll(args) -> int:
+    """`fleet journal-roll` -- keep only the newest three checkpoints.
+
+    A malformed board is reported and left untouched.  The command takes the
+    same single-writer lock as supervisor journal append so an explicit roll
+    cannot race a checkpoint.
+    """
+    with fleet_lock():
+        result = roll_supervisor_journal()
+    if result["rolled"]:
+        print(f"journal board rolled: {result['moved_bytes']} bytes to "
+              f"{supervisor_journal_history_path()}")
+    else:
+        print(f"journal board unchanged: {result['checkpoints']} checkpoints")
     return 0
 
 
@@ -18607,6 +18736,48 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
             f"re-running this verb is safe.")
     print(f"notified {target} as {inc}: "
           f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
+    return 0
+
+
+def cmd_interface_register(args, run=subprocess.run) -> int:
+    """Register the current interface pane and restore the canonical window.
+
+    The pane id comes only from ``TMUX_PANE`` and is checked in the same shape
+    the keeper accepts: a percent sign followed by ASCII decimal digits.  A
+    missing or malformed environment value is a refusal, never a guessed
+    pane target or a state-file write.
+    """
+    pane = os.environ.get("TMUX_PANE")
+    if pane is None:
+        raise FleetCliError(
+            "interface-register: TMUX_PANE is unset; run this verb inside tmux")
+    if not (pane.startswith("%") and pane[1:].isascii()
+            and pane[1:].isdecimal()):
+        raise FleetCliError(
+            "interface-register: TMUX_PANE must contain a tmux pane ID")
+
+    current_window = _tmux_window_name(run, pane)
+    if current_window is None:
+        raise FleetCliError(
+            "interface-register: tmux pane lookup failed; registration was not written")
+    if current_window != "fleet":
+        if not tmux_command(run, sys.stderr, "rename-window", "-t", pane,
+                            "fleet", label="interface-register"):
+            raise FleetCliError(
+                "interface-register: tmux window rename failed; registration was not written")
+
+    path = state_dir() / "interface-pane"
+    existing = None
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        pass
+    if existing != pane:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(pane + "\n", encoding="utf-8")
+        print(f"interface pane registered: {pane}")
+    else:
+        print(f"interface pane already registered: {pane}")
     return 0
 
 
@@ -23014,6 +23185,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_supckpt.add_argument("--sid", help="override caller session id")
     p_supckpt.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+    sub.add_parser("journal-roll",
+                   help="roll older supervisor journal entries into history")
+
+    sub.add_parser("interface-register",
+                   help="register this tmux pane as the interface (inside tmux)")
+
     p_supbeat = sub.add_parser("sup-heartbeat", help="refresh the supervisor claim heartbeat (no journal write)")
     p_supbeat.add_argument("--sid", help="override caller session id")
     p_supbeat.add_argument("--nonce", help=NONCE_ARG_HELP)
@@ -23258,6 +23435,10 @@ def main(argv=None) -> int:
             return cmd_sup_spawn(args)
         if args.command == "sup-checkpoint":
             return cmd_sup_checkpoint(args)
+        if args.command == "journal-roll":
+            return cmd_journal_roll(args)
+        if args.command == "interface-register":
+            return cmd_interface_register(args)
         if args.command == "sup-heartbeat":
             return cmd_sup_heartbeat(args)
         if args.command == "sup-release":
