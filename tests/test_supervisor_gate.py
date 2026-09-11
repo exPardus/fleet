@@ -25,6 +25,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 @pytest.fixture
@@ -378,7 +379,7 @@ class TestEveryMutatingVerbIsGated:
         verb that reaches `_supervisor_gate` and is missing from this list is
         invisible to BOTH taxonomy tests at once -- the failure CRIT-1
         describes, one level up. Read out of the source rather than restated."""
-        src = (Path(fleet.__file__)).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         called = set(re.findall(r'_supervisor_gate\(\s*"([a-z-]+)"', src))
         assert called == set(GATED_VERBS), (
             f"call sites not in GATED_VERBS: {sorted(called - set(GATED_VERBS))}; "

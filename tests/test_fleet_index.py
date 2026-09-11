@@ -23,6 +23,7 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 def _write(path, text):
@@ -1716,7 +1717,7 @@ class TestTheSourceIsReadOnce:
     BIG_B = "\n\n" + "".join("def b_%d():\n    pass\n" % i for i in range(200))
 
     def test_a_write_between_the_hash_and_the_parse_cannot_tear_the_shard(
-            self, tmp_path, monkeypatch):
+            self, tmp_path, patch_fleet, monkeypatch):
         # The race window, forced open rather than waited for. The write is
         # real and lands exactly where the second read used to be. With one
         # read the parse still describes the bytes that were hashed; with two
@@ -1730,7 +1731,7 @@ class TestTheSourceIsReadOnce:
             _write(root / "a.py", self.B)
             return real(source_path, lang, raw)
 
-        monkeypatch.setattr(fleet, "parse_source_symbols",
+        patch_fleet("parse_source_symbols",
                             parse_after_a_concurrent_write)
         got = fleet.verified_shard_rows(root, "a.py")
         assert [r[0] for r in got["rows"]] == ["alpha"]
@@ -1738,7 +1739,7 @@ class TestTheSourceIsReadOnce:
         assert header == fleet.header_for_bytes(self.A.encode("utf-8"), "a.py")
         assert [r[0] for r in rows] == ["alpha"]
 
-    def test_the_build_path_reads_once_too(self, tmp_path, monkeypatch):
+    def test_the_build_path_reads_once_too(self, tmp_path, patch_fleet, monkeypatch):
         # `_index_refresh_one` had the identical two-read shape, and it is the
         # path a MANAGER runs while a worker edits the tree -- the likelier of
         # the two to meet a concurrent writer, not the rarer.
@@ -1750,7 +1751,7 @@ class TestTheSourceIsReadOnce:
             _write(root / "a.py", self.B)
             return real(source_path, lang, raw)
 
-        monkeypatch.setattr(fleet, "parse_source_symbols",
+        patch_fleet("parse_source_symbols",
                             parse_after_a_concurrent_write)
         fleet.main(["index", "build", "--path", str(root), "--force"])
         header, rows = fleet.read_shard(fleet.shard_path_for_source(root, "a.py"))
@@ -2096,20 +2097,20 @@ class TestReparsePointPredicate:
 
 class TestIndexExitCodes:
     def test_build_exits_nonzero_when_a_file_failed(
-            self, tmp_path, capsys, monkeypatch):
+            self, tmp_path, capsys, patch_fleet, monkeypatch):
         root = _project(tmp_path, {"a.py": "X = 1\n"})
         fleet.main(["index", "init", "--path", str(root)])
-        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        patch_fleet("write_shard_atomic", lambda *a, **kw: False)
         capsys.readouterr()
         assert fleet.main(["index", "build", "--path", str(root), "--force"]) \
             == fleet.INDEX_FAILED_RC
         assert "failed 1" in capsys.readouterr().out
 
     def test_update_exits_nonzero_when_a_file_failed(
-            self, tmp_path, capsys, monkeypatch):
+            self, tmp_path, capsys, patch_fleet, monkeypatch):
         root = _project(tmp_path, {"a.py": "X = 1\n"})
         fleet.main(["index", "init", "--path", str(root)])
-        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        patch_fleet("write_shard_atomic", lambda *a, **kw: False)
         _write(root / "a.py", "X = 2\n")
         capsys.readouterr()
         assert fleet.main(
@@ -2117,9 +2118,9 @@ class TestIndexExitCodes:
             == fleet.INDEX_FAILED_RC
 
     def test_init_exits_nonzero_when_its_first_build_failed(
-            self, tmp_path, capsys, monkeypatch):
+            self, tmp_path, capsys, patch_fleet, monkeypatch):
         root = _project(tmp_path, {"a.py": "X = 1\n"})
-        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        patch_fleet("write_shard_atomic", lambda *a, **kw: False)
         capsys.readouterr()
         assert fleet.main(["index", "init", "--path", str(root)]) \
             == fleet.INDEX_FAILED_RC
@@ -2130,7 +2131,7 @@ class TestIndexExitCodes:
         assert fleet.main(["index", "build", "--path", str(root)]) == 0
 
     def test_a_mixed_run_indexes_what_it_can_and_still_exits_failed(
-            self, tmp_path, capsys, monkeypatch):
+            self, tmp_path, capsys, patch_fleet, monkeypatch):
         # N15. The three tests above monkeypatch `write_shard_atomic` to False
         # UNCONDITIONALLY, so every file fails and the interesting case -- some
         # indexed, some failed -- was never exercised. A `return 0 if
@@ -2147,7 +2148,7 @@ class TestIndexExitCodes:
                 return False
             return real(shard, header, rows, **kw)
 
-        monkeypatch.setattr(fleet, "write_shard_atomic", _fail_only_bad)
+        patch_fleet("write_shard_atomic", _fail_only_bad)
         capsys.readouterr()
         rc = fleet.main(["index", "build", "--path", str(root)])
         out = capsys.readouterr()
@@ -2161,7 +2162,7 @@ class TestIndexExitCodes:
         assert fleet.shard_path_for_source(root, "bad.py").read_bytes() == stale
 
     def test_a_partial_failure_does_not_wear_a_refusal_s_exit_code(
-            self, tmp_path, capsys, monkeypatch):
+            self, tmp_path, capsys, patch_fleet, monkeypatch):
         # The collision MIN-c introduced. `main()` collapses every
         # `FleetCliError` to 1, and `failed > 0` returned 1 too, so a caller
         # could not tell "nothing was indexed, run `init`" from "the index is
@@ -2173,7 +2174,7 @@ class TestIndexExitCodes:
         assert fleet.INDEX_NO_INDEX_MESSAGE in capsys.readouterr().err
 
         fleet.main(["index", "init", "--path", str(root)])
-        monkeypatch.setattr(fleet, "write_shard_atomic", lambda *a, **kw: False)
+        patch_fleet("write_shard_atomic", lambda *a, **kw: False)
         capsys.readouterr()
         partial = fleet.main(["index", "build", "--path", str(root), "--force"])
         assert partial == fleet.INDEX_FAILED_RC
@@ -2198,7 +2199,7 @@ class TestIndexExitCodes:
 class TestIndexHoldsTheInterpreterFloor:
     def test_fleet_imports_no_module_newer_than_the_floor(self):
         import ast as _ast
-        source = _read(Path(fleet.__file__))
+        source = fleet_implementation_source()
         imported = set()
         for node in _ast.walk(_ast.parse(source)):
             if isinstance(node, _ast.Import):

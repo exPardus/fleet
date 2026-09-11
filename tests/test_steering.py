@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 def _blank_out_function(source: str, func_name: str) -> str:
@@ -133,7 +134,7 @@ class TestAppendMailbox:
         beside the atomic one, and `_migrate_residual_mailbox` (which had its
         own appender) could regrow one. Neither appender's CODE may open a
         file at all."""
-        source = Path(fleet.__file__).read_text(encoding="utf-8")
+        source = fleet_implementation_source()
         for func in self._MAILBOX_APPENDERS:
             code = _function_code(source, func)
             assert "open(" not in code, (
@@ -271,7 +272,7 @@ class TestCmdRelease:
 
 class TestPlatformAdapterBoundary:
     def test_no_os_branches_outside_adapter_block(self):
-        source = Path(fleet.__file__).read_text(encoding="utf-8")
+        source = fleet_implementation_source()
         start = source.index("# === PLATFORM ADAPTER START")
         end = source.index("# === PLATFORM ADAPTER END") + len("# === PLATFORM ADAPTER END ===")
         assert start != -1 and end != -1
@@ -328,7 +329,8 @@ class TestPlatformAdapterBoundary:
         quietly disarming every assertion below."""
         root = self._repo_root()
         scanned = {p.relative_to(root).as_posix() for p in self._scanned_files()}
-        assert {"bin/fleet_statusline.py",
+        assert {"bin/fleet_index.py", "bin/fleet_errors.py",
+                "bin/fleet_statusline.py",
                 "bin/hooks/stop_outcome.py",
                 "bin/hooks/stop_mailbox.py",
                 "bin/hooks/posttooluse_mailbox.py",

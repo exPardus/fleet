@@ -45,6 +45,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 REAL_LIST = Path.home() / ".claude" / "fleet-homes.list"
 
@@ -625,7 +626,7 @@ class TestNoCwdResolutionWasAdded:
         CWD-independent from the first line on (ga1 N5). That is one operator-
         typed path being made absolute, not a search. What must not exist is a
         WALK: no parent iteration, no marker file, no git root."""
-        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(fleet_implementation_source())
         scopes = {"_home_to_create", "_init_named_home", "_write_new_home_state",
                   "_record_home_on_this_machine"}
         # ATTRIBUTES and STRINGS, not a substring sweep over the dump. Measured:
@@ -653,7 +654,7 @@ class TestNoCwdResolutionWasAdded:
         only reader, and terminal-surface D7 makes fleet PULL-ONLY. A slice that
         wanted cwd resolution would most cheaply get it by bringing the marker
         back."""
-        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         assert 'Path.home() / ".claude" / "fleet-home"' not in src
 
 

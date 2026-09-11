@@ -321,7 +321,7 @@ class TestTheQuiescentHomeCanary:
         ["home"],
     ])
     def test_driving_home_a_leaves_home_b_byte_identical(
-            self, argv, two_homes, monkeypatch, capsys):
+            self, argv, two_homes, patch_fleet, monkeypatch, capsys):
         a, b = two_homes
         if not home_is_quiescent(b):
             pytest.skip(
@@ -342,8 +342,12 @@ class TestTheQuiescentHomeCanary:
         reached = []
         name = "cmd_" + argv[0].replace("-", "_")
         original = getattr(fleet, name)
-        monkeypatch.setattr(fleet, name,
-                            lambda args: reached.append(name) or original(args))
+        {
+            'cmd_status': lambda value: patch_fleet('cmd_status', value),
+            'cmd_homes': lambda value: patch_fleet('cmd_homes', value),
+            'cmd_clean': lambda value: patch_fleet('cmd_clean', value),
+            'cmd_home': lambda value: patch_fleet('cmd_home', value),
+        }[name](lambda args: reached.append(name) or original(args))
 
         before = _digest(b)
         rc = fleet.main(["--fleet-home", str(a)] + argv)

@@ -444,20 +444,20 @@ class TestOutputFormat:
         assert "def alpha" not in out
 
     def test_an_unreadable_source_at_slice_time_degrades_to_the_pointer(
-            self, proj, monkeypatch, capsys):
+            self, proj, patch_fleet, monkeypatch, capsys):
         # §11.5's "unreadable source at slice time" row: readable when the
         # header was hashed, gone by the time the slice is read.
         def boom(_path):
             raise OSError("vanished mid-slice")
 
-        monkeypatch.setattr(fleet, "_q_source_lines", boom)
+        patch_fleet("_q_source_lines", boom)
         rc, out, err = _run(capsys, "alpha", "--src", "--path", "src/api.py")
         assert rc == 0
         assert out == "src/api.py:6-9\tfunc\talpha\t(x: int) -> str\n"
         assert "src/api.py" in err
 
     def test_the_same_row_against_a_REAL_unreadable_file(
-            self, proj, monkeypatch, capsys):
+            self, proj, patch_fleet, monkeypatch, capsys):
         # The test above REPLACES `_q_source_lines`, so it pins the caller's
         # handling and nothing about the function itself. Measured: injecting
         # `except OSError: return []` into the real `_q_source_lines` left the
@@ -481,7 +481,7 @@ class TestOutputFormat:
                 target.mkdir()
             return real_pointer(hit)
 
-        monkeypatch.setattr(fleet, "_q_pointer", swap_then_format)
+        patch_fleet("_q_pointer", swap_then_format)
         rc, out, err = _run(capsys, "alpha", "--src", "--path", "src/api.py")
         assert rc == 0                       # a hit WAS printed
         assert out == "src/api.py:6-9\tfunc\talpha\t(x: int) -> str\n"
@@ -737,7 +737,7 @@ class TestStaleness:
         assert fleet.shard_path_for_source(proj, "src/util.py").is_file()
 
     def test_a_shard_that_vanishes_mid_swap_is_treated_as_stale(
-            self, proj, monkeypatch, capsys):
+            self, proj, patch_fleet, monkeypatch, capsys):
         # §11.5's mid-swap row: the reader never crashes on a concurrent
         # writer, it re-parses.
         real = fleet.read_shard
@@ -747,7 +747,7 @@ class TestStaleness:
                 return None
             return real(shard_path)
 
-        monkeypatch.setattr(fleet, "read_shard", flaky)
+        patch_fleet("read_shard", flaky)
         rc, out, _err = _run(capsys, "alpha")
         assert rc == 0
         assert "src/util.py:1-2\tfunc\talpha\t(z)" in out.splitlines()
@@ -886,13 +886,13 @@ class TestOutlinePathContainment:
         assert out.splitlines()[0] == "## src/api.py (17 lines, python)"
 
     def test_the_guard_runs_before_the_shard_layer_is_touched(
-            self, proj, monkeypatch, capsys, victim):
+            self, proj, patch_fleet, monkeypatch, capsys, victim):
         # Defence in depth means the primitive is never CALLED with an
         # out-of-root rel, not that it survives being called with one.
         def forbidden(*_args, **_kwargs):
             raise AssertionError("an out-of-root path reached the shard layer")
 
-        monkeypatch.setattr(fleet, "verified_shard_rows", forbidden)
+        patch_fleet("verified_shard_rows", forbidden)
         assert _run(capsys, "--outline", "a/../../../../victim/PRECIOUS")[0] != 0
         self._survives(*victim)
 
@@ -1194,11 +1194,11 @@ class TestOutlineShardPathContainment:
         assert not escaped.exists()
 
     def test_the_guard_runs_before_the_shard_layer_is_touched(
-            self, jail, monkeypatch, capsys):
+            self, jail, patch_fleet, monkeypatch, capsys):
         def forbidden(*_args, **_kwargs):
             raise AssertionError("an escaping rel reached the shard layer")
 
-        monkeypatch.setattr(fleet, "verified_shard_rows", forbidden)
+        patch_fleet("verified_shard_rows", forbidden)
         monkeypatch.chdir(jail / "sub")
         capsys.readouterr()
         assert _run(capsys, "--outline", "../../../gp/par/proj/VICTIM.py")[0] != 0
@@ -1327,7 +1327,7 @@ class TestEveryReadGoesThroughTheChokePoint:
     `verified_shard_rows` frame."""
 
     @pytest.fixture
-    def guard(self, monkeypatch):
+    def guard(self, patch_fleet, monkeypatch):
         state = {"depth": 0, "direct": [], "verified": 0}
         real_verify, real_read = fleet.verified_shard_rows, fleet.read_shard
 
@@ -1344,8 +1344,8 @@ class TestEveryReadGoesThroughTheChokePoint:
                 state["direct"].append(str(shard_path))
             return real_read(shard_path)
 
-        monkeypatch.setattr(fleet, "verified_shard_rows", verified)
-        monkeypatch.setattr(fleet, "read_shard", read)
+        patch_fleet("verified_shard_rows", verified)
+        patch_fleet("read_shard", read)
         return state
 
     @pytest.mark.parametrize("argv", [
@@ -1376,7 +1376,7 @@ class TestNoFleetState:
     no PID probe, no subprocess at all."""
 
     @pytest.fixture
-    def tripwires(self, monkeypatch, tmp_path):
+    def tripwires(self, patch_fleet, monkeypatch, tmp_path):
         home = tmp_path / "fleet-home"
         home.mkdir()
         monkeypatch.setattr(fleet, "FLEET_HOME", home)
@@ -1388,7 +1388,13 @@ class TestNoFleetState:
 
         for name in ("load_registry", "save_registry", "fleet_lock",
                      "status_snapshot", "mailbox_dir"):
-            monkeypatch.setattr(fleet, name, forbidden(name))
+            {
+                'load_registry': lambda value: patch_fleet('load_registry', value),
+                'save_registry': lambda value: patch_fleet('save_registry', value),
+                'fleet_lock': lambda value: patch_fleet('fleet_lock', value),
+                'status_snapshot': lambda value: patch_fleet('status_snapshot', value),
+                'mailbox_dir': lambda value: patch_fleet('mailbox_dir', value),
+            }[name](forbidden(name))
         for name in ("run", "Popen", "check_output", "call"):
             monkeypatch.setattr(subprocess, name, forbidden(f"subprocess.{name}"))
         return home

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+import fleet_sources
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,9 +77,7 @@ def test_docs_total_cap():
     assert sum(_line_count(path) for path in docs) <= 15000
 
 
-def _fleet_prose_lines():
-    path = ROOT / "bin/fleet.py"
-    source = path.read_text(encoding="utf-8")
+def _python_prose_lines(source):
     tree = ast.parse(source)
     doc_lines = set()
     for node in ast.walk(tree):
@@ -91,6 +91,13 @@ def _fleet_prose_lines():
         if token.type == tokenize.COMMENT
     }
     return len(doc_lines | comment_lines)
+
+
+def _fleet_prose_lines():
+    # Parse each module independently: concatenating would hide the second
+    # and third module's docstrings from ast.get_docstring(Module).
+    return sum(_python_prose_lines(path.read_text(encoding="utf-8"))
+               for path in fleet_sources.fleet_implementation_paths())
 
 
 def test_fleet_py_docstring_and_comment_cap():
@@ -160,3 +167,15 @@ def _prose_lines(path):
                    reason="operator must apply docs/operator/goals-trim-proposal.md")
 def test_supervisor_goals_cap():
     assert _line_count(ROOT / "supervisor/GOALS.md") <= 80
+
+
+@pytest.mark.parametrize("filename", fleet_sources.IMPLEMENTATION_FILES)
+def test_the_prose_cap_counts_module_docstrings_and_comments_in_each_file(
+        filename, tmp_path, monkeypatch):
+    paths = tuple(tmp_path / name for name in fleet_sources.IMPLEMENTATION_FILES)
+    for path in paths:
+        source = ('"""Module documentation."""\nvalue = 1  # inline comment\n'
+                  if path.name == filename else "")
+        path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(fleet_sources, "fleet_implementation_paths", lambda: paths)
+    assert _fleet_prose_lines() == 2
