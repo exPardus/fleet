@@ -118,6 +118,46 @@ def test_landed_lane_without_a_substrate_record_is_unknown(tmp_path):
         ("w68/alpha", "unknown", "abcdef1")]
 
 
+def test_prune_removes_only_clean_merged_lane_worktrees(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    live = tmp_path / "live"
+    merged = tmp_path / "fleet-w68-merged"
+    unmerged = tmp_path / "fleet-w69-unmerged"
+    dirty = tmp_path / "fleet-w67-dirty"
+    for path in (repo, live, merged, unmerged, dirty):
+        path.mkdir()
+    monkeypatch.setattr(fleet, "FLEET_HOME", live)
+    porcelain = (
+        f"worktree {repo}\nHEAD base\nbranch refs/heads/server/persistent-fleet\n\n"
+        f"worktree {merged}\nHEAD one\nbranch refs/heads/w68/merged\n\n"
+        f"worktree {unmerged}\nHEAD two\nbranch refs/heads/w69/unmerged\n\n"
+        f"worktree {dirty}\nHEAD three\nbranch refs/heads/w67/dirty\n\n")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:4] == ["worktree", "list", "--porcelain"]:
+            return subprocess.CompletedProcess(argv, 0, porcelain, "")
+        if argv[1] == "merge-base":
+            return subprocess.CompletedProcess(argv, 0 if argv[3] != "w69/unmerged" else 1,
+                                               "", "")
+        if argv[1] == "-C":
+            status = " M file.py\n" if argv[2] == str(dirty) else ""
+            return subprocess.CompletedProcess(argv, 0, status, "")
+        if argv[1:3] == ["worktree", "remove"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[1:3] == ["branch", "-d"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(argv)
+
+    stats = fleet._wave_prune_landed_worktrees(repo, "base", run=run)
+    assert stats == {"removed": 1, "skipped": 2, "unmerged": 1,
+                     "dirty": 1, "protected": 0, "failed": 0}
+    assert [call[1:] for call in calls if call[1] in {"worktree", "branch"}][-2:] == [
+        ["worktree", "remove", str(merged)], ["branch", "-d", "w68/merged"]]
+    assert all("--force" not in call for call in calls)
+
+
 def test_changelog_gate_names_merge_without_a_line(tmp_path):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "CHANGELOG.md").write_text(
