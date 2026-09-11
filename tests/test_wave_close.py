@@ -78,15 +78,44 @@ def test_default_base_is_newest_wave_close_commit(tmp_path):
 
 
 def test_landed_lanes_are_merge_branches_with_substrate(tmp_path):
+    lane_worktree = tmp_path / "lane-worktree"
+    job = lane_worktree / ".mcx" / "mcx-job"
+    job.mkdir(parents=True)
+    (job / "cwd").write_text(str(lane_worktree), encoding="utf-8")
+    (job / "codex").write_text("/usr/local/bin/codex\n", encoding="utf-8")
+
     def run(argv, **kwargs):
         if argv[1] == "log":
             return subprocess.CompletedProcess(
                 argv, 0, "abcdef1234567\tmerge(w68/alpha): landed\n", "")
-        return subprocess.CompletedProcess(
-            argv, 0, "Substrate: codex\n", "")
+        if argv[1] == "worktree":
+            return subprocess.CompletedProcess(
+                argv, 0,
+                f"worktree {lane_worktree}\n"
+                "HEAD abcdef1234567\n"
+                "branch refs/heads/w68/alpha\n\n", "")
+        # A merge trailer is deliberately misleading: substrate comes from
+        # the lane record, not commit-message prose.
+        return subprocess.CompletedProcess(argv, 0, "Claude-Session: fake\n", "")
 
     assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
         ("w68/alpha", "codex", "abcdef1")]
+
+
+def test_landed_lane_without_a_substrate_record_is_unknown(tmp_path):
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge(w68/alpha): landed\n", "")
+        if argv[1] == "worktree":
+            return subprocess.CompletedProcess(
+                argv, 0,
+                f"worktree {tmp_path / 'lane-worktree'}\n"
+                "branch refs/heads/w68/alpha\n\n", "")
+        return subprocess.CompletedProcess(argv, 0, "Codex\n", "")
+
+    assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
+        ("w68/alpha", "unknown", "abcdef1")]
 
 
 def test_changelog_gate_names_merge_without_a_line(tmp_path):
