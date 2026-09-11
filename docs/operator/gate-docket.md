@@ -2,7 +2,7 @@
 
 **For: Altai. FIVE gates are open. None of them is blocking any work — but read G-K6 FIRST: it was raised on 2026-09-10 out of an outage that had your fleet dark for 8h10m overnight while the keeper, watching, paged nothing. G-K5 is still the one about the priority you sent on 2026-09-09.**
 
-*(Count corrected 2026-09-10 from FOUR to FIVE by supervisor `inc-20260910T041513Z-181d`, in the same turn that raised G-K6 — the digest going stale at the moment a gate is filed is the precise failure root `CLAUDE.md` warns about, and the previous digest was allowed to sit stale at three gates while four were open.)*
+
 
 **THIS FILE IS NOT THE RECORD.** The record is [`docs/OPERATOR-GATES.md`](../OPERATOR-GATES.md) —
 tracked, authoritative, carrying every open gate in full with its filer's own reasoning, plus every
@@ -51,7 +51,7 @@ So this is deliberately **a pointer-and-recommendations digest, not a second cop
 text.** Two files claiming to be the record is the defect this campaign keeps re-finding, and the
 gates file already carries every word of reasoning below at full length.
 
-**The old file is superseded and may be deleted at your convenience.** Every surviving reference to
+Every surviving reference to
 its path is in `supervisor/JOURNAL.md` — seven lines, all dated records of what a supervisor did on
 a given day. Those are correctly left alone: this repo's own ratified rule is that a claim about a
 past tree is not rot, and a record of an act is corrected by appending, never by rewriting. No brief
@@ -177,7 +177,7 @@ record. Nothing below is waiting on anybody.*
 ### Gate 1 (settled: approve the drafted reconstruction) — the `supervisor/GOALS.md` §8 replacement text
 
 **You already ruled the substance** (2026-08-08): apply the §8 band replacement **in full** rather
-than numbers-only, because the block carries three defects — the superseded 150–200k band, a false
+than numbers-only, because the block carries three defects — a stale 150–200k band, a false
 `[UNBUILT]` tag on the §11.3 dispatch refusal (shipped `c6fde34`, widened `d969de3`), and the
 conflation of the BUILT supervisor arm with the genuinely unbuilt worker arm — and **yes**, add
 `supervisor/GOALS.md` to the pin's `SURFACES`.
