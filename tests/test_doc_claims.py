@@ -490,7 +490,13 @@ def _tracked_markdown():
     # not exist, whose content is therefore never read. That is the identical
     # defect `-z` was added to fix, one layer down, and F5's ASCII-only control
     # stayed green throughout it: a control must carry the SHAPE of the data.
-    proc = subprocess.run(["git", "ls-files", "-z", "*.md"], cwd=REPO_ROOT,
+    # Include present untracked files as well as cached files: a linked
+    # worktree may not be able to update its parent-owned index while a rename
+    # is in progress, but the current-tree population must still see the
+    # destination path.
+    proc = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others",
+         "--exclude-standard", "--", "*.md"], cwd=REPO_ROOT,
                           capture_output=True, text=True, encoding="utf-8")
     assert proc.returncode == 0, (
         f"`git ls-files` failed in {REPO_ROOT}: {proc.stderr.strip()!r}. This "
@@ -759,7 +765,7 @@ def test_the_check_count_population_is_derived_and_split_correctly():
     # 2026-08-05. `docs/OPERATOR-GATES.md:24` quotes both `29 checks` and
     # `23 checks` inside an argument whose own prose says "the truth is 28".
     for rel in ("docs/OPERATOR-GATES.md", "docs/PLAN-PROGRESS.md",
-                "docs/SPEC-v2-history.md", "knowledge/lessons.md",
+        "docs/archive/SPEC-v2-history.md", "knowledge/lessons.md",
                 "supervisor/JOURNAL.md"):
         assert rel in tracked and rel not in docs, rel
 
