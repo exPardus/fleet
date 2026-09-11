@@ -75,6 +75,10 @@ RECEIPT_FLOOR = {
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
+    "fleet-index.md": 8,
+    "autoclean.md": 6,
+    "terminal-surface.md": 7,
+    "graceful-succession.md": 14,
     # Enforced 2026-07-27, when M1 + M2's worker-facing surface shipped and the
     # Enforced by the views-doctrine slice (2026-07-27): D4 asserted a rule as
     # if it were shipped behaviour for days while shipped behaviour violated it.
@@ -109,6 +113,19 @@ UNENFORCED = {
     # -- it lives outside the repo and a `--bg` worker cannot reproduce it -- and
     # the three dead-daemon `RATIFICATION WITHHELD` strings are deliberately NOT
     # receipted (no honest reproduction exists; see that spec's receipts section).
+    #
+    # These carry no receipts today: design documents for phases that are not
+    # built, or descriptions of surfaces outside this repo, so there is nothing
+    # of fleet's own behaviour to reproduce. Declared rather than left
+    # unclassified, so adding a receipt to one is a deliberate act.
+    "multi-fleet.md",
+    "phase-2-watchtower.md",
+    "phase-3-telegram.md",
+    "phase-4-webui.md",
+    "phase-5-intelligence.md",
+    "phase1-hardening-kernels.md",
+    "portability.md",
+    "providers.md",
 }
 
 
