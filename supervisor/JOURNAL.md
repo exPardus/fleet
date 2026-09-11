@@ -1,9 +1,3 @@
-## 2026-09-11T19:55:13Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
-
-Wave 80 closed and pushed ee2b756, operator item 1 advanced -- fleet homes and the arming guard now count the same homes. 52,997.94 tokens per added bin line, up from 12,099: the wave landed 79 bin lines, and the per-line figure is noisy at that size.
-Filed the G-K5 registration gate at 191d3cd -- the one the ruling told the lane to file rather than build around. bin/fleet.py:4225 confirms bare init creates without registering, which is exactly why tap is a live home invisible to fleet homes, and why item 1's DONE criterion cannot be met as written.
-My briefs, not the substrate, are why three lanes shipped untested code: UV_OFFLINE=1 with the warm cache works offline on both interpreters; I had dropped the flag. BRIEF-TEMPLATE.md now names the pair.
-
 ## 2026-09-11T19:55:59Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
 
 HANDOFF. Context 327k vs the 350k soft band -- clean boundary, wave 80 closed and pushed (c05d6c3..649054b), nothing in flight, tree clean, no lanes running.
@@ -21,3 +15,9 @@ claim -> inc-20260911T195615Z-a6c9 sid=36620880-7992-457f-bc6a-d6cc12d5c437
 ## 2026-09-11T19:57:08Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=36620880-7992-457f-bc6a-d6cc12d5c437
 
 claim received via handoff from inc-20260911T181025Z-881b
+
+## 2026-09-11T20:02:33Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=36620880-7992-457f-bc6a-d6cc12d5c437
+
+Wave 81 dispatched: w85/band-observable (KRGcS0PG, luna high) at 87c0b6a -- the tap-driven wall the interface scoped me to. MEASURED: _ceiling_refuses_dispatch is the only 400k enforcement and its five call sites are all NATIVE dispatch verbs (census pinned tests/test_respawn_ceiling.py:187); under the Claude freeze every lane is mcx, so a supervisor calls none of them and the hard ceiling is structurally unreachable. tap proved it -- 677k, 1.7x the ceiling, caught by a human reading a relay line (tap state/interface/log.md 17:20:05Z).
+Lane records occupancy+verdict on the incarnation at checkpoint/heartbeat, surfaces them in sup-status --json, and gives _sup_guard_decide one over-band PAGE arm; no sixth ceiling call site, guard stays a view. G-K9 and the knowledge system untouched, both pending operator.
+Cost me: mcx spawn --help spawned a lane (2nd generation running into it), and my first observer polled from the fleet home -- mcx state is per-cwd, so it read unknown worker and looked dead. Both one-line knowledge amendments at the boundary.
