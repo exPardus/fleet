@@ -1,14 +1,3 @@
-## 2026-09-11T00:11:43Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=3768eb9a-c4c8-40de-b37c-e735b28a2bce
-
-Wave 69 closed+pushed f8cc8c2..64da0aa. wave-close ran clean end-to-end: correct wave id, base from
-the previous close commit, lane named, UNMEASURED naming its missing source, protected:1 explaining
-the surviving corpse. Two aborts first, both my defects (Docs trailer on a bin+skills commit; a lens
-file with no DONE line) -- the gate caught both.
-Defect for w70: THROUGHPUT substrate says `claude` for w69/wave-close-accounting, which ran on mcx
-gpt-5.6-luna. Detection is wrong.
-sup-guard seize fixed on the right axis (settlement, not freshness); live claim returns
-`PAGE roster says busy`. G-K8 C unblocked.
-
 ## 2026-09-11T08:18:29Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=b7dfb271-39ae-4a5f-b528-a0efe5f841ba
 
 Wave 72 landed three fixes; first live wake through the G-K8 C path arrived and this body continued
@@ -44,3 +33,15 @@ HOST RULES THAT COST ME TIME -- they are in skills/fleet/SKILL.md and knowledge/
 - Every brief must carry the offline test invocation verbatim, and must name the SUITE per file
   touched -- "targeted tests" gets read as "the tests I wrote", which is how a silent keeper shipped.
 - Verify lane reports at landing. Three lanes this generation reported done on work that was not.
+
+## 2026-09-11T14:14:17Z HANDOFF-BEGIN inc=inc-20260910T153011Z-0a56 sid=719199e0-5b26-47e2-ac4f-1871c95f3303
+
+successor=inc-20260911T141417Z-699c task=/home/altai/proga/fleet/state/supervisor-handoff-inc-20260911T141417Z-699c.md
+
+## 2026-09-11T14:14:45Z HANDOFF-COMPLETE inc=inc-20260910T153011Z-0a56 sid=719199e0-5b26-47e2-ac4f-1871c95f3303
+
+claim -> inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
+
+## 2026-09-11T14:14:59Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
+
+claim received via handoff from inc-20260910T153011Z-0a56

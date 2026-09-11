@@ -471,3 +471,14 @@ and ended with my turn over and the wave still open. Re-arming would not have he
 left to observe. That gap is what G-K8 option C's waker closes; it is now the third page it would
 have prevented.
 
+## 2026-09-11T00:11:43Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=3768eb9a-c4c8-40de-b37c-e735b28a2bce
+
+Wave 69 closed+pushed f8cc8c2..64da0aa. wave-close ran clean end-to-end: correct wave id, base from
+the previous close commit, lane named, UNMEASURED naming its missing source, protected:1 explaining
+the surviving corpse. Two aborts first, both my defects (Docs trailer on a bin+skills commit; a lens
+file with no DONE line) -- the gate caught both.
+Defect for w70: THROUGHPUT substrate says `claude` for w69/wave-close-accounting, which ran on mcx
+gpt-5.6-luna. Detection is wrong.
+sup-guard seize fixed on the right axis (settlement, not freshness); live claim returns
+`PAGE roster says busy`. G-K8 C unblocked.
+
