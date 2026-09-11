@@ -1115,7 +1115,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:7897) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:19217) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:19222) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -16878,7 +16878,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the other sites that already key on the union (`:2986, :3057,
     :3130, :3391, :3541, :5036, :10115, :10435, :10716, :10947, :11034, :11220, :11221, :11289,
-    :11301, :11312, :11461, :12278, :16748, :19674, :19675, :19726, :20705`). The thirteenth is multi-fleet §5 step 2's
+    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19731, :20710`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16903,7 +16903,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8876, :9415, :14494,
-    :21368), the same safety invariant §7.1's send carve-out rests on. That
+    :21373), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17600,7 +17600,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8876, :9415, :14494,
-    #     :21368) -- so the sid union can never make one body answer for another.
+    #     :21373) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -19048,6 +19048,11 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="wave-close", mint=False)
+        # A close is a turn, and a long one. Without this the holder looks stale
+        # to the keeper for the whole wave -- measured 2026-09-11: 7h stale while
+        # actively closing waves 70 and 71, because wave-close had replaced
+        # sup-checkpoint in the routine and only checkpoint refreshed the beat.
+        claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
     _deliver_notices(notices)
 

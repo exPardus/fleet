@@ -289,3 +289,19 @@ def test_wave_id_survives_the_journal_board_roll(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "detached\n", "")
 
     assert fleet._wave_id(tmp_path, run=fake_run) == "68"
+
+
+def test_wave_close_refreshes_the_heartbeat(monkeypatch, tmp_path):
+    """A close is a turn; the holder must not look stale for the whole wave.
+
+    Measured 2026-09-11: heartbeat_at sat 7h stale while waves 70 and 71 were
+    actively closed, because wave-close replaced sup-checkpoint in the routine
+    and only sup-checkpoint refreshed the beat. The keeper paged a working body.
+    """
+    import inspect
+    src = inspect.getsource(fleet.cmd_wave_close)
+    marker = 'verb="wave-close"'
+    assert marker in src
+    after = src.split(marker, 1)[1].split("write_incarnation", 1)[0]
+    assert 'claim["heartbeat_at"] = now_iso()' in after, (
+        "wave-close writes the claim without advancing heartbeat_at")

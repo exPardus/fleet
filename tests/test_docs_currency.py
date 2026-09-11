@@ -78,6 +78,12 @@ def dispatched_tasks(home):
             if p.is_file() and p.suffix in {".md", ".txt"}
             and not p.name.endswith(".boot-bundle.txt")
             and not p.name.startswith("sup~")
+            # `YYYYMMDD-*.md` is an INBOUND operator ruling or wake, written by
+            # the interface, not a brief the supervisor dispatched. Rule 7 binds
+            # what the supervisor dispatches. These entered scope only because
+            # marking them `RULED:` touched their mtimes, which is a fact about
+            # the filesystem, not about who authored the file.
+            and not re.fullmatch(r"\d{8}-.*", p.name)
             and p.stat().st_mtime >= TASK_CUTOFF]
 
 
