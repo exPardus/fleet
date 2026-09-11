@@ -356,6 +356,11 @@ class TestTheCensus:
             # multi-fleet territory at all?" This is the evidence that the
             # sweep is a heuristic and cannot be the closure argument.
             "_multi_fleet_population_is_live",
+            # w83's computed board: it CONSUMES the snapshot's already-decided
+            # liveness and joins those rows to the git worktree table for
+            # display. It produces no liveness verdict of its own, so it is the
+            # same shape of false positive as `_wave_roster_claude_tokens`.
+            "_supervisor_live_lanes",
         }
         shaped = {n.name for n in ast.walk(tree)
                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))

@@ -812,20 +812,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7247) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8142) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11056) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:7250) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:8145) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:11248) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2005) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:10930) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:11122) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:2518) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8392) -- do not grade a renamed-away path readable.
+      * `_doctor_check_registry` (:8395) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4531) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12015) -- render the release explanation.
+      * `_print_snapshot_table` (:4534) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:12226) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1987,7 +1987,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11056`), because legacy upgrades also require a complete registry.
+    (`:11248`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:892`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -3422,6 +3422,9 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             "limit_kind": rec.get("limit_kind"),
             "resume_eligible": status == "limited" and _limit_reset_passed(rec),
             "attached_since": rec.get("attached_since"),
+            "cwd": rec.get("cwd"),
+            "branch": rec.get("branch"),
+            "blockers": rec.get("blockers"),
             # Expose dispatch kind from this file-only snapshot for native cost rendering.
             "dispatch_kind": rec.get("dispatch_kind"),
             "archived_at": rec.get("archived_at"),
@@ -5917,7 +5920,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:5846` / `cmd_respawn:5662`, before
+    # resolution that runs from `cmd_kill:5849` / `cmd_respawn:5665`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -5948,9 +5951,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:5846` / `cmd_respawn:5662`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:5849` / `cmd_respawn:5665`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:5683-5685` spells out that design -- resolve under the lock.
+    # `cmd_respawn:5686-5688` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -9236,6 +9239,8 @@ SUPERVISOR_BOOT_VERDICTS = tuple(SUPERVISOR_BOOT_RC) + ("handshake-written",
 # A noncurrent successor gets a distinct rc so it can terminate without
 # confusing that terminal disposition with an ordinary occupied-claim refusal.
 SUPERVISOR_BOOT_HANDOFF_REFUSED_RC = 5
+SUPERVISOR_BODY_MAX_LINES = 3
+SUPERVISOR_BUNDLE_MAX_CHARS = 40_000
 
 _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
@@ -10261,11 +10266,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
-    :1950, :2012, :2090, :2897, :5935, :6097, :6294, :6414, :6450, :6612, :6613, :6683,
-    :6693, :6704, :6798, :7273, :10212, :12307, :12308, :12369, :13148`).
+    :1950, :2012, :2090, :2897, :5938, :6100, :6297, :6417, :6453, :6615, :6616, :6686,
+    :6696, :6707, :6801, :7276, :10217, :12518, :12519, :12580, :13359`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5200, :5536, :8718,
-    :13473. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :5203, :5539, :8721,
+    :13684. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10381,7 +10386,187 @@ def _fetch_agents_roster(which=shutil.which, run=subprocess.run):
     return (True, entries)
 
 
-def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list) -> str:
+def _supervisor_read_text(path: Path, label: str) -> tuple[bool, str]:
+    """Read a board source without inventing a value when it is unavailable."""
+    try:
+        return True, path.read_text(encoding="utf-8", errors="strict")
+    except (OSError, UnicodeError) as exc:
+        return False, f"UNREADABLE ({label}: {exc})"
+
+
+def _supervisor_pickup_board() -> list[str]:
+    """Extract successor pickup lines from the newest durable supervisor journal."""
+    directory = state_dir() / "journals"
+    try:
+        paths = sorted(directory.glob("*.md"), key=lambda p: p.stat().st_mtime)
+    except OSError as exc:
+        return [f"UNREADABLE ({directory}: {exc})"]
+    if not paths:
+        return [f"UNREADABLE ({directory}: no supervisor journal)"]
+    ok, text = _supervisor_read_text(paths[-1], str(paths[-1]))
+    if not ok:
+        return [text]
+    lines = text.splitlines()
+    in_pickup = False
+    result = []
+    for line in lines:
+        if re.match(r"^#+\s+(Next steps|Pickup|In progress)\b", line, re.I):
+            in_pickup = True
+            continue
+        if in_pickup and re.match(r"^#+\s+", line):
+            break
+        if in_pickup and line.strip() and re.match(r"^\s*(?:[-*]|\d+[.)])\s+", line):
+            result.append(line.strip())
+    return result or [f"none recorded (source: {paths[-1]})"]
+
+
+def _supervisor_standing_directives() -> list[str]:
+    """List undischarged directives from ``state/tasks/*.md``."""
+    directory = state_dir() / "tasks"
+    if not directory.is_dir():
+        return [f"UNREADABLE ({directory}: directory missing)"]
+    try:
+        paths = sorted(directory.glob("*.md"))
+    except OSError as exc:
+        return [f"UNREADABLE ({directory}: {exc})"]
+    result = []
+    for path in paths:
+        ok, text = _supervisor_read_text(path, str(path))
+        if not ok:
+            result.append(text)
+            continue
+        head = "\n".join(text.splitlines()[:24])
+        # Both markers are LINE-ANCHORED, and neither may be satisfied by
+        # prose. Unanchored, `\bDISCHARGED\b` matches the words "not
+        # discharged" and silently drops a live directive from the board --
+        # measured against state/tasks/20260911-computed-checkpoint.md, which
+        # is not a directive at all and was classified as a discharged one.
+        # A board that omits without saying so is worse than no board.
+        if not re.search(r"^#+.*\bSTANDING DIRECTIVE\b", head, re.I | re.M):
+            continue
+        # Only DISCHARGED discharges. `RULED` means the operator answered the
+        # question, not that the work is done -- measured against the batch-2
+        # directive, which says RULED and still had an item in flight while
+        # this board hid it.
+        if re.search(r"^\s*DISCHARGED\b", head, re.I | re.M):
+            continue
+        title = next((ln.lstrip("# ").strip() for ln in text.splitlines()
+                      if ln.startswith("#")), path.name)
+        result.append(f"{title} [{path}]")
+    return result or ["none (source: state/tasks/*.md)"]
+
+
+def _supervisor_git_board(repo=None, run=subprocess.run) -> dict:
+    """Compute git identity and cleanliness for checkpoint/boot-board output.
+
+    The default is the resolved fleet home, NOT the process cwd: a board read
+    from whatever directory the caller happened to be in is the one failure
+    this board cannot have -- another git repository answers every question
+    plausibly and wrongly, where an unreadable one at least says so.
+    """
+    repo = FLEET_HOME if repo is None else Path(repo)
+    def call(*argv):
+        try:
+            return run(["git", *argv], cwd=str(repo), capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")
+        except (OSError, subprocess.SubprocessError) as exc:
+            return SimpleNamespace(returncode=1, stdout="", stderr=str(exc))
+    root = call("rev-parse", "--show-toplevel")
+    if root.returncode != 0:
+        return {"error": f"UNREADABLE (git repository: {(root.stderr or '').strip()})"}
+    branch = call("symbolic-ref", "--short", "HEAD")
+    head = call("rev-parse", "--short", "HEAD")
+    dirty = call("status", "--porcelain")
+    unpushed = call("rev-list", "--left-right", "--count", "@{upstream}...HEAD")
+    if branch.returncode or head.returncode or dirty.returncode:
+        return {"error": "UNREADABLE (git identity/status)"}
+    unpushed_count = "UNMEASURED (git upstream unavailable)"
+    if unpushed.returncode == 0:
+        fields = unpushed.stdout.split()
+        if len(fields) == 2 and fields[1].isdigit():
+            unpushed_count = int(fields[1])
+    return {"branch": branch.stdout.strip(), "head": head.stdout.strip(),
+            "dirty": len(dirty.stdout.splitlines()), "unpushed": unpushed_count}
+
+
+def _supervisor_live_lanes(snap: dict, run=subprocess.run) -> list[str]:
+    """Join live registry lanes to this repo's durable git worktree table.
+
+    Reads the worktree table of the resolved fleet home for the same reason
+    `_supervisor_git_board` does: the process cwd is not the subject.
+    """
+    if not snap.get("ok", True):
+        return [f"UNREADABLE (registry: {snap.get('reason', 'unknown')})"]
+    try:
+        cp = run(["git", "worktree", "list", "--porcelain"], cwd=str(FLEET_HOME),
+                 capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"UNREADABLE (git worktrees: {exc})"]
+    if cp.returncode != 0:
+        return [f"UNREADABLE (git worktrees: {(cp.stderr or '').strip()})"]
+    worktrees = {}
+    paths_to_branches = {}
+    path = None
+    for line in cp.stdout.splitlines() + [""]:
+        if line.startswith("worktree "):
+            path = line[9:].strip()
+        elif line.startswith("branch refs/heads/") and path:
+            branch = line[18:].strip()
+            worktrees[branch] = path
+            paths_to_branches[path] = branch
+        elif not line:
+            path = None
+    rows = []
+    for row in snap.get("workers", []):
+        name = row.get("name", "")
+        if row.get("tier") == "supervisor" or row.get("status") in {"dead", "archived"}:
+            continue
+        branch = row.get("branch") or name
+        path = worktrees.get(branch)
+        if path is None and row.get("cwd"):
+            path = str(Path(row["cwd"]).resolve())
+            branch = paths_to_branches.get(path)
+        if path:
+            rows.append(f"{name}: {branch} -> {path}")
+    return rows or ["none (sources: registry and git worktree list)"]
+
+
+def _supervisor_dispatch_gates(snap: dict, caller_sid=None, run=subprocess.run) -> list[str]:
+    """Compute memory, live-lane count and caller occupancy gates."""
+    try:
+        cp = run(["free", "-m"], capture_output=True, text=True,
+                 encoding="utf-8", errors="replace")
+        memory = next((ln.split()[6] for ln in cp.stdout.splitlines()
+                       if ln.startswith("Mem:") and len(ln.split()) > 6), None)
+    except (OSError, subprocess.SubprocessError):
+        memory = None
+    mem = f"available_memory_mb={memory}" if memory is not None else "available_memory_mb=UNREADABLE (free -m)"
+    lanes = sum(1 for w in snap.get("workers", [])
+                if w.get("tier") != "supervisor" and w.get("status") not in {"dead", "archived"})
+    occupancy = _transcript_occupancy(find_transcript_path(None, caller_sid)) if caller_sid else None
+    occ = f"caller_occupancy={occupancy}" if occupancy is not None else "caller_occupancy=UNREADABLE (transcript)"
+    return [mem, f"live_lane_count={lanes}", occ]
+
+
+def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> list[str]:
+    """Render the compact, source-labelled board added to the boot bundle."""
+    git = _supervisor_git_board(run=run)
+    git_line = (git["error"] if "error" in git else
+                f"branch={git['branch']} HEAD={git['head']} dirty={git['dirty']} unpushed={git['unpushed']}")
+    out = ["", "--- computed board (read-only sources) ---", f"git: {git_line}",
+           "pickup:"]
+    out.extend(f"  {x}" for x in _supervisor_pickup_board())
+    out.append("live lanes/worktrees:")
+    out.extend(f"  {x}" for x in _supervisor_live_lanes(snap, run=run))
+    out.append("undischarged standing directives:")
+    out.extend(f"  {x}" for x in _supervisor_standing_directives())
+    out.append("dispatch gates:")
+    out.extend(f"  {x}" for x in _supervisor_dispatch_gates(snap, caller_sid, run=run))
+    return out
+
+
+def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
+                        caller_sid=None, run=subprocess.run) -> str:
     """Render GOALS, journal tail, knowledge index, roster and fleet status.
     Registry verdicts come from status_snapshot.
     """
@@ -10418,7 +10603,11 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list)
             out.append(f"  {w['name']}: {w['status']}, {w['turns']} turns, ${w['cost_usd']:.2f}{mail}")
     else:
         out.append(f"(registry unreadable: {snap.get('reason')})")
-    return "\n".join(out)
+    out.extend(_render_computed_board(snap, caller_sid=caller_sid, run=run))
+    rendered = "\n".join(out)
+    if len(rendered) > SUPERVISOR_BUNDLE_MAX_CHARS:
+        raise FleetCliError(f"supervisor boot bundle exceeds {SUPERVISOR_BUNDLE_MAX_CHARS} characters ({len(rendered)})")
+    return rendered
 
 
 def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
@@ -10547,7 +10736,10 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
             # refuse / freeze: strictly read-only.
         rc = SUPERVISOR_BOOT_RC[verdict]
 
-    bundle = _render_boot_bundle(entries, status_snapshot(), supervisor_journal_entries())
+    # Board probes use the local OS/git surfaces; ``run`` here is the injected
+    # Claude-roster transport and many callers intentionally fake only that API.
+    bundle = _render_boot_bundle(entries, status_snapshot(), supervisor_journal_entries(),
+                                 caller_sid=caller_sid)
     # Run lifecycle reaping only after successful boot; successors skip it.
     reap_line = (_supervisor_reap_line(run=run, which=which, caller_sid=caller_sid)
                  if rc == 0 and not getattr(args, "handoff_inc", None) else
@@ -10684,8 +10876,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5200, :5536, :8718,
-    # :13473) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:5203, :5539, :8721,
+    # :13684) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -10693,7 +10885,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:892`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10186`).
+        # names this gate as its reason (`:10191`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11049,7 +11241,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7244`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:7247`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -11099,6 +11291,11 @@ def cmd_sup_checkpoint(args) -> int:
     Every checkpoint refreshes the heartbeat (spec §4: 'the holder refreshes
     at every checkpoint/beat')."""
     body = _read_task_arg(args.body)
+    body_lines = body.splitlines()
+    if len(body_lines) > SUPERVISOR_BODY_MAX_LINES:
+        raise FleetCliError(
+            f"sup-checkpoint: REFUSED body has {len(body_lines)} lines; "
+            f"maximum is {SUPERVISOR_BODY_MAX_LINES}")
     with fleet_lock():
         claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
@@ -11110,8 +11307,22 @@ def cmd_sup_checkpoint(args) -> int:
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
     verdict = supervisor_band_verdict(occupancy, "supervisor")
     occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    git = _supervisor_git_board()
+    if "error" in git:
+        git_txt = git["error"]
+    else:
+        git_txt = (f"branch={git['branch']} HEAD={git['head']} dirty={git['dirty']} "
+                   f"unpushed={git['unpushed']}")
+    snap = status_snapshot()
+    live_lanes = _supervisor_live_lanes(snap)
+    blockers = [w["name"] for w in snap.get("workers", [])
+                if w.get("status") in {"blocked", "stalled", "error"}]
+    blockers += [f"{w['name']}: {b}" for w in snap.get("workers", [])
+                 for b in (w.get("blockers") or [])]
+    blocker_txt = ",".join(blockers) if blockers else "none"
     print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; "
           f"occupancy={occ_txt}; verdict={verdict['verdict']}; heartbeat refreshed")
+    print(f"git: {git_txt}; live lanes: {len(live_lanes) if live_lanes != ['none (sources: registry and git worktree list)'] else 0}; blockers: {blocker_txt}")
     if roll["rolled"]:
         print(f"journal board rolled: {roll['moved_bytes']} bytes to "
               f"{supervisor_journal_history_path()}")
