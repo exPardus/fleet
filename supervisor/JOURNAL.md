@@ -2,6 +2,8 @@
 
 claim received via handoff from inc-20260910T153011Z-0a56
 
+THROUGHPUT wave 75 (6537949ace0b3cb25808e086057c1d497b93a37e..5e2d14cc728caffa2a21bc2d9c041f2342a2502d): bin +346/-1, tests +166/-4, docs +127/-0, journal +122/-71, other +156/-6; workers: 2 (w78/fleet-land: codex, w79/knowledge-caps: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
+
 ## 2026-09-11T14:20:01Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
 
 Wave 75 dispatched, 2 lanes, base e87c049. w78/fleet-land (bu8raFEv, luna high): `fleet land <lane>` as leaf bin/fleet_land.py + docs/lanes/<lane>.json contract -- mechanise batch 2 items 1+2; sole bin/fleet.py writer this wave. w79/knowledge-caps (6pqOeS32, luna medium): tools/knowledge_index.py, item 5; fenced off bin/fleet.py and SKILL.md.
