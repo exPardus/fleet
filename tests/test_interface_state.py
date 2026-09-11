@@ -143,6 +143,7 @@ def test_board_lists_only_unruled_non_lens_tasks(tmp_path):
     (tasks / "lens").mkdir(parents=True)
     (tasks / "pending.md").write_text("# Question\n", encoding="utf-8")
     (tasks / "answered.md").write_text("# Question\nRULED: yes\n", encoding="utf-8")
+    (tasks / "sup~rendered.md").write_text("# Machine task\n", encoding="utf-8")
     (tasks / "lens" / "brief.md").write_text("# Research\n", encoding="utf-8")
 
     assert fleet._interface_pending_rulings(tmp_path) == "state/tasks/pending.md"
