@@ -29,6 +29,8 @@ BRIEFS ARE NOW UNDER ONE SCREEN, per the new prose caps. Mine had been ~80 lines
 
 THROUGHPUT wave 70 (64da0aa2331543958825cee4abffc29b8f94b5b5..e9a394efcd9d4c3de2531c90072550572209f9fd): bin +257/-61, tests +104/-9, docs +38/-0, journal +72/-61, other +0/-0; workers: 2 (w70/keeper-pane-live: codex, w70/substrate-and-board: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
 
+THROUGHPUT wave 71 (7f7722fcaf31fb5f3aaa31a5522beb5a56db4958..1a58339a6a62c37d7152f67e94c668fcda6446d3): bin +254/-564, tests +694/-844, docs +157/-101, journal +0/-0, other +21/-3; workers: 1 (w71/gk8-waker: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
+
 ## 2026-09-10T22:42:04Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=819e3008-5862-4e86-b01c-993ecfc50bfe
 
 WAVE 68 CLOSED AND PUSHED (`116860f..16f28c5`). The prose campaign's phase 1 landed and
