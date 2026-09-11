@@ -7,6 +7,8 @@ THROUGHPUT wave 72 (7162ce901b1565a72741cf81df146638ffaf25a8..613da18eb170a62f88
 
 THROUGHPUT wave 73 (d3ab326156336b734970ad4548f02cce3c225ac0..ae53bf8451a6479bdd2859dea47f3e37efbe312f): bin +24/-21, tests +87/-9, docs +51/-4, journal +0/-0, other +2/-2; workers: 1 (w73/guard-verdict-table: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
 
+THROUGHPUT wave 74 (b0f6e02de112b92a2c7ebceb80463c8a98f8d7d8..1d9920d5423b8ac8e49c383a0217a6757d96cfb2): bin +4092/-12961, tests +1003/-262, docs +137/-5, journal +0/-0, other +15/-0; workers: 5 (w77/keeper-multihome: codex, w76/split-extract: codex, w75/split-contract: codex, w74/code-prose: codex, w74/docs-archive: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
+
 ## SHIPPED
 - `314ea3e` `skills/fleet/` is a 160-line operating manual; `supervisor.md` (587) and
   `docs/operator/server-interface-profile.md` deleted, their current content absorbed. It teaches the

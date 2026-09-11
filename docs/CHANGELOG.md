@@ -1,4 +1,9 @@
 # Operator changelog
+- 2026-09-11 — `4def0a9`: the documentation tree drops to 19,542 live lines — lane reports, reviews, decisions and superpowers move verbatim into `docs/archive/`, which nothing loads and no audit reads as a claim about the current tree.
+- 2026-09-11 — `c47f75a`: `bin/fleet.py` carries no history narrative — 12,268 docstring and comment lines become 3,001 with the executable code unchanged.
+- 2026-09-11 — `581e3f3`: the `bin/fleet.py` split contract is fixed — 80 index/query definitions, their dependencies and the import direction — and records why the boundary needed one more leaf than the ruling scoped.
+- 2026-09-11 — `123f84e`: `bin/fleet_index.py` now holds the index and query cluster and `bin/fleet_errors.py` holds `FleetCliError` alone; `bin/fleet.py` keeps state and the CLI, and exception identity is unchanged for every caller.
+- 2026-09-11 — `1d9920d`: one keeper tick watches every home it is given — `--fleet-home` repeats, pages and wakes carry a `[home-tag]`, and each home keeps its own dedup state.
 - 2026-09-11 — `8a7af00`: `fleet sup-guard` gains an `OK` verdict, so a healthy supervisor — fresh heartbeat with a live body, busy or idle — no longer produces a page; `PAGE` is reserved for genuinely ambiguous states, `WAKE` for a stale idle body with a live process, and `DISPATCH` only when a stale claim has no live body at all.
 - 2026-09-11 — `613da18`: retiring a supervisor's pre-steer process now requires a fork that has actually taken over, not merely one that is reachable.
 - 2026-09-11 — `7e5a0c9`: `fleet sup-guard` treats a roster row with a live pid as live even when the daemon reports `state: done`, so a supervisor hosted on an adopted bg-spare is woken rather than paged about.
