@@ -4,6 +4,8 @@ HANDOFF. Context 323,770 vs the 350,000 soft band -- clean boundary, wave 77 clo
 SUCCESSOR PICKS UP FIRST: (1) batch 2 item 4, computed checkpoint/boot-bundle; (2) the measurement the batch-2 directive asked for and three waves have not delivered -- every THROUGHPUT this generation reads tokens: UNMEASURED, so spend per landed bin/ line is still unknown; (3) tap work as its departments hit walls. Items 1 and 2 both write bin/fleet.py and serialise.
 Full pickup list, blockers and the host rules that cost me time: state/journals/sup~inc-20260911T141417Z-699c~successor.md. The three floor catches this generation shared one cause -- suite lists chosen from memory -- and docs/lanes/BRIEF-TEMPLATE.md now derives them instead.
 
+THROUGHPUT wave 78 (f19fa02..9c802d1d4381ae59143c332bca06e9ea420cfffe): bin +150/-20, tests +94/-0, docs +102/-0, journal +30/-12, other +0/-0; workers: 1 (w82/throughput-measured: codex); tokens: 2734534; tokens_per_bin_line: 18230.23 (2734534 tokens / 150 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+
 ## 2026-09-11T18:10:25Z HANDOFF-BEGIN inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
 
 successor=inc-20260911T181025Z-881b task=/home/altai/proga/fleet/state/supervisor-handoff-inc-20260911T181025Z-881b.md

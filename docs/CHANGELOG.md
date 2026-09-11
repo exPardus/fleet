@@ -1,4 +1,24 @@
 # Operator changelog
+THROUGHPUT wave 78 (f19fa02..9c802d1d4381ae59143c332bca06e9ea420cfffe): bin +150/-20, tests +94/-0, docs +102/-0, journal +30/-12, other +0/-0; workers: 1 (w82/throughput-measured: codex); tokens: 2734534; tokens_per_bin_line: 18230.23 (2734534 tokens / 150 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+Wave 78 — THROUGHPUT stops saying UNMEASURED
+
+`wave-close` reads Codex usage from the landed lane's own worktree instead of
+the main checkout's `.mcx`, which is not where lane jobs write. Claude usage
+falls back from the token-less agents roster to `state/outcomes/*.jsonl`,
+bounded to the landed lanes' current sessions. `tokens_per_bin_line` and
+`external_lines` now print in this line and in the CHANGELOG header; each
+names its denominator or its missing source rather than defaulting to zero.
+
+merge(w82/throughput-measured) dafc707.
+
+Measured live before landing: 2,734,534 Codex tokens for lane w82 alone —
+the number three waves reported as `UNMEASURED (mcx result files missing)`.
+
+`docs/lanes/BRIEF-TEMPLATE.md` now names what `fleet land` actually reads:
+`<name>` is the branch's first path component, the JSON `lane` field is that
+same component and not the lane KIND, and `blockers` is a landing gate rather
+than a notes field. Three consecutive landing refusals, all taught by the
+template.
 - 2026-09-11 — `b2a8dc7`: entering the 350k supervisor context band now REFUSES `spawn`, `send`, `respawn` and `sup-spawn` with a one-line reason, instead of relying on the supervisor to remember. `--force-band` clears that soft refusal for one call and cannot clear the 400k hard ceiling; the handoff verbs are never refused, because a gate that blocks the remedy is worse than no gate.
 - 2026-09-11 — `b2a8dc7`: `fleet sup-checkpoint` reports the caller's context occupancy and band verdict in its header line.
 - 2026-09-11 — `67c874b`: `fleet brief <item>` emits a brief — DONE line, base sha, file list, test command, structured-result contract, blank judgement — and refuses when the `Serves:` citation is absent or when its phrase does not occur under the `product.md` section it names. Checking the section as well as the phrase catches a phrase that moves between sections, which is a real change to what a feature serves.
