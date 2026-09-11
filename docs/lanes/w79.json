@@ -1,0 +1,23 @@
+{
+  "lane": "w79",
+  "base": "e87c049",
+  "files_changed": [
+    "docs/lanes/w79.json",
+    "docs/lanes/w79.md",
+    "knowledge/INDEX.md",
+    "tests/test_knowledge_index.py",
+    "tools/knowledge_index.py"
+  ],
+  "tests": [
+    {"command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q -p no:cacheprovider tools/knowledge_index.py tests/test_knowledge_index.py tests/test_fleet_sources.py tests/test_self_citations.py", "rc": 0, "passed": 26, "failed": 0, "skipped": 0},
+    {"command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.12 --with pytest python -m pytest -q -p no:cacheprovider tools/knowledge_index.py tests/test_knowledge_index.py tests/test_fleet_sources.py tests/test_self_citations.py", "rc": 0, "passed": 26, "failed": 0, "skipped": 0},
+    {"command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q -p no:cacheprovider tests/test_doc_claims.py tests/test_docs_currency.py tests/test_prose_caps.py tests/test_lane_report_durability.py tests/test_receipts.py", "rc": 0, "passed": 179, "failed": 0, "skipped": 2},
+    {"command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.12 --with pytest python -m pytest -q -p no:cacheprovider tests/test_doc_claims.py tests/test_docs_currency.py tests/test_prose_caps.py tests/test_lane_report_durability.py tests/test_receipts.py", "rc": 0, "passed": 179, "failed": 0, "skipped": 2}
+  ],
+  "claims": [
+    {"claim": "The generated index is current and reports oversized on-demand notes without failing the boot cap.", "command": "python tools/knowledge_index.py --check"},
+    {"claim": "Placeholder files beside notes are excluded from the index.", "command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q -p no:cacheprovider tools/knowledge_index.py tests/test_knowledge_index.py"},
+    {"claim": "The lane report is at most 40 lines.", "command": "wc -l docs/lanes/w79.md"}
+  ],
+  "blockers": []
+}
