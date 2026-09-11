@@ -1,36 +1,3 @@
-## 2026-09-10T21:04:28Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=c8677549-1ea9-4c1e-a8ac-ab65b25aca52
-
-WAVE 68 OPEN — the prose-rot campaign, phase 1 (context-loaded files).
-
-MEASURED at `713f058`, confirming the directive: `docs/` 92,635 md lines, 38,907 of them in 68 lane
-reports; `knowledge/` 2,565 (lessons.md 2,033); `skills/fleet/supervisor.md` 587; CLAUDE.md 36 but
-mostly corrections of itself; profile 143; GOALS.md 133; 68 history phrases in `bin/fleet.py`.
-
-I am a producer of this rot, not an observer of it. The lane reports being archived are ones I
-commissioned, and my checkpoints are the same genre. Checkpoints get shorter from here.
-
-DISPATCHED, both `gpt-5.6-luna` high, detached, observers armed:
-- `BqtwsRwm` w68-skill — `skills/fleet/` becomes the operating manual, <=400 lines total, imperative,
-  verbs derived from `build_parser()` rather than from any existing doc. This is the operator's
-  "more instructions" ask.
-- `SsvzANTe` w68-caps — CLAUDE.md <=60, profile <=100, briefs <=60, loaded knowledge <=400 with
-  entries <=12, lessons >30d to `docs/archive/`, and `tests/test_prose_caps.py` pinning EVERY cap
-  including the ones later lanes must satisfy, xfail with the lane named. A cap nobody wrote down is
-  a cap nobody meets.
-
-ONE CONSTRAINT I DID NOT LET THE CAMPAIGN OVERRIDE: `supervisor/GOALS.md` is 133 against an 80 cap,
-but it is operator-owned and no lane may originate its content. The lane writes a proposed trim to
-`docs/operator/goals-trim-proposal.md` and I carry it as a PROPOSAL. The cap is pinned xfail meanwhile.
-
-QUEUED, NOT DROPPED: G-K8 option C (socket path out, waker via `fleet send` on `sup-guard --do`,
-keeper wake on by default) — one astra lane, next wave. Batch 2's five verbs after it.
-
-BRIEFS ARE NOW UNDER ONE SCREEN, per the new prose caps. Mine had been ~80 lines.
-
-THROUGHPUT wave 70 (64da0aa2331543958825cee4abffc29b8f94b5b5..e9a394efcd9d4c3de2531c90072550572209f9fd): bin +257/-61, tests +104/-9, docs +38/-0, journal +72/-61, other +0/-0; workers: 2 (w70/keeper-pane-live: codex, w70/substrate-and-board: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
-
-THROUGHPUT wave 71 (7f7722fcaf31fb5f3aaa31a5522beb5a56db4958..1a58339a6a62c37d7152f67e94c668fcda6446d3): bin +254/-564, tests +694/-844, docs +157/-101, journal +0/-0, other +21/-3; workers: 1 (w71/gk8-waker: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
-
 ## 2026-09-10T22:42:04Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=819e3008-5862-4e86-b01c-993ecfc50bfe
 
 WAVE 68 CLOSED AND PUSHED (`116860f..16f28c5`). The prose campaign's phase 1 landed and
@@ -92,3 +59,12 @@ Defect for w70: THROUGHPUT substrate says `claude` for w69/wave-close-accounting
 gpt-5.6-luna. Detection is wrong.
 sup-guard seize fixed on the right axis (settlement, not freshness); live claim returns
 `PAGE roster says busy`. G-K8 C unblocked.
+
+## 2026-09-11T08:18:29Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=b7dfb271-39ae-4a5f-b528-a0efe5f841ba
+
+Wave 72 landed three fixes; first live wake through the G-K8 C path arrived and this body continued
+from it (sid rotated, so fork-steer ran). Live-wake receipt is PARTIAL: state/keeper/last-page.json
+holds no supervisor-stalled/wake key, so keeper authorship is unconfirmed -- the wake may have come
+from the interface. Full receipt still owed at a keeper-authored wake.
+Pre-steer processes are gone: roster has 3 live-pid rows and neither c3de1414 nor 38f399b5 is among
+them, consistent with retirement-after-live-fork.
