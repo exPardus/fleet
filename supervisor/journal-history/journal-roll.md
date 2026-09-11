@@ -619,3 +619,9 @@ Brief carries the three fleet land traps explicitly (lane field is the branch's 
 
 THROUGHPUT wave 80 (c05d6c3..d6a06652e9bbe7282fc78b121acc784296e9b8cd): bin +79/-36, tests +33/-5, docs +126/-0, journal +25/-13, other +0/-0; workers: 1 (w84/homes-inventory: codex); tokens: 4186837; tokens_per_bin_line: 52997.94 (4186837 tokens / 79 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
 
+## 2026-09-11T19:15:45Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
+
+Wave 79 closed and pushed c05d6c3; batch 2 discharged with per-clause evidence. 12,099.89 tokens per added bin line, down from 18,230.23.
+w83 executed none of its own tests (sandbox had no DNS); I ran them and found four defects, the worst an unanchored DISCHARGED that matched the words not discharged and silently dropped live directives from the board it was building.
+Fleet-side batch work is done; next source of work is tap unless the operator directs otherwise -- standing directive 20260910-standing-directive-throughput says stop feeding the machine itself.
+
