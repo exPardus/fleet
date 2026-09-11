@@ -117,7 +117,7 @@ def test_a_stalled_supervisor_is_paged_into_the_window(home):
     sends = r.tmux("send-keys")
     assert len(sends) == 2
     assert sends[0][2:] == ["-t", "work:fleet", "-l", sends[0][-1]]
-    assert sends[0][-1].startswith("KEEPER: supervisor stalled")
+    assert sends[0][-1].startswith(f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
     assert sends[1][-1] == "Enter"
     state = _state(home)
     assert "supervisor-stalled" in state and state["_hook_error_lines"] == 0
@@ -129,6 +129,38 @@ def test_second_tick_inside_the_window_sends_nothing(home):
     n = len(r.tmux("send-keys"))
     _main(home, r)
     assert len(r.tmux("send-keys")) == n
+
+
+def test_one_home_tick_tags_page_and_uses_that_homes_dedup_state(home):
+    runner = Runner()
+    rc, out = _main(home, runner)
+    tag = fleet.home_tag(home)
+    assert rc == 0
+    assert f"[{tag}] keeper: paged supervisor-stalled" in out
+    assert runner.tmux("send-keys")[0][-1].startswith(
+        f"[{tag}] KEEPER: supervisor stalled")
+    assert (home / "state" / "keeper" / "last-page.json").exists()
+
+
+def test_two_home_tick_pages_both_and_keeps_dedup_state_separate(
+        home, tmp_path, monkeypatch):
+    other = tmp_path / "other-home"
+    (other / "state").mkdir(parents=True)
+    (other / "bin").mkdir()
+    (other / "bin" / "fleet.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(fleet, "FLEET_HOME", home)
+    runner = Runner()
+    out = io.StringIO()
+    rc = k.main(["--once", "--fleet-home", str(home),
+                 "--fleet-home", str(other)], run=runner,
+                now_fn=lambda: NOW, snapshot_fn=_snapshot, out=out)
+    assert rc == 0
+    sends = [a[-1] for a in runner.tmux("send-keys") if a[-1] != "Enter"]
+    assert len(sends) == 2
+    assert sends[0].startswith(f"[{fleet.home_tag(home)}] KEEPER: ")
+    assert sends[1].startswith(f"[{fleet.home_tag(other)}] KEEPER: ")
+    assert (home / "state" / "keeper" / "last-page.json").exists()
+    assert (other / "state" / "keeper" / "last-page.json").exists()
 
 
 # --- I3: one home, or no tick ----------------------------------------------
@@ -189,7 +221,8 @@ def test_the_tick_after_a_creation_pages(home):
     _main(home, live)
     assert live.tmux("new-window") == []
     sends = live.tmux("send-keys")
-    assert len(sends) == 2 and sends[0][-1].startswith("KEEPER: supervisor stalled")
+    assert len(sends) == 2 and sends[0][-1].startswith(
+        f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
     assert "supervisor-stalled" in _state(home)
 
 
@@ -237,7 +270,8 @@ def test_the_next_tick_retries_a_failed_delivery(home):
     r = Runner()
     _main(home, r)
     sends = r.tmux("send-keys")
-    assert len(sends) == 2 and sends[0][-1].startswith("KEEPER: supervisor stalled")
+    assert len(sends) == 2 and sends[0][-1].startswith(
+        f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
 
 
 def test_a_failed_delivery_keeps_the_previous_record_for_that_rule(home):
@@ -261,9 +295,9 @@ def test_enter_is_not_sent_when_the_literal_send_failed(home):
     in its prompt box."""
     r = Runner(tmux_rc=1)
     _main(home, r)
-    assert [a[-1] for a in r.tmux("send-keys")] == ["KEEPER: supervisor stalled (claim none). "
-                                                    "Report state, then relaunch with "
-                                                    "sup-spawn; do not await the operator."]
+    assert [a[-1] for a in r.tmux("send-keys")] == [f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled (claim none). "
+                                                        "Report state, then relaunch with "
+                                                        "sup-spawn; do not await the operator."]
 
 
 # --- C4: what actually reaches the bypass session --------------------------
@@ -277,7 +311,7 @@ def test_a_hostile_decision_question_is_typed_as_one_line(home):
     assert typed, "nothing was typed"
     for line in typed:
         assert "\n" not in line and "\r" not in line and "\x1b" not in line
-        assert line.startswith("KEEPER: ")
+        assert line.startswith(f"[{fleet.home_tag(home)}] KEEPER: ")
         assert len(line) <= k.PAGE_TEXT_LIMIT
 
 
