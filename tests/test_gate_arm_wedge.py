@@ -105,7 +105,7 @@ def _victim(name="victim", spawned_by=THIRD):
     return rec
 
 
-def _spy(monkeypatch, attr):
+def _spy(patch_fleet, monkeypatch, attr):
     """Replace a verb's REAL WORK function. `reached` empty == the verb never
     ran; the status flip is the effect a passing gate would have produced. This
     is the "assert on the last verb" rule made concrete for two verbs whose
@@ -119,7 +119,10 @@ def _spy(monkeypatch, attr):
         fleet.save_registry(data)
         return 0
 
-    monkeypatch.setattr(fleet, attr, _fake)
+    {
+        '_cmd_kill_native': lambda value: patch_fleet('_cmd_kill_native', value),
+        '_cmd_interrupt_native': lambda value: patch_fleet('_cmd_interrupt_native', value),
+    }[attr](_fake)
     return reached
 
 
@@ -175,12 +178,12 @@ class TestTheWedgedStateArmsTheGate:
         ("interrupt", ["interrupt", "victim"], "_cmd_interrupt_native"),
     ])
     def test_the_other_two_measured_verbs_never_reach_their_work(
-            self, wedge_home, monkeypatch, verb, argv, work):
+            self, wedge_home, patch_fleet, monkeypatch, verb, argv, work):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
         _released()
         _roster(monkeypatch, RELEASER)
         _victim()
-        reached = _spy(monkeypatch, work)
+        reached = _spy(patch_fleet, monkeypatch, work)
         assert fleet.main(argv) == fleet.SUPERVISOR_CONTINUITY_RC
         assert reached == [], f"{verb} ran through a wedged claim"
         assert _status("victim") == "idle"
@@ -190,14 +193,14 @@ class TestTheWedgedStateArmsTheGate:
         ("interrupt", ["interrupt", "victim"], "_cmd_interrupt_native"),
     ])
     def test_the_same_two_verbs_run_once_the_releaser_is_gone(
-            self, wedge_home, monkeypatch, verb, argv, work):
+            self, wedge_home, patch_fleet, monkeypatch, verb, argv, work):
         # The discriminator, so the refusal above cannot be passing for some
         # unrelated reason: byte-identical setup, releaser roster-GONE.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
         _released()
         _roster(monkeypatch, "sid-someone-else")
         _victim()
-        reached = _spy(monkeypatch, work)
+        reached = _spy(patch_fleet, monkeypatch, work)
         assert fleet.main(argv) == 0
         assert reached == ["victim"]
 
@@ -428,7 +431,7 @@ class TestTheWedgedArmCannotCrashAVerb:
         ("_registry_records_or_none", OSError("registry exploded")),
     ])
     def test_a_raising_surface_does_not_crash_the_verb(
-            self, wedge_home, monkeypatch, surface, exc):
+            self, wedge_home, patch_fleet, monkeypatch, surface, exc):
         # Driven through the LAST VERB and asserted on its effect: `clean --yes`
         # must complete and delete, exactly as it does on the gate's other
         # fail-open arms, rather than traceback.
@@ -440,14 +443,17 @@ class TestTheWedgedArmCannotCrashAVerb:
         def _boom(*a, **k):
             raise exc
 
-        monkeypatch.setattr(fleet, surface, _boom)
+        {
+            '_fetch_agents_roster': lambda value: patch_fleet('_fetch_agents_roster', value),
+            '_registry_records_or_none': lambda value: patch_fleet('_registry_records_or_none', value),
+        }[surface](_boom)
         assert fleet.main(["clean", "--yes"]) == 0
         assert _names() == []
 
     @pytest.mark.parametrize("surface", ["_fetch_agents_roster",
                                          "_registry_records_or_none"])
     def test_the_raise_does_not_escape_the_gate_frame(
-            self, wedge_home, monkeypatch, surface):
+            self, wedge_home, patch_fleet, monkeypatch, surface):
         # The same fault at the frame the break lens drove it out of, so a
         # future caller that does not go through `fleet.main` is covered too.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", THIRD)
@@ -457,7 +463,10 @@ class TestTheWedgedArmCannotCrashAVerb:
         def _boom(*a, **k):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(fleet, surface, _boom)
+        {
+            '_fetch_agents_roster': lambda value: patch_fleet('_fetch_agents_roster', value),
+            '_registry_records_or_none': lambda value: patch_fleet('_registry_records_or_none', value),
+        }[surface](_boom)
         fleet._supervisor_gate("kill", nonce=None)      # returns, does not raise
 
     def test_the_never_crash_guard_does_not_swallow_the_refusal(

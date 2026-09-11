@@ -48,6 +48,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_paths
 
 REPO = Path(__file__).resolve().parents[1]
 from conftest import child_env  # noqa: E402
@@ -218,7 +219,8 @@ class TestInstallRootIsNotOverridable:
         """Spec Definitions: "never overridable". A `FLEET_INSTALL` env var would
         hand back exactly the conflation this slice removes -- one variable
         moving both planes -- so the pin is that no such read exists."""
-        keys = self._env_keys_read_by(REPO / "bin" / "fleet.py")
+        keys = set().union(*(self._env_keys_read_by(path)
+                             for path in fleet_implementation_paths()))
         assert "FLEET_HOME" in keys, (
             "the env-read detector found no FLEET_HOME read, so it would not "
             "have seen a FLEET_INSTALL one either -- fix the derivation")
@@ -275,7 +277,8 @@ class TestTheCodePlaneSandbox:
         real list is empty. This is the other half."""
         import conftest
         names = {p.name for p in conftest.code_plane_files(REPO)}
-        assert {"fleet.py", "fleet_statusline.py", "run_py.sh",
+        assert {"fleet.py", "fleet_index.py", "fleet_errors.py",
+                "fleet_statusline.py", "run_py.sh",
                 "worker-settings.template.json"} <= names
 
 

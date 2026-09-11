@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 def _iso(dt):
@@ -721,7 +722,7 @@ class TestSchedulerSurfaceIsRetired:
         """Source scan, because an adapter method is not the only way to
         shell out to a scheduler -- the point is that fleet installs no
         OS-scheduler state on any platform."""
-        src = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         code = [ln for ln in src.splitlines()
                 if ln.strip() and not ln.lstrip().startswith("#")]
         for tool in ("schtasks", "crontab", "launchctl", "systemd-run"):
@@ -794,8 +795,7 @@ class TestSchedulerSurfaceIsRetired:
 # as the load_registry detector documents for its own walk.
 def _fleet_call_graph(source=None):
     """{top-level function or Class.method -> set of names it calls}."""
-    src = source if source is not None else Path(fleet.__file__).read_text(
-        encoding="utf-8")
+    src = source if source is not None else fleet_implementation_source()
 
     def _called(fn):
         out = set()
@@ -1187,7 +1187,7 @@ class TestTheSweepUnderAHeldClaim:
         directly in the tier's own helper, one frame deeper, and inside a nested
         closure (the attribution rule's own case). A pin nobody broke is a
         claim."""
-        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         # control: the un-planted source yields exactly the sanctioned delegate.
         assert (set(_gate_callers_reachable_from("cmd_autoclean", src))
                 == set(self.SANCTIONED_GATED_DELEGATES))
@@ -1329,7 +1329,7 @@ class TestTheSweepUnderAHeldClaim:
             f"parameter is reachable from `cmd_autoclean` and nowhere else, by "
             f"design (council rider 1).")
 
-        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         assert "return cmd_archive(args)" in src, (
             "the `archive` dispatch is no longer the positional "
             "`cmd_archive(args)` this pin assumes. If it now splats a namespace "

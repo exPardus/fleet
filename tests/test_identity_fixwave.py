@@ -39,6 +39,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 CORRUPT = "{ this is not json"
@@ -237,7 +238,7 @@ class TestNoSupervisorVerbQuarantinesTheRegistry:
         derives it."""
         import re
         from pathlib import Path
-        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         cited = set(re.findall(r'verb="(sup-[a-z-]+)"', src))
         assert cited, "no `verb=\"sup-...\"` labels found -- the matcher rotted"
         assert cited == set(VERBS), (

@@ -57,6 +57,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +383,7 @@ class TestTheQuarantinedReasonCrossesHomes:
         a second. `tests/test_identity_quarantine_glob.py::test_the_glob_string_
         is_written_once_in_the_source` counts the literal; this states why the
         cross-home reader is allowed to ask the question at all."""
-        src = Path(fleet.__file__).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         assert src.count('"fleet.json.corrupt.*"') == 1
 
 

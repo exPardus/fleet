@@ -239,7 +239,7 @@ class TestItIsAViewAndStaysOne:
     (see `docs/lanes/w63-sidunion.md` §5, M10). A recorded call cannot be
     swallowed."""
 
-    def _recorder(self, monkeypatch, *names):
+    def _recorder(self, patch_fleet, monkeypatch, *names):
         reached = []
 
         def stub(_n, _real):
@@ -249,27 +249,30 @@ class TestItIsAViewAndStaysOne:
             return wrapper
 
         for name in names:
-            monkeypatch.setattr(fleet, name, stub(name, getattr(fleet, name)))
+            {
+                'fleet_lock': lambda value: patch_fleet('fleet_lock', value),
+                'load_registry': lambda value: patch_fleet('load_registry', value),
+            }[name](stub(name, getattr(fleet, name)))
         return reached
 
-    def test_the_union_read_never_takes_the_lock(self, sup_home, monkeypatch):
+    def test_the_union_read_never_takes_the_lock(self, sup_home, patch_fleet, monkeypatch):
         """CLAUDE.md's standing RULE and terminal-surface D4: a view takes no
         `fleet.lock`. `sup-status` gained a REGISTRY read in w63 and that is
         the one thing about the widening that has to stay true."""
         _install(_record(CLAIM_SID, [RETIRED_1]))
         _held()
-        reached = self._recorder(monkeypatch, "fleet_lock")
+        reached = self._recorder(patch_fleet, monkeypatch, "fleet_lock")
         assert fleet.supervisor_claim_sids() is not None
         assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
         assert reached == [], "sup-status took fleet.lock"
 
-    def test_the_union_read_is_not_load_registry(self, sup_home, monkeypatch):
+    def test_the_union_read_is_not_load_registry(self, sup_home, patch_fleet, monkeypatch):
         """Pinned by BEHAVIOUR, not by reading the source: `load_registry`
         quarantines, so a reader that reached for it would rename a corrupt
         registry aside from a view. `tests/test_load_registry_callers.py` pins
         the scopes; this pins the one function."""
         _install(_record(CLAIM_SID, [RETIRED_1]))
         _held()
-        reached = self._recorder(monkeypatch, "load_registry")
+        reached = self._recorder(patch_fleet, monkeypatch, "load_registry")
         assert fleet.supervisor_claim_sids() == sorted([CLAIM_SID, RETIRED_1])
         assert reached == [], "supervisor_claim_sids reached load_registry"
