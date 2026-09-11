@@ -1,6 +1,7 @@
 import io
 import json
 import subprocess
+import sys
 
 import pytest
 
@@ -23,13 +24,18 @@ class Runner:
     process exited with `remain-on-exit` set."""
 
     def __init__(self, *, pane_cmd="claude", pane_dead=False, tmux_rc=0,
-                 agents_rc=0, decision=None):
+                 agents_rc=0, decision=None, guard=None, guard_rc=0):
         self.calls = []
         self.pane_cmd = pane_cmd
         self.pane_dead = pane_dead
         self.tmux_rc = tmux_rc
         self.agents_rc = agents_rc
         self.decision = decision
+        self.guard = guard if guard is not None else {
+            "verdict": "DISPATCH", "reason": "claim none", "state": "none",
+            "sent": False, "quiet": False}
+        self.guard_rc = guard_rc
+        self.guard_kwargs = []
 
     def __call__(self, argv, **kw):
         argv = list(argv)
@@ -40,6 +46,10 @@ class Runner:
                     return _cp(argv, 1, "")
                 return _cp(argv, 0, f"{self.pane_cmd} {1 if self.pane_dead else 0}\n")
             return _cp(argv, self.tmux_rc)
+        if "sup-guard" in argv:
+            self.guard_kwargs.append(kw)
+            body = json.dumps(self.guard) if isinstance(self.guard, dict) else self.guard
+            return _cp(argv, self.guard_rc, body)
         if "sup-status" in argv:
             return _cp(argv, 0, json.dumps({"goals_active": True,
                                             "incarnation": None,
@@ -308,3 +318,77 @@ def test_window_and_session_flags(home):
     r = Runner()
     _main(home, r, "--tmux-session", "s2", "--window", "ops")
     assert r.tmux("send-keys")[0][3] == "s2:ops"
+
+
+# --- G-K8 C: the guard owns every wake decision ----------------------------
+
+
+def test_main_invokes_the_installed_guard_for_this_home(home, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "inherited-session")
+    monkeypatch.setenv("MCX_WORKER", "1")
+    runner = Runner()
+    _main(home, runner)
+    calls = [argv for argv in runner.calls if "sup-guard" in argv]
+    assert calls == [[sys.executable, str(k._INSTALL_ROOT / "bin" / "fleet.py"),
+                      "sup-guard", "--fleet-home", str(home), "--json", "--do"]]
+    env = runner.guard_kwargs[0]["env"]
+    assert env["FLEET_HOME"] == str(home)
+    assert env["MCX_WORKER"] == "1"
+    assert "CLAUDE_CODE_SESSION_ID" not in env
+    assert not any("sup-spawn" in argv or "send" in argv for argv in runner.calls)
+
+
+def test_dry_run_asks_for_a_guard_preview_without_do(home):
+    runner = Runner()
+    _main(home, runner, "--dry-run")
+    calls = [argv for argv in runner.calls if "sup-guard" in argv]
+    assert len(calls) == 1
+    assert "--do" not in calls[0]
+
+
+@pytest.mark.parametrize("guard", [
+    {"verdict": "WAKE sup|inc-test|boot", "reason": "idle", "sent": True},
+    {"verdict": "PAGE heartbeat fresh", "reason": "heartbeat fresh", "quiet": True},
+])
+def test_guard_send_or_quiet_does_not_page(home, guard):
+    runner = Runner(guard=guard)
+    rc, _ = _main(home, runner)
+    assert rc == 0
+    assert runner.tmux("send-keys") == []
+    assert "supervisor-stalled" not in _state(home)
+
+
+@pytest.mark.parametrize("guard, guard_rc", [
+    ("not json", 0),
+    ("[]", 0),
+    ({"verdict": "SPAWN"}, 0),
+    ({"verdict": "WAKE sup|inc-test|boot", "sent": True,
+      "reason": "send failed"}, 1),
+])
+def test_failed_or_invalid_guard_reply_still_pages(home, guard, guard_rc):
+    runner = Runner(guard=guard, guard_rc=guard_rc)
+    rc, _ = _main(home, runner)
+    assert rc == 0
+    sends = runner.tmux("send-keys")
+    assert len(sends) == 2
+    assert "guard unavailable" in sends[0][-1]
+    assert "Report state" in sends[0][-1]
+    assert "sup-spawn" not in sends[0][-1]
+
+
+def test_guard_wake_without_send_confirmation_still_pages(home):
+    runner = Runner(guard={"verdict": "WAKE sup|inc-test|boot", "reason": "idle"})
+    _main(home, runner)
+    assert len(runner.tmux("send-keys")) == 2
+
+
+def test_limited_main_pages_once_before_a_distant_reset_horizon(home):
+    runner = Runner(guard={
+        "verdict": "PAGE supervisor limited", "reason": "supervisor limited",
+        "body_name": "sup|inc-test|boot", "state": "held",
+        "limit_reset_at": NOW + 2 * k.REPAGE_SECONDS})
+    _main(home, runner)
+    assert len(runner.tmux("send-keys")) == 2
+    assert "supervisor limited" in runner.tmux("send-keys")[0][-1]
+    _main(home, runner, now=NOW + k.REPAGE_SECONDS + 1)
+    assert len(runner.tmux("send-keys")) == 2

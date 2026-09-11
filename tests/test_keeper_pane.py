@@ -56,6 +56,8 @@ def tick(home, runner, monkeypatch, *extra):
     # isolate only the unrelated fleet/git/roster observation subprocesses.
     monkeypatch.setattr(k, "collect", lambda *a, **kw: {
         "goals_active": True, "claim_state": "none", "hook_error_lines": 0})
+    monkeypatch.setattr(k, "_supervisor_guard", lambda *a, **kw: {
+        "verdict": "DISPATCH", "reason": "claim none", "state": "none"})
     out = io.StringIO()
     k.main(["--once", "--fleet-home", str(home), *extra], run=runner,
            now_fn=lambda: 1_800_000_000.0, out=out)
