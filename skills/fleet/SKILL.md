@@ -64,11 +64,11 @@ the selected fleet home:
 
 ### Interface rules
 
-- Never run `sup-spawn` over a live supervisor body; run `fleet sup-guard` first and treat its `DISPATCH`, `WAKE`, or `PAGE` verdict as the answer.
+- Never run `sup-spawn` over a live supervisor body; run `fleet sup-guard --fleet-home <path>` first. Only the interface acts on `DISPATCH` with `sup-spawn`. For `WAKE`, `sup-guard --do` re-verifies and sends `@supervisor/briefs/wake.md`; it never spawns. `PAGE` needs an interface report; fresh healthy state needs no action.
 - Never tick an operator gate; carry open decisions to the operator and record the ruling with its task file.
 - Ask the operator before every destructive verb, including `kill`, `clean`, `archive`, repair, release, retirement, and home registration changes.
 - When more than one home is listed, pass `--fleet-home <path>` on every mutating verb.
-- Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity.
+- Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity. `supervisor limited` means wait for the recorded roster horizon; do not wake or spawn around that limit. The keeper pages it once until that horizon.
 - Treat a `SUPERVISOR:` line as a graceful generation handoff: acknowledge it, read `fleet sup-status --json`, record the transfer, and use the guard before any stillborn-successor dispatch.
 - Relay every `THROUGHPUT` line and offer one idea per wave; record the relay in the interface log.
 
@@ -136,7 +136,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-heartbeat`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
 - `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state.
-- `fleet sup-guard [--do] [--json]`: verify the two-live-body guard and optionally execute its action.
+- `fleet sup-guard [--do] [--json]`: verify the two-live-body guard; `--do` re-verifies and sends the wake brief only on `WAKE`. `DISPATCH` and `PAGE` remain verdicts for the interface; no supervisor spawn occurs in the guard.
 - `fleet sup-context [--sid SID] [--json]`: report this session's context occupancy against its tier band.
 - `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json]`: route an operator-only decision.
 - `fleet sup-notify TEXT [--tmux-session SESSION] [--window WINDOW] [--dry-run]`: notify the interface through its tmux window.

@@ -1072,12 +1072,12 @@ def _quarantine_artifacts() -> list:
     registry is always newer -- an "artifact newer than the registry"
     comparison would never fire on the recreation bypasses it exists to stop.
 
-      * `_sweep_husks` (:12147) -- a rename can hide live worker records from
+      * `_sweep_husks` (:12248) -- a rename can hide live worker records from
         the roster sweep, so a thin registry would rm sessions it still owns.
-      * `_doctor_check_autoclean` (:13358) -- a lingering artifact means the
+      * `_doctor_check_autoclean` (:13460) -- a lingering artifact means the
         sweep above is refusing itself, which is how a bricked sweep reads
         green-and-fresh.
-      * `_require_claim_holder`'s §9 arm (:18195) -- the legacy upgrade mints
+      * `_require_claim_holder`'s §9 arm (:18297) -- the legacy upgrade mints
         generation 1 on bare sid equality, so it needs the registry that
         cleared it to be COMPLETE, not merely readable. See there.
 
@@ -1093,7 +1093,7 @@ def _quarantine_artifacts() -> list:
         §6.5 worker-turn gate, which refuses on `True` alone, so poisoning a
         HEALTHY read here would let a real worker turn through §6.5 -- closing
         the §9 door by opening a wider one. Rule 1 lives at the §9 arm instead.
-      * `_identity_abstention_note` (:17916) -- the same distinction, in words,
+      * `_identity_abstention_note` (:18018) -- the same distinction, in words,
         because the generic note names `fleet doctor` and doctor is what MADE
         this state.
       * `_read_registry_readonly` (:4298) -- the VIEW surface's copy of the same
@@ -1102,7 +1102,7 @@ def _quarantine_artifacts() -> list:
         a never-initialised box prints, so the two states were not
         distinguishable from the read surface at all. A `Path.glob` is a read,
         so this costs the views doctrine nothing.
-      * `_doctor_check_registry` (:13896) -- doctor graded only on whether the
+      * `_doctor_check_registry` (:13998) -- doctor graded only on whether the
         LOADER RAISED, and the loader returns `{"workers": {}}` for a missing
         file, so the row called a renamed-away path *"is readable"* and doctor
         exited 0 with every row green (P1-12). A bare absence stays a PASS: no
@@ -1115,7 +1115,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:7897) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:19115) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:19217) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -3334,7 +3334,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     -- reads `ok` while MISSING every record the artifact holds, and the §9 arm
     read that thinness as an affirmative *"you are provably not a worker"*. The
     presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18195`), where it costs the §6.5 gate nothing.
+    (`:18297`), where it costs the §6.5 gate nothing.
 
     An artifact can also outlive its incident by days -- `_sweep_husks` tells the
     operator to restore the file first and delete the artifact second -- so that
@@ -8741,6 +8741,8 @@ def _cmd_send_native(name: str, message: str,
         ceiling_file_path(old_sid).unlink()
     except OSError:
         pass
+    _reap_current_supervisor_forks(name, expected_sid=new_sid, run=run,
+                                   which=which, sleep=sleep, attempts=3)
     print(f"{name}: fork-steered (new session {short_id}) -- fork carries full transcript (G2b)")
     return 0
 
@@ -10079,7 +10081,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # P1-6: `read_registry_no_repair`, NOT `load_registry`. This is a PRE-FLIGHT
-    # resolution that runs from `cmd_kill:9973` / `cmd_respawn:9586`, before
+    # resolution that runs from `cmd_kill:9975` / `cmd_respawn:9588`, before
     # either verb has taken `fleet.lock` -- and `load_registry` QUARANTINES a
     # corrupt registry, i.e. RENAMES IT ASIDE, which is a write. An unlocked
     # write races every other fleet command, and it destroys the evidence the
@@ -10142,10 +10144,10 @@ def _supervisor_lifecycle_target(verb, name):
     # P1-6: `read_registry_no_repair` -- `load_registry` MINUS the rename, with
     # the same missing-file contract, the same validator and the same
     # `RegistryCorruptError`, so the arm below is unchanged. This read runs from
-    # `cmd_kill:9973` / `cmd_respawn:9586`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9975` / `cmd_respawn:9588`, ahead of either verb's `fleet_lock`,
     # and quarantining here did two things: it wrote without the lock, and it
     # STOLE the quarantine from the lock-held read that was designed to perform
-    # it. `cmd_respawn:9610-9612` spells out that design -- *"resolve under the
+    # it. `cmd_respawn:9612-9614` spells out that design -- *"resolve under the
     # lock so a corrupt registry surfaces through load_registry's quarantine"* --
     # and the theft is what falsified it: by the time the lock-held read ran the
     # file was ABSENT rather than corrupt, so `{"workers": {}}` came back and the
@@ -11180,6 +11182,105 @@ def _reap_mail_pending(sid: str) -> bool:
         return False
     except OSError:
         return True
+
+
+def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
+                                   run=subprocess.run, which=shutil.which,
+                                   sleep=time.sleep, roster_fn=None, attempts=1,
+                                   caller_sid=None):
+    """Stop idle pre-steer processes only after the CURRENT fork is live.
+
+    This is process retirement, not whole-record archive eligibility: the
+    current supervisor row and all its SID history remain intact. Send tries
+    three fresh observations, one second apart; lifecycle/guard passes retry
+    deferred cleanup. No dispatch success or outcome alone proves a live fork.
+    At most four stops, each with the existing five-second CLI-attempt timeout,
+    bound a pass even when a body has accumulated a large retired SID history.
+    """
+    caller = caller_sid or current_caller_session()
+    fetch = roster_fn or (lambda: _fetch_agents_roster(which=which, run=run))
+    stopped = []
+
+    def current():
+        ok, _reason, data = _read_registry_readonly()
+        claim = read_incarnation()
+        if not ok or not isinstance(claim, dict) or claim.get("state") == "released":
+            return None
+        workers = data.get("workers", {})
+        holders = [(n, r) for n, r in workers.items()
+                   if _record_is_supervisor_claim_holder(r, claim=claim) is True]
+        if len(holders) != 1:
+            return None
+        n, record = holders[0]
+        sid = record.get("session_id")
+        if (name is not None and n != name or not sid or
+                expected_sid is not None and sid != expected_sid or
+                record.get("archived_at") or not is_native(record)):
+            return None
+        sids = _record_sids(record)
+        if any(other != n and sids & _record_sids(rec)
+               for other, rec in workers.items()):
+            return None
+        history = record.get("retired_sids", [])
+        if not isinstance(history, list):
+            return None
+        retired = [s for s in _ordered_unique_sids(history)
+                   if isinstance(s, str) and _SID_SHAPE_RE.fullmatch(s)
+                   and s != sid and s != caller]
+        return n, sid, retired, claim.get("incarnation_id")
+
+    try:
+        initial = current()
+        if initial is None or not initial[2]:
+            return stopped
+        for attempt in range(max(1, min(attempts, 3))):
+            ok, entries = fetch()
+            if ok and initial[1] in _sup_guard_live_rows(entries):
+                break
+            if attempt + 1 < max(1, min(attempts, 3)):
+                sleep(1)
+        else:
+            print(f"fleet: {initial[0]}: fork retirement deferred -- "
+                  "replacement not observed live", file=sys.stderr)
+            return stopped
+        # Retire newest parents first. No daemon subprocess runs under the
+        # fleet lock; re-read the authority and mail immediately before stop.
+        live = _sup_guard_live_rows(entries)
+        candidates = [sid for sid in reversed(initial[2])
+                      if len(live.get(sid, [])) == 1
+                      and live[sid][0].get("status") == "idle"
+                      and not _reap_mail_pending(sid)][:4]
+        for retired in candidates:
+            ok, entries = fetch()
+            if not ok:
+                break
+            live = _sup_guard_live_rows(entries)
+            old_rows = live.get(retired, [])
+            if len(live.get(initial[1], [])) != 1 or not old_rows:
+                continue
+            if len(old_rows) != 1 or old_rows[0].get("status") != "idle":
+                continue
+            with fleet_lock():
+                fresh = current()
+                if (fresh is None or fresh[:2] != initial[:2]
+                        or fresh[3] != initial[3] or retired not in fresh[2]
+                        or _reap_mail_pending(retired)):
+                    continue
+            ok, outcome = _stop_native_session_status(
+                retired, run=run, which=which,
+                timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS,
+                ref=old_rows[0].get("id"))
+            _append_event_quiet("supervisor_fork_retired", initial[0],
+                                session_id=retired, live_fork=initial[1],
+                                stopped=ok, outcome=outcome)
+            print(f"fleet: {initial[0]}: retiring pre-steer session "
+                  f"{retired[:8]}... {outcome}", file=sys.stderr)
+            if ok:
+                stopped.append(retired)
+    except Exception as exc:
+        print(f"fleet: supervisor fork retirement deferred -- "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+    return stopped
 
 
 def _reap_protection(name: str, record: dict, roster_entries: list, claim,
@@ -12415,6 +12516,7 @@ def _supervisor_reap(run=subprocess.run, which=shutil.which, caller_sid=None,
     ok, reason, data = _read_registry_readonly()
     if not ok:
         return 0, f"registry {reason}"
+    _reap_current_supervisor_forks(run=run, which=which, caller_sid=caller_sid)
     stats = {} if reap_stats is None else reap_stats
     args = argparse.Namespace(reap=True, reap_stats=stats, dry_run=False,
                               reap_caller_sid=caller_sid)
@@ -16774,9 +16876,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is councilor 1's half of the same ruling. A bare `released_by_sid in
     live_sids` is what shipped, and `_record_sids`' own docstring says why it
     is wrong -- *"matching against `session_id` alone fails open on it
-    (ND4a)"* -- for the eighteen other sites that already key on the union (`:2986, :3057,
-    :3130, :3391, :3541, :5036, :10113, :10433, :10714, :10945, :11032, :11188,
-    :11200, :11211, :11360, :12177, :16646, :19572, :19573, :19624, :20570`). The thirteenth is multi-fleet §5 step 2's
+    (ND4a)"* -- for the other sites that already key on the union (`:2986, :3057,
+    :3130, :3391, :3541, :5036, :10115, :10435, :10716, :10947, :11034, :11220, :11221, :11289,
+    :11301, :11312, :11461, :12278, :16748, :19674, :19675, :19726, :20705`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16800,8 +16902,8 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     answers True, so this can never be a regression on the state the bare
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
-    writer appends that record's OWN prior sid alone: :8874, :9413, :14392,
-    :21233), the same safety invariant §7.1's send carve-out rests on. That
+    writer appends that record's OWN prior sid alone: :8876, :9415, :14494,
+    :21368), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17497,8 +17599,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #     its unchanged arming.
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
-    #     writer appends that record's OWN prior sid alone (:8874, :9413, :14392,
-    #     :21233) -- so the sid union can never make one body answer for another.
+    #     writer appends that record's OWN prior sid alone (:8876, :9415, :14494,
+    #     :21368) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -17531,7 +17633,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         #     file aside (`:1227`), which is a write. Routing the identity read
         #     through it made `fleet send` shred the operator's evidence from a
         #     path that promises to touch nothing; the helper exists for exactly
-        #     this and names this gate as its reason (`:16574`). A `None` here
+        #     this and names this gate as its reason (`:16676`). A `None` here
         #     still fails toward the gate -- an unreadable registry is reported
         #     by its own doctor row, and is never a reason to decide blind.
         #     MERGE NOTE (2026-07-27): main and `fix/identity-registry-judges`
@@ -18173,7 +18275,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # A worker whose own record sits inside the artifact upgrades the claim.
         #
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as `_sweep_husks`
-        # spells it at `:12140`. Not an mtime comparison: `os.rename` preserves
+        # spells it at `:12241`. Not an mtime comparison: `os.rename` preserves
         # mtime, so the artifact's mtime is the PRE-corruption write time and any
         # recreated registry is always newer -- the comparison would never fire
         # on the one bypass it exists to stop.
@@ -19644,7 +19746,8 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         state = "unknown"
 
     roster_ok, roster_or_reason = roster_fn()
-    entries = roster_or_reason if roster_ok else []
+    entries = roster_or_reason if roster_ok and isinstance(roster_or_reason, list) else []
+    roster_ok = bool(roster_ok and isinstance(roster_or_reason, list))
     live_rows = _sup_guard_live_rows(entries)
     handshake_exists = handshake_path().exists()
     handshake = read_handshake() if handshake_exists else None
@@ -19657,6 +19760,17 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     else:
         sids = None
     body_name = _sup_guard_body_name(sids)
+    # The fleet projection supplies transcript-detected parks; newer native
+    # rosters may supply the same status/horizon directly, even without a PID.
+    body_rows = [row for row in entries if isinstance(row, dict)
+                 and row.get("sessionId") in (sids or [])]
+    projected = snapshot.get("workers") if isinstance(snapshot, dict) else None
+    projected_rows = [row for row in projected if isinstance(row, dict)
+                      and row.get("name") == body_name] if isinstance(projected, list) else []
+    limited_rows = [row for row in body_rows + projected_rows
+                    if row.get("status") == "limited"]
+    horizons = [row.get("limit_reset_at") for row in limited_rows
+                if isinstance(row.get("limit_reset_at"), str)]
     live_body_rows = [row for sid, rows in live_rows.items()
                       for row in rows
                       if isinstance(row.get("name"), str)
@@ -19679,6 +19793,8 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "handshake": handshake,
         "pending": pending,
         "body_name": body_name,
+        "limited": bool(limited_rows),
+        "limit_reset_at": max(horizons, default=None),
         "heartbeat_age_seconds": sup.get("heartbeat_age_seconds"),
         "goals_active": bool(sup.get("goals_active")),
     }
@@ -19692,9 +19808,10 @@ def _sup_guard_decide(observation):
         ("state", "claim_sids", "registry_ok", "registry_reason",
          "roster_ok", "roster_reason",
          "heartbeat_age_seconds", "body_name", "pending",
-         "handshake_exists")
+         "handshake_exists", "limit_reset_at")
     }
     if not obs.get("goals_active"):
+        detail["quiet"] = True
         return "PAGE", "supervisor goals inactive", detail
     if obs.get("registry_ok", True) is False:
         return "PAGE", f"registry unavailable: {obs.get('registry_reason')}", detail
@@ -19709,6 +19826,12 @@ def _sup_guard_decide(observation):
         return "PAGE", reason, detail
     if obs.get("pending"):
         return "PAGE", "handoff in flight", detail
+
+    if obs.get("limited"):
+        reason = "supervisor limited"
+        if _limit_reset_passed({"limit_reset_at": obs.get("limit_reset_at")}):
+            reason += "; reset horizon passed, interface must resume"
+        return "PAGE", reason, detail
 
     state = obs.get("state")
     claim = obs.get("claim") or {}
@@ -19735,13 +19858,18 @@ def _sup_guard_decide(observation):
         return "PAGE", "claim session not in the roster, sid union unavailable", detail
     matching = [row for sid in sids for row in obs["live_rows"].get(sid, [])]
     if matching:
-        statuses = {row.get("status") for row in matching}
+        statuses = {row.get("status") if isinstance(row.get("status"), str) else None
+                    for row in matching}
         if "busy" in statuses:
+            age = obs.get("heartbeat_age_seconds")
+            detail["quiet"] = (isinstance(age, (int, float))
+                               and age <= SUPERVISOR_CLAIM_STALE_SECONDS)
             return "PAGE", "roster says busy", detail
         if statuses == {"idle"}:
             age = obs.get("heartbeat_age_seconds")
             if (not isinstance(age, (int, float))
                     or age <= SUPERVISOR_CLAIM_STALE_SECONDS):
+                detail["quiet"] = isinstance(age, (int, float))
                 return "PAGE", "fresh heartbeat with live idle body", detail
             return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         return "PAGE", "live supervisor status unknown", detail
@@ -19767,41 +19895,48 @@ def _sup_guard_line(verdict, reason, target=None):
 
 
 def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
-    """`fleet sup-guard [--do] [--json]` -- one-line two-live-body view.
+    """Observe twice before action; WAKE sends, DISPATCH/PAGE never spawn.
 
-    The default is a lock-free/read-only observation.  ``--do`` deliberately
-    remains an explicit operator action: it re-runs the complete observation
-    immediately before dispatching or waking, and executes only that second
-    verdict.  PAGE has no action.
+    JSON includes explicit sent/quiet flags so the keeper does not derive
+    liveness again. Plain output retains the three-verdict interface.
     """
+    do = getattr(args, "do", False)
     observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
-    verdict, reason, detail = _sup_guard_decide(observation)
-    if getattr(args, "do", False):
+    if do:
+        # Retry parents whose fork was not yet visible at the send's bounded
+        # retirement check. The helper independently proves safe retirement.
+        _reap_current_supervisor_forks(roster_fn=roster_fn)
         observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
-        verdict, reason, detail = _sup_guard_decide(observation)
-    line = _sup_guard_line(verdict, reason,
-                           detail.get("body_name"))
+    verdict, reason, detail = _sup_guard_decide(observation)
+    sent, rc = False, 0
+    if do and verdict == "WAKE":
+        try:
+            with redirect_stdout(io.StringIO()):
+                rc = cmd_send(SimpleNamespace(
+                    name=SUPERVISOR_BODY_NAME,
+                    message="@supervisor/briefs/wake.md", nonce=None))
+            sent = rc == 0
+            if not sent:
+                verdict, reason = "PAGE", "supervisor wake send failed"
+        except (FleetCliError, ClaudeNotFoundError, ValueError, OSError,
+                FleetLockTimeout) as exc:
+            verdict, reason, rc = "PAGE", f"supervisor wake send failed: {exc}", 1
+            print(f"fleet: sup-guard action failed: {exc}", file=sys.stderr)
+    if do and rc:
+        # Send can discover and persist a limit while recomputing its target.
+        # Publish that park/horizon immediately; never turn it into timer retries
+        # of a generic send failure. This is observation only, not a second send.
+        after = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        next_verdict, next_reason, next_detail = _sup_guard_decide(after)
+        if next_reason.startswith("supervisor limited"):
+            verdict, reason, detail, rc = next_verdict, next_reason, next_detail, 0
+    line = _sup_guard_line(verdict, reason, detail.get("body_name"))
     if getattr(args, "json", False):
-        output = {"verdict": line, "reason": reason, **detail}
+        output = {"verdict": line, "reason": reason, **detail, "sent": sent}
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
     else:
         print(line)
-    if not getattr(args, "do", False) or verdict == "PAGE":
-        return 0
-    try:
-        with redirect_stdout(io.StringIO()):
-            if verdict == "DISPATCH":
-                return cmd_sup_spawn(SimpleNamespace(
-                    task="@supervisor/briefs/server-standing.md",
-                    model=None, permission_mode=None, nonce=None,
-                    setting_sources="project,local"))
-            return cmd_send(SimpleNamespace(
-                name=SUPERVISOR_BODY_NAME,
-                message="@supervisor/briefs/server-standing.md", nonce=None))
-    except (FleetCliError, ClaudeNotFoundError, ValueError,
-            FleetLockTimeout) as exc:
-        print(f"fleet: sup-guard action failed: {exc}", file=sys.stderr)
-        return 1
+    return rc
 
 
 def cmd_sup_context(args) -> int:
@@ -24463,7 +24598,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="one-line two-live-body verdict before supervisor revival")
     p_supguard.add_argument(
         "--do", action="store_true",
-        help="re-verify immediately, then execute DISPATCH or WAKE")
+        help="re-verify immediately, then send WAKE; DISPATCH/PAGE remain interface verdicts")
     p_supguard.add_argument(
         "--json", action="store_true",
         help="include read-only guard detail as one JSON line")
