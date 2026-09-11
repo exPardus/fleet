@@ -1,4 +1,36 @@
 # Operator changelog
+THROUGHPUT wave 80 (c05d6c3..d6a06652e9bbe7282fc78b121acc784296e9b8cd): bin +79/-36, tests +33/-5, docs +126/-0, journal +25/-13, other +0/-0; workers: 1 (w84/homes-inventory: codex); tokens: 4186837; tokens_per_bin_line: 52997.94 (4186837 tokens / 79 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+Wave 80 — the homes inventory counts what the guard counts
+
+merge(w84/homes-inventory) 767564a. `fleet homes` showed one row while the
+arming guard counted two, and `_refuse_wrong_home_destructive` built a single
+message from both: it said "this machine runs 2 fleets", printed both paths
+under "Homes counted:", and then embedded a view showing one. That message is
+what an operator sees at the moment a command of theirs was refused.
+
+The view now renders the resolution population, each row labelled as a listed
+record or the install-root legacy term, and the refusal renders from the
+arming snapshot so its count and its view cannot drift apart. A single-fleet
+machine's output is deliberately unchanged: arming begins at a population of
+two, so below that there is no disagreement to correct.
+
+Measured live against the real install root, before and after: 1 row vs
+2 rows, guard counting 2 throughout.
+
+Four defects found at landing, none visible to the lane: `homes_population()`
+lost its `ok` key; the lane's two view tests contradicted each other and it
+ran neither; the listed-home reason test was never updated for the legacy
+term; and the spec paragraph was inserted between steps 2 and 3 of the
+numbered resolution order, terminating the list.
+
+And the reason those lanes see nothing: a Codex lane has no DNS, and a brief
+that names the warm uv cache without `UV_OFFLINE=1` makes uv try PyPI first
+and die with the cache already complete. MEASURED on 3.10 and 3.12 with the
+network blocked: with the flag, green; without it, unresolvable. w83 and w84
+each shipped code they had never executed for want of one environment
+variable in a brief I wrote. `docs/lanes/BRIEF-TEMPLATE.md` now names it.
+
+Operator items advanced: item 1 (multi-fleet usable by the operator).
 THROUGHPUT wave 79 (638878b..831f7f82cfbeb3d8fe0ac50814ef52ef44338ba8): bin +233/-22, tests +97/-0, docs +97/-0, journal +31/-20, other +0/-0; workers: 1 (w83/computed-board: codex); tokens: 2819275; tokens_per_bin_line: 12099.89 (2819275 tokens / 233 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
 Wave 79 — the supervisor's board computes itself, and batch 2 is discharged
 
