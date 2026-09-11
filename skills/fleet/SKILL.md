@@ -107,16 +107,16 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet knowledge`: print `knowledge/INDEX.md`.
 - `fleet homes [--add PATH|--retire PATH]`: list registered homes or append one add/retire record.
 - `fleet init [--home PATH] [--statusline] [--chain] [--force]`: initialize a home and optionally register it or install its statusline.
-- `fleet spawn NAME --dir PATH --task TEXT`: dispatch one worker with its mode, model, budget, category, settings, and context options.
+- `fleet spawn NAME --dir PATH --task TEXT [--force-band]`: dispatch one worker with its mode, model, budget, category, settings, and context options.
 - `fleet status [NAME] [--json] [--stale-ok] [--all]`: show worker state, optionally including archived rows.
 - `fleet peek NAME [-n LINES]`: print a bounded recent event digest.
 - `fleet result NAME`: print the last completed turn's result.
 - `fleet wait NAME... [--any|--all] [--timeout SECONDS]`: wait for one or more turns to finish.
-- `fleet send NAME MESSAGE`: deliver a worker message or start its next turn.
+- `fleet send NAME MESSAGE [--force-band]`: deliver a worker message or start its next turn.
 - `fleet interrupt NAME`: stop the worker's current turn.
 - `fleet attach NAME [--force]`: attach an interactive terminal to a worker.
 - `fleet release NAME`: release an attached worker to idle.
-- `fleet respawn NAME [--task TEXT] [--force] [--yes]`: start a fresh session while retaining the worker identity and recorded brief.
+- `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
 - `fleet kill NAME [--yes]`: interrupt a worker and mark it dead.
 - `fleet clean [--dead-only|--tombstones] [--yes]`: remove eligible dead records and their disposable artifacts.
@@ -130,8 +130,8 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet doctor [--repair]`: run health checks; use `--repair` only when the operator authorizes quarantine of corrupt state.
 - `fleet brief ITEM`: render a task-file brief with DONE, base, files, tests, structured-result contract and a verified `Serves:` citation; stale or missing product citations refuse.
 - `fleet sup-boot [--sid SID] [--nonce VALUE] [--handoff-inc ID] [--handoff-token TOKEN]`: claim or resume supervisor duty and emit the boot bundle.
-- `fleet sup-spawn --task TEXT [--model MODEL] [--permission-mode MODE] [--setting-sources LIST] [--nonce VALUE]`: dispatch a gen-0 supervisor body.
-- `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat.
+- `fleet sup-spawn --task TEXT [--model MODEL] [--permission-mode MODE] [--setting-sources LIST] [--nonce VALUE] [--force-band]`: dispatch a gen-0 supervisor body.
+- `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat; its header reports the caller's context occupancy and band verdict.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
 - `fleet wave-close --base SHA --changelog TEXT [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, and notifying.
@@ -152,7 +152,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. Omitting it on one of these is refused as a continuity failure naming a second body, which reads like an incident and is not one.
 - Treat `sup-boot` exit 0 as a held or transferred claim, exit 2 as refusal, exit 3 as freeze, exit 4=continuity refusal, and exit 5 as handoff refusal.
 - Reconcile `fleet status` outcomes before dispatching; do not treat a limited worker as dead.
-- Context bands are supervisor 350–400k and worker 250–300k; the supervisor enters its band at **350k** and reaches its hard ceiling at **400k**, while the worker enters its band at **250k** and reaches **300k**.
+- Context bands are supervisor 350–400k and worker 250–300k; the supervisor enters its band at **350k** and reaches its hard ceiling at **400k**, while the worker enters its band at **250k** and reaches **300k**. Entering the supervisor band REFUSES `spawn`, `send`, `respawn` and `sup-spawn` with a one-line reason; `--force-band` overrides that soft refusal for one call and **cannot** override the 400k hard ceiling. The handoff verbs are never refused.
 - Freeze and page the operator when claim evidence is ambiguous; never seize or mass-respawn on an ambiguous snapshot.
 - Keep journal checkpoints claim-bound and concise; use `sup-checkpoint` for durable working state.
 

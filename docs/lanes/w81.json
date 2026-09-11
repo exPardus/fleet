@@ -1,0 +1,35 @@
+{
+  "lane": "w81",
+  "base": "10c24f3f978c95937adf7848f4ae6c301d230a0d",
+  "files_changed": [
+    "bin/fleet.py",
+    "tests/test_supervisor_ceiling.py",
+    "docs/lanes/w81.md",
+    "docs/lanes/w81.json"
+  ],
+  "claims": [
+    "soft-band dispatch refusal uses supervisor_band_verdict",
+    "force-band overrides soft only and cannot pass hard",
+    "sup-checkpoint reports caller occupancy and verdict",
+    "no mcx dispatch helper exists in bin/fleet.py"
+  ],
+  "tests": [
+    {
+      "python": "3.10",
+      "status": "999 passed, 4 skipped"
+    },
+    {
+      "python": "3.12",
+      "status": "999 passed, 4 skipped"
+    },
+    {
+      "python": "3.10 docs",
+      "status": "185 passed, 2 xfailed"
+    },
+    {
+      "python": "3.12 docs",
+      "status": "185 passed, 2 xfailed"
+    }
+  ],
+  "blockers": []
+}
