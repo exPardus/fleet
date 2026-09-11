@@ -812,20 +812,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7250) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8145) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11248) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:7293) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:8188) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:11291) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2005) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11122) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:11165) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:2518) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8395) -- do not grade a renamed-away path readable.
+      * `_doctor_check_registry` (:8438) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4534) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12226) -- render the release explanation.
+      * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:12269) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1987,7 +1987,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11248`), because legacy upgrades also require a complete registry.
+    (`:11291`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:892`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -2725,18 +2725,23 @@ def read_homes_list() -> dict:
 
 
 def homes_population() -> dict:
-    """Read the homes list and attach each member's registry state and worker snapshot.
-    Use one snapshot per member for both classification and rendering. Preserve
-    not_initialized, quarantined and unreadable as distinct population facts.
+    """Read the resolution population and attach one registry snapshot per home.
+    Preserve provenance so the view distinguishes listed records from the
+    install-root legacy term. The snapshot is shared by classification/rendering.
     """
-    out = dict(read_homes_list())
+    out = resolution_population()
     homes = []
-    for ident in out["members"]:
+    states = []
+    for ident in out["homes"]:
         ok, reason, data = read_registry_at(ident)
         # Carry workers from this snapshot so the renderer does not read the home twice.
         homes.append({"path": ident, "ok": ok, "reason": reason,
-                      "workers": len(data["workers"])})
+                      "workers": len(data["workers"]),
+                      "provenance": out["provenance"][ident]})
+        states.append({"home": ident, "ok": ok, "reason": reason,
+                       "workers": len(data["workers"])})
     out["homes"] = homes
+    out["states"] = states
     return out
 
 
@@ -2852,13 +2857,23 @@ def resolution_population(install=None) -> dict:
         install = INSTALL_ROOT
     listed = read_homes_list()
     legacy = home_identity(install)
-    homes, seen = [], set()
-    for ident in list(listed["members"]) + [legacy]:
+    homes, seen, provenance = [], set(), {}
+    for ident, source in (
+            [(h, "listed record") for h in listed["members"]]
+            + [(legacy, "install-root legacy term")]):
+        provenance.setdefault(ident, []).append(source)
         if ident not in seen:
             seen.add(ident)
             homes.append(ident)
     return {"homes": homes, "legacy": legacy,
+            "provenance": provenance, "list_path": listed["path"],
+            "path": listed["path"],
             "list_ok": listed["ok"], "list_reason": listed["reason"],
+            "ok": listed["ok"],
+            "reason": listed["reason"], "members": list(listed["members"]),
+            "retired": list(listed["retired"]),
+            "decode_note": listed["decode_note"],
+            "invalid_lines": listed["invalid_lines"],
             # Readable bytes can still contain unparseable records, leaving home count unknown.
             "list_invalid_lines": listed["invalid_lines"],
             "listed_members": list(listed["members"])}
@@ -2875,6 +2890,8 @@ def lookup_home_for_sid(sid, population=None, install=None) -> dict:
     pop = resolution_population(install) if population is None else population
     out = {"state": "no_sid", "home": None, "hits": [], "unreadable": [],
            "population": list(pop["homes"]), "legacy": pop["legacy"],
+           "provenance": pop.get("provenance", {}),
+           "list_path": pop.get("list_path", homes_list_path()),
            "list_ok": pop["list_ok"], "list_reason": pop["list_reason"],
            "list_invalid_lines": pop.get("list_invalid_lines", 0),
            # None means no census was read; [] means a read found no homes.
@@ -2889,7 +2906,8 @@ def lookup_home_for_sid(sid, population=None, install=None) -> dict:
         # that was already happening rather than by a second pass. A second
         # `read_registry_at` here would double the cost of every sid-carrying
         # invocation on a surface that has been O(1) forever.
-        out["states"].append({"home": ident, "ok": ok, "reason": reason})
+        out["states"].append({"home": ident, "ok": ok, "reason": reason,
+                               "workers": len(data["workers"])})
         if not ok:
             if reason == "unreadable":
                 out["unreadable"].append(ident)
@@ -3126,7 +3144,7 @@ def multi_fleet_arming(look=None, population=None, install=None) -> dict:
     out = {"armed": False, "reason": "population_below_two",
            "indeterminate": False, "counted": [],
            "skipped_not_initialized": [],
-           "population": list(look["population"])}
+           "population": list(look["population"]), "states": None}
     if not look.get("list_ok", True):
         out.update(armed=True, indeterminate=True, reason="list_unreadable")
         return out
@@ -3139,6 +3157,7 @@ def multi_fleet_arming(look=None, population=None, install=None) -> dict:
     states = look.get("states")
     if states is None:
         states = homes_population_states(out["population"])
+    out["states"] = states
     for state in states:
         if state["ok"] or state["reason"] in MULTI_FLEET_ARMING_UNKNOWN_REASONS:
             out["counted"].append(state["home"])
@@ -3156,7 +3175,8 @@ def homes_population_states(population) -> list:
     states = []
     for ident in population:
         ok, reason, _data = read_registry_at(ident)
-        states.append({"home": ident, "ok": ok, "reason": reason})
+        states.append({"home": ident, "ok": ok, "reason": reason,
+                       "workers": len(_data["workers"])})
     return states
 
 
@@ -3182,7 +3202,7 @@ def _refuse_wrong_home_destructive(command, res, arming) -> str:
     if counted:
         body += f"Homes counted:\n{counted}\n"
     return (body + f"Name the home you mean with `--fleet-home <PATH>`.\n\n"
-                   f"{render_homes_view()}")
+                   f"{render_homes_view(population=res['lookup'], states=arming.get('states'))}")
 
 
 def _apply_wrong_home_guard(args, command, res) -> None:
@@ -3882,17 +3902,39 @@ def _write_text_tolerating_console_encoding(text: str) -> None:
     sys.stdout.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
 
 
-def render_homes_view() -> str:
+def render_homes_view(population=None, states=None) -> str:
     """Render fleet homes as a string that refusals can embed.
     This view takes no lock, probes nothing and writes nothing. Render an
     unreadable list distinctly from an empty one: absence is not evidence."""
-    pop = homes_population()
+    pop = homes_population() if population is None else population
+    if population is not None:
+        entries = []
+        view_states = states
+        if view_states is None:
+            view_states = [{"home": ident, "ok": False, "reason": "unknown",
+                            "workers": 0} for ident in pop.get("population", [])]
+        for state in view_states:
+            ident = state["home"]
+            entries.append({"path": ident, "ok": state["ok"],
+                            "reason": state["reason"],
+                            "workers": state.get("workers", 0),
+                            "provenance": pop.get("provenance", {}).get(ident, [])})
+        pop = {**pop, "homes": entries,
+               "path": pop.get("list_path", homes_list_path()),
+               "reason": pop.get("list_reason"), "retired": [],
+               "invalid_lines": pop.get("list_invalid_lines", 0),
+               "decode_note": None}
     out = [f"fleet homes: {pop['path']}"]
     if pop["reason"] == "unreadable":
         out.append("  list unreadable -- population unknown")
-    elif not pop["homes"]:
+    # The legacy install-root term is always in the population, so "empty" here
+    # means "that term alone and nothing listed" -- a single-fleet machine,
+    # whose output must not change because multi-fleet machines needed a fix.
+    legacy_only = (pop["reason"] != "unreadable" and not pop.get("members")
+                   and len(pop["homes"]) <= 1)
+    if not pop["homes"] or legacy_only:
         out.append("  (no homes listed -- this machine runs a single fleet)")
-    else:
+    elif pop["homes"]:
         width = max(len(h["path"]) for h in pop["homes"])
         # Pair each statusline tag with its path so the nameplate is identifiable.
         tags = [home_tag(h["path"]) for h in pop["homes"]]
@@ -3903,7 +3945,8 @@ def render_homes_view() -> str:
             else:
                 state = {"not_initialized": "not initialized"}.get(
                     entry["reason"], entry["reason"])
-            out.append(f"  {tag}  {entry['path']:<{width}}  {state}")
+            provenance = "; ".join(entry.get("provenance", []))
+            out.append(f"  {tag}  {entry['path']:<{width}}  {state}  [{provenance}]")
         # Report collisions: a shared four-digit tag cannot distinguish two homes.
         clash = sorted({t for t in tags if tags.count(t) > 1})
         if clash:
@@ -5920,7 +5963,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:5849` / `cmd_respawn:5665`, before
+    # resolution that runs from `cmd_kill:5892` / `cmd_respawn:5708`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -5951,9 +5994,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:5849` / `cmd_respawn:5665`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:5892` / `cmd_respawn:5708`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:5686-5688` spells out that design -- resolve under the lock.
+    # `cmd_respawn:5729-5731` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -10266,11 +10309,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
-    :1950, :2012, :2090, :2897, :5938, :6100, :6297, :6417, :6453, :6615, :6616, :6686,
-    :6696, :6707, :6801, :7276, :10217, :12518, :12519, :12580, :13359`).
+    :1950, :2012, :2090, :2915, :5981, :6143, :6340, :6460, :6496, :6658, :6659, :6729,
+    :6739, :6750, :6844, :7319, :10260, :12561, :12562, :12623, :13402`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5203, :5539, :8721,
-    :13684. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :5246, :5582, :8764,
+    :13727. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10876,8 +10919,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5203, :5539, :8721,
-    # :13684) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:5246, :5582, :8764,
+    # :13727) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -10885,7 +10928,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:892`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10191`).
+        # names this gate as its reason (`:10234`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11241,7 +11284,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7247`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:7290`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.

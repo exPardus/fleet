@@ -449,13 +449,20 @@ class TestThePopulationCarriesEachHomesReadTimeState:
 
         states = {h["path"].rsplit("/", 1)[-1]: h["reason"]
                   for h in fleet.homes_population()["homes"]}
+        # The population is the RESOLUTION population, so the install-root
+        # legacy term is a member of it too -- that is the point of w84: the
+        # inventory and the arming guard must count the same homes.
+        legacy = fleet.home_identity(fleet.INSTALL_ROOT).rsplit("/", 1)[-1]
+        assert states.pop(legacy, "absent") != "absent", states
         assert states == {"good": None, "bare": "not_initialized", "broken": "unreadable"}
 
     def test_a_retired_home_is_not_in_the_population(self, tmp_path, sandboxed_list):
         good = _home(tmp_path, "good")
         ident = fleet.home_identity(str(good))
         _write(sandboxed_list, f"{ident}\n!{ident}\n")
-        assert fleet.homes_population()["homes"] == []
+        homes = fleet.homes_population()["homes"]
+        assert [h["path"] for h in homes] == [fleet.home_identity(fleet.INSTALL_ROOT)]
+        assert homes[0]["provenance"] == ["install-root legacy term"]
 
     def test_an_unreadable_list_says_so_and_lists_nothing(self, sandboxed_list, monkeypatch):
         """§4: *"Unreadable list => treated as armed-with-unknown-population"*.
@@ -470,7 +477,8 @@ class TestThePopulationCarriesEachHomesReadTimeState:
         monkeypatch.setattr(Path, "read_bytes", denied)
         out = fleet.homes_population()
         assert (out["ok"], out["reason"]) == (False, "unreadable")
-        assert out["homes"] == [] and out["members"] == []
+        assert out["members"] == []
+        assert [h["path"] for h in out["homes"]] == [fleet.home_identity(fleet.INSTALL_ROOT)]
 
     def test_the_population_read_takes_no_lock(self, tmp_path, sandboxed_list, monkeypatch):
         """One lock-free snapshot per home (§5.2). A lock-taking population read
@@ -481,7 +489,7 @@ class TestThePopulationCarriesEachHomesReadTimeState:
             raise AssertionError("homes_population took fleet_lock")
 
         monkeypatch.setattr(fleet, "fleet_lock", forbidden)
-        assert len(fleet.homes_population()["homes"]) == 1
+        assert len(fleet.homes_population()["homes"]) == 2
 
 
 # ---------------------------------------------------------------------------
