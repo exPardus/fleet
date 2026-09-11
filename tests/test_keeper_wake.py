@@ -76,10 +76,29 @@ def test_stale_idle_no_pid_pages_never_spawns(tick):
     assert 'sup-spawn' in pages[0]
 
 
-def test_fresh_live_body_does_nothing(tick):
+@pytest.mark.parametrize('status', ['idle', 'busy'])
+def test_fresh_live_body_does_nothing(tick, status):
     invoke, pages, sends, _, _ = tick
-    invoke(age=10)
+    invoke(age=10, status=status)
     assert not sends and not pages
+
+
+def test_fresh_pidless_body_pages_without_wake_or_spawn(tick):
+    invoke, pages, sends, _, _ = tick
+    invoke(age=10, pid=None)
+    assert not sends and len(pages) == 1
+    assert 'fresh heartbeat but body is not roster-live' in pages[0]
+    assert 'sup-spawn' not in pages[0]
+
+
+@pytest.mark.parametrize('do', [False, True])
+def test_keeper_accepts_ok_without_quiet_flag(tmp_path, do):
+    result = k._supervisor_guard(tmp_path, lambda argv, **kw:
+        subprocess.CompletedProcess(argv, 0, json.dumps({
+            'verdict': 'OK', 'reason': 'fresh heartbeat with live body'}), ''), do=do)
+    assert result['verdict'] == 'OK'
+    assert result['quiet'] is False and result['sent'] is False
+    assert k.rule_supervisor_stalled({'supervisor_guard': result}, NOW) is None
 
 
 def test_limited_pages_once_even_beyond_six_hours_before_horizon(tick):
