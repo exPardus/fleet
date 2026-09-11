@@ -4237,9 +4237,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     ceiling can be written only after join; native dispatch rejects USD budgets.
     The injectable clock bounds roster join without real waits in tests."""
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
-    _ceiling_refusal = (_ceiling_refuses_dispatch("spawn", force_band=True)
-                        if getattr(args, "force_band", False)
-                        else _ceiling_refuses_dispatch("spawn"))
+    _ceiling_refusal = _ceiling_refuses_dispatch(
+        "spawn",
+        force_band=getattr(args, "force_band", False))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -5126,9 +5126,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     resolved_name = _resolve_worker_target(args.name)
     _supervisor_gate("send", nonce=getattr(args, "nonce", None),
                      send_target=resolved_name)
-    _ceiling_refusal = (_ceiling_refuses_dispatch("send", force_band=True)
-                        if getattr(args, "force_band", False)
-                        else _ceiling_refuses_dispatch("send"))
+    _ceiling_refusal = _ceiling_refuses_dispatch(
+        "send",
+        force_band=getattr(args, "force_band", False))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -5426,9 +5426,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     # Apply the ceiling here as well as in cmd_respawn for direct callers.
     # --task starts new work; bare respawn remains permitted as over-ceiling recovery.
     if getattr(args, "task", None):
-        _ceiling_refusal = (_ceiling_refuses_dispatch("respawn", force_band=True)
-                            if getattr(args, "force_band", False)
-                            else _ceiling_refuses_dispatch("respawn"))
+        _ceiling_refusal = _ceiling_refuses_dispatch(
+            "respawn",
+            force_band=getattr(args, "force_band", False))
         if _ceiling_refusal is not None:
             raise FleetCliError(_ceiling_refusal)
     name = args.name
@@ -5652,9 +5652,9 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     # is §11.4 recovery, which must remain usable to fix over-ceiling state.
     # _cmd_respawn_native repeats this check for direct callers.
     if getattr(args, "task", None):
-        _ceiling_refusal = (_ceiling_refuses_dispatch("respawn", force_band=True)
-                            if getattr(args, "force_band", False)
-                            else _ceiling_refuses_dispatch("respawn"))
+        _ceiling_refusal = _ceiling_refuses_dispatch(
+            "respawn",
+            force_band=getattr(args, "force_band", False))
         if _ceiling_refusal is not None:
             raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -12799,9 +12799,9 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
     bypass default, and a generated boot ritual. The nonce is presented without
     rotation because this is a mutating lifecycle verb (claim-nonce §7)."""
     _supervisor_gate("sup-spawn", nonce=getattr(args, "nonce", None))
-    _ceiling_refusal = (_ceiling_refuses_dispatch("sup-spawn", force_band=True)
-                        if getattr(args, "force_band", False)
-                        else _ceiling_refuses_dispatch("sup-spawn"))
+    _ceiling_refusal = _ceiling_refuses_dispatch(
+        "sup-spawn",
+        force_band=getattr(args, "force_band", False))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
