@@ -4,6 +4,8 @@ w79/knowledge-caps landed (merge b6c1d20 -> server/persistent-fleet). tools/know
 Lane reported DONE the first time with a JSON carrying no test rc and a report citing results 'recorded in the handoff' (no handoff exists), and it had indexed projects/.gitkeep into the file the boot bundle reads. One steer fixed all three. The verify-at-landing rule earned its cost again.
 Over-cap on-demand notes MEASURED, none moved: campaign-template 238, claude-fleet 114, pmbot 50, claude-oracle 21, stupidbox 20, spawn-etiquette 14 (cap 12). w78 still running.
 
+THROUGHPUT wave 76 (5f50ac0b3d1d4c8719cfa7911107ecb14d62f73a..2255cc2f9cf562792c8cdcedcc39b8d3785578a6): bin +230/-8, tests +169/-6, docs +99/-0, journal +24/-12, other +61/-0; workers: 1 (w80/fleet-brief: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
+
 ## 2026-09-11T15:30:59Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
 
 Wave 75 CLOSED and pushed: 6537949..5e2d14c, 5f50ac0. bin +346/-1, tests +166/-4, docs +127/-0. Landed: fleet land + docs/lanes/<lane>.json contract (batch 2 items 1+2), tools/knowledge_index.py (item 5), SKILL.md --nonce list fix.
