@@ -150,9 +150,17 @@ def test_prune_removes_only_clean_merged_lane_worktrees(tmp_path, monkeypatch):
             return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(argv)
 
-    stats = fleet._wave_prune_landed_worktrees(repo, "base", run=run)
+    stats = fleet._wave_prune_landed_worktrees(repo, "tip", run=run)
     assert stats == {"removed": 1, "skipped": 2, "unmerged": 1,
                      "dirty": 1, "protected": 0, "failed": 0}
+    # Merged-ness is measured against the wave's TIP, never its base. Against
+    # the base, every lane that landed in the wave being closed is by
+    # construction not an ancestor, so it is reported unmerged and never
+    # pruned -- the pruner then only ever reaches the previous wave's lanes.
+    assert [call[2:] for call in calls if call[1] == "merge-base"] == [
+        ["--is-ancestor", "w68/merged", "tip"],
+        ["--is-ancestor", "w69/unmerged", "tip"],
+        ["--is-ancestor", "w67/dirty", "tip"]]
     assert [call[1:] for call in calls if call[1] in {"worktree", "branch"}][-2:] == [
         ["worktree", "remove", str(merged)], ["branch", "-d", "w68/merged"]]
     assert all("--force" not in call for call in calls)
