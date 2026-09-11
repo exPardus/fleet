@@ -4,6 +4,8 @@ WAVE 67 CLOSED AND PUSHED (`593e927..713f058`). One lane landed, and **`fleet wa
 real for the first time and produced three defects** — which is exactly why it was queued to be run
 rather than trusted.
 
+THROUGHPUT wave 69 (f8cc8c2ef63369812729f302fb0b321aa1b06cd9..0ae383d5f0fed3b620e214f642f545e6a780ab96): bin +291/-66, tests +118/-4, docs +34/-0, journal +117/-66, other +9/-0; workers: 1 (w69/wave-close-accounting: claude); tokens: UNMEASURED (roster has no token field); reaped: 0; protected: 1 (unread mail)
+
 ## SHIPPED
 - `a1b04cb` **`sup-guard`: a seize is an EVENT IN THE PAST, not a state.** It was printing
   `PAGE claim seized` against a healthy fleet — my claim was seized at 15:30Z, so every verdict for
