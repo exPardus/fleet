@@ -1074,20 +1074,21 @@ def _panes(run, target):
     return panes
 
 
-def registered_pane(home, run):
-    """Return the registered live pane ID, or None if absent/dead/gone.
+def _registered_pane_details(home, run, out=None):
+    """Return ``(pane, reason)`` for the registered pane.
 
-    The interface writes this registration on launch AND manual resume.
-    Its command can be claude, a subprocess, or a shell: identity comes
-    from the registration, liveness from pane_dead, never a window name.
-    An unreadable registration or failed scan is not evidence of absence;
-    raise so this tick leaves both tmux and delivery state alone.
+    A registration is useful only while its pane is running Claude itself.
+    ``pane_current_command`` is deliberately checked in addition to
+    ``pane_dead``: after Claude exits, tmux leaves the pane at the user's
+    shell prompt and paging that pane is paging into a dead interface.
     """
+    if out is None:
+        out = sys.stdout
     try:
         pane = (home / "state" / "interface-pane").read_text(
             encoding="utf-8").strip()
     except FileNotFoundError:
-        return None
+        return None, "absent"
     if not (pane.startswith("%") and pane[1:].isascii()
             and pane[1:].isdecimal()):
         raise ValueError("state/interface-pane must contain a tmux pane ID")
@@ -1100,8 +1101,28 @@ def registered_pane(home, run):
         if parts and parts[0] == pane:
             if len(parts) < 3 or parts[-1] not in ("0", "1"):
                 raise ValueError("tmux pane liveness unreadable")
-            return pane if parts[-1] == "0" else None
-    return None
+            command = parts[1]
+            if command != "claude":
+                # Keep the known shell set as the negative case used by the
+                # window classifier. Other commands are equally unsafe as a
+                # registered interface, so they receive the same fallback.
+                print(f"keeper: registered pane {pane} runs {command}, not claude; "
+                      "falling back to window", file=out)
+                return None, ("shell" if command in SHELL_COMMANDS else "command")
+            if parts[-1] == "1":
+                return None, "dead"
+            return pane, "claude"
+    return None, "gone"
+
+
+def registered_pane(home, run, out=None):
+    """Return the registered live Claude pane ID, or None if unusable.
+
+    The interface writes this registration on launch AND manual resume.
+    An unreadable registration or failed scan is not evidence of absence;
+    raise so this tick can report the uncertainty without selecting a pane.
+    """
+    return _registered_pane_details(home, run, out=out)[0]
 
 
 def registered_session(home):
@@ -1275,21 +1296,24 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     interface_notice = None
 
+    registration_path = home / "state" / "interface-pane"
+    pane_reason = "absent"
     try:
-        pane = registered_pane(home, run)
+        pane, pane_reason = _registered_pane_details(home, run, out=out)
     except (OSError, ValueError) as exc:
         if not interface_state:
-            print(f"keeper: interface pane unavailable ({exc}); deferring tick",
-                  file=out)
-            return 0
-        interface_notice = ("KEEPER: interface registration unavailable "
-                            f"({exc}); page delivered to {target}")
-        print(interface_notice, file=out)
+            print(f"keeper: interface pane unavailable ({exc}); "
+                  "falling back to window", file=out)
+        else:
+            interface_notice = ("KEEPER: interface registration unavailable "
+                                f"({exc}); page delivered to {target}")
+            print(interface_notice, file=out)
         pane = None
+        pane_reason = "unknown"
     if pane:
         report_interface_candidates(run, target, pane, out)
         target = pane
-    elif interface_state:
+    elif interface_state and pane_reason == "absent":
         try:
             interface_session = registered_session(home)
         except (OSError, ValueError) as exc:
@@ -1344,12 +1368,33 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
         run, session=args.tmux_session, window=args.window,
         cwd=str(home), launch=launch, out=out)
     if created:
-        # I6: nothing is paged into a window created this tick, and the dedup
-        # record is left exactly as the previous tick wrote it -- so the next
-        # tick, 15 minutes into the new session's life, pages everything that
-        # is still true.
-        print(f"keeper: created {target}; pages deferred to next tick", file=out)
-        rule_state = prev_rules
+        # A shell/dead registered pane is stale state. The newly launched
+        # session must register itself; retaining the old ID lets the next
+        # tick select the wrong pane again. These fallback cases still emit
+        # their page through the window path (the no-registration path keeps
+        # the normal startup deferral).
+        if registration_path.exists():
+            try:
+                registration_path.unlink()
+            except OSError as exc:
+                print(f"keeper: could not remove stale interface pane "
+                      f"({exc})", file=out)
+        if pane_reason in {"shell", "command", "dead"}:
+            for p in send:
+                if page(run, target, p.text, out=out):
+                    print(f"keeper: paged {p.rule}", file=out)
+                    continue
+                print(f"keeper: page NOT delivered: {p.rule}", file=out)
+                previous = prev_rules.get(p.rule)
+                if previous is None:
+                    rule_state.pop(p.rule, None)
+                else:
+                    rule_state[p.rule] = previous
+        else:
+            # I6: nothing is paged into a window created this tick, and the
+            # dedup record is left exactly as the previous tick wrote it.
+            print(f"keeper: created {target}; pages deferred to next tick", file=out)
+            rule_state = prev_rules
     else:
         for p in send:
             if page(run, target, p.text, out=out):

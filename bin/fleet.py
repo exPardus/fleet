@@ -18511,6 +18511,85 @@ def _wave_lane_worktree(repo, lane, run=subprocess.run):
     return None
 
 
+def _wave_worktree_entries(repo, run=subprocess.run):
+    """Read linked worktrees as ``(path, branch)`` pairs."""
+    result = _wave_git(repo, "worktree", "list", "--porcelain", run=run)
+    entries = []
+    path = branch = None
+    for line in result.stdout.splitlines() + [""]:
+        if line.startswith("worktree "):
+            path = Path(line[len("worktree "):].strip())
+            branch = None
+        elif line.startswith("branch refs/heads/"):
+            branch = line[len("branch refs/heads/"):].strip()
+        elif not line and path is not None:
+            entries.append((path, branch))
+            path = branch = None
+    return entries
+
+
+def _wave_prune_landed_worktrees(repo, base, run=subprocess.run):
+    """Remove clean lane worktrees whose branches are ancestors of ``base``.
+
+    This is intentionally conservative: a dirty, unmerged, protected, or
+    otherwise failed entry is reported and left in place. In particular,
+    ``git worktree remove`` is never given ``--force`` and a branch is deleted
+    only after its worktree removal succeeds.
+    """
+    stats = {"removed": 0, "skipped": 0,
+             "unmerged": 0, "dirty": 0, "protected": 0, "failed": 0}
+    current = Path.cwd().resolve()
+    live_home = Path(FLEET_HOME).resolve()
+    for raw_path, branch in _wave_worktree_entries(repo, run=run):
+        if not branch or not re.fullmatch(r"w\d+/.+", branch):
+            continue
+        path = raw_path.resolve()
+        if _wave_same_path(path, repo) or _wave_same_path(path, current) \
+                or _wave_same_path(path, live_home):
+            stats["skipped"] += 1
+            stats["protected"] += 1
+            continue
+        merged = _wave_git(repo, "merge-base", "--is-ancestor", branch, base,
+                           run=run, check=False)
+        if merged.returncode != 0:
+            stats["skipped"] += 1
+            stats["unmerged"] += 1
+            print(f"wave-close: kept {path}: branch {branch} is unmerged",
+                  file=sys.stderr)
+            continue
+        status = _wave_git(repo, "-C", str(path), "status", "--porcelain",
+                           "--untracked-files=all", run=run, check=False)
+        if status.returncode != 0:
+            stats["skipped"] += 1
+            stats["failed"] += 1
+            print(f"wave-close: kept {path}: could not inspect worktree",
+                  file=sys.stderr)
+            continue
+        if status.stdout.strip():
+            stats["skipped"] += 1
+            stats["dirty"] += 1
+            print(f"wave-close: kept {path}: dirty worktree", file=sys.stderr)
+            continue
+        removed = _wave_git(repo, "worktree", "remove", str(path),
+                            run=run, check=False)
+        if removed.returncode != 0:
+            stats["skipped"] += 1
+            stats["failed"] += 1
+            detail = (removed.stderr or removed.stdout or "").strip()
+            print(f"wave-close: kept {path}: worktree remove failed"
+                  + (f": {detail[:200]}" if detail else ""), file=sys.stderr)
+            continue
+        branch_deleted = _wave_git(repo, "branch", "-d", branch,
+                                   run=run, check=False)
+        stats["removed"] += 1
+        if branch_deleted.returncode != 0:
+            stats["failed"] += 1
+            detail = (branch_deleted.stderr or branch_deleted.stdout or "").strip()
+            print(f"wave-close: removed {path} but branch {branch} remains"
+                  + (f": {detail[:200]}" if detail else ""), file=sys.stderr)
+    return stats
+
+
 def _wave_same_path(left, right):
     """Compare two record paths without requiring either path to exist."""
     try:
@@ -18935,6 +19014,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         _wave_git(repo, "commit", "-m", f"fleet wave-close: checkpoint push failure wave {wave_id}", run=run)
         raise FleetCliError(f"wave-close: push failed after {attempts} attempts: {push_failures}")
 
+    pruned = _wave_prune_landed_worktrees(repo, base, run=run)
     notify_args = argparse.Namespace(text=throughput, tmux_session="work", window="fleet",
                                      dry_run=False, sid=getattr(args, "sid", None),
                                      nonce=getattr(args, "nonce", None))
@@ -18942,6 +19022,10 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     print(throughput)
     print(f"wave-close: floor tree={tree}; journal rolled={roll['rolled']}; "
           f"progress rows refreshed={progress_rows}; push attempts={attempts}")
+    print(f"wave-close: worktrees removed: {pruned['removed']}; "
+          f"worktrees skipped: {pruned['skipped']} "
+          f"(unmerged: {pruned['unmerged']}, dirty: {pruned['dirty']}, "
+          f"protected: {pruned['protected']}, failed: {pruned['failed']})")
     return 0
 
 
