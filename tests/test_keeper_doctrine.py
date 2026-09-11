@@ -76,7 +76,7 @@ def test_the_detector_sees_a_planted_dispatch():
 #: `fleet.<name>` for exactly that reason; do not "tidy" it into a bare
 #: import.
 ALLOWED_FLEET_ATTRIBUTES = {
-    "status_snapshot", "MIN_PYTHON_VERSION", "FLEET_HOME",
+    "status_snapshot", "MIN_PYTHON_VERSION", "FLEET_HOME", "home_tag",
     "KEEPER_LINE_PREFIX", "INTERFACE_LINE_LIMIT",
     "one_line", "interface_line", "tmux_command", "type_interface_line",
     "append_interface_log",
