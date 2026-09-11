@@ -66,6 +66,57 @@ def test_codex_result_usage_is_summed_without_double_counting_events(tmp_path):
         "UNMEASURED (mcx result files missing)"
 
 
+def test_codex_usage_reads_the_landed_lane_worktree_events_once(tmp_path):
+    lane = tmp_path / "lane"
+    job = lane / ".mcx" / "job"
+    job.mkdir(parents=True)
+    (job / "result").write_text("completed prose\n", encoding="utf-8")
+    (job / "events.jsonl").write_text(
+        '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":30,"output_tokens":4}}\n',
+        encoding="utf-8")
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, f"worktree {lane}\nbranch refs/heads/w82/codex\n\n", "")
+
+    assert fleet._wave_codex_tokens(
+        tmp_path, [("w82/codex", "codex", "abc")], run=run) == "34"
+
+
+def test_claude_usage_reads_wave_session_from_outcomes(tmp_path):
+    lane = tmp_path / "lane"
+    outcomes = tmp_path / "state" / "outcomes"
+    outcomes.mkdir(parents=True)
+    (tmp_path / "state" / "fleet.json").write_text(
+        '{"workers":{"worker":{"cwd":"' + str(lane) + '",'
+        '"session_id":"sid-current"}}}', encoding="utf-8")
+    (outcomes / "worker.jsonl").write_text(
+        '{"kind":"result","session_id":"sid-old","input_tokens":99,'
+        '"output_tokens":99}\n'
+        '{"kind":"result","session_id":"sid-current","input_tokens":11,'
+        '"output_tokens":7,"cache_creation_input_tokens":5,'
+        '"cache_read_input_tokens":3}\n', encoding="utf-8")
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, f"worktree {lane}\nbranch refs/heads/w82/claude\n\n", "")
+
+    assert fleet._wave_outcomes_claude_tokens(
+        tmp_path, [("w82/claude", "claude", "abc")], run=run) == "26"
+
+
+def test_new_usage_sources_remain_unmeasured_when_their_source_is_missing(tmp_path):
+    lanes = [("w82/codex", "codex", "abc")]
+    assert fleet._wave_codex_tokens(tmp_path, lanes=lanes,
+                                    run=lambda *a, **k: subprocess.CompletedProcess(
+                                        a[0], 0, "", "" )).startswith("UNMEASURED")
+    assert fleet._wave_outcomes_claude_tokens(
+        tmp_path, [("w82/claude", "claude", "abc")],
+        run=lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "", "")
+    ).startswith("UNMEASURED")
+
+
 def test_default_base_is_newest_wave_close_commit(tmp_path):
     def run(argv, **kwargs):
         assert argv[:3] == ["git", "log", "--format=%H%x09%s"]
@@ -313,3 +364,46 @@ def test_wave_close_refreshes_the_heartbeat(monkeypatch, tmp_path):
     after = src.split(marker, 1)[1].split("write_incarnation", 1)[0]
     assert 'claim["heartbeat_at"] = now_iso()' in after, (
         "wave-close writes the claim without advancing heartbeat_at")
+
+
+def test_external_lines_counts_a_sibling_worktree_as_inside_this_repo(tmp_path):
+    # MEASURED against the live repo before this test existed: a lane worktree
+    # is a SIBLING of the repository root, not a child of it, so a path-prefix
+    # test calls a lane of this very repo "external". `git worktree list`
+    # enumerates only this repository's worktrees, so resolution IS the answer.
+    sibling = tmp_path.parent / (tmp_path.name + "-w82-lane")
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 0, f"worktree {sibling}\nbranch refs/heads/w82/a\n\n", "")
+
+    assert fleet._wave_external_lines(
+        tmp_path, [("w82/a", "codex", "abc")], "base", run=run) == (
+        "0 (MEASURED: 1 landed lane(s), all worktrees of this repo)")
+
+
+def test_external_lines_refuses_to_call_an_unresolvable_lane_zero(tmp_path):
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    verdict = fleet._wave_external_lines(
+        tmp_path, [("w82/a", "codex", "abc")], "base", run=run)
+    assert verdict.startswith("UNMEASURED (no cross-repo line receipt")
+    assert "w82/a" in verdict
+
+
+def test_external_lines_measured_zero_when_no_lane_landed(tmp_path):
+    assert fleet._wave_external_lines(
+        tmp_path, [], "base", run=lambda *a, **k: None) == (
+        "0 (MEASURED: no lanes landed this wave)")
+
+
+def test_tokens_per_bin_line_names_its_denominator_and_guards_zero(tmp_path):
+    source = (pathlib.Path(__file__).resolve().parents[1] / "bin" / "fleet.py").read_text(
+        encoding="utf-8")
+    # The ratio is printed with the operands that produced it, so a reader can
+    # check the division; and an unknown token total or a wave that landed no
+    # `bin/` lines stays UNMEASURED rather than dividing by zero.
+    assert "added bin lines" in source
+    assert 'tokens_per_bin_line = ("UNMEASURED' in source
+    assert "if unknown or bin_added == 0 else" in source
