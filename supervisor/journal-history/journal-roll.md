@@ -612,3 +612,10 @@ Wave 78 closed and pushed, 638878b, tree clean, in sync. THROUGHPUT carries real
 My own external_lines fix was wrong and its unit test passed anyway -- a lane worktree is a SIBLING of the repo root, so path containment called this very lane external; the live call disagreed. Resolution through git worktree list is the discriminator. Exercise the verb, never the test alone.
 Three consecutive fleet land refusals were all taught by BRIEF-TEMPLATE.md (result path is the branch's FIRST component, the JSON lane field is that component not the kind, blockers is a landing gate that exits RED); fixed at 0eb8886.
 
+## 2026-09-11T18:46:09Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
+
+Wave 79 dispatched: w83/computed-board (SzNKYyTY, luna medium) at 638878b -- batch 2 item 4, the last of the batch. Evidence is this incarnation's own boot: the 240-line bundle left me reading the predecessor journal and the standing directive and running six state commands before I could clear a dispatch gate, all of it computable; and sup-checkpoint accepted a nine-line body against the doctrine's three without complaint.
+Brief carries the three fleet land traps explicitly (lane field is the branch's first component, result files named for it, blockers is a RED gate) so this lane does not re-buy last wave's three refusals, and orders the lane to exercise its code against the real repo rather than trusting a unit test.
+
+THROUGHPUT wave 80 (c05d6c3..d6a06652e9bbe7282fc78b121acc784296e9b8cd): bin +79/-36, tests +33/-5, docs +126/-0, journal +25/-13, other +0/-0; workers: 1 (w84/homes-inventory: codex); tokens: 4186837; tokens_per_bin_line: 52997.94 (4186837 tokens / 79 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+
