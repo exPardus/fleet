@@ -34,6 +34,36 @@ Your branch will get an adversarial gate — write for that reader.
 **Journal** (working state, not the report) at `<fleet home>/state/journals/<name>.md`.
 ```
 
+## Naming the suites (2026-09-11, after three floor catches in one generation)
+
+A brief names the SUITE per file touched. Choosing that list from memory failed
+three times in one generation, each time caught by the wave-close floor rather
+than by the lane:
+
+- `bin/fleet_land.py` shipped outside `tests/fleet_sources.IMPLEMENTATION_FILES`,
+  so no census scanned it and every install built from that tuple carried a
+  `fleet.py` whose import of it died.
+- `land` shipped with no effect disposition (`tests/test_round7_defect_pins.py`).
+- w81 changed the ceiling call sites and tripped the exactly-five census in
+  `tests/test_respawn_ceiling.py`.
+
+Derive the list instead of recalling it. For each file the lane touches:
+
+    grep -rln "<basename or symbol>" tests/
+
+and add these whenever the lane does the matching thing:
+
+| The lane... | must run |
+|---|---|
+| adds or renames a VERB | `tests/test_round7_defect_pins.py`, `tests/test_verb_effect_guard.py`, `tests/test_views_doctrine.py` |
+| adds a FLAG to a verb | the above, plus update the `skills/fleet/SKILL.md` CLI list — it claims to be derived from `build_parser()` |
+| adds a new `bin/` MODULE | `tests/test_fleet_sources.py` and the `IMPLEMENTATION_FILES` tuple, `tests/test_sid_collision.py` |
+| touches the dispatch CEILING | `tests/test_respawn_ceiling.py`, `tests/test_supervisor_ceiling.py` |
+| changes any line count in `bin/fleet.py` | `tests/test_self_citations.py`; keep the count stable or run `tools/repoint_self_citations.py <sha>` |
+
+A pre-existing failure is not the lane's to fix: reproduce it at the base with
+untouched source and say so.
+
 ## Task convention (2026-09-10)
 
 Every brief under `docs/lanes/` and every dispatched task under `state/tasks/`
