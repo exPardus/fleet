@@ -130,24 +130,24 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet doctor [--repair]`: run health checks; use `--repair` only when the operator authorizes quarantine of corrupt state.
 - `fleet sup-boot [--sid SID] [--nonce VALUE] [--handoff-inc ID] [--handoff-token TOKEN]`: claim or resume supervisor duty and emit the boot bundle.
 - `fleet sup-spawn --task TEXT [--model MODEL] [--permission-mode MODE] [--setting-sources LIST] [--nonce VALUE]`: dispatch a gen-0 supervisor body.
-- `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL]`: append a supervisor journal checkpoint and refresh its heartbeat.
+- `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
-- `fleet wave-close --base SHA --changelog TEXT`: close one wave by reaping, flooring, accounting, landing, pushing, and notifying.
-- `fleet sup-heartbeat`: refresh the supervisor claim heartbeat without a journal entry.
+- `fleet wave-close --base SHA --changelog TEXT [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, and notifying.
+- `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
 - `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state.
 - `fleet sup-guard [--do] [--json]`: verify the two-live-body guard: fresh heartbeat + live busy/idle PID → `OK` (no page or wake), stale + live idle PID → `WAKE <body>`, stale + no live PID → `DISPATCH`, fresh + no live PID or unreadable registry/roster → `PAGE`. Existing ambiguity checks still page, and a live body never permits `DISPATCH`. `--do` re-verifies and sends the wake brief only on `WAKE`; `OK` and `PAGE` perform no action. `DISPATCH` pages the interface, which alone owns `sup-spawn`; neither guard nor keeper spawns.
 - `fleet sup-context [--sid SID] [--json]`: report this session's context occupancy against its tier band.
-- `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json]`: route an operator-only decision.
-- `fleet sup-notify TEXT [--tmux-session SESSION] [--window WINDOW] [--dry-run]`: notify the interface through its tmux window.
+- `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json] [--nonce VALUE]`: route an operator-only decision.
+- `fleet sup-notify TEXT [--tmux-session SESSION] [--window WINDOW] [--dry-run] [--nonce VALUE]`: notify the interface through its tmux window.
 - `fleet sup-handoff-begin [--model MODEL] [--permission-mode MODE] [--nonce VALUE]`: dispatch the handoff successor.
 - `fleet sup-handoff-complete --expect-inc ID [--expect-sid SID] [--nonce VALUE]`: verify the successor handshake and transfer the claim.
 - `fleet sup-handoff-abort [--successor-sid SID|--successor-inc ID|--retire-all] [--force] [--nonce VALUE]`: stop or retire a pending successor and resume duty.
 
 ## Supervisor guard and generations
 
-- Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation.
+- Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. Omitting it on one of these is refused as a continuity failure naming a second body, which reads like an incident and is not one.
 - Treat `sup-boot` exit 0 as a held or transferred claim, exit 2 as refusal, exit 3 as freeze, exit 4=continuity refusal, and exit 5 as handoff refusal.
 - Reconcile `fleet status` outcomes before dispatching; do not treat a limited worker as dead.
 - Context bands are supervisor 350–400k and worker 250–300k; the supervisor enters its band at **350k** and reaches its hard ceiling at **400k**, while the worker enters its band at **250k** and reaches **300k**.
