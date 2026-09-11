@@ -1,17 +1,17 @@
-## 2026-09-11T15:30:59Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
-
-Wave 75 CLOSED and pushed: 6537949..5e2d14c, 5f50ac0. bin +346/-1, tests +166/-4, docs +127/-0. Landed: fleet land + docs/lanes/<lane>.json contract (batch 2 items 1+2), tools/knowledge_index.py (item 5), SKILL.md --nonce list fix.
-Floor REFUSED the first close on 10 failures vs the 6-failure host baseline, both new defects from w78 and both missed by MY brief's suite list (it named neither test_round7_defect_pins nor test_sid_collision): fleet_land.py shipped outside tests/fleet_sources.IMPLEMENTATION_FILES, so no census scanned it and every install built from that tuple carried a fleet.py whose top-level fleet_land import died; and the land verb shipped with no effect disposition. Fixed in 5e2d14c. A new verb needs the effect-disposition pin and a new bin/ module needs the census tuple -- put both in every brief that ships either.
-Then found closing: the worktree pruner asked merge-base against the wave's BASE, so it called this wave's own landed lanes unmerged and could only ever prune one wave late. Fixed + pinned in 569411d.
-
-## 2026-09-11T16:02:15Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=e061dbdf-894a-48cc-a9c3-e1c31ca40d09
-
-Wave 76 dispatched: one lane w80/fleet-brief (NtCl32NP, luna high) at base 6cfdd28 -- fleet brief as leaf bin/fleet_brief.py, carrying the product.md Serves: citation and REFUSING a citation whose phrase does not occur under the named section, plus a pin scoping the requirement to task files from 2026-09-11T21:00Z so wave 75 and earlier stay grandfathered. One lane only: everything left in batch 2 writes bin/fleet.py and the one-writer rule holds.
-Brief carries the two shipping requirements wave 75 taught: a new verb needs an entry in UNCLASSIFIED_BY_THE_RATIFIED_TABLE, a new bin/ module needs tests/fleet_sources.IMPLEMENTATION_FILES. Both suites named.
-BLOCKER RAISED, mine to own: 569411d is red on test_docs_currency::test_branch_docs_currency -- bin/fleet.py changed with a trailer naming knowledge/, and the lint takes only docs/ or a literal Docs: n/a. Green at 5f50ac0, so I introduced it. It blocks every wave close until it ages out of the 20-commit window. Decision raised: amend+force-push (recommended) vs widening the lint. I did not widen it myself: it would clear my own violation.
-
 ## 2026-09-11T16:52:47Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=e061dbdf-894a-48cc-a9c3-e1c31ca40d09
 
 Wave 76 CLOSED and pushed: 5f50ac0..2255cc2, close 950678a, host rules e95f57f. bin +230/-8, tests +169/-6, docs +99/-0; one lane. Landed: fleet brief with a VERIFIED product.md Serves: citation (absent phrase, right phrase under the wrong section, and no citation each refuse with exit 1; valid exits 0 -- I ran all four), the dispatched-task pin scoped from 2026-09-11T21:00Z so wave 75 and earlier are grandfathered, and the docs-currency surface widened to docs/ + skills/ + knowledge/ per the operator ruling B.
 The wave-close pruner fix from wave 75 is PROVEN: worktrees removed 3 (w78, w79, w80 with their branches), skipped 5 (1 genuinely unmerged, 4 dirty). Under the old base comparison this wave own lanes would all have been called unmerged and kept.
 Four failed closes before this one, all mine, all refused before the commit/push phase: changelog cited the lane sha not the merge sha; I monitored a wrapper pid, read its death as the close finishing, and started a SECOND concurrent close; I rm -rf the live close working clone thinking it stray; and I rotated the generation mid-flight with sup-heartbeat. All four rules now in knowledge/projects/claude-fleet.md.
+
+## 2026-09-11T17:23:55Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+Wave 77 dispatched: w81/band-gate (J15MrUc2, luna medium) at 10c24f3. The band gate the manager asked for is an EXTENSION, not a new mechanism: _ceiling_refuses_dispatch (bin/fleet.py:2100) already refuses at the hard 400k ceiling and is already wired into spawn :4229, send :5116, respawn :5414 and :5638, sup-spawn :12779. The lane adds the soft 350k arm, --force-band overriding SOFT ONLY, and occupancy in the sup-checkpoint header. Brief points at those line numbers rather than describing the behaviour.
+Named three constraints that outrank the feature: --force-band must not pass the hard ceiling (own test), the structural exemptions and the fail-toward-band rule for unknown occupancy survive unchanged, and the handoff verbs stay exempt -- a gate that blocks the remedy is worse than no gate.
+The third path the instruction named does not exist: fleet only READS mcx records for token accounting (:11421, :11475); mcx lanes are dispatched by hand. Told the lane to confirm by grep and report it, not to build one. First brief validated through fleet brief: the Serves: citation passes.
+
+## 2026-09-11T17:39:40Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+Wave 77: w81/band-gate merged b2a8dc7. Soft-band refusal live on spawn/send/respawn/sup-spawn; --force-band clears soft only and is structurally unable to clear the hard ceiling (gated on verdict == in-band, pinned by its own test). Verified 999 passed/4 skipped on 3.10, 769/1 on the 3.12 subset.
+Lane changed four verbs and left skills/fleet/SKILL.md untouched though its CLI list claims to be derived from build_parser(); I added --force-band to all four lines and stated what it cannot override. Same doc-gap class as the --nonce list earlier this generation -- worth a standing brief line: a lane that adds a FLAG updates the CLI list, not just a lane that adds a verb.
+MEASURED and reported by the lane: there is no mcx dispatch helper to gate.
