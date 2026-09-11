@@ -18,7 +18,8 @@ def _line_count(path: Path) -> int:
 
 
 def _files(root: Path):
-    return sorted(path for path in root.rglob("*") if path.is_file())
+    return sorted(path for path in root.rglob("*")
+                  if path.is_file() and "__pycache__" not in path.parts)
 
 
 def _loaded_entries(path: Path):
@@ -86,8 +87,6 @@ def _fleet_prose_lines():
     return len(doc_lines | comment_lines)
 
 
-@pytest.mark.xfail(strict=False,
-                   reason="w69-code-prose will close the bin/fleet.py prose cap")
 def test_fleet_py_docstring_and_comment_cap():
     assert _fleet_prose_lines() <= 4000
 
@@ -98,9 +97,17 @@ def test_fleet_skill_total_cap():
     assert sum(_line_count(path) for path in _files(ROOT / "skills/fleet")) <= 400
 
 
-@pytest.mark.xfail(strict=False,
-                   reason="w69-zero-prose will close the repository prose lint")
 def test_forbidden_prose_is_absent_from_scoped_surfaces():
+    """No history narrative in the surfaces that load into a tier's context.
+
+    Scoped to PROSE -- comments, docstrings and markdown -- not to every line.
+    The handoff protocol's own vocabulary is `superseded_at`,
+    `HANDOFF_SUPERSEDED_KEY` and `HANDOFF_SUPERSEDED_BY_RELEASE`, and a doctor
+    row tells the operator a legacy file is superseded. Those are identifiers
+    and user-facing text, not a record of what a document used to say. A lint
+    that cannot tell them apart can only ever be xfail, which is the same as
+    not having it.
+    """
     needles = ("corrected 20", "superseded", "SUPERSEDED", "CORRECTED")
     roots = [ROOT / name for name in ("bin", "CLAUDE.md", "skills",
                                       "supervisor", "docs/operator")]
@@ -108,10 +115,41 @@ def test_forbidden_prose_is_absent_from_scoped_surfaces():
     for root in roots:
         paths = [root] if root.is_file() else _files(root)
         for path in paths:
-            for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            # The journal archive is history by definition and loads into no
+            # tier's context, exactly like docs/archive/.
+            if "journal-history" in path.parts:
+                continue
+            prose = _prose_lines(path)
+            for line_no, line in prose:
                 if any(needle in line for needle in needles):
                     offenders.append(f"{path.relative_to(ROOT)}:{line_no}")
     assert not offenders, offenders
+
+
+def _prose_lines(path):
+    """(line_no, text) for comment, docstring and markdown lines only."""
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if path.suffix != ".py":
+        return list(enumerate(lines, 1))
+    out = [(i, ln) for i, ln in enumerate(lines, 1) if ln.lstrip().startswith("#")]
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef, ast.Module)):
+            continue
+        body = node.body
+        if not (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            continue
+        start = body[0].lineno
+        end = getattr(body[0], "end_lineno", start)
+        out += [(i, lines[i - 1]) for i in range(start, end + 1)]
+    return sorted(set(out))
 
 
 @pytest.mark.xfail(strict=False,
