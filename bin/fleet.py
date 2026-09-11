@@ -825,7 +825,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12269) -- render the release explanation.
+      * `_tombstone_releasing_body` (:12277) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -10310,10 +10310,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
     :1950, :2012, :2090, :2915, :5981, :6143, :6340, :6460, :6496, :6658, :6659, :6729,
-    :6739, :6750, :6844, :7319, :10260, :12561, :12562, :12623, :13402`).
+    :6739, :6750, :6844, :7319, :10260, :12570, :12571, :12632, :13433`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :5246, :5582, :8764,
-    :13727. This makes union identity safe; the age boundary distinguishes respawn.
+    :13758. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10920,7 +10920,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:5246, :5582, :8764,
-    # :13727) -- so union identity cannot make one body answer for another.
+    # :13758) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11345,10 +11345,13 @@ def cmd_sup_checkpoint(args) -> int:
             verb="sup-checkpoint")
         supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body)
         roll = roll_supervisor_journal()
+        occupancy = _transcript_occupancy(find_transcript_path(None, caller))
+        verdict = supervisor_band_verdict(occupancy, "supervisor")
+        claim["context_occupancy"] = occupancy
+        claim["context_verdict"] = verdict["verdict"] if occupancy is not None else None
+        claim["context_measured_at"] = now_iso()
         claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
-    occupancy = _transcript_occupancy(find_transcript_path(None, caller))
-    verdict = supervisor_band_verdict(occupancy, "supervisor")
     occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
     git = _supervisor_git_board()
     if "error" in git:
@@ -12243,9 +12246,14 @@ def cmd_sup_heartbeat(args) -> int:
     """`fleet sup-heartbeat [--sid S]` -- beat without journal spam (GOALS
     frugality: a beat is not an event worth a checkpoint)."""
     with fleet_lock():
-        claim, _, notices = _require_claim_holder(
+        claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-heartbeat")
+        occupancy = _transcript_occupancy(find_transcript_path(None, caller))
+        verdict = supervisor_band_verdict(occupancy, "supervisor")
+        claim["context_occupancy"] = occupancy
+        claim["context_verdict"] = verdict["verdict"] if occupancy is not None else None
+        claim["context_measured_at"] = now_iso()
         claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
     print(f"heartbeat refreshed for {claim['incarnation_id']}")
@@ -12366,7 +12374,8 @@ def _project_claim(claim, now=None):
             pending_age = None
     out = {key: claim.get(key) for key in (
         "incarnation_id", "session_id", "claimed_at", "heartbeat_at", "claimed_via",
-        "lineage_id", "nonce_seq", "state", "released_at", "released_by_sid", "reason")}
+        "lineage_id", "nonce_seq", "state", "released_at", "released_by_sid", "reason",
+        "context_occupancy", "context_verdict", "context_measured_at")}
     out["nonce_present"] = bool(claim.get("nonce_hash"))
     out["pending_present"] = bool(claim.get("pending_nonce_hash"))
     out["pending_age_seconds"] = pending_age
@@ -12692,6 +12701,8 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "body_name": body_name,
         "limited": bool(limited_rows),
         "limit_reset_at": max(horizons, default=None),
+        "context_occupancy": claim.get("context_occupancy") if isinstance(claim, dict) else None,
+        "context_verdict": claim.get("context_verdict") if isinstance(claim, dict) else None,
         "heartbeat_age_seconds": sup.get("heartbeat_age_seconds"),
         "goals_active": bool(sup.get("goals_active")),
     }
@@ -12707,6 +12718,10 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at")
     }
+    detail.update({
+        key: obs.get(key) for key in
+        ("context_occupancy", "context_verdict")
+    })
     if not obs.get("goals_active"):
         detail["quiet"] = True
         return "PAGE", "supervisor goals inactive", detail
@@ -12729,6 +12744,22 @@ def _sup_guard_decide(observation):
         if _limit_reset_passed({"limit_reset_at": obs.get("limit_reset_at")}):
             reason += "; reset horizon passed, interface must resume"
         return "PAGE", reason, detail
+
+    # An over-band body must not be given more work -- but only a LIVE one.
+    # The recorded verdict outlives the body that wrote it, so firing this arm
+    # on a stale claim would send a DEAD over-band supervisor to PAGE instead
+    # of the DISPATCH that replaces it, and an over-band body is the one most
+    # likely to die. A fresh heartbeat is the liveness the arm requires; a
+    # stale one falls through to the WAKE/DISPATCH arms unchanged.
+    _age = obs.get("heartbeat_age_seconds")
+    if (obs.get("state") == "held"
+            and obs.get("context_verdict") == "over-band"
+            and isinstance(_age, (int, float))
+            and _age <= SUPERVISOR_CLAIM_STALE_SECONDS):
+        return "PAGE", (
+            f"supervisor context over-band: "
+            f"occupancy={obs.get('context_occupancy')}; "
+            f"ceiling={SUPERVISOR_BAND_HARD_TOKENS}"), detail
 
     state = obs.get("state")
     claim = obs.get("claim") or {}

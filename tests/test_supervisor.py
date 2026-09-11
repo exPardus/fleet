@@ -1065,6 +1065,56 @@ class TestCheckpointHeartbeat:
         assert latest["inc"] == "inc-me"
         assert fleet.read_incarnation()["heartbeat_at"] > old_beat
 
+    def test_checkpoint_records_own_context_measurement(self, sup_home, tmp_path,
+                                                        monkeypatch):
+        transcript = tmp_path / "caller.jsonl"
+        transcript.write_text(json.dumps({
+            "type": "assistant", "message": {"usage": {
+                "input_tokens": 100000,
+                "cache_creation_input_tokens": 120000,
+                "cache_read_input_tokens": 240000,
+            }}}) + "\n", encoding="utf-8")
+        seen = []
+        monkeypatch.setattr(
+            fleet, "find_transcript_path",
+            lambda name, sid: seen.append((name, sid)) or transcript)
+        self._hold(sid="sid-claim")
+        live = fleet.mint_nonce()
+        claim = fleet.read_incarnation()
+        claim.update(nonce_hash=fleet.nonce_digest(live), nonce_seq=1)
+        fleet.write_incarnation(claim)
+        assert fleet.cmd_sup_checkpoint(
+            SimpleNamespace(body="measured", kind="CHECKPOINT", sid="sid-caller",
+                            nonce=live)) == 0
+        claim = fleet.read_incarnation()
+        assert seen == [(None, "sid-caller")]
+        assert claim["context_occupancy"] == 460000
+        assert claim["context_verdict"] == "over-band"
+        assert claim["context_measured_at"]
+
+    def test_heartbeat_records_null_context_verdict_when_transcript_unreadable(
+            self, sup_home, monkeypatch):
+        monkeypatch.setattr(fleet, "find_transcript_path",
+                            lambda name, sid: None)
+        self._hold()
+        assert fleet.cmd_sup_heartbeat(SimpleNamespace(sid="sid-me")) == 0
+        claim = fleet.read_incarnation()
+        assert claim["context_occupancy"] is None
+        assert claim["context_verdict"] is None
+        assert claim["context_measured_at"]
+
+    def test_sup_status_json_surfaces_context_measurement(self, sup_home, capsys):
+        self._hold()
+        claim = fleet.read_incarnation()
+        claim.update(context_occupancy=375000, context_verdict="in-band",
+                     context_measured_at="2026-09-12T00:00:00Z")
+        fleet.write_incarnation(claim)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        info = json.loads(capsys.readouterr().out)
+        assert info["incarnation"]["context_occupancy"] == 375000
+        assert info["incarnation"]["context_verdict"] == "in-band"
+        assert info["incarnation"]["context_measured_at"] == "2026-09-12T00:00:00Z"
+
     def test_non_holder_refused_journal_untouched(self, sup_home):
         self._hold(sid="sid-holder")
         args = SimpleNamespace(body="intruder", kind="CHECKPOINT", sid="sid-intruder")
