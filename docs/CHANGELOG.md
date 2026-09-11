@@ -1,4 +1,8 @@
 # Operator changelog
+- 2026-09-11 — `062fcd9`: `fleet land <lane>` validates a lane's structured result, commits exactly the paths it lists when the lane could not commit, rebases it on the source tip, runs its named tests plus the docs-currency and receipt checks, and prints ten lines ending GREEN or RED — so a failing lane reaches you as an exit code, never as prose.
+- 2026-09-11 — `062fcd9`: `docs/lanes/<lane>.json` is the lane result contract — files changed, tests with their rc and counts, claims each tied to a proving command, blockers — and a claim with no command behind it is refused.
+- 2026-09-11 — `dd6c271`: `tools/knowledge_index.py` generates and checks `knowledge/INDEX.md`, fails a stale index or an over-cap boot entry, and rolls lessons older than 30 days to the archive verbatim; notes loaded on demand are reported over cap, never moved.
+- 2026-09-11 — `46b80e8`: the fleet skill's CLI list names every verb that accepts `--nonce` — it showed 6 where `build_parser()` has 21, and omitting the flag is refused as a second-body continuity failure, which reads like an incident and is not one.
 - 2026-09-11 — `4def0a9`: the documentation tree drops to 19,542 live lines — lane reports, reviews, decisions and superpowers move verbatim into `docs/archive/`, which nothing loads and no audit reads as a claim about the current tree.
 - 2026-09-11 — `c47f75a`: `bin/fleet.py` carries no history narrative — 12,268 docstring and comment lines become 3,001 with the executable code unchanged.
 - 2026-09-11 — `581e3f3`: the `bin/fleet.py` split contract is fixed — 80 index/query definitions, their dependencies and the import direction — and records why the boundary needed one more leaf than the ruling scoped.
