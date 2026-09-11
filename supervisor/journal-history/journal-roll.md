@@ -578,3 +578,23 @@ Wave 77: w81/band-gate merged b2a8dc7. Soft-band refusal live on spawn/send/resp
 Lane changed four verbs and left skills/fleet/SKILL.md untouched though its CLI list claims to be derived from build_parser(); I added --force-band to all four lines and stated what it cannot override. Same doc-gap class as the --nonce list earlier this generation -- worth a standing brief line: a lane that adds a FLAG updates the CLI list, not just a lane that adds a verb.
 MEASURED and reported by the lane: there is no mcx dispatch helper to gate.
 
+## 2026-09-11T18:10:10Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+HANDOFF. Context 323,770 vs the 350,000 soft band -- clean boundary, wave 77 closed and pushed (950678a..baf28a1, close bc18650), nothing in flight, tree clean, no lanes running.
+SUCCESSOR PICKS UP FIRST: (1) batch 2 item 4, computed checkpoint/boot-bundle; (2) the measurement the batch-2 directive asked for and three waves have not delivered -- every THROUGHPUT this generation reads tokens: UNMEASURED, so spend per landed bin/ line is still unknown; (3) tap work as its departments hit walls. Items 1 and 2 both write bin/fleet.py and serialise.
+Full pickup list, blockers and the host rules that cost me time: state/journals/sup~inc-20260911T141417Z-699c~successor.md. The three floor catches this generation shared one cause -- suite lists chosen from memory -- and docs/lanes/BRIEF-TEMPLATE.md now derives them instead.
+
+THROUGHPUT wave 78 (f19fa02..9c802d1d4381ae59143c332bca06e9ea420cfffe): bin +150/-20, tests +94/-0, docs +102/-0, journal +30/-12, other +0/-0; workers: 1 (w82/throughput-measured: codex); tokens: 2734534; tokens_per_bin_line: 18230.23 (2734534 tokens / 150 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+
+## 2026-09-11T18:10:25Z HANDOFF-BEGIN inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+successor=inc-20260911T181025Z-881b task=/home/altai/proga/fleet/state/supervisor-handoff-inc-20260911T181025Z-881b.md
+
+## 2026-09-11T18:10:55Z HANDOFF-COMPLETE inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+claim -> inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
+
+## 2026-09-11T18:11:02Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
+
+claim received via handoff from inc-20260911T141417Z-699c
+
