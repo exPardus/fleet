@@ -324,6 +324,16 @@ def resolve_bash():
 BASH = None
 
 
+def _is_archive_path(path, root):
+    """Whether *path* is under docs/archive, the one-way prose sink."""
+    try:
+        relative = pathlib.Path(path).resolve().relative_to(
+            pathlib.Path(root).resolve())
+    except ValueError:
+        return False
+    return relative.parts[:2] == ("docs", "archive")
+
+
 class Receipt:
     __slots__ = ("cmd", "expected", "exit_code", "line", "volatile", "pin", "live")
 
@@ -994,6 +1004,10 @@ def main(argv=None):
     self_test_verdict = Verdict.PASSED
     receipts_failed = False
     for p in args.paths:
+        if _is_archive_path(p, root):
+            print(f"=== {p} ===")
+            print("IGNORED: docs/archive is historical prose outside receipt scope")
+            continue
         text = pathlib.Path(p).read_text(encoding="utf-8")
         print(f"=== {p} ===")
         if args.self_test:
