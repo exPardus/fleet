@@ -812,20 +812,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7228) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8123) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11037) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:7247) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:8142) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:11056) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2005) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:10911) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:2507) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8373) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:10930) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:2518) -- expose that distinction to views.
+      * `_doctor_check_registry` (:8392) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4518) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:11862) -- render the release explanation.
+      * `_print_snapshot_table` (:4531) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:11885) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1756,7 +1756,7 @@ def find_transcript_path(name: str, sid: str):
 
 # Context occupancy bands (three-tier-command.md §11): soft means hand off at the
 # next boundary; hard means finish in-flight work and start none. Supervisor
-# dispatch enforces its hard threshold. Explicit tiers prevent workers silently
+# dispatch enforces both thresholds. Explicit tiers prevent workers silently
 # receiving the supervisor's higher allowance.
 SUPERVISOR_BAND_SOFT_TOKENS = 350_000
 SUPERVISOR_BAND_HARD_TOKENS = 400_000
@@ -1987,7 +1987,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11037`), because legacy upgrades also require a complete registry.
+    (`:11056`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:892`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -2097,11 +2097,12 @@ def _resolve_worker_target(name):
 
 
 
-def _ceiling_refuses_dispatch(verb, now=None):
-    """Return a spawn/send refusal when supervisor occupancy reaches the hard band.
+def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
+    """Return a dispatch refusal at the supervisor soft or hard band.
     Exempt absent FLEET_WORKER, absent sid and definite non-holders, in that order.
     Unknown holder identity remains subject; unknown occupancy refuses. Read the
-    caller's own transcript and compare SUPERVISOR_BAND_HARD_TOKENS.
+    caller's own transcript and compare the supervisor soft and hard thresholds.
+    ``force_band`` override may pass the soft band, but never the hard ceiling.
     The stamp-absence exemption can also exempt a hosted supervisor because the
     daemon substitutes its environment; this is a current limitation (§18.4).
     SPEC.md:204's worker-turn claim prohibition concerns the separate claim gate.
@@ -2129,21 +2130,31 @@ def _ceiling_refuses_dispatch(verb, now=None):
     # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
     # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
-    if occupancy is not None and occupancy < SUPERVISOR_BAND_HARD_TOKENS:
-        return None                     # below the hard ceiling -- dispatch allowed
+    verdict = supervisor_band_verdict(occupancy, "supervisor")
+    if verdict["verdict"] == "below-band":
+        return None
     occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    if verdict["verdict"] == "in-band" and force_band:
+        return None
+    if verdict["verdict"] == "over-band":
+        return (
+            f"{verb}: refusing -- the supervisor claim-holder's context occupancy "
+            f"({occ_txt}) is at or above the {SUPERVISOR_BAND_HARD_TOKENS:,}-token hard ceiling "
+            f"(three-tier §11.3); --force-band cannot override the hard ceiling. Past "
+            f"the ceiling, start NO new worker turns: let the in-flight wave finish and "
+            f"READ its outcomes (`fleet status`/`result`/`peek`/`wait`), then hand off "
+            f"(`fleet sup-handoff-begin`). The handoff verbs are exempt from this refusal. "
+            f"(Fleet-enforced, not discretion. A session with no `FLEET_WORKER` stamp is "
+            f"exempt structurally, three-tier §11.3 ND4c -- so if you believe you are the "
+            f"interface tier and are reading this, the hosting daemon substituted an "
+            f"environment carrying a stamp into a session it never launched: `fleet doctor` "
+            f"names that leak.)")
     return (
-        f"{verb}: refusing -- the supervisor claim-holder's context occupancy "
-        f"({occ_txt}) is at or above the {SUPERVISOR_BAND_HARD_TOKENS:,}-token hard ceiling "
-        f"(three-tier §11.3). Past the ceiling, start NO new worker turns: let "
-        f"the in-flight wave finish and READ its outcomes (`fleet status`/"
-        f"`result`/`peek`/`wait`), then hand off (`fleet sup-handoff-begin`). "
-        f"The handoff verbs are exempt from this refusal. (Fleet-enforced, not "
-        f"discretion. A session with no `FLEET_WORKER` stamp is exempt "
-        f"structurally, three-tier §11.3 ND4c -- so if you believe you are the "
-        f"interface tier and are reading this, the hosting daemon substituted "
-        f"an environment carrying a stamp into a session it never launched: "
-        f"`fleet doctor` names that leak.)")
+        f"{verb}: refusing -- the supervisor claim-holder's context occupancy ({occ_txt}) "
+        f"is at or above the {SUPERVISOR_BAND_SOFT_TOKENS:,}-token soft trigger but below "
+        f"the {SUPERVISOR_BAND_HARD_TOKENS:,}-token hard ceiling (three-tier §11.3). "
+        f"Pass --force-band only for this soft-band judgement call, or hand off at the "
+        f"next boundary. The handoff verbs are exempt from this refusal.")
 
 
 def _record_time(rec: dict):
@@ -4226,7 +4237,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     ceiling can be written only after join; native dispatch rejects USD budgets.
     The injectable clock bounds roster join without real waits in tests."""
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
-    _ceiling_refusal = _ceiling_refuses_dispatch("spawn")
+    _ceiling_refusal = (_ceiling_refuses_dispatch("spawn", force_band=True)
+                        if getattr(args, "force_band", False)
+                        else _ceiling_refuses_dispatch("spawn"))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -5113,7 +5126,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     resolved_name = _resolve_worker_target(args.name)
     _supervisor_gate("send", nonce=getattr(args, "nonce", None),
                      send_target=resolved_name)
-    _ceiling_refusal = _ceiling_refuses_dispatch("send")
+    _ceiling_refusal = (_ceiling_refuses_dispatch("send", force_band=True)
+                        if getattr(args, "force_band", False)
+                        else _ceiling_refuses_dispatch("send"))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -5411,7 +5426,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     # Apply the ceiling here as well as in cmd_respawn for direct callers.
     # --task starts new work; bare respawn remains permitted as over-ceiling recovery.
     if getattr(args, "task", None):
-        _ceiling_refusal = _ceiling_refuses_dispatch("respawn")
+        _ceiling_refusal = (_ceiling_refuses_dispatch("respawn", force_band=True)
+                            if getattr(args, "force_band", False)
+                            else _ceiling_refuses_dispatch("respawn"))
         if _ceiling_refusal is not None:
             raise FleetCliError(_ceiling_refusal)
     name = args.name
@@ -5635,7 +5652,9 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     # is §11.4 recovery, which must remain usable to fix over-ceiling state.
     # _cmd_respawn_native repeats this check for direct callers.
     if getattr(args, "task", None):
-        _ceiling_refusal = _ceiling_refuses_dispatch("respawn")
+        _ceiling_refusal = (_ceiling_refuses_dispatch("respawn", force_band=True)
+                            if getattr(args, "force_band", False)
+                            else _ceiling_refuses_dispatch("respawn"))
         if _ceiling_refusal is not None:
             raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -5898,7 +5917,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:5827` / `cmd_respawn:5643`, before
+    # resolution that runs from `cmd_kill:5846` / `cmd_respawn:5662`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -5929,9 +5948,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:5827` / `cmd_respawn:5643`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:5846` / `cmd_respawn:5662`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:5664-5666` spells out that design -- resolve under the lock.
+    # `cmd_respawn:5683-5685` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -10170,7 +10189,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:892`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:2495`) applies here too. An unreadable registry
+    rule for the view path (`:2506`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -10242,11 +10261,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
-    :1950, :2012, :2090, :2886, :5916, :6078, :6275, :6395, :6431, :6593, :6594, :6664,
-    :6674, :6685, :6779, :7254, :10193, :12154, :12155, :12216, :12993`).
+    :1950, :2012, :2090, :2897, :5935, :6097, :6294, :6414, :6450, :6612, :6613, :6683,
+    :6693, :6704, :6798, :7273, :10212, :12177, :12178, :12239, :13018`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5185, :5519, :8699,
-    :13318. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :5200, :5536, :8718,
+    :13343. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10665,8 +10684,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5185, :5519, :8699,
-    # :13318) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:5200, :5536, :8718,
+    # :13343) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -10674,7 +10693,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:892`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10167`).
+        # names this gate as its reason (`:10186`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11030,7 +11049,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7225`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:7244`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -11088,7 +11107,11 @@ def cmd_sup_checkpoint(args) -> int:
         roll = roll_supervisor_journal()
         claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
-    print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; heartbeat refreshed")
+    occupancy = _transcript_occupancy(find_transcript_path(None, caller))
+    verdict = supervisor_band_verdict(occupancy, "supervisor")
+    occ_txt = f"{occupancy:,} tokens" if occupancy is not None else "unreadable"
+    print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; "
+          f"occupancy={occ_txt}; verdict={verdict['verdict']}; heartbeat refreshed")
     if roll["rolled"]:
         print(f"journal board rolled: {roll['moved_bytes']} bytes to "
               f"{supervisor_journal_history_path()}")
@@ -12776,7 +12799,9 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
     bypass default, and a generated boot ritual. The nonce is presented without
     rotation because this is a mutating lifecycle verb (claim-nonce §7)."""
     _supervisor_gate("sup-spawn", nonce=getattr(args, "nonce", None))
-    _ceiling_refusal = _ceiling_refuses_dispatch("sup-spawn")
+    _ceiling_refusal = (_ceiling_refuses_dispatch("sup-spawn", force_band=True)
+                        if getattr(args, "force_band", False)
+                        else _ceiling_refuses_dispatch("sup-spawn"))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
@@ -13872,6 +13897,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Pass settings-source selection through to Claude so foreign hooks can be excluded.
     p_spawn.add_argument("--setting-sources", dest="setting_sources", default=None)
     p_spawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+    p_spawn.add_argument("--force-band", action="store_true",
+                         help="override the supervisor soft context-band refusal; never the hard ceiling")
     # Enforce the cumulative token ceiling before resume and expose it to the
     # Stop hook so pending mail cannot block a ceiling stop.
     p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
@@ -13911,6 +13938,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("name")
     p_send.add_argument("message")
     p_send.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+    p_send.add_argument("--force-band", action="store_true",
+                        help="override the supervisor soft context-band refusal; never the hard ceiling")
 
     p_interrupt = sub.add_parser("interrupt", help="kill a worker's running turn")
     p_interrupt.add_argument("name")
@@ -13928,6 +13957,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("name")
     p_respawn.add_argument("--task", default=None)
     p_respawn.add_argument("--force", action="store_true")
+    p_respawn.add_argument("--force-band", action="store_true",
+                           help="override the supervisor soft context-band refusal; never the hard ceiling")
     p_respawn.add_argument("--yes", action="store_true",
                            help="confirm respawning a worker this session did not spawn")
     p_respawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
@@ -14071,6 +14102,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  f"{SUP_SPAWN_DEFAULT_MODE}, §10.2 "
                                  f"earned-privilege)")
     p_supspawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+    p_supspawn.add_argument("--force-band", action="store_true",
+                            help="override the supervisor soft context-band refusal; never the hard ceiling")
     # Carry settings-source selection so foreign Stop hooks can be excluded.
     p_supspawn.add_argument("--setting-sources", dest="setting_sources", default=None)
 

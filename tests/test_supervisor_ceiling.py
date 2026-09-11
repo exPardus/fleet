@@ -1,5 +1,5 @@
-"""three-tier-command.md §11.3 -- the supervisor's hard dispatch ceiling (B4),
-**400k since the 2026-08-05 operator ruling** (200k before it).
+"""three-tier-command.md §11.3 -- the supervisor's dispatch bands (B4),
+**350k soft / 400k hard since the 2026-08-05 operator ruling** (200k before it).
 
 At and above `SUPERVISOR_BAND_HARD_TOKENS` the dispatch verbs (`fleet spawn`/`fleet send`)
 REFUSE to start new worker turns -- but for EXACTLY ONE caller: the supervisor
@@ -184,13 +184,23 @@ class TestCeiling:
         self._occ(monkeypatch, fleet.SUPERVISOR_BAND_HARD_TOKENS)
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
-    def test_soft_band_does_not_refuse_dispatch(self, ceil_home, monkeypatch):
-        # soft <= occ < hard is a standing directive, NOT a fleet refusal
-        # (§11.3). 375k sits inside the supervisor's 350-400k band, which is
-        # where the old 175k sat inside 150-200k.
+    def test_soft_band_refuses_dispatch(self, ceil_home, monkeypatch):
+        # The soft trigger is now fleet-enforced; the explicit override is the
+        # only escape while the hard ceiling remains fail-safe.
         self._as_supervisor(monkeypatch)
         self._occ(monkeypatch, 375000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is None
+        reason = fleet._ceiling_refuses_dispatch("spawn")
+        assert reason is not None
+        assert "350,000" in reason and "400,000" in reason
+
+    def test_force_band_overrides_soft_but_not_hard(self, ceil_home, monkeypatch):
+        self._as_supervisor(monkeypatch)
+        self._occ(monkeypatch, 375000)
+        assert fleet._ceiling_refuses_dispatch("spawn", force_band=True) is None
+        self._occ(monkeypatch, 405000)
+        reason = fleet._ceiling_refuses_dispatch("spawn", force_band=True)
+        assert reason is not None
+        assert "hard ceiling" in reason and "cannot override" in reason
 
     def test_below_band_does_not_refuse(self, ceil_home, monkeypatch):
         self._as_supervisor(monkeypatch)
