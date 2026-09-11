@@ -526,3 +526,9 @@ successor=inc-20260911T141417Z-699c task=/home/altai/proga/fleet/state/superviso
 
 claim -> inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
 
+## 2026-09-11T14:14:59Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=3a0004fd-cbd4-43ea-9389-3e639caadbc3
+
+claim received via handoff from inc-20260910T153011Z-0a56
+
+THROUGHPUT wave 75 (6537949ace0b3cb25808e086057c1d497b93a37e..5e2d14cc728caffa2a21bc2d9c041f2342a2502d): bin +346/-1, tests +166/-4, docs +127/-0, journal +122/-71, other +156/-6; workers: 2 (w78/fleet-land: codex, w79/knowledge-caps: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
+
