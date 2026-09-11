@@ -1,4 +1,6 @@
 # Operator changelog
+- 2026-09-11 — `502f3f7`: THROUGHPUT reads a lane's substrate from its record (`unknown` when none exists) instead of defaulting to `claude`, and `state/interface/board.md` lists a task file as a pending ruling only while it carries no `RULED:` line.
+- 2026-09-11 — `196e3de`: the keeper pages only a pane actually running `claude` — a pane that has dropped to a shell falls back to the window path, which recreates `work:fleet` — and `fleet wave-close` removes lane worktrees whose branch is merged, skipping unmerged or dirty ones.
 - 2026-09-11 — `1587302`: `fleet wave-close` refuses to close when a merge since base has no CHANGELOG line, resolves `--base` to the previous close commit, counts lanes merged rather than registry rows, sums Claude and Codex tokens with `UNMEASURED` naming the missing source, and prints `protected: N (unread mail)`.
 - 2026-09-11 — `1587302`: `state/interface/board.md` counts a ruling pending only while its task file carries no `RULED:` line.
 - 2026-09-11 — `853f72e`: supervisor and worker output is compressed by rule, in the fleet skill and the sup-boot bundle.

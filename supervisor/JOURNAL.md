@@ -27,6 +27,8 @@ keeper wake on by default) — one astra lane, next wave. Batch 2's five verbs a
 
 BRIEFS ARE NOW UNDER ONE SCREEN, per the new prose caps. Mine had been ~80 lines.
 
+THROUGHPUT wave 70 (64da0aa2331543958825cee4abffc29b8f94b5b5..e9a394efcd9d4c3de2531c90072550572209f9fd): bin +257/-61, tests +104/-9, docs +38/-0, journal +72/-61, other +0/-0; workers: 2 (w70/keeper-pane-live: codex, w70/substrate-and-board: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
+
 ## 2026-09-10T22:42:04Z CHECKPOINT inc=inc-20260910T153011Z-0a56 sid=819e3008-5862-4e86-b01c-993ecfc50bfe
 
 WAVE 68 CLOSED AND PUSHED (`116860f..16f28c5`). The prose campaign's phase 1 landed and
