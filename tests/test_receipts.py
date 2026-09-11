@@ -76,21 +76,6 @@ RECEIPT_FLOOR = {
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
     # Enforced 2026-07-27, when M1 + M2's worker-facing surface shipped and the
-    # §11.7 grant-execution experiment was landed. Six at first, one of them
-    # `# volatile` and therefore WARN-only and not executed here at all.
-    #
-    # Eight after that day's fix wave, and NONE volatile. The experiment block
-    # was volatile for a reason that turned out to be false in two clauses and
-    # a real defect in the third: it read a LIVE ABSOLUTE PATH into the
-    # supervisor's working journal, so its `# at` pin constrained nothing and
-    # the text it cited had never been committed anywhere -- it reproduced by
-    # accident and was one `git stash` from evaporating. The transcript is now
-    # a committed artifact under `docs/specs/receipts/` and the block is a
-    # normal enforced receipt, which is why this suite executes all eight.
-    "fleet-index.md": 8,
-    # Joined the enforced set in the 2026-07-27 `unbuilt-sweep` pass (see
-    # UNENFORCED below). Floor is the count the harness extracts today.
-    "autoclean.md": 6,
     # Enforced by the views-doctrine slice (2026-07-27): D4 asserted a rule as
     # if it were shipped behaviour for days while shipped behaviour violated it.
     # Its receipts are the first in this corpus that EXECUTE fleet rather than
@@ -98,11 +83,6 @@ RECEIPT_FLOOR = {
     # materialised pinned tree, so they stay hermetic and never touch a live
     # fleet's state/.
     "terminal-surface.md": 7,
-    # The graceful-succession slice (2026-07-27). Its whole subject is a fleet
-    # asserting a state nothing measured -- `sup-release` recorded an accurate
-    # free-text reason and no surface parsed it -- so every CURRENT-STATE claim
-    # it makes about shipped code is a pinned receipt rather than a sentence.
-    "graceful-succession.md": 14,
 }
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
@@ -122,12 +102,6 @@ SPEC_DIR = REPO / "docs" / "specs"
 # omission. This is gap 2's lesson one level up -- exclude explicitly, or the
 # exclusion is invisible.
 UNENFORCED = {
-    "portability.md": (
-        "[SUPERSEDED - native-substrate pivot 2026-07-13]. Its one receipt-shaped "
-        "block is a hand-summarised line-number roll-up "
-        "('tests/test_core.py:371,377,... # 10x fleet.pid_alive(...)'), never "
-        "literal grep output, and it greps for probe_liveness/pid_alive which the "
-        "pivot deleted. Pre-existing; flagged to the manager, not fixed here."),
     # native-substrate.md was ENFORCED by the ns/receipts-enforce slice: its
     # claims about fleet's OWN code (`bin/fleet.py` helpers added / probes deleted)
     # are now pinned grep receipts, plus one volatile `claude --version`. Its
@@ -135,36 +109,6 @@ UNENFORCED = {
     # -- it lives outside the repo and a `--bg` worker cannot reproduce it -- and
     # the three dead-daemon `RATIFICATION WITHHELD` strings are deliberately NOT
     # receipted (no honest reproduction exists; see that spec's receipts section).
-    # autoclean.md was ENFORCED by the 2026-07-27 `unbuilt-sweep` pass: correcting
-    # its stale `ready-for-build` status line to BUILT required a grep receipt for
-    # the claim, so it gained a "Build receipt" section with pinned blocks and left
-    # this list. `test_every_spec_is_classified`'s `stale` assertion is what names
-    # this edit as the remedy -- a spec that grows receipts must not stay listed.
-    # terminal-surface.md was ENFORCED by the views-doctrine slice (2026-07-27):
-    # its D4 read as a description of shipped behaviour that measurement showed
-    # false, so the measurement now lands as pinned receipts. See RECEIPT_FLOOR.
-    "providers.md": "predates the convention; no fenced receipts.",
-    "phase1-hardening-kernels.md": "predates the convention; no fenced receipts.",
-    "phase-2-watchtower.md": "predates the convention; no fenced receipts.",
-    "phase-3-telegram.md": "predates the convention; no fenced receipts.",
-    "phase-4-webui.md": "predates the convention; no fenced receipts.",
-    "phase-5-intelligence.md": "predates the convention; no fenced receipts.",
-    # fleet-index.md was UNENFORCED here while it specced unbuilt behaviour --
-    # `fleet index` did not exist, so there was nothing to re-execute, and the
-    # entry's own reason string was flagged in that spec's §16 as something that
-    # would rot the moment anything built. It did. M1's shard layer and M2's
-    # worker-facing surface shipped 2026-07-26/27, the §11.7 grant-execution
-    # experiment was landed as a receipt, and the spec moved to the ENFORCED set
-    # above (RECEIPT_FLOOR). Promoting rather than rewording is the point: a
-    # document that gains receipts and keeps its exclusion proves nothing.
-    # Drafting-stage design doc (2026-07-30): its measured claims (the FLEET_HOME
-    # resolution shape, the hook _fleet_home duplicates, the founding-incident
-    # timestamps) are cited by symbol/path in prose, not pasted transcripts, and
-    # its dual-lens gate re-derived them against the tree (mf-rs: 32 claims, 0
-    # ROTTED). Gains pinned receipts when it reaches ready-for-build -- the gate
-    # findings (mf-rb F1/F2/F3) already oblige a redraft before that.
-    "multi-fleet.md": ("Status: drafting; no fenced receipts yet -- receipts land "
-                       "with the ready-for-build revision."),
 }
 
 
