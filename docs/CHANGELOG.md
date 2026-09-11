@@ -1,4 +1,29 @@
 # Operator changelog
+THROUGHPUT wave 79 (638878b..831f7f82cfbeb3d8fe0ac50814ef52ef44338ba8): bin +233/-22, tests +97/-0, docs +97/-0, journal +31/-20, other +0/-0; workers: 1 (w83/computed-board: codex); tokens: 2819275; tokens_per_bin_line: 12099.89 (2819275 tokens / 233 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+Wave 79 — the supervisor's board computes itself, and batch 2 is discharged
+
+merge(w83/computed-board) ca1732a. `sup-checkpoint` refuses a body over three
+lines before it takes the lock — so a refusal neither rotates the nonce nor
+files a false second-body row — and prints git identity, cleanliness, live
+lanes and blockers it derives itself. The boot bundle gains a computed board:
+pickup list, live lanes with their worktrees, undischarged standing
+directives, dispatch gates. Every source is labelled, and an unreadable one
+names itself rather than defaulting to a plausible value. Live bundle 9,377
+chars against the 40,000 cap.
+
+Four defects found at landing, none visible to the lane, whose sandbox had no
+DNS and which therefore executed none of its own tests: an unanchored
+`DISCHARGED` matched the words "not discharged" and silently dropped live
+directives from the board; `RULED` was read as a discharge, though the batch-2
+directive says RULED and still had an item in flight; both board helpers read
+`Path.cwd()` instead of `FLEET_HOME`, so a different git repository would have
+answered every question plausibly and wrongly; and the new liveness-shaped
+reader was undeclared to the census in `tests/test_liveness_readers.py`.
+
+The mechanise-batch-2 directive is now DISCHARGED, each clause carrying the
+wave and merge that landed it: `fleet land` and the structured lane result
+(w78), `fleet brief` (w80), the computed board (w83), knowledge caps (w79),
+and the measurement itself (w82).
 THROUGHPUT wave 78 (f19fa02..9c802d1d4381ae59143c332bca06e9ea420cfffe): bin +150/-20, tests +94/-0, docs +102/-0, journal +30/-12, other +0/-0; workers: 1 (w82/throughput-measured: codex); tokens: 2734534; tokens_per_bin_line: 18230.23 (2734534 tokens / 150 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
 Wave 78 — THROUGHPUT stops saying UNMEASURED
 
