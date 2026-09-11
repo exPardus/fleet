@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -14000,6 +14000,11 @@ def build_parser() -> argparse.ArgumentParser:
         p_ix.add_argument("--path", default=None,
                           help="index root (default: the current directory)")
 
+    p_land = sub.add_parser(
+        "land",
+        help="stage a lane result, rebase its branch, and run its checks")
+    p_land.add_argument("lane", help="lane name, such as w78")
+
     # Query operations use only the target project, never fleet state.
     p_q = sub.add_parser("q", help="query this project's symbol index (M2)")
     # Stashed so `cmd_q` can raise argparse's own exit-2 usage error for the
@@ -14261,6 +14266,10 @@ def main(argv=None) -> int:
         return 1
     args = parser.parse_args(_absorb_minted_flag_values(stripped))
     try:
+        # Land is a repository operation owned by its leaf module. It must not
+        # resolve or read fleet-home state before it can prepare a lane.
+        if args.command == "land":
+            return fleet_land.cmd_land(args)
         # Bare init creates in cwd; explicit selectors and statusline setup use the
         # normal resolver. Do not synthesize args.home, which also appends the
         # machine-list entry and invokes the destructive tier.
