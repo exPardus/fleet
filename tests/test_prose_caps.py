@@ -92,8 +92,6 @@ def test_fleet_py_docstring_and_comment_cap():
     assert _fleet_prose_lines() <= 4000
 
 
-@pytest.mark.xfail(strict=False,
-                   reason="w69-skill-caps will close the skills/fleet total cap")
 def test_fleet_skill_total_cap():
     assert sum(_line_count(path) for path in _files(ROOT / "skills/fleet")) <= 400
 
