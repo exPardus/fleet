@@ -7,5 +7,5 @@ Type=oneshot
 WorkingDirectory=%h/proga/fleet
 EnvironmentFile=%h/.config/fleet/keeper.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 ${FLEET_HOME}/bin/fleet_keeper.py --once --fleet-home ${FLEET_HOME}
+ExecStart=/usr/bin/python3 /home/altai/proga/fleet/bin/fleet_keeper.py --once --fleet-home /home/altai/proga/fleet --fleet-home /home/altai/proga/tap
 TimeoutStartSec=300

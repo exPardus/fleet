@@ -50,10 +50,15 @@ def _one_line(text, limit=PAGE_TEXT_LIMIT):
     return fleet.one_line(text, limit)
 
 
-def _page_line(text):
-    """The exact bytes a page types: `KEEPER: `-prefixed, then one-lined.
+def _page_line(text, tag=None):
+    """The exact bytes a page types, optionally tagged for one home.
     Delegate: `fleet.interface_line` with this module's prefix."""
-    return fleet.interface_line(text, PAGE_PREFIX, PAGE_TEXT_LIMIT)
+    if tag:
+        prefix = f"[{tag}] {PAGE_PREFIX}"
+        text = f"[{tag}] {text}"
+    else:
+        prefix = PAGE_PREFIX
+    return fleet.interface_line(text, prefix, PAGE_TEXT_LIMIT)
 
 
 # --------------------------------------------------------------------- rules
@@ -259,6 +264,45 @@ def save_state(path: Path, state: dict) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=1, sort_keys=True), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _snapshot_for_home(home, run, snapshot_fn):
+    """Read one home's snapshot without rebinding imported fleet state.
+
+    The historical injected no-argument ``snapshot_fn`` remains the seam for
+    the single-home tests and callers.  The shipped default can only read the
+    home captured when ``fleet`` was imported, so another home is read through
+    the file-only ``status --stale-ok --json`` command in a child process.
+    """
+    home = Path(home).resolve()
+    imported_home = Path(fleet.FLEET_HOME).resolve()
+    if snapshot_fn is not fleet.status_snapshot:
+        try:
+            return snapshot_fn()
+        except Exception as exc:  # noqa: BLE001 -- isolate one home
+            return {"ok": False, "reason": f"unreadable: {exc}",
+                    "workers": [], "supervisor": {}}
+    if home == imported_home:
+        try:
+            return snapshot_fn()
+        except Exception as exc:  # noqa: BLE001 -- isolate one home
+            return {"ok": False, "reason": f"unreadable: {exc}",
+                    "workers": [], "supervisor": {}}
+    argv = [sys.executable, str(_INSTALL_ROOT / "bin" / "fleet.py"),
+            "--fleet-home", str(home), "status", "--stale-ok", "--json"]
+    env = {**os.environ, "FLEET_HOME": str(home)}
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    rc, out = _run_text(run, argv, env=env)
+    if rc != 0:
+        return {"ok": False, "reason": "unreadable", "workers": [],
+                "supervisor": {}}
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return {"ok": False, "reason": "unreadable", "workers": [],
+                "supervisor": {}}
+    return data if isinstance(data, dict) else {
+        "ok": False, "reason": "unreadable", "workers": [], "supervisor": {}}
 
 
 # ------------------------------------------------------------------- collect
@@ -537,7 +581,7 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     on. MEASURED at `64aa96b`, not assumed."""
     home = Path(home)
     prev_state = prev_state or {}
-    snap = snapshot_fn()
+    snap = _snapshot_for_home(home, run, snapshot_fn)
     sup = snap.get("supervisor") or {}
     status = _sup_status(home, run)
     claim_state = sup.get("state") or "unknown"
@@ -790,11 +834,14 @@ def ensure_window(run, *, session, window, cwd, launch, out=sys.stdout):
                  "-c", cwd, launch)
 
 
-def page(run, target, text, out=sys.stdout):
+def page(run, target, text, out=sys.stdout, tag=None):
     """Type one sanitised line and submit it. Returns whether it landed --
     the caller records dedup state only for a page that did (C3).
     Delegate: `fleet.type_interface_line` with this module's prefix."""
-    return fleet.type_interface_line(run, target, text, prefix=PAGE_PREFIX,
+    prefix = f"[{tag}] {PAGE_PREFIX}" if tag else PAGE_PREFIX
+    if tag:
+        text = f"[{tag}] {text}"
+    return fleet.type_interface_line(run, target, text, prefix=prefix,
                                      out=out, limit=PAGE_TEXT_LIMIT,
                                      label="keeper")
 
@@ -808,7 +855,8 @@ def _parser():
                    help="run one tick and exit (the only mode; a timer supplies cadence)")
     p.add_argument("--dry-run", action="store_true",
                    help="print pages/wakes; touch neither tmux, daemon nor state")
-    p.add_argument("--fleet-home", default=str(_INSTALL_ROOT))
+    p.add_argument("--fleet-home", action="append", default=None,
+                   help="fleet home to observe (repeat for multiple homes)")
     p.add_argument("--tmux-session", default="work")
     p.add_argument("--window", default="fleet")
     p.add_argument("--profile", default=None,
@@ -816,11 +864,19 @@ def _parser():
     return p
 
 
-def main(argv=None, *, run=subprocess.run, now_fn=time.time,
-         snapshot_fn=fleet.status_snapshot, out=sys.stdout):
+def _run_one(argv=None, *, run=subprocess.run, now_fn=time.time,
+             snapshot_fn=fleet.status_snapshot, out=sys.stdout,
+             home_override=None, allow_import_mismatch=False):
     parser = _parser()
     args = parser.parse_args(argv)
-    home = Path(args.fleet_home).resolve()
+    home_values = args.fleet_home or [str(_INSTALL_ROOT)]
+    if home_override is not None:
+        home = Path(home_override).resolve()
+    else:
+        if len(home_values) != 1:
+            parser.error("one home is required for an individual tick")
+        home = Path(home_values[0]).resolve()
+    tag = fleet.home_tag(home)
     # I3: `--fleet-home` reaches the sup-status subprocess, git's cwd and the
     # state path -- but `fleet.FLEET_HOME` is frozen at IMPORT, so
     # `status_snapshot()` reads whatever home the imported module resolved.
@@ -829,7 +885,7 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     # rebinding it here would make the keeper a second definition of where
     # the fleet lives.
     imported_home = Path(fleet.FLEET_HOME).resolve()
-    if imported_home != home:
+    if imported_home != home and not allow_import_mismatch:
         print(f"keeper: --fleet-home {home} does not match the imported fleet "
               f"home {imported_home}; refusing", file=out)
         return 1
@@ -857,7 +913,7 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     if args.dry_run:
         print(f"[dry-run] {obs['supervisor_guard']['verdict']}", file=out)
     elif obs["supervisor_guard"].get("sent"):
-        print("keeper: supervisor wake sent", file=out)
+        print(f"[{tag}] keeper: supervisor wake sent", file=out)
     pages = evaluate(obs, now)
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     interface_notice = None
@@ -873,7 +929,7 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
         else:
             interface_notice = ("KEEPER: interface registration unavailable "
                                 f"({exc}); page delivered to {target}")
-            print(interface_notice, file=out)
+            print(f"[{tag}] {interface_notice}", file=out)
         pane = None
         pane_reason = "unknown"
     if pane:
@@ -885,17 +941,17 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
         except (OSError, ValueError) as exc:
             interface_notice = ("KEEPER: interface registration unavailable "
                                 f"({exc}); page delivered to {target}")
-            print(interface_notice, file=out)
+            print(f"[{tag}] {interface_notice}", file=out)
             interface_session = None
         if interface_session and interface_notice is None:
-            print(f"KEEPER: interface session {interface_session} is registered "
+            print(f"[{tag}] KEEPER: interface session {interface_session} is registered "
                   f"outside tmux; page delivered to {target}", file=out)
             interface_notice = ("KEEPER: interface session is registered "
                                 f"outside tmux; page delivered to {target}")
         elif interface_notice is None:
             interface_notice = ("KEEPER: interface is not registered; "
                                 f"page delivered to {target}")
-            print(interface_notice, file=out)
+            print(f"[{tag}] {interface_notice}", file=out)
 
     if interface_notice:
         if pages:
@@ -908,13 +964,13 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
 
     if args.dry_run:
         for p in pages:
-            print(f"[dry-run] {p.rule}: {_page_line(p.text)}", file=out)
+            print(f"[dry-run] {p.rule}: {_page_line(p.text, tag)}", file=out)
         if pane:
             print(f"[dry-run] interface pane {pane}; would not create a window",
                   file=out)
             return 0
         if interface_notice:
-            print(f"[dry-run] {interface_notice}; would not create a window",
+            print(f"[dry-run] [{tag}] {interface_notice}; would not create a window",
                   file=out)
             return 0
         # Mirror `ensure_window`'s own verdict (via the same classifier)
@@ -947,10 +1003,10 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
                       f"({exc})", file=out)
         if pane_reason in {"shell", "command", "dead"}:
             for p in send:
-                if page(run, target, p.text, out=out):
-                    print(f"keeper: paged {p.rule}", file=out)
+                if page(run, target, p.text, out=out, tag=tag):
+                    print(f"[{tag}] keeper: paged {p.rule}", file=out)
                     continue
-                print(f"keeper: page NOT delivered: {p.rule}", file=out)
+                print(f"[{tag}] keeper: page NOT delivered: {p.rule}", file=out)
                 previous = prev_rules.get(p.rule)
                 if previous is None:
                     rule_state.pop(p.rule, None)
@@ -959,19 +1015,19 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
         else:
             # I6: nothing is paged into a window created this tick, and the
             # dedup record is left exactly as the previous tick wrote it.
-            print(f"keeper: created {target}; pages deferred to next tick", file=out)
+            print(f"[{tag}] keeper: created {target}; pages deferred to next tick", file=out)
             rule_state = prev_rules
     else:
         for p in send:
-            if page(run, target, p.text, out=out):
-                print(f"keeper: paged {p.rule}", file=out)
+            if page(run, target, p.text, out=out, tag=tag):
+                print(f"[{tag}] keeper: paged {p.rule}", file=out)
                 continue
             # C3: a page tmux refused was never seen by anyone. Recording it
             # as sent suppressed the rule for the whole 6h re-page window --
             # the fleet's loudest alarm silenced by the failure of the wire
             # that carries it. Carry the previous entry forward (or drop the
             # key) so the next tick tries again.
-            print(f"keeper: page NOT delivered: {p.rule}", file=out)
+            print(f"[{tag}] keeper: page NOT delivered: {p.rule}", file=out)
             previous = prev_rules.get(p.rule)
             if previous is None:
                 rule_state.pop(p.rule, None)
@@ -981,6 +1037,35 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     rule_state["_hook_error_lines"] = obs["hook_error_lines"]
     save_state(state_path, rule_state)
     return 0
+
+
+def main(argv=None, *, run=subprocess.run, now_fn=time.time,
+         snapshot_fn=fleet.status_snapshot, out=sys.stdout):
+    """Run one independent tick for every selected home.
+
+    A home failure is reported and the remaining homes still run.  A lone
+    explicit home retains the historical imported-home guard; repeated homes
+    use per-home subprocess snapshots so no global fleet state is rebound.
+    """
+    parser = _parser()
+    raw = list(sys.argv[1:] if argv is None else argv)
+    parsed = parser.parse_args(raw)
+    home_values = parsed.fleet_home or [str(_INSTALL_ROOT)]
+    homes = [Path(value).resolve() for value in home_values]
+    multi = len(homes) > 1
+    rc = 0
+    for home in homes:
+        try:
+            one_rc = _run_one(raw, run=run, now_fn=now_fn,
+                              snapshot_fn=snapshot_fn, out=out,
+                              home_override=home,
+                              allow_import_mismatch=multi)
+        except Exception as exc:  # noqa: BLE001 -- isolate one home
+            tag = fleet.home_tag(home)
+            print(f"[{tag}] KEEPER: home tick failed ({exc})", file=out)
+            one_rc = 1
+        rc = max(rc, one_rc)
+    return rc
 
 
 if __name__ == "__main__":
