@@ -16878,7 +16878,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the other sites that already key on the union (`:2986, :3057,
     :3130, :3391, :3541, :5036, :10115, :10435, :10716, :10947, :11034, :11220, :11221, :11289,
-    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19749, :20728`). The thirteenth is multi-fleet §5 step 2's
+    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19749, :20729`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16903,7 +16903,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8876, :9415, :14494,
-    :21391), the same safety invariant §7.1's send carve-out rests on. That
+    :21392), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17600,7 +17600,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8876, :9415, :14494,
-    #     :21391) -- so the sid union can never make one body answer for another.
+    #     :21392) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
