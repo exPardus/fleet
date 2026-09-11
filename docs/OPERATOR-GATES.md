@@ -181,6 +181,54 @@ measured on, so a Claude update fails loudly instead of silently.
   **The lane's recommendation: A**, with the interface-profile edit landed *before* the append, not
   after — the window between them is exactly when a `supervisor-dead` page would fail to revive.
 
+- [ ] **G-K5's second build item says `fleet init` in a repo is "equivalent to `init --home <repo>/<dir>`", but `init --home` REGISTERS the home in the machine-global list and bare `init` does not — should bare `init` register the home it creates, or should the ruling's "equivalent to" be narrowed to creation only**?
+
+  **This is the gate your G-K5 ruling told the lane to file rather than build around**, and it was
+  built around instead. Your words: *"`fleet init` run inside a repo inits fleet INTO that repo and
+  creates a fleet home there — a CREATION-verb default, equivalent to `init --home <repo>/<dir>`
+  ... If either collides with §5 or with the E2 destructive tier for `init --home`, file a gate
+  rather than building around it."* It collides with the E2 tier: `init --home` is RATIFIED
+  DESTRUCTIVE (2026-08-10) **because** it appends to `~/.claude/fleet-homes.list`, which is
+  machine-global and append-only, so making bare `init` equivalent would make every `fleet init` an
+  irreversible machine-global act. Lane `w64/initrepo` resolved it by not registering, and its own
+  `docs/PLAN-PROGRESS.md` row records the clarification as *"drafted, not raised"*.
+
+  **MEASURED at `ee2b756`, and this is why it matters now, not later:**
+
+  - `bin/fleet.py:4225` — *"Create a cwd home by default; explicit `--home` also registers it."*
+  - `/home/altai/proga/tap` is a LIVE fleet home: it resolves (tag `cece`), runs supervisor
+    `inc-20260911T182128Z-3742` and the only real downstream job on this machine. It is in neither
+    `~/.claude/fleet-homes.list` nor `fleet homes`.
+  - Standing directive `state/tasks/20260910-standing-directive-throughput.md` §1 item 1 defines
+    DONE as *"the operator can run `fleet init` in a sibling repo and see two fleets in the bar."*
+    **That criterion cannot be met while bare `init` does not register** — not by oversight, by
+    construction. Item 1 is otherwise complete: G-K7 reading A landed, the statusline tags differ
+    per home (`a3ad` / `c3e5` / `cece`), the two-home proof stands, and wave 80 made `fleet homes`
+    and the arming guard count the same homes.
+
+  **The readings:**
+
+  - **A — bare `init` registers.** Item 1's DONE criterion is met as written. Cost: every
+    `fleet init` becomes a machine-global irreversible append, which is precisely what the E2 tier
+    exists to gate, and a stray `init` in any directory permanently arms the wrong-home guard one
+    notch further.
+  - **B — bare `init` creates only; "equivalent to" is narrowed to creation.** Ships today's
+    behaviour as the ruling. Cost: the operator registers each new home with one explicit
+    `fleet homes --add`, and item 1's DONE line needs rewording to say so.
+  - **C — bare `init` creates, then PROMPTS to register** (refusing non-interactively with the
+    `--add` command named). Keeps the irreversible act deliberate while meeting the spirit of item 1.
+    Cost: a prompt on a creation verb, and a non-interactive path that must not silently skip.
+
+  **My recommendation: B, plus registering tap now.** A makes an irreversible machine-global write
+  the default side effect of a creation verb, which is the shape the E2 tier was ratified to
+  prevent; C adds a prompt to the one verb most likely to be run from a script. B is what is built,
+  is defensible on its own terms, and costs the operator one command per home — and the real
+  complaint behind item 1 is that a live home is invisible, which registering tap fixes immediately
+  regardless of which reading you take.
+
+  *(The narrower question "register `/home/altai/proga/tap`?" is already with you from
+  `fleet sup-decision` at `c05d6c3`; this gate is its general form. Answering this one answers both.)*
+
 ## Settled
 
 - [x] **kz-work server fleet — revival actor, notification path, and interface permission mode?** *(2026-09-08 by Altai, in-session.)* Answer: **the keeper timer PAGES ONLY and never dispatches; outbound notification goes ONLY through the ccgram-bound `work:fleet` window (no direct Bot API, no second bot); the server interface session runs `bypassPermissions`.** Design: `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md`.
