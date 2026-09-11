@@ -35,7 +35,11 @@ def currency_violations(repo, cutoff=ADOPTION_BASE):
                     "--no-renames", "-r", commit).splitlines()
         code = any(PurePosixPath(p).parent == PurePosixPath("bin")
                    and p.endswith(".py") for p in names)
-        docs = any(p.startswith("docs/") for p in names)
+        # Archived prose is intentionally outside the current-tree currency
+        # surface. A code change documented only by an archive move still needs
+        # a live document or an explicit Docs: n/a trailer.
+        docs = any(p.startswith("docs/") and not p.startswith("docs/archive/")
+                   for p in names)
         message = git(repo, "show", "-s", "--format=%B", commit)
         exempt = re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M)
         if code and not docs and not exempt:
