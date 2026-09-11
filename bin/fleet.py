@@ -11235,7 +11235,7 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
             return stopped
         for attempt in range(max(1, min(attempts, 3))):
             ok, entries = fetch()
-            if ok and initial[1] in _sup_guard_live_rows(entries):
+            if ok and initial[1] in _fork_took_over_rows(entries):
                 break
             if attempt + 1 < max(1, min(attempts, 3)):
                 sleep(1)
@@ -11245,7 +11245,7 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
             return stopped
         # Retire newest parents first. No daemon subprocess runs under the
         # fleet lock; re-read the authority and mail immediately before stop.
-        live = _sup_guard_live_rows(entries)
+        live = _fork_took_over_rows(entries)
         candidates = [sid for sid in reversed(initial[2])
                       if len(live.get(sid, [])) == 1
                       and live[sid][0].get("status") == "idle"
@@ -16878,7 +16878,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the other sites that already key on the union (`:2986, :3057,
     :3130, :3391, :3541, :5036, :10115, :10435, :10716, :10947, :11034, :11220, :11221, :11289,
-    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19736, :20715`). The thirteenth is multi-fleet §5 step 2's
+    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19749, :20728`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16903,7 +16903,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8876, :9415, :14494,
-    :21378), the same safety invariant §7.1's send carve-out rests on. That
+    :21391), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17600,7 +17600,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8876, :9415, :14494,
-    #     :21378) -- so the sid union can never make one body answer for another.
+    #     :21391) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -19722,6 +19722,19 @@ def _sup_guard_live_rows(entries):
             continue
         rows.setdefault(sid, []).append(entry)
     return rows
+
+
+def _fork_took_over_rows(entries):
+    """Live rows that also prove a fork TOOK OVER, not merely that it exists.
+
+    Stricter than `_sup_guard_live_rows` on purpose. The guard asks "can this
+    body be reached", where a `state: done` bg-spare host with a live pid is a
+    yes. Retirement asks "has the replacement actually assumed the work", and a
+    `done` fork answers no -- retiring the parent on that evidence is how the
+    addendum's "never retire on the strength of the send alone" gets violated.
+    """
+    return {sid: rows for sid, rows in _sup_guard_live_rows(entries).items()
+            if any(r.get("state") != "done" for r in rows)}
 
 
 def _sup_guard_body_name(sids):

@@ -320,6 +320,13 @@ class TestTheCensus:
             # ignores rows marked `done` -- status alone is not evidence of
             # life, which is the w61 finding arriving at a new caller.
             "_sup_guard_live_rows",
+            # Censused although the NAME HEURISTIC does not match it: no
+            # "_live"/"roster_" token appears in `_fork_took_over_rows`, so the
+            # sweep would miss it silently. It is a real Q1 reader -- the
+            # stricter one, deciding whether a fork assumed the work before its
+            # parent may be retired. Listed so the census records the reader
+            # rather than relying on a name to find it.
+            "_fork_took_over_rows",
             "recompute_worker_native", "native_epoch_suspicious",
             "supervisor_epoch_check", "_investigate_no_outcome",
             "_supervisor_tier_snapshot", "_dispatch_grace_active",
