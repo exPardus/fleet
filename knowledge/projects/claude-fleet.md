@@ -101,6 +101,10 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   can be NAMED IN ADVANCE, with the reason in the dispatch line — never for docs, tests, receipts,
   reports or folds. **Both plans are constrained at once: Claude 77%, Codex 75%, both resetting around
   2026-09-15**, so waves are 1–2 lanes.
+- **`mcx spawn --help` SPAWNS A WORKER whose task is the literal string `--help`.** `mcx spawn`
+  treats everything after its flags as instructions and it has no help of its own; the top-level
+  `mcx --help` is the one that prints usage. Measured 2026-09-11 — it consumed a lane slot until
+  `mcx stop` caught it, and on a 3-lane host that is a dispatch you cannot make.
 - **The supervisor must never export `MCX_WORKER=1`** — it is the lane-side recursion guard, and
   setting it on yourself gets `mcx: workers cannot launch or steer workers`.
 - **Codex cannot commit**: its sandbox makes git metadata read-only. Every lane ends with the
