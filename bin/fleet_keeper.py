@@ -833,7 +833,14 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
         return 1
     profile = Path(args.profile) if args.profile else (
         home / "skills" / "fleet" / "SKILL.md")
-    launch = ('claude --permission-mode bypassPermissions '
+    # `env -u CLAUDE_CODE_OAUTH_TOKEN`: a long-lived token in the keeper's
+    # environment is inference-only and blocks Remote Control, so the launched
+    # interface must fall back to the `claude auth login` credentials. Measured
+    # 2026-09-11: the token is present in the environment inherited by the
+    # keeper (not exported from ~/.zshenv), so unsetting it at the launch is the
+    # only place that reliably strips it.
+    launch = ('env -u CLAUDE_CODE_OAUTH_TOKEN '
+              'claude --permission-mode bypassPermissions '
               f'"Read {profile} and follow it exactly."')
     target = f"{args.tmux_session}:{args.window}"
     state_path = home / "state" / "keeper" / "last-page.json"

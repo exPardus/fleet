@@ -171,7 +171,10 @@ def test_a_created_window_defers_its_pages_to_the_next_tick(home):
     assert argv[argv.index("-n") + 1] == "fleet"
     assert argv[argv.index("-c") + 1] == str(home)
     launch = argv[-1]
-    assert launch.startswith("claude --permission-mode bypassPermissions ")
+    assert launch.startswith(
+        "env -u CLAUDE_CODE_OAUTH_TOKEN claude --permission-mode bypassPermissions "), (
+        "the launched interface must not inherit the inference-only OAuth token; "
+        "it blocks Remote Control and the interface needs the auth-login creds")
     assert "Read" in launch and "follow it exactly" in launch
     assert r.tmux("send-keys") == []
     assert "pages deferred to next tick" in out
