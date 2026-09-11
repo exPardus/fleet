@@ -1,4 +1,6 @@
 # Operator changelog
+- 2026-09-11 — `b2a8dc7`: entering the 350k supervisor context band now REFUSES `spawn`, `send`, `respawn` and `sup-spawn` with a one-line reason, instead of relying on the supervisor to remember. `--force-band` clears that soft refusal for one call and cannot clear the 400k hard ceiling; the handoff verbs are never refused, because a gate that blocks the remedy is worse than no gate.
+- 2026-09-11 — `b2a8dc7`: `fleet sup-checkpoint` reports the caller's context occupancy and band verdict in its header line.
 - 2026-09-11 — `67c874b`: `fleet brief <item>` emits a brief — DONE line, base sha, file list, test command, structured-result contract, blank judgement — and refuses when the `Serves:` citation is absent or when its phrase does not occur under the `product.md` section it names. Checking the section as well as the phrase catches a phrase that moves between sections, which is a real change to what a feature serves.
 - 2026-09-11 — `67c874b`: every dispatched task file from 2026-09-11T21:00Z names the `product.md` line it serves; wave 75 and earlier are grandfathered and nothing is retrofitted.
 - 2026-09-11 — `730bb2a`: the docs-currency lint accepts `docs/`, `skills/` and `knowledge/` — a `bin/` change documented in the operating manual or in a project's host-fact note is documented, and used to fail.

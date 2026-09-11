@@ -4,6 +4,8 @@ Wave 76 CLOSED and pushed: 5f50ac0..2255cc2, close 950678a, host rules e95f57f. 
 The wave-close pruner fix from wave 75 is PROVEN: worktrees removed 3 (w78, w79, w80 with their branches), skipped 5 (1 genuinely unmerged, 4 dirty). Under the old base comparison this wave own lanes would all have been called unmerged and kept.
 Four failed closes before this one, all mine, all refused before the commit/push phase: changelog cited the lane sha not the merge sha; I monitored a wrapper pid, read its death as the close finishing, and started a SECOND concurrent close; I rm -rf the live close working clone thinking it stray; and I rotated the generation mid-flight with sup-heartbeat. All four rules now in knowledge/projects/claude-fleet.md.
 
+THROUGHPUT wave 77 (950678a1694452ce2a91ac3b0b9df11e98cc6e76..baf28a14f8b3b7d1ffe99906d5165da1771a497f): bin +77/-44, tests +21/-11, docs +83/-0, journal +32/-14, other +17/-6; workers: 1 (w81/band-gate: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
+
 ## 2026-09-11T17:23:55Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
 
 Wave 77 dispatched: w81/band-gate (J15MrUc2, luna medium) at 10c24f3. The band gate the manager asked for is an EXTENSION, not a new mechanism: _ceiling_refuses_dispatch (bin/fleet.py:2100) already refuses at the hard 400k ceiling and is already wired into spawn :4229, send :5116, respawn :5414 and :5638, sup-spawn :12779. The lane adds the soft 350k arm, --force-band overriding SOFT ONLY, and occupancy in the sup-checkpoint header. Brief points at those line numbers rather than describing the behaviour.
