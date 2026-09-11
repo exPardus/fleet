@@ -825,7 +825,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:4531) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:11885) -- render the release explanation.
+      * `_tombstone_releasing_body` (:12015) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -10262,10 +10262,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
     :1950, :2012, :2090, :2897, :5935, :6097, :6294, :6414, :6450, :6612, :6613, :6683,
-    :6693, :6704, :6798, :7273, :10212, :12177, :12178, :12239, :13018`).
+    :6693, :6704, :6798, :7273, :10212, :12307, :12308, :12369, :13148`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :5200, :5536, :8718,
-    :13343. This makes union identity safe; the age boundary distinguishes respawn.
+    :13473. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10685,7 +10685,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:5200, :5536, :8718,
-    # :13343) -- so union identity cannot make one body answer for another.
+    # :13473) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11461,6 +11461,10 @@ def _wave_record_substrate(repo, worktree):
             substrate = record.get("substrate")
             if substrate in {"claude", "codex"}:
                 return substrate
+            # Native background records predate the explicit substrate field;
+            # their dispatch kind is the durable Claude marker.
+            if record.get("dispatch_kind") == "bg":
+                return "claude"
 
     jobs = Path(worktree) / ".mcx"
     try:
@@ -11494,21 +11498,39 @@ def _wave_landed_lanes(repo, base, run=subprocess.run):
     return lanes
 
 
-def _wave_codex_tokens(repo):
-    """Sum Codex usage from local mcx result records.
+def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
+    """Sum Codex usage from mcx records in the landed lane worktrees.
 
     Completed mcx jobs conventionally leave a text ``result`` plus an
     ``events.jsonl`` containing the final usage object.  Prefer the result and
     consult its event log only when the result has no machine-readable usage,
-    so one job cannot be counted twice.
+    so one job cannot be counted twice.  ``lanes`` is the already-resolved
+    landed-lane list; using its worktree join is essential because the main
+    checkout's ``.mcx`` is not where lane jobs live.
     """
-    root = Path(repo) / ".mcx"
-    try:
-        result_paths = sorted(root.glob("*/result"))
-    except OSError:
-        result_paths = []
+    if lanes is None:
+        roots = [Path(repo)]
+    else:
+        roots = []
+        for lane, substrate, _sha in lanes:
+            if substrate != "codex":
+                continue
+            worktree = _wave_lane_worktree(repo, lane, run=run)
+            if worktree is not None:
+                roots.append(Path(worktree))
+            else:
+                roots.append(Path(repo) / f"<worktree for {lane}>")
+    result_paths = []
+    for root in roots:
+        try:
+            result_paths.extend(sorted(root.glob(".mcx/*/result")))
+        except OSError:
+            continue
     if not result_paths:
-        return "UNMEASURED (mcx result files missing)"
+        if lanes is None:
+            return "UNMEASURED (mcx result files missing)"
+        source = ", ".join(str(root / ".mcx/*/result") for root in roots)
+        return "UNMEASURED (mcx result files missing: " + source + ")"
     total = 0
     measured = 0
     missing = []
@@ -11540,7 +11562,9 @@ def _wave_codex_tokens(repo):
                     elif isinstance(item, list):
                         pending.extend(item)
             if pairs:
-                total += sum(sum(pair) for pair in pairs)
+                # A result document is one mcx record even if it repeats a
+                # usage object at multiple JSON nesting levels.
+                total += sum(pairs[-1])
                 measured += 1
                 continue
             try:
@@ -11548,6 +11572,9 @@ def _wave_codex_tokens(repo):
                     encoding="utf-8", errors="replace")
             except OSError:
                 events = ""
+            # A record can have several turn.completed events.  The final
+            # usage line is the record total; summing events double-counts it.
+            last_pair = None
             for line in events.splitlines():
                 try:
                     event = json.loads(line)
@@ -11559,15 +11586,106 @@ def _wave_codex_tokens(repo):
                     usage = item.get("usage") if isinstance(item, dict) else None
                 pair = _wave_token_pair(usage)
                 if pair is not None:
-                    pairs.append(pair)
+                    last_pair = pair
+            if last_pair is not None:
+                pairs.append(last_pair)
         if pairs:
-            total += sum(sum(pair) for pair in pairs)
+            total += sum(pairs[-1])
             measured += 1
         else:
             missing.append(result_path.as_posix())
     if missing:
         return "UNMEASURED (mcx usage missing: " + ", ".join(missing) + ")"
     return str(total) if measured else "UNMEASURED (mcx usage missing)"
+
+
+def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
+    """Sum Claude outcome usage for the landed lanes in this wave.
+
+    The roster has no usage field, so this reads ``state/outcomes``.  It is
+    bounded to the current wave by first joining each landed Claude lane to
+    its current registry record through the lane worktree, then accepting only
+    outcome rows whose ``session_id`` equals that record's current session id.
+    Historical rows from other workers and retired session ids are excluded.
+    """
+    registry = Path(repo) / "state" / "fleet.json"
+    try:
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return "UNMEASURED (outcomes ledger or registry missing)"
+    workers = payload.get("workers") if isinstance(payload, dict) else None
+    if not isinstance(workers, dict):
+        return "UNMEASURED (outcomes ledger or registry missing)"
+    sessions = []
+    for lane, substrate, _sha in lanes:
+        if substrate != "claude":
+            continue
+        worktree = _wave_lane_worktree(repo, lane, run=run)
+        matches = [record for record in workers.values()
+                   if isinstance(record, dict)
+                   and _wave_same_path(record.get("cwd"), worktree)]
+        if len(matches) != 1 or not matches[0].get("session_id"):
+            return "UNMEASURED (Claude lane session missing from registry)"
+        sessions.append(str(matches[0]["session_id"]))
+    if not sessions:
+        return "0"
+    outcome_root = Path(repo) / "state" / "outcomes"
+    try:
+        paths = sorted(outcome_root.glob("*.jsonl"))
+    except OSError:
+        paths = []
+    if not paths:
+        return "UNMEASURED (outcomes ledger missing)"
+    total = 0
+    found = set()
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            continue
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            sid = record.get("session_id")
+            if sid not in sessions or record.get("kind") != "result":
+                continue
+            values = [record.get(key) for key in
+                      ("input_tokens", "output_tokens",
+                       "cache_creation_input_tokens", "cache_read_input_tokens")]
+            if not all(isinstance(value, int) and not isinstance(value, bool)
+                       and value >= 0 for value in values):
+                return "UNMEASURED (Claude outcome usage missing)"
+            total += sum(values)
+            found.add(sid)
+    if len(found) != len(set(sessions)):
+        return "UNMEASURED (Claude outcome usage missing)"
+    return str(total)
+
+
+def _wave_external_lines(repo, lanes, base, run=subprocess.run):
+    """Count lines this wave's lanes landed in repositories other than ``repo``.
+
+    Git's numstat is repository-scoped, so it can never see another repository.
+    The durable join is ``git worktree list``, which enumerates the worktrees of
+    THIS repository and nothing else: a lane ``_wave_lane_worktree`` resolves is
+    by construction a worktree of this repository, so its lines landed here --
+    even though the worktree directory is a SIBLING of the repository root, not
+    a child of it.  A lane it cannot resolve either worked in another repository
+    or has had its worktree pruned, and those two are indistinguishable from
+    here, so that lane leaves the count UNMEASURED rather than counted as zero.
+    """
+    if not lanes:
+        return "0 (MEASURED: no lanes landed this wave)"
+    unresolved = [lane for lane, _substrate, _sha in lanes
+                  if _wave_lane_worktree(repo, lane, run=run) is None]
+    if unresolved:
+        return ("UNMEASURED (no cross-repo line receipt; lane worktree not in "
+                "this repo: " + ", ".join(unresolved) + ")")
+    return f"0 (MEASURED: {len(lanes)} landed lane(s), all worktrees of this repo)"
 
 
 _WAVE_PYTEST_COUNT_RE = re.compile(
@@ -11784,13 +11902,17 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     floor, tree = _wave_floor(repo, wave_id, run=run, which=which)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
-    claude_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
-                     f"UNMEASURED (roster unavailable: {roster})")
     lanes = _wave_landed_lanes(repo, base, run=run)
+    roster_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
+                     f"UNMEASURED (roster unavailable: {roster})")
+    # The roster's refusal is intentional: its schema has no usage field.
+    # Durable outcomes are wave-bounded by the landed lane's current session.
+    claude_tokens = (roster_tokens if not roster_tokens.startswith("UNMEASURED")
+                     else _wave_outcomes_claude_tokens(repo, lanes, run=run))
     lane_text = ", ".join(f"{name}: {substrate}" for name, substrate, _sha in lanes)
     if not lane_text:
         lane_text = "none"
-    codex_tokens = (_wave_codex_tokens(repo)
+    codex_tokens = (_wave_codex_tokens(repo, lanes, run=run)
                     if any(substrate == "codex" for _name, substrate, _sha in lanes)
                     else "0")
     token_values = [claude_tokens, codex_tokens]
@@ -11799,12 +11921,19 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     token_text = ("UNMEASURED (" + "; ".join(value[len("UNMEASURED ("):-1]
                                                 for value in unknown) + ")"
                   if unknown else str(sum(int(value) for value in token_values)))
+    bin_added = buckets["bin"][0]
+    tokens_per_bin_line = ("UNMEASURED (token source or added bin lines missing)"
+                           if unknown or bin_added == 0 else
+                           f"{int(token_text) / bin_added:.2f}"
+                           f" ({token_text} tokens / {bin_added} added bin lines)")
+    external_lines = _wave_external_lines(repo, lanes, base, run=run)
     protected = reap_stats.get("protected_unread_mail", 0)
     throughput = (
         f"THROUGHPUT wave {wave_id} ({base}..{tree}): "
         + ", ".join(f"{name} +{values[0]}/-{values[1]}"
                      for name, values in buckets.items())
         + f"; workers: {len(lanes)} ({lane_text}); tokens: {token_text}; "
+        f"tokens_per_bin_line: {tokens_per_bin_line}; external_lines: {external_lines}; "
         f"reaped: {reap_count}; protected: {protected} (unread mail)")
 
     # Re-check immediately before landing the append-only boundary.  The
@@ -11814,7 +11943,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         claim, _, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="wave-close", mint=False)
-        _wave_prepend_after_title(repo / "docs" / "CHANGELOG.md", changelog)
+        _wave_prepend_after_title(repo / "docs" / "CHANGELOG.md",
+                                   throughput + "\n" + changelog)
         _wave_prepend_journal(repo / "supervisor" / "JOURNAL.md", throughput)
         progress_rows = _wave_refresh_progress(repo, wave_id)
         roll = roll_supervisor_journal(home=repo)
