@@ -60,10 +60,10 @@ def test_live_idle_body_under_retired_sid_is_wake_not_dispatch(home, monkeypatch
     assert capsys.readouterr().out == f"WAKE {BODY}\n"
 
 
-def test_fresh_live_idle_body_is_page_not_wake(home, monkeypatch, capsys):
-    run_guard(monkeypatch, snapshot(age=10), [row(RETIRED)])
-    assert capsys.readouterr().out == (
-        "PAGE fresh heartbeat with live idle body\n")
+@pytest.mark.parametrize("status", ["idle", "busy"])
+def test_fresh_live_body_is_ok(home, monkeypatch, capsys, status):
+    run_guard(monkeypatch, snapshot(age=10), [row(RETIRED, status=status)])
+    assert capsys.readouterr().out == "OK\n"
 
 
 def test_stale_claim_with_no_live_union_sid_is_dispatch(home, monkeypatch, capsys):
@@ -78,6 +78,13 @@ def test_unreadable_registry_is_page_not_dispatch(home, monkeypatch, capsys):
     run_guard(monkeypatch, broken)
     assert capsys.readouterr().out == (
         "PAGE registry unavailable: quarantined\n")
+
+
+def test_unreadable_roster_is_page(home, capsys):
+    fleet.cmd_sup_guard(SimpleNamespace(do=False, json=False),
+                        snapshot_fn=snapshot,
+                        roster_fn=lambda: (False, "unreadable"))
+    assert capsys.readouterr().out == "PAGE roster unavailable: unreadable\n"
 
 
 def test_live_busy_body_is_page_not_dispatch(home, monkeypatch, capsys):
@@ -151,6 +158,55 @@ def test_no_claim_with_live_supervisor_body_pages(home, monkeypatch, capsys):
         "PAGE live supervisor body without a safe claim\n")
 
 
+@pytest.mark.parametrize("name", [BODY, None, "adopted-host"])
+def test_released_body_live_under_retired_sid_never_dispatches(
+        home, monkeypatch, capsys, name):
+    claim = fleet.read_incarnation()
+    claim.update(state="released", released_by_sid=SID)
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(state="released"), [row(RETIRED, name=name)])
+    assert capsys.readouterr().out == (
+        "PAGE live supervisor body without a safe claim\n")
+
+
+@pytest.mark.parametrize("status", ["idle", "busy"])
+def test_do_ok_has_no_action(home, monkeypatch, capsys, status):
+    def forbidden(*args, **kwargs):
+        pytest.fail("OK must perform no action")
+    monkeypatch.setattr(fleet, "cmd_send", forbidden)
+    monkeypatch.setattr(fleet, "cmd_sup_spawn", forbidden)
+    monkeypatch.setattr(fleet, "_reap_current_supervisor_forks", forbidden)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=lambda: snapshot(age=10),
+                               roster_fn=roster(row(SID, status=status))) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == "OK"
+    assert result["sent"] is False
+
+
+@pytest.mark.parametrize("ambiguity,reason", [
+    ({"state": "unknown"}, "claim state unknown"),
+    ({"handshake_exists": True}, "supervisor/HANDSHAKE unreadable"),
+    ({"pending": True}, "handoff in flight"),
+    ({"claim_sids": None}, "claim session not in the roster, sid union unavailable"),
+    ({"limited": True}, "supervisor limited"),
+])
+def test_fresh_live_body_still_pages_on_ambiguity(home, ambiguity, reason):
+    obs = fleet._sup_guard_observe(snapshot_fn=lambda: snapshot(age=10),
+                                  roster_fn=roster(row(SID)))
+    obs.update(ambiguity)
+    verdict, actual_reason, _ = fleet._sup_guard_decide(obs)
+    assert (verdict, actual_reason) == ("PAGE", reason)
+
+
+@pytest.mark.parametrize("status", ["idle", "busy", "unknown"])
+@pytest.mark.parametrize("age", [None, 10, 4000])
+def test_live_body_never_dispatches(home, status, age):
+    obs = fleet._sup_guard_observe(snapshot_fn=lambda: snapshot(age=age),
+                                  roster_fn=roster(row(RETIRED, status=status)))
+    assert fleet._sup_guard_decide(obs)[0] != "DISPATCH"
+
+
 def test_do_dispatch_never_spawns(
         home, monkeypatch, capsys):
     calls = []
@@ -184,6 +240,9 @@ def test_do_page_has_no_action(home, monkeypatch, capsys):
     monkeypatch.setattr(fleet, "_sup_guard_observe", lambda **_: observation)
     monkeypatch.setattr(fleet, "cmd_sup_spawn",
                         lambda args: calls.append(args) or 0)
+    monkeypatch.setattr(fleet, "cmd_send", lambda args: calls.append(args) or 0)
+    monkeypatch.setattr(fleet, "_reap_current_supervisor_forks",
+                        lambda **_: calls.append("reap"))
     assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=False)) == 0
     assert not calls
     assert capsys.readouterr().out == "PAGE claim seized\n"
@@ -258,7 +317,7 @@ def test_guard_retries_deferred_fork_retirement_before_revalidation(home, monkey
     monkeypatch.setattr(fleet, '_reap_current_supervisor_forks',
                         lambda **_: calls.append('reap'))
     fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
-                        snapshot_fn=lambda: calls.append('observe') or snapshot(age=10),
+                        snapshot_fn=lambda: calls.append('observe') or snapshot(),
                         roster_fn=roster(row(SID)))
     assert calls == ['observe', 'reap', 'observe']
 
