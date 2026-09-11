@@ -71,6 +71,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 CORRUPT = "{ this is not json"
@@ -524,7 +525,7 @@ class TestTheArtifactGlobHelper:
         NOT SUFFICIENT ON ITS OWN, and `TestTheHelperIsTheONLYSpelling` below is
         why: a site that diverges in MEANING while the literal is still spelled
         once passes this count unchanged."""
-        src = (fleet.Path(fleet.__file__)).read_text(encoding="utf-8")
+        src = fleet_implementation_source()
         assert src.count('"fleet.json.corrupt.*"') == 1
 
     def test_it_matches_the_name_the_REAL_writer_mints(self, qg_home):

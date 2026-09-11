@@ -48,11 +48,12 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 CORRUPT = "{ this is not json"
 
-SRC = Path(fleet.__file__).read_text(encoding="utf-8")
+SRC = fleet_implementation_source()
 REPO = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = REPO / "commands"
 

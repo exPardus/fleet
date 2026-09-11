@@ -1,5 +1,5 @@
 """Test bootstrap: make bin/fleet.py importable as `fleet` without turning bin/
-into a package (fleet.py must stay a standalone single-file CLI).
+into a package (fleet.py remains directly executable as a CLI).
 
 Also auto-applies the SPEC §12 tier markers (unit/hooks/live) by file name so
 individual test files need no per-test marker edits, and enforces the
@@ -345,3 +345,32 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.hooks)
         else:
             item.add_marker(pytest.mark.unit)
+
+
+@pytest.fixture
+def patch_fleet(monkeypatch):
+    """Patch the implementation owner and its public facade as one seam.
+
+    Callers use literal names (enforced by the AST census). Unknown and
+    non-string names fail before either module is changed. FleetCliError is
+    mirrored into the index module so patched raises and CLI catches agree;
+    the exception-only leaf keeps its original class identity.
+    """
+    import fleet
+    import fleet_index
+    from fleet_patch_audit import moved_exports
+
+    moved = moved_exports(BIN_DIR.parent)
+
+    def _patch(name, value):
+        if not isinstance(name, str):
+            raise TypeError("patch_fleet requires a literal string name")
+        if not hasattr(fleet, name):
+            raise AttributeError(f"unknown fleet patch name: {name}")
+        if name in moved or name == "FleetCliError":
+            if not hasattr(fleet_index, name):
+                raise AttributeError(f"missing fleet_index patch target: {name}")
+            monkeypatch.setattr(fleet_index, name, value)
+        monkeypatch.setattr(fleet, name, value)
+
+    return _patch

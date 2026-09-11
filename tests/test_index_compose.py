@@ -64,6 +64,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +142,7 @@ def _compose(name, cwd, task="the task", sid=None, **kw):
 
 
 @pytest.fixture
-def taught_verb_present(monkeypatch):
+def taught_verb_present(patch_fleet, monkeypatch):
     """Declare every verb the teach lines name as REGISTERED on the parser.
 
     §11.8's second gate (fix wave C3) suppresses the teach lines entirely
@@ -158,8 +159,7 @@ def taught_verb_present(monkeypatch):
     real parser, in `TestTheTaughtVerbMustExist`.
     """
     real = fleet.registered_cli_verbs
-    monkeypatch.setattr(
-        fleet, "registered_cli_verbs",
+    patch_fleet("registered_cli_verbs",
         lambda: frozenset(real()) | set(fleet.index_teach_verbs()))
 
 
@@ -271,10 +271,10 @@ class TestTheTaughtVerbMustExist:
             f"exits 2 with an argparse `invalid choice`.")
 
     def test_an_unregistered_verb_suppresses_the_lines_in_an_indexed_project(
-            self, indexed_project, monkeypatch):
+            self, indexed_project, patch_fleet, monkeypatch):
         """The absent arm, forced, so it is pinned whichever side of the merge
         this file is read on."""
-        monkeypatch.setattr(fleet, "registered_cli_verbs", frozenset)
+        patch_fleet("registered_cli_verbs", frozenset)
         prompt = _compose("w1", indexed_project)
         assert prompt == TestAbsentContextIsFree._expected(indexed_project)
         for token in ("fleet q", "--outline", "--src"):
@@ -525,7 +525,7 @@ def call_counts(root):
     Calibration for the whole idea: a plain new module-level `def` calling the
     function DID red the old scan, which is exactly how a detector earns the
     description "non-vacuous for the shape its author imagined"."""
-    tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+    tree = ast.parse(fleet_implementation_source())
     names = _rebound_names(tree, root)
     out = {}
 
@@ -553,7 +553,7 @@ def _call_sites(needle, skip_defs=()):
 
     Comment/docstring lines are skipped by the same crude prefix test the
     original census used; `skip_defs` drops the definition itself."""
-    src = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
+    src = fleet_implementation_source().splitlines()
     out = set()
     for n, line in enumerate(src, start=1):
         if needle not in line or line.lstrip().startswith(("#", "*", '"')):
@@ -775,7 +775,7 @@ class TestContextDigest:
         assert capsys.readouterr().err.strip()
 
     def test_an_escaping_path_is_skipped_even_when_normalisation_raises(
-            self, indexed_project, monkeypatch, capsys):
+            self, indexed_project, patch_fleet, monkeypatch, capsys):
         """The same property under the OTHER implementation, forced, so this
         file pins both worlds without waiting on a merge.
 
@@ -787,7 +787,7 @@ class TestContextDigest:
             pass
 
         real = fleet._index_posix_rel
-        monkeypatch.setattr(fleet, "_index_posix_rel", lambda rel: (
+        patch_fleet("_index_posix_rel", lambda rel: (
             (_ for _ in ()).throw(_PathRejected(f"escapes the root: {rel}"))
             if ".." in str(rel) else real(rel)))
 
@@ -1355,7 +1355,7 @@ class TestDigestNeverServesAnUnverifiedCoordinate:
         prompt = _compose("w1", indexed_project, context=["src/api.py"])
         assert "- L4 alpha(x: int) -> str" in prompt
 
-    def test_the_digest_reads_through_the_choke_point(self, indexed_project, monkeypatch):
+    def test_the_digest_reads_through_the_choke_point(self, indexed_project, patch_fleet, monkeypatch):
         """The structural half. §11.3's `verified_shard_rows` is THE choke
         point; a digest built off `read_shard` directly would pass the
         behavioural test above whenever the shard happened to be fresh.
@@ -1367,7 +1367,7 @@ class TestDigestNeverServesAnUnverifiedCoordinate:
             calls.append((Path(root), rel))
             return real(root, rel, **kw)
 
-        monkeypatch.setattr(fleet, "verified_shard_rows", spy)
+        patch_fleet("verified_shard_rows", spy)
         _compose("w1", indexed_project, context=["src/api.py"])
         assert calls == [(Path(indexed_project), "src/api.py")], (
             "the digest did not go through verified_shard_rows() -- some other "
@@ -1483,13 +1483,13 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
         assert "spawned" in self._events()
 
     def test_arm_1_produces_no_phantom_even_if_the_skip_is_removed(
-            self, indexed_project, monkeypatch):
+            self, indexed_project, patch_fleet, monkeypatch):
         """The hoist, on its own. Force the SAME arm to raise past the
         per-path skip by breaking the layer above it, and assert the registry
         is untouched -- this is what fails if someone deletes the hoist and
         keeps only the warn-and-skip."""
         self._dispatch_ok(monkeypatch)
-        monkeypatch.setattr(fleet, "compose_context_digests",
+        patch_fleet("compose_context_digests",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 OSError("shard directory is a file")))
         with pytest.raises(fleet.FleetCliError, match="could not compose"):
@@ -1502,7 +1502,7 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
     # -- arm 2: the source parse. -------------------------------------------
 
     def test_arm_2_a_source_that_dies_mid_parse_warns_and_the_spawn_proceeds(
-            self, indexed_project, monkeypatch, capsys):
+            self, indexed_project, patch_fleet, monkeypatch, capsys):
         """`verified_shard_rows` re-reads the source AFTER hashing it, so a
         file that disappears in that gap raises `OSError` from
         `parse_source_symbols`. Forced rather than raced, because the window
@@ -1523,7 +1523,7 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
                 raise OSError("source vanished between header and parse")
             return real(source_path, *args, **kwargs)
 
-        monkeypatch.setattr(fleet, "parse_source_symbols", _boom)
+        patch_fleet("parse_source_symbols", _boom)
         # Force the re-parse: a fresh shard would be served without one.
         fleet.shard_path_for_source(indexed_project, "src/api.py").unlink()
 
@@ -1534,7 +1534,7 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
     # -- arm 3: the path shape. ---------------------------------------------
 
     def test_arm_3_a_rejected_path_shape_warns_and_the_spawn_proceeds(
-            self, indexed_project, monkeypatch, capsys):
+            self, indexed_project, patch_fleet, monkeypatch, capsys):
         """`_index_posix_rel` grows a path-shape guard on `idx/core` that
         RAISES on `..` instead of returning a rel that fails the membership
         test. Simulated here with a `FleetCliError` subclass minted locally,
@@ -1551,7 +1551,7 @@ class TestComposeFailureNeverLeavesAPhantomRecord:
                 raise _PathRejected(f"path escapes the index root: {rel}")
             return real(rel)
 
-        monkeypatch.setattr(fleet, "_index_posix_rel", _guarded)
+        patch_fleet("_index_posix_rel", _guarded)
 
         assert self._spawn(indexed_project, monkeypatch,
                            "src/api.py,../plain/src/api.py") == 0

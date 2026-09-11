@@ -82,6 +82,7 @@ import tokenize
 from pathlib import Path
 
 import fleet
+from fleet_sources import fleet_implementation_paths, fleet_implementation_source
 
 
 SRC_PATH = Path(fleet.__file__)
@@ -122,13 +123,13 @@ _LOOKBEHIND = 60
 MINIMUM_SELF_CITATIONS = 20
 
 
-def _tokens():
-    return list(tokenize.generate_tokens(io.StringIO(SRC_RAW).readline))
+def _tokens(source=SRC_RAW):
+    return list(tokenize.generate_tokens(io.StringIO(source).readline))
 
 
-def _line_starts():
+def _line_starts(source=SRC_RAW):
     offsets, pos = [], 0
-    for line in SRC_RAW.split("\n"):
+    for line in source.split("\n"):
         offsets.append(pos)
         pos += len(line) + 1
     return offsets
@@ -142,17 +143,19 @@ def _offset(rowcol):
     return _LINE_STARTS[row - 1] + col
 
 
-def _prose_spans():
+def _prose_spans(source=SRC_RAW):
     """`(start, end)` character offsets of every comment and plain string.
 
     Positions only -- never token TEXT -- so the spans are identical on 3.10
     and 3.13 for the tokens this file accepts.
     """
     spans = []
-    for tok in _tokens():
+    starts = _line_starts(source)
+    for tok in _tokens(source):
         if tok.type == tokenize.COMMENT or (
                 tok.type == tokenize.STRING and _PLAIN_STRING_RE.match(tok.string)):
-            spans.append((_offset(tok.start), _offset(tok.end)))
+            spans.append((starts[tok.start[0] - 1] + tok.start[1],
+                          starts[tok.end[0] - 1] + tok.end[1]))
     return spans
 
 
@@ -179,7 +182,7 @@ def _document_prefixed(before):
     return bool(_DOCUMENT_TAIL_RE.search(window))
 
 
-def _classified_numbers():
+def _classified_numbers(source=SRC_RAW):
     """`(line, number, kind)` for every `:NNNN` in prose.
 
     `kind` is `timestamp`, `other-document` or `self`, and the fall-through is
@@ -187,10 +190,11 @@ def _classified_numbers():
     citation (RED), never as a silent pass.
     """
     out = []
-    for match in _NUMBER_RE.finditer(SRC_RAW):
-        if not _in_prose(match.start()):
+    spans = _prose_spans(source)
+    for match in _NUMBER_RE.finditer(source):
+        if not any(start <= match.start() < end for start, end in spans):
             continue
-        before = SRC_RAW[:match.start()]
+        before = source[:match.start()]
         line = before.count("\n") + 1
         if before and before[-1].isdigit():
             kind = "timestamp"               # 23:25:27, 4:40am, +00:00
@@ -212,7 +216,7 @@ SELF_CITATIONS = [(line, n) for line, n, kind in CLASSIFIED if kind == "self"]
 # author's memory of it.
 # --------------------------------------------------------------------------
 
-def _code_lines():
+def _code_lines(source=SRC_RAW):
     """Lines carrying at least one token that is neither prose nor layout.
 
     A docstring mentioning `_record_sids(rec)` must not count as a call site,
@@ -221,7 +225,7 @@ def _code_lines():
     skip = {tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT,
             tokenize.ENDMARKER, tokenize.COMMENT}
     out = set()
-    for tok in _tokens():
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
         if tok.type in skip:
             continue
         if tok.type == tokenize.STRING and _PLAIN_STRING_RE.match(tok.string):
@@ -232,6 +236,9 @@ def _code_lines():
 
 
 CODE_LINES = _code_lines()
+IMPLEMENTATION_RAW = fleet_implementation_source()
+IMPLEMENTATION_SRC = IMPLEMENTATION_RAW.splitlines()
+IMPLEMENTATION_CODE_LINES = _code_lines(IMPLEMENTATION_RAW)
 
 
 def _function_span(name):
@@ -264,8 +271,8 @@ def _enclosing_function(n):
 def _call_lines(callee):
     """Code lines that CALL `callee`, its own `def` excluded."""
     needle = callee + "("
-    return {i for i, line in enumerate(SRC, start=1)
-            if needle in line and i in CODE_LINES
+    return {i for i, line in enumerate(IMPLEMENTATION_SRC, start=1)
+            if needle in line and i in IMPLEMENTATION_CODE_LINES
             and not line.lstrip().startswith("def ")}
 
 
@@ -291,7 +298,7 @@ def _retired_sid_writers():
     That file still owns the INVARIANT (no writer appends a foreign sid); what
     is checked here is only that the numbers citing it resolve.
     """
-    return {i for i, line in enumerate(SRC, start=1)
+    return {i for i, line in enumerate(IMPLEMENTATION_SRC, start=1)
             if re.match(r'^\s*\S+\["retired_sids"\]\s*=', line)}
 
 
@@ -381,7 +388,7 @@ def _supervisor_lifecycle_preflight_calls():
     distinct from the delegate they hand off to.
     """
     return {n for n in _call_lines("_supervisor_lifecycle_target")
-            if re.search(r"(?<!\w)_supervisor_lifecycle_target\(", SRC[n - 1])}
+            if re.search(r"(?<!\w)_supervisor_lifecycle_target\(", IMPLEMENTATION_SRC[n - 1])}
 
 
 DERIVATIONS = {
@@ -767,3 +774,24 @@ class TestEverySelfCitationResolves:
                 f"{sorted(expected)}. Missing from the citation: "
                 f"{sorted(expected - cited)}; cited but not real: "
                 f"{sorted(cited - expected)}")
+
+
+def test_extracted_modules_have_no_unregistered_self_citations():
+    """Leaf citations require their own physical-file expectations before use.
+
+    The original citation resolver remains physical fleet.py; its safety
+    enumerations above census all implementation files and reject new sites.
+    """
+    for path in fleet_implementation_paths()[1:]:
+        source = path.read_text(encoding="utf-8")
+        assert not [entry for entry in _classified_numbers(source)
+                    if entry[2] == "self"], path
+        assert not _CITATION_SHAPE_RE.search(source), path
+        assert not _NAMED_CITATION_RE.search(source), path
+
+
+def test_leaf_citation_scan_sees_both_bare_and_named_references():
+    for source in ("# evidence :123\n", "# helper (:123)\n",
+                   "# `helper:123-125`\n"):
+        assert any(kind == "self" for _, _, kind in _classified_numbers(source))
+    assert _classified_numbers("value = items[:3]\n") == []

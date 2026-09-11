@@ -61,12 +61,12 @@ is a one-line change, exactly as re-pinning a receipt's `# at <sha>` is.
 import re
 from pathlib import Path
 
-import fleet
+import fleet_sources
+import pytest
 
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC_PATH = REPO / "docs" / "specs" / "claim-nonce.md"
-SRC_RAW = Path(fleet.__file__).read_text(encoding="utf-8")
 SPEC_RAW = SPEC_PATH.read_text(encoding="utf-8")
 
 # The citing sites in `bin/fleet.py`, by count. Three today: the identity-block
@@ -112,24 +112,28 @@ def _norm(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-SRC_NORM = _norm(SRC_RAW)
 SPEC_NORM = _norm(SPEC_RAW)
 
 
-def _cited_sections():
-    """(line number, section number) for every citing site, in file order."""
+def _cited_sections(source=None):
+    """(census line, section number) across all implementation files."""
+    source = (fleet_sources.fleet_implementation_source()
+              if source is None else source)
     out = []
-    for match in _MARKER_RE.finditer(SRC_RAW):
-        line = SRC_RAW.count("\n", 0, match.start()) + 1
+    for match in _MARKER_RE.finditer(source):
+        line = source.count("\n", 0, match.start()) + 1
         out.append((line, match.group(1)))
     return out
 
 
 def _citation_windows():
     """(line number, section number, normalised citation text) per site."""
-    windows = [SRC_NORM[m.start():m.start() + _WINDOW]
-               for m in _MARKER_RE.finditer(SRC_NORM)]
-    return [(ln, sec, win) for (ln, sec), win in zip(_cited_sections(), windows)]
+    source = fleet_sources.fleet_implementation_source()
+    normalized = _norm(source)
+    windows = [normalized[m.start():m.start() + _WINDOW]
+               for m in _MARKER_RE.finditer(normalized)]
+    return [(ln, sec, win)
+            for (ln, sec), win in zip(_cited_sections(source), windows)]
 
 
 def _spec_section(number):
@@ -170,7 +174,7 @@ class TestTheDoctrineCitationsNameARatifiedClause:
         """
         sites = _cited_sections()
         assert len(sites) == EXPECTED_SITES, (
-            f"expected {EXPECTED_SITES} doctrine citations in bin/fleet.py, "
+            f"expected {EXPECTED_SITES} doctrine citations in the implementation, "
             f"found {len(sites)} at lines {[ln for ln, _ in sites]} -- if a site "
             f"was deliberately added or removed, re-pin EXPECTED_SITES")
 
@@ -188,7 +192,7 @@ class TestTheDoctrineCitationsNameARatifiedClause:
     def test_every_cited_section_exists(self):
         for line, number in _cited_sections():
             assert _spec_section(number) is not None, (
-                f"bin/fleet.py:{line} cites claim-nonce §{number}, which is "
+                f"implementation census:{line} cites claim-nonce §{number}, which is "
                 f"not a heading in {SPEC_PATH.name}")
 
     def test_every_cited_section_is_ratified(self):
@@ -201,18 +205,18 @@ class TestTheDoctrineCitationsNameARatifiedClause:
         for line, number in _cited_sections():
             body = _spec_section(number)
             assert "RATIFIED" in body, (
-                f"bin/fleet.py:{line} cites claim-nonce §{number}, which "
+                f"implementation census:{line} cites claim-nonce §{number}, which "
                 f"carries no RATIFIED marker")
             # The DATE is derived, not hardcoded: pinning a literal date here
             # meant that re-pointing the citations at a later ruling (2026-07-30
             # replaced this clause once already) went RED for the wrong reason
             # and taught the next editor to loosen the assertion instead.
             assert re.search(r"RATIFIED by \w+, \d{4}-\d{2}-\d{2}", _norm(body)), (
-                f"bin/fleet.py:{line} cites claim-nonce §{number}, which names "
+                f"implementation census:{line} cites claim-nonce §{number}, which names "
                 f"no ratification date in the form 'RATIFIED by <who>, "
                 f"<YYYY-MM-DD>'")
             assert "REQUIRES OPERATOR RATIFICATION" not in body, (
-                f"bin/fleet.py:{line} cites claim-nonce §{number}, which is "
+                f"implementation census:{line} cites claim-nonce §{number}, which is "
                 f"still awaiting ratification")
 
     def test_every_citation_quotes_the_ratified_clause(self):
@@ -223,11 +227,11 @@ class TestTheDoctrineCitationsNameARatifiedClause:
         """
         for line, number, window in _citation_windows():
             assert _norm(CLAUSE_HEAD) in window, (
-                f"bin/fleet.py:{line} cites claim-nonce §{number} without "
+                f"implementation census:{line} cites claim-nonce §{number} without "
                 f"quoting the ratified clause")
             body = _norm(_spec_section(number) or "")
             assert _norm(CLAUSE_HEAD) in body, (
-                f"claim-nonce §{number}, cited from bin/fleet.py:{line}, "
+                f"claim-nonce §{number}, cited from implementation census:{line}, "
                 f"does not state the clause the citation quotes")
 
     def test_the_scope_clause_travels_with_it(self):
@@ -243,15 +247,15 @@ class TestTheDoctrineCitationsNameARatifiedClause:
         for line, number, _window in _citation_windows():
             body = _norm(_spec_section(number) or "")
             assert _norm(CLAUSE_SCOPE) in body, (
-                f"claim-nonce §{number}, cited from bin/fleet.py:{line}, "
+                f"claim-nonce §{number}, cited from implementation census:{line}, "
                 f"states the clause without its scope half")
 
     def test_no_site_still_cites_the_unratified_amendment(self):
         """The disease, not the symptom: `[PROPOSED]` in prescriptive voice."""
-        assert "NOT RATIFIED DOCTRINE" not in SRC_RAW, (
+        assert "NOT RATIFIED DOCTRINE" not in fleet_sources.fleet_implementation_source(), (
             "bin/fleet.py still carries a `[PROPOSED -- NOT RATIFIED DOCTRINE]` "
             "marker for a clause the operator ratified on 2026-07-27")
-        assert "§16.4 item 3" not in SRC_RAW, (
+        assert "§16.4 item 3" not in fleet_sources.fleet_implementation_source(), (
             "bin/fleet.py still cites claim-nonce §16.4 item 3 -- the OPEN "
             "QUESTION, not the answer to it")
 
@@ -267,7 +271,7 @@ class TestTheDoctrineCitationsNameARatifiedClause:
         """
         for line, number, window in _citation_windows():
             assert _norm(SUPERSEDED_SCOPE) not in window, (
-                f"bin/fleet.py:{line} cites claim-nonce §{number} and quotes "
+                f"implementation census:{line} cites claim-nonce §{number} and quotes "
                 f"the SUPERSEDED scope half -- replaced 2026-07-30 by the "
                 f"substitution model (§18)")
 
@@ -284,6 +288,19 @@ class TestTheDoctrineCitationsNameARatifiedClause:
             heading = re.search(rf"^#+\s+{re.escape(number)}(?=[.\s])",
                                 SPEC_RAW, re.M)
             assert heading is not None and heading.start() > amendment, (
-                f"claim-nonce §{number}, cited from bin/fleet.py:{line}, does "
+                f"claim-nonce §{number}, cited from implementation census:{line}, does "
                 f"not follow §16 -- the ratified clause is filed inside the "
                 f"unratified amendment")
+
+
+@pytest.mark.parametrize("filename", fleet_sources.IMPLEMENTATION_FILES)
+def test_the_doctrine_census_sees_a_citation_in_each_module(
+        filename, tmp_path, monkeypatch):
+    paths = tuple(tmp_path / name for name in fleet_sources.IMPLEMENTATION_FILES)
+    for path in paths:
+        source = ("# RATIFIED DOCTRINE -- claim-nonce §18\n"
+                  if path.name == filename else "")
+        path.write_text(source, encoding="utf-8")
+    monkeypatch.setattr(fleet_sources, "fleet_implementation_paths", lambda: paths)
+    assert [section for _, section in _cited_sections()] == ["18"]
+    assert [section for _, section, _ in _citation_windows()] == ["18"]

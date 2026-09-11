@@ -374,7 +374,7 @@ def test_the_claim_sid_is_never_dropped_from_the_union(home):
     assert obs["claim_rows"] == {F4_CLAIM_SID: "busy"}
 
 
-def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, monkeypatch):
+def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, patch_fleet, monkeypatch):
     """THE NARROW-READER PIN (terminal-surface D4, CLAUDE.md's standing RULE).
     w63 could have taught the keeper to read `state/fleet.json`. It did not:
     the union arrives inside the `sup-status --json` it already ran, so the
@@ -400,7 +400,10 @@ def test_the_keeper_reads_no_registry_of_its_own_to_get_the_union(home, monkeypa
     reached = []
     for name in ("load_registry", "_read_registry_readonly"):
         real = getattr(fleet, name)
-        monkeypatch.setattr(fleet, name, lambda *a, _n=name, _r=real, **k: (
+        {
+            'load_registry': lambda value: patch_fleet('load_registry', value),
+            '_read_registry_readonly': lambda value: patch_fleet('_read_registry_readonly', value),
+        }[name](lambda *a, _n=name, _r=real, **k: (
             reached.append(_n), _r(*a, **k))[1])
     run = _runner(_table(sup=_fork_sup()))
     obs = _collect(home, run)
