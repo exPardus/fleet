@@ -201,6 +201,10 @@ def _interface_pending_rulings(home):
         # Lens briefs are research inputs, not operator decision slots.
         if relative.parts and relative.parts[0].lower() == "lens":
             continue
+        # Supervisor-rendered task files are machine inputs, not unanswered
+        # operator rulings, wherever they appear under the task root.
+        if fnmatch.fnmatch(path.name, "sup~*.md"):
+            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
@@ -18487,8 +18491,77 @@ def _wave_registry_worker_count():
     return str(len(workers)) if isinstance(workers, dict) else "UNMEASURED"
 
 
+def _wave_lane_worktree(repo, lane, run=subprocess.run):
+    """Return the worktree registered for a landed lane branch.
+
+    The merge subject identifies the branch, but it does not identify the
+    worker substrate. Git's worktree table is the durable join between that
+    branch and the lane's own worker records.
+    """
+    result = _wave_git(repo, "worktree", "list", "--porcelain", run=run,
+                       check=False)
+    if result.returncode != 0:
+        return None
+    current = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current = Path(line[len("worktree "):].strip())
+        elif current is not None and line == f"branch refs/heads/{lane}":
+            return current
+    return None
+
+
+def _wave_same_path(left, right):
+    """Compare two record paths without requiring either path to exist."""
+    try:
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
+            os.path.abspath(str(right)))
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _wave_record_substrate(repo, worktree):
+    """Read a substrate only from a record tied to ``worktree``.
+
+    The fleet registry is the source for native worker records when it carries
+    the explicit field. mcx records live in the lane worktree; their saved
+    ``cwd`` plus the ``codex`` executable marker is the mcx record. Neither a
+    branch name nor commit-message trailers are evidence of the substrate.
+    """
+    if worktree is None:
+        return "unknown"
+    registry = Path(repo) / "state" / "fleet.json"
+    try:
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        payload = None
+    workers = payload.get("workers") if isinstance(payload, dict) else None
+    if isinstance(workers, dict):
+        for record in workers.values():
+            if not isinstance(record, dict) or not _wave_same_path(
+                    record.get("cwd"), worktree):
+                continue
+            substrate = record.get("substrate")
+            if substrate in {"claude", "codex"}:
+                return substrate
+
+    jobs = Path(worktree) / ".mcx"
+    try:
+        candidates = sorted(path for path in jobs.iterdir() if path.is_dir())
+    except (FileNotFoundError, OSError):
+        candidates = []
+    for job in candidates:
+        try:
+            saved_cwd = (job / "cwd").read_text(encoding="utf-8").strip()
+        except (FileNotFoundError, OSError, UnicodeError):
+            continue
+        if _wave_same_path(saved_cwd, worktree) and (job / "codex").is_file():
+            return "codex"
+    return "unknown"
+
+
 def _wave_landed_lanes(repo, base, run=subprocess.run):
-    """Return merge-commit lanes in ``base..HEAD`` with their substrate."""
+    """Return merge-commit lanes in ``base..HEAD`` with recorded substrate."""
     result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
                        f"{base}..HEAD", run=run)
     lanes = []
@@ -18497,16 +18570,10 @@ def _wave_landed_lanes(repo, base, run=subprocess.run):
         match = re.search(r"^merge\(([^)]+)\):", subject, re.IGNORECASE)
         if not match:
             continue
-        body = _wave_git(repo, "show", "-s", "--format=%B", commit,
-                         run=run).stdout
-        substrate = "UNMEASURED"
-        if re.search(r"substrate\s*[:=]\s*codex|\bcodex\b|gpt-\d",
-                     body, re.IGNORECASE) or "codex" in match.group(1).lower():
-            substrate = "codex"
-        elif re.search(r"substrate\s*[:=]\s*claude|\bclaude\b|claude-session",
-                       body, re.IGNORECASE) or "claude" in match.group(1).lower():
-            substrate = "claude"
-        lanes.append((match.group(1), substrate, commit[:7]))
+        lane = match.group(1)
+        substrate = _wave_record_substrate(
+            repo, _wave_lane_worktree(repo, lane, run=run))
+        lanes.append((lane, substrate, commit[:7]))
     return lanes
 
 
