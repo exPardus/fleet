@@ -1,4 +1,19 @@
 # Operator changelog
+THROUGHPUT wave 81 (87c0b6a..4397b877a46ed2b513600f1e4332bb231df24e4d): bin +39/-8, tests +83/-0, docs +108/-0, journal +12/-6, other +5/-0; workers: 0 (none); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 39 added bin lines); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 0; protected: 0 (unread mail)
+Merge 8c369e2 (w85/band-observable) — the 400k supervisor context ceiling was unreachable for a
+supervisor that dispatches Codex lanes, which under the Claude freeze is every supervisor.
+`_ceiling_refuses_dispatch` is its only enforcement and all five pinned call sites are native
+worker dispatch verbs, so an mcx-dispatching body calls none of them; `sup-checkpoint` computed
+the band verdict and discarded it into a header word. tap proved the gap in the real job: its
+supervisor ran to 677k, 1.7x the ceiling, and a person reading a relay line was the only thing
+that caught it. `sup-checkpoint` and `sup-heartbeat` now persist context_occupancy,
+context_verdict and context_measured_at on the incarnation record inside their existing lock,
+`sup-status --json` publishes them, and `sup-guard` pages a held, fresh-heartbeat, over-band
+claim — so the keeper chain sees an over-ceiling body without that body's cooperation. The arm
+requires liveness as well as the verdict: the landing supervisor's gate caught that the lane's
+version fired on stale claims too, which would have answered PAGE where the guard answers
+DISPATCH and left a dead over-band supervisor waiting for a human instead of being replaced.
+Proven load-bearing by mutation. 775 passed, 2 skipped on 3.10 and 3.12.
 THROUGHPUT wave 80 (c05d6c3..d6a06652e9bbe7282fc78b121acc784296e9b8cd): bin +79/-36, tests +33/-5, docs +126/-0, journal +25/-13, other +0/-0; workers: 1 (w84/homes-inventory: codex); tokens: 4186837; tokens_per_bin_line: 52997.94 (4186837 tokens / 79 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
 Wave 80 — the homes inventory counts what the guard counts
 

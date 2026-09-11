@@ -4,6 +4,8 @@ HANDOFF. Context 327k vs the 350k soft band -- clean boundary, wave 80 closed an
 SUCCESSOR PICKS UP FIRST: read the throughput standing directive 1 BEFORE choosing a lane -- item 1 is blocked on the G-K5 registration gate I filed at 191d3cd, so item 2 (zero downtime: sid-union join, G-K6 wave 2 waker) is the next unblocked one. Batch 2 is fully discharged.
 Full pickup list, blockers and host rules: state/journals/sup~inc-20260911T181025Z-881b~successor.md. The generation's costliest defect was mine: briefs that named the uv cache without UV_OFFLINE=1, so two lanes shipped code they never executed.
 
+THROUGHPUT wave 81 (87c0b6a..4397b877a46ed2b513600f1e4332bb231df24e4d): bin +39/-8, tests +83/-0, docs +108/-0, journal +12/-6, other +5/-0; workers: 0 (none); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 39 added bin lines); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 0; protected: 0 (unread mail)
+
 ## 2026-09-11T19:56:15Z HANDOFF-BEGIN inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
 
 successor=inc-20260911T195615Z-a6c9 task=/home/altai/proga/fleet/state/supervisor-handoff-inc-20260911T195615Z-a6c9.md
