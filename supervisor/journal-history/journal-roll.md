@@ -558,3 +558,11 @@ Wave 76 dispatched: one lane w80/fleet-brief (NtCl32NP, luna high) at base 6cfdd
 Brief carries the two shipping requirements wave 75 taught: a new verb needs an entry in UNCLASSIFIED_BY_THE_RATIFIED_TABLE, a new bin/ module needs tests/fleet_sources.IMPLEMENTATION_FILES. Both suites named.
 BLOCKER RAISED, mine to own: 569411d is red on test_docs_currency::test_branch_docs_currency -- bin/fleet.py changed with a trailer naming knowledge/, and the lint takes only docs/ or a literal Docs: n/a. Green at 5f50ac0, so I introduced it. It blocks every wave close until it ages out of the 20-commit window. Decision raised: amend+force-push (recommended) vs widening the lint. I did not widen it myself: it would clear my own violation.
 
+## 2026-09-11T16:52:47Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=e061dbdf-894a-48cc-a9c3-e1c31ca40d09
+
+Wave 76 CLOSED and pushed: 5f50ac0..2255cc2, close 950678a, host rules e95f57f. bin +230/-8, tests +169/-6, docs +99/-0; one lane. Landed: fleet brief with a VERIFIED product.md Serves: citation (absent phrase, right phrase under the wrong section, and no citation each refuse with exit 1; valid exits 0 -- I ran all four), the dispatched-task pin scoped from 2026-09-11T21:00Z so wave 75 and earlier are grandfathered, and the docs-currency surface widened to docs/ + skills/ + knowledge/ per the operator ruling B.
+The wave-close pruner fix from wave 75 is PROVEN: worktrees removed 3 (w78, w79, w80 with their branches), skipped 5 (1 genuinely unmerged, 4 dirty). Under the old base comparison this wave own lanes would all have been called unmerged and kept.
+Four failed closes before this one, all mine, all refused before the commit/push phase: changelog cited the lane sha not the merge sha; I monitored a wrapper pid, read its death as the close finishing, and started a SECOND concurrent close; I rm -rf the live close working clone thinking it stray; and I rotated the generation mid-flight with sup-heartbeat. All four rules now in knowledge/projects/claude-fleet.md.
+
+THROUGHPUT wave 77 (950678a1694452ce2a91ac3b0b9df11e98cc6e76..baf28a14f8b3b7d1ffe99906d5165da1771a497f): bin +77/-44, tests +21/-11, docs +83/-0, journal +32/-14, other +17/-6; workers: 1 (w81/band-gate: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
+
