@@ -16878,7 +16878,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the other sites that already key on the union (`:2986, :3057,
     :3130, :3391, :3541, :5036, :10115, :10435, :10716, :10947, :11034, :11220, :11221, :11289,
-    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19731, :20710`). The thirteenth is multi-fleet §5 step 2's
+    :11301, :11312, :11461, :12278, :16748, :19679, :19680, :19736, :20715`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16903,7 +16903,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8876, :9415, :14494,
-    :21373), the same safety invariant §7.1's send carve-out rests on. That
+    :21378), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17600,7 +17600,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8876, :9415, :14494,
-    #     :21373) -- so the sid union can never make one body answer for another.
+    #     :21378) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
@@ -19703,8 +19703,14 @@ def _sup_guard_live_rows(entries):
     """Map live roster sids to their rows using PID presence as liveness.
 
     A terminal row may remain in ``claude agents --json --all`` after its
-    process exits.  The guard therefore requires a non-empty pid and ignores
-    rows explicitly marked ``done``; status alone is not evidence of life.
+    process exits, so a non-empty pid is required; status alone is not
+    evidence of life.
+
+    ``state`` is NOT consulted. Measured 2026-09-11: a session hosted on an
+    adopted daemon bg-spare reports ``state: "done"`` while holding a live pid
+    and ``status: "idle"`` -- two sids of the live claim holder read that way at
+    once, and excluding ``done`` made the guard page a body it could see. The
+    pid is the liveness fact; ``done`` describes the host's own lifecycle.
     """
     rows = {}
     for entry in entries if isinstance(entries, list) else ():
@@ -19712,8 +19718,7 @@ def _sup_guard_live_rows(entries):
             continue
         sid = entry.get("sessionId")
         pid = entry.get("pid")
-        if (not isinstance(sid, str) or not sid or pid in (None, "", 0)
-                or entry.get("state") == "done"):
+        if not isinstance(sid, str) or not sid or pid in (None, "", 0):
             continue
         rows.setdefault(sid, []).append(entry)
     return rows

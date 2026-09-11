@@ -364,7 +364,14 @@ class TestTheCensus:
         assert len(shaped) >= 6, f"sweep found only {sorted(shaped)}"
 
     def test_the_heartbeat_census_has_no_hole(self, tree):
-        """MEASURED: 8 write sites, all inside a `sup-*` verb's function.
+        """MEASURED: 9 write sites, all inside a supervisor claim-holder verb.
+
+        `cmd_wave_close` joined on 2026-09-11 and is named explicitly rather
+        than loosening the scope rule. A close IS a supervisor turn -- a
+        twelve-minute one -- and while only `sup-*` stamped the beat, a holder
+        that closed waves through `wave-close` looked 7h stale and the keeper
+        paged it three times. The fence stays a fence: a new site joins this
+        census with a reason, it does not widen the predicate.
 
         The control is the reconciliation, not the count: every textual
         occurrence of the key must be accounted for as a classified AST node
@@ -374,8 +381,9 @@ class TestTheCensus:
         writes = _key_write_lines(tree, "heartbeat_at")
         smap = _scope_map(tree)
         scopes = sorted({smap.get(ln, "<module>") for ln in writes})
-        assert len(writes) == 8, f"heartbeat writers moved: {writes}"
+        assert len(writes) == 9, f"heartbeat writers moved: {writes}"
         assert all(s.startswith("cmd_sup_") or s.startswith("_cmd_sup_")
+                   or s == "cmd_wave_close"
                    for s in scopes), scopes
 
         # CONTROL: reconcile against the raw text. Anything the AST did not
