@@ -5,7 +5,7 @@ Every block here is `# volatile: host state` — evidence lives on kz-work, not 
 
 **Note added 2026-09-09 (lane `w58-docs`), and nothing below it was edited.** The `supervisor-dead`
 pages recorded in this log end `Report state; await operator before sup-spawn.` That instruction is
-**superseded** by the 2026-09-09 succession ruling and its amendment: the keeper still never dispatches,
+replaced by the 2026-09-09 succession ruling and its amendment: the keeper still never dispatches,
 but its page now asks the interface to **relaunch**, and the interface runs `sup-spawn` on it without
 waiting for the operator (after a two-live-body guard). The page strings below are **what was actually
 typed on those dates** and stay verbatim — they are host evidence, not doctrine. The shipped string in
