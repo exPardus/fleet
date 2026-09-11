@@ -87,6 +87,17 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   waiter you do not need is a shell you are paying for on a box that kills shells. Same reasoning for
   long test runs: **run the floor in the FOREGROUND, split into halves** to stay inside the tool
   timeout — and note `ls tests/test_*.py` silently misses `tests/integration` (9 skips).
+- **Closing a wave: four rules, each paid for with a failed close (2026-09-11, wave 76).**
+  (a) The `--changelog` text must name the **MERGE** sha, not the lane commit -- the gate reads
+  merge commits since base. (b) **Capture the real python pid**: `pgrep -f wave-close | head -1`
+  matches a wrapper, and believing that pid's death means the close ended is how two concurrent
+  non-idempotent closes end up on one repo. Have the launcher write the child pid to a file.
+  (c) **Never `rm` a `/tmp/fleet-wave-close-*` directory without checking for a live
+  `wave-close`** -- that is its working clone, and deleting it kills the floor with
+  `FileNotFoundError`. (d) **Never run `sup-heartbeat` or `sup-checkpoint` while a close is in
+  flight**: it rotates the generation the close will present at its own final `sup-notify`.
+  All four failures refused before the commit/push phase, which is the only reason they were
+  free; the same mistakes during landing would leave real partial state.
 - **`fleet wave-close` MUST be run DETACHED (`setsid`), not backgrounded. MEASURED 2026-09-11.**
   The harness low-memory guard killed two wave-close runs and then two plain observer shells,
   at `free` 275-582 MB while `available` held above 4 GB and nothing was actually short. A
