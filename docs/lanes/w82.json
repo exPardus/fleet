@@ -1,0 +1,57 @@
+{
+  "lane": "w82",
+  "base": "f19fa024674e488fdf037fe9a55e75d90c76d13f",
+  "files_changed": [
+    "bin/fleet.py",
+    "tests/test_wave_close.py",
+    "docs/lanes/w82.md",
+    "docs/lanes/w82.json"
+  ],
+  "tests": [
+    {
+      "command": "UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_liveness_readers.py tests/test_round7_defect_pins.py tests/test_self_citations.py",
+      "rc": 0,
+      "passed": 143,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_liveness_readers.py tests/test_round7_defect_pins.py tests/test_self_citations.py",
+      "rc": 0,
+      "passed": 143,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Codex usage is read from the landed lane worktree and counted once",
+      "command": "pytest tests/test_wave_close.py::test_codex_usage_reads_the_landed_lane_worktree_events_once"
+    },
+    {
+      "claim": "Claude usage falls back to the outcomes ledger, bounded to the lanes' current sessions",
+      "command": "pytest tests/test_wave_close.py::test_claude_usage_reads_wave_session_from_outcomes"
+    },
+    {
+      "claim": "A missing token source stays UNMEASURED and never 0",
+      "command": "pytest tests/test_wave_close.py::test_new_usage_sources_remain_unmeasured_when_their_source_is_missing"
+    },
+    {
+      "claim": "A sibling lane worktree counts as inside this repo",
+      "command": "pytest tests/test_wave_close.py::test_external_lines_counts_a_sibling_worktree_as_inside_this_repo"
+    },
+    {
+      "claim": "An unresolvable lane is UNMEASURED, not zero",
+      "command": "pytest tests/test_wave_close.py::test_external_lines_refuses_to_call_an_unresolvable_lane_zero"
+    },
+    {
+      "claim": "tokens_per_bin_line names its denominator and guards the zero case",
+      "command": "pytest tests/test_wave_close.py::test_tokens_per_bin_line_names_its_denominator_and_guards_zero"
+    },
+    {
+      "claim": "Codex tokens for this lane measure 2734534 from its worktree events.jsonl",
+      "command": "python3 -c \"import sys; sys.path.insert(0,'bin'); import fleet; print(fleet._wave_codex_tokens('/home/altai/proga/fleet', [('w82/throughput-measured','codex','0')]))\""
+    }
+  ],
+  "blockers": []
+}
