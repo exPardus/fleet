@@ -1,49 +1,17 @@
 #!/usr/bin/env python3
-"""fleet keeper -- liveness pages and opt-in existing-body wakes.
+"""Fleet keeper: guard-directed supervisor wakes and interface pages.
 
-Runs from a systemd user timer every 15 minutes (`--once`). It OBSERVES
-fleet state read-only and TYPES one-line pages into the dedicated tmux
-interface pane (`state/interface-pane`, falling back to `work:fleet`),
-whose Claude session relays them to
-Telegram through the ccgram bridge. It never takes `fleet.lock`, never
-writes fleet state, and NEVER DISPATCHES A SUPERVISOR SESSION. With an
-explicit --wake-socket/--wake-key pair it also sends authenticated local
-daemon replies to an existing idle claim-holder (G-K6 B). Only keeper-owned
-last-page.json changes; a reply ACK does not change C's stall observation.
-
-WHAT "never dispatches" NOW MEANS (operator ruling 2026-09-09 and its
-AMENDMENT, `state/tasks/20260909-succession-ruling.md`; it supersedes the
-2026-09-08 "the timer pages, a human revives" ruling recorded in
-docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md, which
-still carries the old page text and is the prose lane's to correct). The
-keeper's own boundary is UNCHANGED in kind -- it observes and it types. What
-changed is what it types: the supervisor-liveness rule (named
-`rule_supervisor_dead` then, `rule_supervisor_stalled` since G-K6 wave 1)
-used to say "await operator before sup-spawn" and now says "relaunch",
-because the INTERFACE runs
-`sup-spawn` on that line without waiting for the operator. Revival is
-therefore no longer a human message from the phone, and the keeper still
-runs no `sup-spawn` itself. The two-live-body guard the amendment asks for
-lives on the interface, in skills/fleet/SKILL.md, not
-here.
-
-Exit codes: 0 for every observed fleet state (a dead fleet is news, not an
-error), 2 from argparse for a usage error, and 1 for exactly one condition
--- `--fleet-home` naming a home other than the one the imported `fleet`
-module froze at import time, where every reading would be about the wrong
-home (fix wave 1, I3).
-
-stdlib only; floor is fleet.MIN_PYTHON_VERSION.
+The timer runs sup-guard --do for supervisor-stalled. The guard alone decides
+liveness, revalidates, and sends an existing body its wake brief. DISPATCH is
+an interface page, never a supervisor spawn. Only keeper dedup state is owned
+here; the guard/send path may lock and update fleet state. No daemon socket API.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
-import socket
-import stat
 import subprocess
 import sys
 import time
@@ -57,191 +25,9 @@ import fleet  # noqa: E402
 
 Page = namedtuple("Page", "rule fingerprint text")
 
-HEARTBEAT_STALE_SECONDS = 3600
 UNPUSHED_PAGE_SECONDS = 6 * 3600
 REPAGE_SECONDS = 6 * 3600
 ANOMALOUS_STATUSES = ("dead-suspected", "limited")
-
-# B is opt-in on this same timer, so G-K1 can gate the whole tick. No second
-# service/loop survives disabling the keeper. C remains the independent alarm.
-WAKE_DELAY_SECONDS = 15 * 60
-WAKE_STATE_KEY = "_supervisor_wake"
-WAKE_TIMEOUT_SECONDS = 5
-WAKE_REPLY_LIMIT = 16 * 1024
-WAKE_LIST_LIMIT = 1024 * 1024
-
-
-def _wake_identity(status):
-    """A settled, nonce-bearing claim from the read-only projection, or None.
-
-    Unknown/missing protocol fields fail closed for this action; C's alarm
-    still fails loud. Never wake a retired sid to compensate for a missing
-    current session: it may carry stale claim context.
-    """
-    if not isinstance(status, dict) or status.get("goals_active") is not True:
-        return None
-    inc = status.get("incarnation")
-    if not isinstance(inc, dict):
-        return None
-    sid, incarnation = inc.get("session_id"), inc.get("incarnation_id")
-    if (not isinstance(sid, str)
-            or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", sid)
-            or not isinstance(incarnation, str) or not incarnation
-            or inc.get("state") not in (None, "held")
-            or inc.get("nonce_present") is not True
-            or inc.get("pending_present") is not False
-            or inc.get("handoff_pending_count") != 0
-            or status.get("handshake") is not None
-            or status.get("abort_flag") is not False
-            or _pending_question(status)):
-        return None
-    return [incarnation, sid]
-
-
-def wake_due(obs, previous, now):
-    """(due, record): 15 minutes of observed idle, then 15-minute retries.
-
-    One keeper-owned key remembers idle onset and the last ATTEMPT, including
-    refused/ambiguous deliveries. Delivery never refreshes a heartbeat or
-    clears C. Busy/claim changes reset the observation window. This records
-    transport outcomes, not proof that the model made progress.
-    """
-    identity = obs.get("wake_identity")
-    rows = obs.get("claim_rows") or {}
-    if (not identity or not obs.get("registry_ok") or not obs.get("agents_ok")
-            or not obs.get("goals_active") or obs.get("claim_state") != "held"
-            or not obs.get("sid_union_ok")
-            or rows.get(identity[1]) != "idle"
-            or any(st not in (None, "idle") for st in rows.values())):
-        return False, None
-    previous = previous if isinstance(previous, dict) else {}
-    def timestamp(value):
-        return (isinstance(value, (int, float)) and not isinstance(value, bool)
-                and math.isfinite(value) and value <= now)
-    if (previous.get("identity") != identity
-            or not timestamp(previous.get("idle_since"))):
-        return False, {"identity": identity, "idle_since": now}
-    record = dict(previous)
-    at = record.get("attempt_at", record["idle_since"])
-    if not timestamp(at):
-        return False, {"identity": identity, "idle_since": now}
-    beat = obs.get("heartbeat_age_seconds")
-    fresh = (isinstance(beat, (int, float)) and math.isfinite(beat)
-             and beat < WAKE_DELAY_SECONDS)
-    return (not fresh and now - max(at, record["idle_since"]) >= WAKE_DELAY_SECONDS), record
-
-
-def _wake_target(home, identity, run):
-    """Re-read claim + body union + roster immediately before local delivery."""
-    status = _sup_status(home, run)
-    if _wake_identity(status) != identity:
-        return None
-    union = status.get("claim_sids")
-    if not isinstance(union, list) or identity[1] not in union:
-        return None
-    rc, raw = _run_text(run, ["claude", "agents", "--json"])
-    if rc != 0:
-        return None
-    try:
-        rows = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(rows, list):
-        return None
-    relevant = [r for r in rows if isinstance(r, dict) and r.get("sessionId") in union]
-    if any(r.get("status") not in (None, "idle") for r in relevant):
-        return None
-    matches = [r for r in relevant if r.get("sessionId") == identity[1]]
-    if len(matches) != 1:
-        return None
-    row = matches[0]
-    short = row.get("id")
-    if (row.get("kind") != "background" or row.get("state") != "working"
-            or row.get("status") != "idle" or type(row.get("pid")) is not int
-            or row["pid"] <= 0 or not isinstance(short, str)
-            or not re.fullmatch(r"[0-9a-f]{8}", short)):
-        return None
-    if _wake_identity(_sup_status(home, run)) != identity:
-        return None  # roster collection may have spanned a release/handoff
-    return {"short": short, "session_id": identity[1], "pid": row["pid"]}
-
-
-def _daemon_request(socket_path, request, limit):
-    """One bounded local request. Never log responses: list includes nonces."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-        conn.settimeout(WAKE_TIMEOUT_SECONDS)
-        conn.connect(str(socket_path))
-        conn.sendall((json.dumps(request) + "\n").encode("utf-8"))
-        reply = bytearray()
-        deadline = time.monotonic() + WAKE_TIMEOUT_SECONDS
-        while b"\n" not in reply and len(reply) < limit:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("daemon response timeout")
-            conn.settimeout(remaining)
-            chunk = conn.recv(min(4096, limit - len(reply)))
-            if not chunk:
-                break
-            reply.extend(chunk)
-    if b"\n" not in reply:
-        raise ValueError("incomplete daemon response")
-    response = json.loads(bytes(reply).split(b"\n", 1)[0])
-    if not isinstance(response, dict):
-        raise ValueError("invalid daemon response")
-    return response
-
-
-def wake_existing(socket_path, key_path, target):
-    """Claude 2.1.267 local control protocol 1: reply to an EXISTING handle.
-
-    No CLI reply helper (it can start a daemon), no resume, no model client,
-    no fallback. Paths are explicit operator opt-in, never guessed. The
-    daemon's reply handler rejects missing/retired jobs and calls handle.reply
-    on a live one. That process makes the first model call; a plan refusal
-    cannot cancel this systemd timer. Source receipt: w64-waker report.
-    """
-    if (not isinstance(target, dict) or not isinstance(target.get("short"), str)
-            or not re.fullmatch(r"[0-9a-f]{8}", target["short"])
-            or not isinstance(target.get("session_id"), str)
-            or type(target.get("pid")) is not int or target["pid"] <= 0):
-        return "invalid-target"
-    prompt = ("Keeper wake: verify this session still holds the supervisor claim "
-              "and GOALS are active before acting. Follow the supervisor beat "
-              "procedure, refresh the heartbeat and continue the queued work. "
-              "If authority changed or an operator decision is pending, stop.")
-    try:
-        # The operator-selected socket may belong to a different config root
-        # than `claude agents`. Shorts are daemon-local: bind to sid AND pid
-        # on that exact socket before sending. The vendor API has no CAS;
-        # a process/claim transition after these reads remains possible.
-        listing = _daemon_request(socket_path, {"proto": 1, "op": "list"}, WAKE_LIST_LIMIT)
-        jobs = listing.get("jobs")
-        if listing.get("ok") is not True or listing.get("op") != "list" or not isinstance(jobs, list):
-            return "invalid-list"
-        matches = [j for j in jobs if isinstance(j, dict) and j.get("short") == target["short"]]
-        if (len(matches) != 1 or matches[0].get("sessionId") != target["session_id"]
-                or matches[0].get("pid") != target["pid"]
-                or matches[0].get("dying") or matches[0].get("outcome")):
-            return "target-changed-or-unavailable"
-        # Refuse FIFOs/devices and oversized keys, without blocking on open.
-        fd = os.open(key_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
-        with os.fdopen(fd, "r", encoding="utf-8") as key_file:
-            info = os.fstat(key_file.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
-                return "invalid-key"
-            key = key_file.read(4097).strip()
-        if not key or len(key) > 4096:
-            return "invalid-key"
-        request = {"proto": 1, "op": "reply", "short": target["short"],
-                   "text": prompt, "auth": key}
-        response = _daemon_request(socket_path, request, WAKE_REPLY_LIMIT)
-        if response.get("ok") is True and response.get("op") == "reply":
-            return "accepted"
-        return "refused"
-    except (OSError, ValueError, AttributeError):
-        # Never log auth or arbitrary daemon text (which may echo a request).
-        # Timeout is ambiguous: it may have landed. Throttle every attempt.
-        return "transport-unavailable"
 
 # THE SANITISER MOVED, THE DOCTRINE DID NOT (w58/notify, 2026-09-09). Fix
 # wave 1's C4 body now lives in `fleet.one_line` / `fleet.interface_line`,
@@ -271,18 +57,6 @@ def _page_line(text):
 
 
 # --------------------------------------------------------------------- rules
-
-def _since(obs):
-    """When the supervisor stopped, if anything says: the claim's own
-    `released_at` first, else the heartbeat age in whole minutes."""
-    released_at = obs.get("released_at")
-    if released_at:
-        return str(released_at)
-    beat = obs.get("heartbeat_age_seconds")
-    if beat is None:
-        return None
-    return f"{int(beat // 60)} min ago"
-
 
 def rule_registry_unreadable(obs, now):
     """Two states, two pages (fix wave 1, I1). A home where `fleet init` has
@@ -340,247 +114,28 @@ def rule_claim_unknown(obs, now):
                 "Report it; do not repair.")
 
 
-#: The ONE roster `status` value that means "this body is taking a turn right
-#: now" (MEASURED, `docs/lanes/w61-keeperblind.md` §3, claude 2.1.267 on this
-#: host: a background session reads `busy` inside its turn and flips to `idle`
-#: within 13 s of the turn ending, with no other field moving).
-#:
-#: IT IS AN ALLOWLIST OF ONE, AND THAT IS THE DELIBERATE CHOICE. Everything
-#: else -- `idle`, `waiting`, a value a later CLI invents, a non-string, or no
-#: `status` key at all -- reads as NOT WORKING and therefore PAGES once the
-#: heartbeat is stale. This is an alarm; the direction it must fail in is
-#: LOUD. A denylist ("page unless the status is one of these dead ones") would
-#: silently re-acquire the 2026-09-09 blindness the first time the CLI shipped
-#: a new value.
-ROSTER_BUSY = "busy"
-
-
-def _claim_activity(obs):
-    """`(activity, status, sid)` for the claim-holder BODY's roster rows, from
-    `claude agents --json` (the plain spelling; never `--all`).
-
-    IT GRADES A SET OF ROWS, NOT ONE ROW (w63). `obs["claim_rows"]` is every
-    roster row belonging to any sid in the body's UNION
-    (`session_id` u `retired_sids`), because a fork-steered body HAS several
-    sessions at once and the claim names only the newest. MEASURED on this
-    host 2026-09-10T10:38Z, one body, two live rows and two live processes:
-    `37e5c61c...` idle at pid 434832 (the pre-steer session) and
-    `42445477...` busy at pid 515437 (the fork holding the claim). Grading
-    the claim's row alone answers a question about a SESSION while the page
-    speaks about a BODY.
-
-    Four classes, because the three non-busy ones are three different
-    sentences for the operator and one of them is not even a defect in the
-    same sense. Read in this order, most-alive first -- ANY row that is busy
-    makes the body busy:
-
-    - `"busy"`   -- some union row reads `status == "busy"`: this body is in a
-                    turn right now.
-    - `"quiet"`  -- some union row carries some other status (`idle` is the
-                    measured one): the body is ALIVE and NOT WORKING. This is
-                    both the 2026-09-09 outage (the claim's own row idle) and
-                    the 2026-09-10 10:16Z false page (the claim's row gone,
-                    the PRE-STEER row idle with a live pid).
-    - `"dead"`   -- union rows exist but NONE carries a `status`. MEASURED: on
-                    a dead row `status` and `pid` are ABSENT from the object,
-                    not present-and-null (w61 §2), and such rows persist in the
-                    plain spelling indefinitely -- one was 22h old when
-                    measured. MEASURED again by w63 over a whole body:
-                    `sup|inc-20260910T041459Z-2382|boot` had BOTH its retired
-                    sids listed as pid-less `blocked` rows while its current
-                    `session_id` had no row at all. Listed is not alive, and
-                    that is why "any union sid is in the roster" is NOT the
-                    predicate -- it would make that corpse immortal.
-    - `"absent"` -- no row for ANY sid of this body.
-
-    `sid` is the row the class was decided on, so the page can say whether the
-    live session is the claim's or a retired one. It is picked by sorted sid
-    among equals, never by dict order, so the same observation always produces
-    the same page text and therefore the same dedup fingerprint.
-
-    NO VALUE IS READ AS A BARE `.get()` TRUTH TEST. A missing obs key, a
-    non-dict, a row without the key, and a row whose key holds a non-string
-    all land on `"dead"`/`"absent"` EXPLICITLY, so the alarm can never be
-    silenced by a shape nobody anticipated -- `.get()` returning `None` by
-    accident is exactly how a rule ends up passing its tests while watching
-    nothing."""
-    rows = obs.get("claim_rows")
-    if not isinstance(rows, dict) or not rows:
-        return "absent", None, None
-    live = {sid: st for sid, st in rows.items()
-            if isinstance(st, str) and st}
-    busy = sorted(sid for sid, st in live.items() if st == ROSTER_BUSY)
-    if busy:
-        return "busy", live[busy[0]], busy[0]
-    if live:
-        sid = sorted(live)[0]
-        return "quiet", live[sid], sid
-    return "dead", None, sorted(rows)[0]
-
-
 def rule_supervisor_stalled(obs, now):
-    """The fleet has no supervisor TAKING TURNS. Fires on: GOALS active, the
-    roster readable, and either a released/absent claim (no supervisor by
-    definition -- no roster condition), or a HELD claim whose heartbeat is
-    missing/stale AND whose own session row is not `busy`.
-
-    RENAMED FROM `rule_supervisor_dead` (G-K6 wave 1, operator ruling
-    2026-09-10 *"G-K6 C then B"*, which invites the rename *"if the lane
-    agrees the name is wrong"*). The lane agrees. The rule now pages a body
-    that is alive, listed, holding the claim, and idle -- calling that "dead"
-    is a false claim about the world in the page the operator reads at 3am.
-    The `Page` rule name moved with it (`supervisor-dead` ->
-    `supervisor-stalled`), which is the dedup key: see the report for the
-    one-off re-fire that costs.
-
-    WHAT C CHANGED, AND WHY THE OLD ARM WAS THE WRONG INSTRUMENT. The arm used
-    to be `claim_sid in roster_sids` -- MERE PRESENCE. It was added (fix wave
-    1, C2) to protect a supervisor that was *alive and unlisted*, on the
-    premise that `claude agents --json` "lists ACTIVE sessions only". MEASURED
-    (`docs/lanes/w61-keeperblind.md` §3, §6), that premise is exactly
-    INVERTED: an idle-between-turns background session is PRESENT, at
-    `state: "working"`, `status: "idle"`, with a live pid, and it stays that
-    way until the daemon retires it at 8h. Alive-and-unlisted does not occur
-    for a background session on this host. What occurs is dead-and-listed
-    (5 of 10 plain rows, one 22h old) and alive-listed-and-doing-nothing --
-    and the old arm admitted both. On 2026-09-09 it suppressed the page for
-    8h10m51s while the heartbeat screamed; `status`-armed, the identical
-    observations page at 21:04:36Z instead of 04:14:36Z.
-
-    THE SID JOIN STAYS, AND IT IS LOAD-BEARING. C's change was to the
-    MEMBERSHIP predicate; C2's fix -- join on a SESSION ID, never a `sup|`
-    name prefix -- is untouched, because `ai-title` can overwrite `name` after
-    a resume, so a name join can bind a live supervisor to the wrong row or
-    miss it entirely and page at a healthy fleet.
-
-    WHAT w63 CHANGED IS THE JOIN'S SUBJECT: the claim's ONE sid became the
-    claim-holder BODY's sid UNION (`session_id` u `retired_sids`), resolved in
-    `sup-status --json` and read here out of `obs["claim_rows"]`. C asked
-    whether the CLAIM's session had a roster row, which for a fork-steered
-    body is a question about one of its several sessions and flips as turns
-    start and end -- so on 2026-09-10 at 10:16Z it paged that a live,
-    listed, idle supervisor was gone. See `_claim_activity`.
-
-    THE FINGERPRINT IS DELIBERATELY LEFT ON THE CLAIM SID, and the cost is
-    named rather than discovered. `claim_sid` ROTATES on every fork-steer, so
-    two stalls either side of a `fleet send` dedup as different pages. That is
-    the right answer here -- a steer is a fresh attempt to un-stall the body,
-    and a stall that survives it is news -- and re-keying on something stable
-    (the incarnation id, or the union's minimum) would be a behaviour change
-    to `dedup` that no measured event asks for. w63 does not make it.
-
-    THE RESIDUAL C DOES NOT CLOSE, STATED PLAINLY: a supervisor WEDGED
-    MID-TURN reports `status: "busy"` for as long as its process lives, and
-    this rule stays silent for exactly as long. UNMEASURED -- w61 could not
-    produce a wedge, and neither did this lane. The hole is strictly smaller
-    than the one it replaces (that one swallowed every idle body too), but it
-    is a hole, and it is the reason a heartbeat-only rule (reading A) is still
-    arguable. A supervisor mid-LEGITIMATE-long-turn reads `busy` too, and is
-    suppressed on purpose: that is C's whole claim to introducing no new false
-    positive.
-
-    A held claim with a FRESH heartbeat never pages, whatever the roster
-    says -- that gate is checked first and is unchanged."""
-    if not obs.get("goals_active"):
+    """Render the guard verdict; never derive liveness from keeper readings."""
+    guard = obs.get("supervisor_guard")
+    if not isinstance(guard, dict):
+        return Page("supervisor-stalled", "guard-unavailable",
+                    "KEEPER: supervisor stalled (guard unavailable). Report state.")
+    if guard.get("quiet") or guard.get("sent"):
         return None
-    if not obs.get("agents_ok", True):
-        return None  # cannot tell dead from unlisted; login/missing rules cover it
-    state = obs.get("claim_state")
-    if state in ("released", "none"):
-        reason = f"claim {state}"
-        fp = reason
-    elif state == "held":
-        beat = obs.get("heartbeat_age_seconds")
-        if beat is not None and beat <= HEARTBEAT_STALE_SECONDS:
-            return None
-        activity, status, sid = _claim_activity(obs)
-        if activity == "busy":
-            return None
-        stale = ("no heartbeat" if beat is None
-                 else f"heartbeat {int(beat // 60)} min stale")
-        if activity == "quiet":
-            # The 2026-09-09 shape. Name the value, because "idle" and
-            # "waiting" (a permission prompt nobody is at the keyboard for)
-            # are different remedies and the operator can only see which
-            # from the page.
-            seen = f"roster says {status}"
-            if obs.get("claim_sid") and sid != obs.get("claim_sid"):
-                # ...and the 2026-09-10 10:16Z shape, which is the SAME
-                # remedy but a different sentence: the live session is a
-                # pre-steer one, so an operator who greps the roster for the
-                # sid in `sup-status` will not find it and must not conclude
-                # the body is gone.
-                #
-                # GUARDED ON `claim_sid` BEING KNOWN, not just on inequality.
-                # With no readable claim sid, `sid != None` is trivially true
-                # and the page would call a row "retired" on no evidence --
-                # a page must not assert a relation it did not observe. No
-                # `collect` produces that shape today (a malformed holder sid
-                # empties the union too), so this is a guard against the
-                # observation dict a future caller hands in, and it is
-                # pinned rather than left to the argument above.
-                seen += " under a retired sid"
-        elif activity == "dead":
-            # "body", not "claim session": the rows that were listed may be
-            # retired sids, and after w63 this class means every session this
-            # body ever had is listed without a live process.
-            seen = "body listed with no live process"
-        elif obs.get("sid_union_ok"):
-            seen = "no session of this body in the roster"
-        else:
-            # The union could not be resolved (`sup-status --json` published
-            # `claim_sids: null` -- unreadable registry, no claim, or an
-            # older fleet), so this observation is about ONE session and the
-            # page must not dress it up as a statement about the body. The
-            # page still FIRES: an alarm degrades loud (see `ROSTER_BUSY`),
-            # and an unreadable registry has its own page besides
-            # (`rule_registry_unreadable`).
-            seen = "claim session not in the roster, sid union unavailable"
-        reason = f"{stale}, {seen}"
-        # The fingerprint must NOT carry the heartbeat age (re-review minor
-        # 1): the age changes every tick, so a beat-bearing fingerprint never
-        # equals its predecessor and `dedup` can never suppress it -- the
-        # operator would be paged every 15 minutes instead of once per
-        # REPAGE_SECONDS. The age still reaches the operator, in the TEXT,
-        # via `_since` below.
-        fp = f"held:stale:{obs.get('claim_sid') or '-'}"
+    verdict = guard.get("verdict", "PAGE guard unavailable")
+    reason = guard.get("reason", "guard unavailable")
+    identity = guard.get("body_name") or guard.get("state") or "unknown"
+    if reason.startswith("supervisor limited"):
+        fingerprint = f"limited:{identity}:{guard.get('limit_reset_at')}:{reason}"
+        text = f"KEEPER: {reason}. Report state; respect the reset horizon."
+    elif verdict == "DISPATCH":
+        fingerprint = f"dispatch:{identity}"
+        text = (f"KEEPER: supervisor stalled ({reason}). Report state, then "
+                "relaunch with sup-spawn; do not await the operator.")
     else:
-        return None  # `unknown` belongs to rule_claim_unknown
-    since = _since(obs)
-    head = (f"supervisor stalled since {since}" if since
-            else "supervisor stalled")
-    # THE INSTRUCTION IS `RELAUNCH`, NOT `WAIT` (operator ruling 2026-09-09,
-    # AMENDMENT: *"keeper must just instruct interface to relaunch
-    # supervisor"*). The keeper still does not dispatch -- it types, the
-    # INTERFACE runs `sup-spawn`, and it does so without waiting for the
-    # operator. The predecessor text ("Report state; await operator before
-    # sup-spawn.") is what the amendment names and replaces.
-    #
-    # THE TWO-LIVE-BODY GUARD IS DELIBERATELY NOT IN THIS PAGE. The amendment
-    # puts it on the interface -- *"check `sup-status` and the roster before
-    # dispatching, and page the operator instead when the state is
-    # ambiguous"* -- and `skills/fleet/SKILL.md` is where
-    # it is written, because it is a procedure and this is 200 characters
-    # shared with a worker-writable `released_at`. A page that spends its
-    # budget restating a checklist truncates the verb it exists to name.
-    #
-    # THE FINGERPRINT IS UNCHANGED ACROSS C, ON PURPOSE, AND THE INVARIANT
-    # WAS RE-CHECKED (this change DOES alter what the page says). `fp` still
-    # carries no heartbeat age -- and it also does NOT carry the activity
-    # class. The class can move under a stalled supervisor (`quiet` becomes
-    # `dead` when the daemon finally retires the body, as it did at 04:05:58Z
-    # on 2026-09-09), and folding it in would re-page on a transition that
-    # changes nothing the operator does. One claim, one held-and-stalled
-    # fingerprint, one page per REPAGE_SECONDS.
-    #
-    # THE RULE NAME DID CHANGE: `supervisor-dead` -> `supervisor-stalled`.
-    # That IS the dedup identity (`state/keeper/last-page.json` keys on it),
-    # so the first tick after this lands re-pages a stall that was already
-    # paged under the old name -- once. Stated, not discovered; see
-    # `docs/lanes/w62-keeperc.md`.
-    return Page("supervisor-stalled", f"{state}:{fp}",
-                f"KEEPER: {head} ({reason}). Report state, then relaunch "
-                "with sup-spawn; do not await the operator.")
+        fingerprint = f"page:{identity}:{reason}"
+        text = f"KEEPER: supervisor stalled ({reason}). Report state."
+    return Page("supervisor-stalled", fingerprint, text)
 
 
 def rule_supervisor_frozen(obs, now):
@@ -595,6 +150,11 @@ def rule_supervisor_frozen(obs, now):
 def rule_worker_anomaly(obs, now):
     names = []
     for w in obs.get("workers", []):
+        # The guard has the current supervisor's dedicated alert and horizon.
+        # Including it here would re-page a limited body on the worker cadence.
+        guard = obs.get("supervisor_guard") or {}
+        if w.get("name") and w.get("name") == guard.get("body_name"):
+            continue
         status = w.get("status")
         if status in ANOMALOUS_STATUSES:
             names.append(f"{w.get('name')}({status})")
@@ -674,7 +234,8 @@ def dedup(pages, state, now):
     for page in pages:
         prev = state.get(page.rule)
         if (prev is None or prev.get("fingerprint") != page.fingerprint
-                or now - float(prev.get("at", 0)) > REPAGE_SECONDS):
+                or (not page.fingerprint.startswith("limited:")
+                    and now - float(prev.get("at", 0)) > REPAGE_SECONDS)):
             send.append(page)
             new_state[page.rule] = {"fingerprint": page.fingerprint, "at": now}
         else:
@@ -726,6 +287,33 @@ def _run_text(run, argv, *, cwd=None, env=None):
     except (OSError, subprocess.SubprocessError):
         return 1, ""
     return cp.returncode, cp.stdout or ""
+
+
+def _supervisor_guard(home, run, *, do):
+    argv = [sys.executable, str(_INSTALL_ROOT / "bin" / "fleet.py"),
+            "sup-guard", "--fleet-home", str(home), "--json"]
+    if do:
+        argv.append("--do")
+    # A keeper is a plain-shell caller, not the session that launched its timer.
+    env = {**os.environ, "FLEET_HOME": str(home)}
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    try:
+        cp = run(argv, capture_output=True, text=True, timeout=180, env=env)
+        data = json.loads(cp.stdout or "")
+        if (not isinstance(data, dict) or not isinstance(data.get("verdict"), str)
+                or data["verdict"].split(" ", 1)[0] not in {"WAKE", "DISPATCH", "PAGE"}):
+            raise ValueError("invalid guard verdict")
+        if cp.returncode:
+            raise ValueError(data.get("reason") or "guard action failed")
+        if not isinstance(data.get("reason"), str):
+            raise ValueError("missing guard reason")
+        data["quiet"] = data.get("quiet") is True
+        # A preview or a non-confirmed WAKE must never suppress the alarm.
+        data["sent"] = bool(do and data["verdict"].startswith("WAKE ")
+                            and data.get("sent") is True)
+        return data
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return {"verdict": "PAGE guard unavailable", "reason": f"guard unavailable: {exc}"}
 
 
 def _sup_status(home, run):
@@ -801,8 +389,8 @@ def _agents(run):
     carries `pid`/`status` ONLY WHILE THE PROCESS LIVES. On a dead row the
     `status` key is ABSENT from the object, not present-and-null -- so the
     mapping's value is None for "listed with no live process", and a sid
-    missing from the mapping is "no row at all". `_claim_activity` is the one
-    place that reads the difference.
+    missing from the mapping is "no row at all". These are diagnostics;
+    sup-guard owns the action decision.
 
     A non-str or empty `status` is normalised to None (the same treatment a
     dead row gets), because this data crosses a process boundary and the
@@ -1012,7 +600,7 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     # listing. w63 keeps that distinction and widens its SUBJECT: `claim_rows`
     # maps every union sid that HAS a row to that row's status-or-None, so
     # "no row" is now absence from this mapping and a corpse is a `None`
-    # value. `_claim_activity` is the only reader that has to tell them apart.
+    # value. The guard owns liveness; these rows remain diagnostic observations.
     #
     # The keys `claim_in_roster`/`claim_row_status` are GONE rather than
     # redefined, exactly as `claim_sid_live` was deleted rather than kept with
@@ -1020,9 +608,6 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     # session to a whole body is how the next reader inherits this outage.
     claim_rows = {sid: agent_statuses[sid]
                   for sid in sorted(union) if sid in agent_statuses}
-    wake_identity = _wake_identity(status)
-    if wake_identity and wake_identity[0] != sup.get("incarnation_id"):
-        wake_identity = None  # claim changed between the two read surfaces
     return {
         "goals_active": goals_active,
         "claim_state": claim_state,
@@ -1030,7 +615,6 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         "claim_sids": sorted(union),
         "sid_union_ok": sid_union_ok,
         "claim_rows": claim_rows,
-        "wake_identity": wake_identity,
         "released_at": released_at,
         "heartbeat_age_seconds": beat,
         "pending_decision": pending,
@@ -1222,10 +806,6 @@ def _parser():
                    help="run one tick and exit (the only mode; a timer supplies cadence)")
     p.add_argument("--dry-run", action="store_true",
                    help="print pages/wakes; touch neither tmux, daemon nor state")
-    p.add_argument("--wake-socket", type=Path,
-                   help="opt in to existing-body wakes via this daemon control.sock")
-    p.add_argument("--wake-key", type=Path,
-                   help="daemon control.key (required with --wake-socket; never logged)")
     p.add_argument("--fleet-home", default=str(_INSTALL_ROOT))
     p.add_argument("--tmux-session", default="work")
     p.add_argument("--window", default="fleet")
@@ -1235,12 +815,9 @@ def _parser():
 
 
 def main(argv=None, *, run=subprocess.run, now_fn=time.time,
-         snapshot_fn=fleet.status_snapshot, out=sys.stdout,
-         wake_fn=wake_existing):
+         snapshot_fn=fleet.status_snapshot, out=sys.stdout):
     parser = _parser()
     args = parser.parse_args(argv)
-    if bool(args.wake_socket) != bool(args.wake_key):
-        parser.error("--wake-socket and --wake-key must be supplied together")
     home = Path(args.fleet_home).resolve()
     # I3: `--fleet-home` reaches the sup-status subprocess, git's cwd and the
     # state path -- but `fleet.FLEET_HOME` is frozen at IMPORT, so
@@ -1266,32 +843,12 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
     state = load_state(state_path)
     obs = collect(home, now=now, run=run, snapshot_fn=snapshot_fn,
                   prev_state=state, out=out)
-    # The wake does not depend on a usable interface pane or a model there.
-    # Save attempts BEFORE delivery, bounding retries after a crash/timeout.
-    # The same service's systemd oneshot serialises its timer invocations.
-    if args.wake_socket:
-        due, wake_state = wake_due(obs, state.get(WAKE_STATE_KEY), now)
-        if args.dry_run:
-            print(f"[dry-run] supervisor wake {'due' if due else 'not due'}", file=out)
-        else:
-            if due:
-                wake_target = _wake_target(home, wake_state["identity"], run)
-                wake_state.update(attempt_at=now, result="attempting")
-                state[WAKE_STATE_KEY] = wake_state
-                save_state(state_path, state)
-                wake_state["result"] = (wake_fn(args.wake_socket, args.wake_key, wake_target)
-                                        if wake_target else "target-changed-or-unavailable")
-                try:
-                    fleet.append_interface_log(
-                        "WAKE", f"result={wake_state['result']}", home=home)
-                except OSError:
-                    pass
-                print(f"keeper: supervisor wake {wake_state['result']}", file=out)
-            if wake_state is None:
-                state.pop(WAKE_STATE_KEY, None)
-            else:
-                state[WAKE_STATE_KEY] = wake_state
-            save_state(state_path, state)
+    # Run independently of pane availability; a failed action remains a page.
+    obs["supervisor_guard"] = _supervisor_guard(home, run, do=not args.dry_run)
+    if args.dry_run:
+        print(f"[dry-run] {obs['supervisor_guard']['verdict']}", file=out)
+    elif obs["supervisor_guard"].get("sent"):
+        print("keeper: supervisor wake sent", file=out)
     pages = evaluate(obs, now)
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     interface_notice = None
@@ -1413,8 +970,6 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
                 rule_state[p.rule] = previous
 
     rule_state["_hook_error_lines"] = obs["hook_error_lines"]
-    if args.wake_socket and WAKE_STATE_KEY in state:
-        rule_state[WAKE_STATE_KEY] = state[WAKE_STATE_KEY]
     save_state(state_path, rule_state)
     return 0
 

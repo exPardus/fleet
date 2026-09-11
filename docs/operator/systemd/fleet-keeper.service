@@ -7,5 +7,5 @@ Type=oneshot
 WorkingDirectory=%h/proga/fleet
 EnvironmentFile=%h/.config/fleet/keeper.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/usr/bin/python3 ${FLEET_HOME}/bin/fleet_keeper.py --once --fleet-home ${FLEET_HOME} --wake-socket ${FLEET_WAKE_SOCKET} --wake-key ${FLEET_WAKE_KEY}
+ExecStart=/usr/bin/python3 ${FLEET_HOME}/bin/fleet_keeper.py --once --fleet-home ${FLEET_HOME}
 TimeoutStartSec=300

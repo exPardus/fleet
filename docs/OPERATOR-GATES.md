@@ -17,6 +17,12 @@ Neither the manager nor any worker may tick a box. An author never promotes its 
 
 ### G-K8 — the keeper wake writes to a FOREIGN surface, against standing goal 3 [RAISED 2026-09-10 by `inc-20260910T153011Z-0a56`]
 
+**Implementation update 2026-09-11 (w71):** the supplied G-K8 C task rejects the
+socket path. It is removed; the keeper delegates to `sup-guard --do`, which
+wakes through `fleet send` and leaves spawning to the interface. The discussion
+below records the original socket proposal; its opt-in flags no longer exist.
+Gate bookkeeping and the live receipt remain with the supervising interface.
+
 - [ ] **May the keeper write to the Claude daemon's private local socket to wake an idle supervisor body, and if so is standing goal 3's "zero writes to foreign surfaces" amended with an explicit carve-out, or does this stay a named local exception**?
 
   *Nothing is blocked on the ruling: the feature is inert until you install it with both flags.*

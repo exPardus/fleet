@@ -220,8 +220,7 @@ def test_the_claim_rows_status_reaches_the_observation(home):
                         "status": "idle", "pid": 303182}])
     obs = _collect(home, _runner(_table(agents=idle)))
     assert obs["claim_rows"] == {SUP_SID: "idle"}
-    stale = {**obs, "heartbeat_age_seconds": 29451.0}
-    assert "supervisor-stalled" in [p.rule for p in k.evaluate(stale, NOW)]
+    assert "supervisor_guard" not in obs  # main obtains the guard verdict.
 
 
 def test_a_dead_row_keeps_its_sid_and_carries_no_status_key(home):
@@ -237,8 +236,7 @@ def test_a_dead_row_keeps_its_sid_and_carries_no_status_key(home):
                           "startedAt": "2026-09-09T16:29:31Z"}])
     obs = _collect(home, _runner(_table(agents=corpse)))
     assert obs["claim_rows"] == {SUP_SID: None}
-    stale = {**obs, "heartbeat_age_seconds": 29451.0}
-    assert "supervisor-stalled" in [p.rule for p in k.evaluate(stale, NOW)]
+    assert "supervisor_guard" not in obs  # main obtains the guard verdict.
 
 
 def test_a_non_string_status_on_the_claim_row_is_not_a_working_body(home):
@@ -285,33 +283,24 @@ def test_the_pre_steer_row_is_what_the_join_finds(home):
     assert obs["claim_sid"] not in obs["claim_rows"], "the fork row is gone"
     assert obs["claim_rows"] == {F4_RETIRED_1: "idle"}
     assert obs["sid_union_ok"] is True
-    assert k._claim_activity(obs)[0] == "quiet"
 
 
-def test_the_10_16Z_false_page_does_not_fire_end_to_end(home):
-    """PIN 1, WHOLE. `collect` -> `evaluate` -> the page an operator reads, on
-    the roster and the `sup-status` of 2026-09-10T10:16Z. The body is alive and
-    idle, so `supervisor-stalled` is CORRECT and stays; what must never appear
-    is the sentence that its session is gone, about a body that visibly IS in
-    the roster under another sid. That sentence is what sends the interface to
-    `sup-spawn` and puts a second body over one `supervisor/GOALS.md`.
+def test_collected_sid_diagnostics_do_not_override_the_supplied_guard_wake(home):
+    """The 4f99 union join remains diagnostic; main supplies the decision.
 
-    The rules-level twin (`test_the_4f99_observation_never_pages_that_the_
-    session_is_gone`) pins the reason CLAUSE from a hand-built observation;
-    this one pins the JOIN, because the join lives in `collect` and a
-    rules-level fixture cannot exercise it."""
+    The current fork sid is absent and a retired row is idle. A successful
+    guard wake must suppress the alarm without a keeper liveness decision.
+    """
     roster = json.dumps([{"name": "sup|inc-4f99|successor",
                           "sessionId": F4_RETIRED_1, "kind": "background",
                           "state": "blocked", "status": "idle", "pid": 434832}])
     obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
-    pages = k.evaluate(obs, NOW)
-    stalled = [p for p in pages if p.rule == "supervisor-stalled"]
-    assert len(stalled) == 1, [p.rule for p in pages]
-    text = stalled[0].text
-    assert "roster says idle under a retired sid" in text, text
-    assert "not in the roster" not in text, text
-    assert "no live process" not in text, text
-    assert "dead" not in text, text
+    assert obs["claim_rows"] == {F4_RETIRED_1: "idle"}
+    assert "supervisor_guard" not in obs
+    obs["supervisor_guard"] = {
+        "verdict": "WAKE sup|inc-4f99|successor", "reason": "idle",
+        "body_name": "sup|inc-4f99|successor", "state": "held", "sent": True}
+    assert "supervisor-stalled" not in [p.rule for p in k.evaluate(obs, NOW)]
 
 
 def test_both_rows_reach_the_observation_during_a_turn(home):
@@ -326,7 +315,6 @@ def test_both_rows_reach_the_observation_during_a_turn(home):
     ])
     obs = _collect(home, _runner(_table(sup=_fork_sup(), agents=roster)))
     assert obs["claim_rows"] == {F4_CLAIM_SID: "busy", F4_RETIRED_1: "idle"}
-    assert k._claim_activity(obs)[0] == "busy"
 
 
 def test_a_row_for_a_sid_outside_the_union_never_enters_claim_rows(home):
@@ -523,7 +511,7 @@ def test_a_never_initialised_home_keeps_its_own_reason(home):
                                             "incarnation_id": None,
                                             "heartbeat_age_seconds": None}})
     assert obs["registry_reason"] == "not_initialized"
-    assert [p.rule for p in k.evaluate(obs, NOW)] == ["not-initialised"]
+    assert k.rule_registry_unreadable(obs, NOW).rule == "not-initialised"
 
 
 # --- git --------------------------------------------------------------------
@@ -663,7 +651,8 @@ def test_a_ref_that_cannot_be_named_still_pages_the_count(home):
 def _rule_obs(n, oldest, ref):
     """A quiet observation carrying only the git half, so `evaluate` sees the
     unpushed rule and nothing else."""
-    return {"goals_active": True, "claim_state": "held", "claim_sid": None,
+    return {"supervisor_guard": {"verdict": "PAGE heartbeat fresh", "quiet": True},
+            "goals_active": True, "claim_state": "held", "claim_sid": None,
             "claim_rows": {"sid": "busy"}, "claim_sids": ["sid"],
             "sid_union_ok": True,
             "heartbeat_age_seconds": 1.0,

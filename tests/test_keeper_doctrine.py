@@ -1,6 +1,9 @@
-"""The keeper is a reader plus two tmux actions. These pins make the
-spec's 'never dispatches, never locks' claim mechanical, and prove the
-detector can see a violation by planting one."""
+"""The keeper delegates wake actions only through the guard CLI.
+
+These pins forbid direct fleet mutation/dispatch APIs in the keeper; G-K8 C
+allows the guard subprocess to send and retire safely. Seed tests prove the
+detectors catch a direct API reach.
+"""
 import ast
 from pathlib import Path
 
@@ -31,8 +34,8 @@ def _referenced_names(source):
 def test_the_keeper_references_no_dispatching_or_locking_name():
     hits = sorted(FORBIDDEN & _referenced_names(SRC))
     assert hits == [], (
-        f"fleet_keeper.py references {hits}. The keeper pages; it never "
-        "dispatches, locks, or repairs (spec §3.3, operator ruling 2026-09-08).")
+        f"fleet_keeper.py directly references {hits}. Wake actions must pass "
+        "through the sup-guard CLI (G-K8 C); direct mutation APIs are forbidden.")
 
 
 def test_the_detector_sees_a_planted_dispatch():
