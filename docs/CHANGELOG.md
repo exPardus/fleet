@@ -1,4 +1,5 @@
 # Operator changelog
+- 2026-09-11 — `8a7af00`: `fleet sup-guard` gains an `OK` verdict, so a healthy supervisor — fresh heartbeat with a live body, busy or idle — no longer produces a page; `PAGE` is reserved for genuinely ambiguous states, `WAKE` for a stale idle body with a live process, and `DISPATCH` only when a stale claim has no live body at all.
 - 2026-09-11 — `613da18`: retiring a supervisor's pre-steer process now requires a fork that has actually taken over, not merely one that is reachable.
 - 2026-09-11 — `7e5a0c9`: `fleet sup-guard` treats a roster row with a live pid as live even when the daemon reports `state: done`, so a supervisor hosted on an adopted bg-spare is woken rather than paged about.
 - 2026-09-11 — `d205e4d`: `fleet wave-close` refreshes the claim heartbeat, so a supervisor that closes waves no longer looks stale to the keeper for the length of the wave.
