@@ -70,9 +70,10 @@ import ast
 from pathlib import Path
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
-SRC = Path(fleet.__file__).read_text(encoding="utf-8")
+SRC = fleet_implementation_source()
 
 # The enumeration is an AST walk, not a regex over the text, and that is a
 # correction this file made to itself on its first run: a grep for

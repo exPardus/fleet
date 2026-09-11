@@ -62,6 +62,7 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 REAL_LIST = Path.home() / ".claude" / "fleet-homes.list"
 
@@ -215,7 +216,7 @@ class TestTheGrammarIsNotOsPathIsabs:
         AST rather than substring: the module explains the ban in prose at
         `_HOMES_LIST_ABSOLUTE`, and a grep-shaped lint would make documenting
         the rule the thing that breaks it."""
-        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(fleet_implementation_source())
         callers = {}
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -235,7 +236,7 @@ class TestTheGrammarIsNotOsPathIsabs:
     def test_no_homes_list_scope_calls_isabs(self):
         """The half of the census that is a hard rule: whatever else in the
         module may ask `isabs`, nothing that touches the homes list may."""
-        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(fleet_implementation_source())
         homes_symbols = {"homes_list_path", "homes_path_is_absolute",
                          "fold_homes_list", "parse_homes_list_line",
                          "append_home_record", "read_homes_list",
@@ -599,7 +600,7 @@ class TestTheWriterIsAppendOnly:
         no-rewrite lint)"*. Derived from the AST rather than listed: any scope
         that can reach the homes list may not perform a whole-file write,
         truncate, unlink or rename."""
-        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(fleet_implementation_source())
         offenders = self._offenders(tree)
         assert not offenders, (
             f"these scopes touch the homes list and can rewrite it: {offenders}. "
@@ -614,7 +615,7 @@ class TestTheWriterIsAppendOnly:
         missing; `main` is named explicitly because including it is the
         failure mode of the obvious over-correction."""
         pop = set(self._population(
-            ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))))
+            ast.parse(fleet_implementation_source())))
         assert "cmd_homes" in pop, (
             "the verb an operator drives is outside the no-rewrite lint -- "
             "this is the exact hole slice (e) found")
@@ -731,7 +732,7 @@ class TestNoImplicitReaders:
         `write_text` is aimed at.
 
         Derived from the AST so a new caller cannot appear quietly."""
-        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        tree = ast.parse(fleet_implementation_source())
         callers = set()
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

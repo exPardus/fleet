@@ -53,6 +53,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin"))
 import fleet  # noqa: E402
+from fleet_sources import fleet_implementation_paths
 from conftest import child_env  # noqa: E402
 
 TESTS = Path(__file__).resolve().parent
@@ -480,11 +481,12 @@ class TestTheRetargetIsRealAndStillOpen:
         not do: `resolve()` follows it straight back to the repo."""
         root = tmp_path / "install"
         (root / "bin").mkdir(parents=True)
-        target = root / "bin" / "fleet.py"
-        try:
-            os.link(Path(fleet.__file__), target)      # same device: free
-        except OSError:
-            shutil.copy2(Path(fleet.__file__), target)
+        for source in fleet_implementation_paths():
+            target = root / "bin" / source.name
+            try:
+                os.link(source, target)      # same device: free
+            except OSError:
+                shutil.copy2(source, target)
         return root
 
     def _drive(self, tmp_path, install, work, *argv, sid):

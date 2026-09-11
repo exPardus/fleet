@@ -49,8 +49,9 @@ from pathlib import Path
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
-SRC = Path(fleet.__file__).read_text(encoding="utf-8")
+SRC = fleet_implementation_source()
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +102,7 @@ def _run(argv, monkeypatch, sid=None):
     return fleet.main(argv)
 
 
-def _reached(monkeypatch, verb):
+def _reached(patch_fleet, monkeypatch, verb):
     """Replace one `cmd_*` with a sentinel and return the call log.
 
     The §7 destructive-tier pin's own words are *"env-resolved `spawn`
@@ -110,7 +111,13 @@ def _reached(monkeypatch, verb):
     so what is pinned is that `main()` handed control to the verb."""
     log = []
     name = "cmd_" + verb.replace("-", "_")
-    monkeypatch.setattr(fleet, name, lambda args: log.append(verb) or 0)
+    {
+        'cmd_clean': lambda value: patch_fleet('cmd_clean', value),
+        'cmd_spawn': lambda value: patch_fleet('cmd_spawn', value),
+        'cmd_sup_decision': lambda value: patch_fleet('cmd_sup_decision', value),
+        'cmd_send': lambda value: patch_fleet('cmd_send', value),
+        'cmd_status': lambda value: patch_fleet('cmd_status', value),
+    }[name](lambda args: log.append(verb) or 0)
     return log
 
 
@@ -269,22 +276,28 @@ class TestTheWorstMatchingTierWins:
     of that `max` finds what stands behind it."""
 
     @staticmethod
-    def _two_tier(monkeypatch, bare_tier, flagged_tier):
+    def _two_tier(patch_fleet, monkeypatch, bare_tier, flagged_tier):
         """A verb that is `bare_tier` bare and `flagged_tier` under `--purge`."""
         tup = {"ordinary": "VERB_EFFECT_ORDINARY",
                "disruptive": "VERB_EFFECT_DISRUPTIVE",
                "destructive": "VERB_EFFECT_DESTRUCTIVE"}
-        monkeypatch.setattr(fleet, tup[bare_tier],
-                            getattr(fleet, tup[bare_tier]) + ("adopt",))
-        monkeypatch.setattr(fleet, tup[flagged_tier],
-                            getattr(fleet, tup[flagged_tier]) + ("adopt --purge",))
+        {
+            'VERB_EFFECT_ORDINARY': lambda value: patch_fleet('VERB_EFFECT_ORDINARY', value),
+            'VERB_EFFECT_DISRUPTIVE': lambda value: patch_fleet('VERB_EFFECT_DISRUPTIVE', value),
+            'VERB_EFFECT_DESTRUCTIVE': lambda value: patch_fleet('VERB_EFFECT_DESTRUCTIVE', value),
+        }[tup[bare_tier]](getattr(fleet, tup[bare_tier]) + ("adopt",))
+        {
+            'VERB_EFFECT_ORDINARY': lambda value: patch_fleet('VERB_EFFECT_ORDINARY', value),
+            'VERB_EFFECT_DISRUPTIVE': lambda value: patch_fleet('VERB_EFFECT_DISRUPTIVE', value),
+            'VERB_EFFECT_DESTRUCTIVE': lambda value: patch_fleet('VERB_EFFECT_DESTRUCTIVE', value),
+        }[tup[flagged_tier]](getattr(fleet, tup[flagged_tier]) + ("adopt --purge",))
 
-    def test_the_plant_really_creates_two_matching_tiers(self, monkeypatch):
+    def test_the_plant_really_creates_two_matching_tiers(self, patch_fleet, monkeypatch):
         """Seed for the seed. If the construction stopped producing a two-tier
         match -- a renamed tuple, an index that de-duplicates by verb -- every
         assertion below would pass for the wrong reason, because `max` of one
         element equals `min` of it. This asserts the precondition itself."""
-        self._two_tier(monkeypatch, "ordinary", "destructive")
+        self._two_tier(patch_fleet, monkeypatch, "ordinary", "destructive")
         rows = fleet._verb_effect_index()["adopt"]
         assert (None, "ordinary") in rows and ("purge", "destructive") in rows
         args = _ns(purge=True)
@@ -300,13 +313,13 @@ class TestTheWorstMatchingTierWins:
         ("disruptive", "destructive", "destructive"),
     ])
     def test_a_verb_matching_two_tiers_takes_the_worse(
-            self, monkeypatch, bare, flagged, worst):
+            self, patch_fleet, monkeypatch, bare, flagged, worst):
         """THE A-1 PIN. Each row reddens under `max` -> `min`.
 
         Three rows rather than one because `min` is not the only wrong
         comparator: a resolver that always returned `destructive` would satisfy
         row 1 while being just as broken, and row 2 catches it."""
-        self._two_tier(monkeypatch, bare, flagged)
+        self._two_tier(patch_fleet, monkeypatch, bare, flagged)
         assert fleet.verb_effect_tier("adopt", _ns(purge=True)) == worst
 
     @pytest.mark.parametrize("bare,flagged", [
@@ -314,12 +327,12 @@ class TestTheWorstMatchingTierWins:
         ("ordinary", "disruptive"),
     ])
     def test_the_flag_being_absent_leaves_the_bare_tier(
-            self, monkeypatch, bare, flagged):
+            self, patch_fleet, monkeypatch, bare, flagged):
         """The other direction, so `max` cannot be satisfied by a resolver that
         ignores the flag and always escalates. Only ONE tier matches here, so
         this row is deliberately green under both comparators -- it is bounding
         the pin above, not duplicating it."""
-        self._two_tier(monkeypatch, bare, flagged)
+        self._two_tier(patch_fleet, monkeypatch, bare, flagged)
         assert fleet.verb_effect_tier("adopt", _ns(purge=False)) == bare
 
     def test_the_shipped_table_still_cannot_exercise_this_rule(self):
@@ -599,76 +612,76 @@ class TestTheDestructiveTierPin:
         return a, b
 
     def test_an_env_resolved_clean_refuses_naming_the_flag(
-            self, armed, monkeypatch, capsys):
-        log = _reached(monkeypatch, "clean")
+            self, armed, patch_fleet, monkeypatch, capsys):
+        log = _reached(patch_fleet, monkeypatch, "clean")
         assert fleet.main(["clean", "--yes"]) == 1
         err = capsys.readouterr().err
         assert "--fleet-home" in err
         assert log == [], "the destructive verb ran anyway"
 
-    def test_an_env_resolved_spawn_proceeds(self, armed, monkeypatch):
-        log = _reached(monkeypatch, "spawn")
+    def test_an_env_resolved_spawn_proceeds(self, armed, patch_fleet, monkeypatch):
+        log = _reached(patch_fleet, monkeypatch, "spawn")
         assert fleet.main(["spawn", "w", "--dir", ".", "--task", "t"]) == 0
         assert log == ["spawn"]
 
-    def test_the_refusal_names_no_chosen_home(self, armed, monkeypatch, capsys):
+    def test_the_refusal_names_no_chosen_home(self, armed, patch_fleet, monkeypatch, capsys):
         """§5's refusal contract: *"Refusals print facts + the `fleet homes`
         view, never a paste-ready command with a chosen home."*"""
         a, b = armed
-        _reached(monkeypatch, "clean")
+        _reached(patch_fleet, monkeypatch, "clean")
         assert fleet.main(["clean", "--yes"]) == 1
         err = capsys.readouterr().err
         for h in (a, b):
             assert f"--fleet-home {fleet.home_identity(h)}" not in err
 
-    def test_the_refusal_embeds_the_homes_view(self, armed, monkeypatch, capsys):
-        _reached(monkeypatch, "clean")
+    def test_the_refusal_embeds_the_homes_view(self, armed, patch_fleet, monkeypatch, capsys):
+        _reached(patch_fleet, monkeypatch, "clean")
         assert fleet.main(["clean", "--yes"]) == 1
         assert "fleet homes:" in capsys.readouterr().err
 
     def test_yes_does_not_buy_past_the_destructive_tier(
-            self, armed, monkeypatch, capsys):
+            self, armed, patch_fleet, monkeypatch, capsys):
         """ga2 F2, and the half of it that turns out NOT to land on a3. §5
         step 1's `--yes` escape belongs to the flag/lookup DISAGREEMENT clause.
         The destructive tier's own remedy, in §5's own words, is *"destructive
         via env/legacy requires the flag"* -- the flag, not a confirmation. So
         `--yes` must not satisfy this refusal, and the 30 verbs that have no
         `--yes` are not blocked by its absence."""
-        _reached(monkeypatch, "clean")
+        _reached(patch_fleet, monkeypatch, "clean")
         assert fleet.main(["clean", "--yes"]) == 1
 
-    def test_the_flag_is_what_lets_it_through(self, armed, monkeypatch):
+    def test_the_flag_is_what_lets_it_through(self, armed, patch_fleet, monkeypatch):
         """The remedy the refusal names actually works -- otherwise the guard
         is a brick with a friendly message, which is the defect a2 shipped twice
         inside its own lane."""
         a, _b = armed
-        log = _reached(monkeypatch, "clean")
+        log = _reached(patch_fleet, monkeypatch, "clean")
         assert fleet.main(["--fleet-home", str(a), "clean", "--yes"]) == 0
         assert log == ["clean"]
 
-    def test_a_lookup_hit_is_exempt(self, home, sandboxed_list, monkeypatch):
+    def test_a_lookup_hit_is_exempt(self, home, sandboxed_list, patch_fleet, monkeypatch):
         """§5: *"Lookup-hit resolutions are exempt from both -- membership is
         affirmative evidence."*"""
         a = home("A", {"w": _rec("SID-1")})
         _list(sandboxed_list, a, home("B"))
         monkeypatch.setattr(fleet, "FLEET_HOME", a)
-        log = _reached(monkeypatch, "clean")
+        log = _reached(patch_fleet, monkeypatch, "clean")
         assert _run(["clean", "--yes"], monkeypatch, sid="SID-1") == 0
         assert log == ["clean"]
 
     def test_an_unarmed_machine_is_byte_identical_to_today(
-            self, home, monkeypatch):
+            self, home, patch_fleet, monkeypatch):
         """The other half of §7's arming pin: *"The arming pin's <2 baseline
         comparison stays."* One fleet, no list -- the guard must be invisible."""
         a = home("A")
         monkeypatch.setattr(fleet, "FLEET_HOME", a)
-        log = _reached(monkeypatch, "clean")
+        log = _reached(patch_fleet, monkeypatch, "clean")
         assert _run(["clean", "--yes"], monkeypatch) == 0
         assert log == ["clean"]
 
     @pytest.mark.parametrize("flag", ["--answer", "--raise"])
     def test_an_empty_residual_flag_does_not_fail_open(
-            self, flag, armed, monkeypatch):
+            self, flag, armed, patch_fleet, monkeypatch):
         """ga3 B1. The residual-flag rows decided *"is this flag set?"* by
         TRUTHINESS while `cmd_sup_decision` decides *"am I writing?"* by
         PRESENCE. The two predicates agree on every value but `""`, which is
@@ -684,7 +697,7 @@ class TestTheDestructiveTierPin:
         values -- which is exactly why 4061 tests did not see this. A pin that
         builds its own `Namespace(answer="")` would be the same weaker shape;
         this one takes the namespace `build_parser()` actually produces."""
-        log = _reached(monkeypatch, "sup-decision")
+        log = _reached(patch_fleet, monkeypatch, "sup-decision")
         assert fleet.main(["sup-decision", flag, ""]) == 1
         assert log == [], "an empty residual flag walked past the guard"
 
@@ -702,24 +715,24 @@ class TestTheDisruptiveTierIsLoudAndNotRefused:
         monkeypatch.setattr(fleet, "FLEET_HOME", a)
         return a, b
 
-    def test_a_disruptive_verb_proceeds(self, armed, monkeypatch):
-        log = _reached(monkeypatch, "send")
+    def test_a_disruptive_verb_proceeds(self, armed, patch_fleet, monkeypatch):
+        log = _reached(patch_fleet, monkeypatch, "send")
         assert _run(["send", "w", "hi"], monkeypatch) == 0
         assert log == ["send"]
 
-    def test_it_renders_its_resolution_provenance(self, armed, monkeypatch,
+    def test_it_renders_its_resolution_provenance(self, armed, patch_fleet, monkeypatch,
                                                   capsys):
         a, _b = armed
-        _reached(monkeypatch, "send")
+        _reached(patch_fleet, monkeypatch, "send")
         assert _run(["send", "w", "hi"], monkeypatch) == 0
         out = capsys.readouterr().out
         assert "[fleet] home" in out and a.resolve().as_posix() in out
 
-    def test_the_provenance_is_the_renderer_a2_built(self, armed, monkeypatch,
+    def test_the_provenance_is_the_renderer_a2_built(self, armed, patch_fleet, monkeypatch,
                                                      capsys):
         """a2's §10, verbatim: *"use them; do not mint a second spelling"*. The
         line the guard prints IS `resolution_provenance`'s output."""
-        _reached(monkeypatch, "send")
+        _reached(patch_fleet, monkeypatch, "send")
         printed = []
         real = fleet.resolution_provenance
         monkeypatch.setattr(fleet, "resolution_provenance",
@@ -727,10 +740,10 @@ class TestTheDisruptiveTierIsLoudAndNotRefused:
         assert _run(["send", "w", "hi"], monkeypatch) == 0
         assert printed and printed[-1] in capsys.readouterr().out
 
-    def test_an_ordinary_verb_stays_silent(self, armed, monkeypatch, capsys):
+    def test_an_ordinary_verb_stays_silent(self, armed, patch_fleet, monkeypatch, capsys):
         """The tier is three-way, not two. `fleet status` on an armed machine
         must not grow a provenance banner it never had."""
-        _reached(monkeypatch, "status")
+        _reached(patch_fleet, monkeypatch, "status")
         assert _run(["status"], monkeypatch) == 0
         assert "[fleet] home" not in capsys.readouterr().out
 
@@ -783,8 +796,8 @@ class TestFleetHomesSitsAboveEveryBlockingStateTheResolverEnters:
 
     @pytest.mark.parametrize("which", RESOLVER_BLOCKING_STATES)
     def test_every_blocking_state_names_the_list_manager(
-            self, which, home, bare, sandboxed_list, monkeypatch, capsys):
-        _reached(monkeypatch, "clean")
+            self, which, home, bare, sandboxed_list, patch_fleet, monkeypatch, capsys):
+        _reached(patch_fleet, monkeypatch, "clean")
         assert self._drive(which, home, bare, sandboxed_list, monkeypatch) == 1
         assert "fleet homes:" in capsys.readouterr().err, (
             f"the {which} refusal does not embed the `fleet homes` view, so "

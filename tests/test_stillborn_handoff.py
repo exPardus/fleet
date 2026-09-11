@@ -59,6 +59,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STOP_OUTCOME = REPO_ROOT / "bin" / "hooks" / "stop_outcome.py"
@@ -426,7 +427,7 @@ def _turns_one_stamp_sites():
     Scoped to the stamp's OWN statement list, not to its enclosing function: a
     function with two dispatch arms and one `turn_started` between them would
     pass a function-scoped check while one arm still emitted nothing."""
-    tree = ast.parse(FLEET_PY.read_text(encoding="utf-8"))
+    tree = ast.parse(fleet_implementation_source())
     sites = []
     for parent in ast.walk(tree):
         for field in ("body", "orelse", "finalbody"):

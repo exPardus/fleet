@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+from fleet_sources import fleet_implementation_source
 
 
 @pytest.fixture
@@ -3937,7 +3938,7 @@ class TestDispatchPathsAreDocumented:
     KNOWN_BUILDERS = ("dispatch_bg", "cmd_sup_handoff_begin")
 
     def _source(self):
-        return (self.REPO / "bin" / "fleet.py").read_text(encoding="utf-8")
+        return fleet_implementation_source()
 
     def _spec(self):
         return (self.REPO / "docs" / "SPEC.md").read_text(encoding="utf-8")
