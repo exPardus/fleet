@@ -165,6 +165,14 @@ below). Search-space-not-authority argument and honesty items unchanged from v6.
    (`--fleet-home` or `FLEET_HOME`), and views render `[fleet]: no home` and exit 0.** No
    step falls off the end of the list silently, on any surface.
 
+The `fleet homes` view renders this same population, including the legacy install-root term,
+and labels each row as a listed record or the legacy term. It is a read-only inventory
+surface: no lock, probe, registry repair, or homes-list write. The view and the arming guard
+therefore count the same homes; where a row is present but uncounted, its state column says
+why (an uninitialized home is rendered and not counted). On a machine with nothing listed the
+view still reports a single fleet rather than rendering the legacy term as a row: arming
+begins at a population of two, so below that there is no disagreement to correct.
+
 > **DIVERGENCE RECORD — steps 3 and 5 above describe behaviour the tree does not have.
 > Measured 2026-08-06 against `39f84d0` (slice a2's landing commit), py 3.13 and py 3.10
 > alike. This note RECORDS the divergence and deliberately does NOT close it:** closing it

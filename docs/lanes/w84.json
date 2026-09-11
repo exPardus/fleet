@@ -1,0 +1,56 @@
+{
+  "lane": "w84",
+  "base": "c05d6c3",
+  "files_changed": [
+    "bin/fleet.py",
+    "tests/test_homes_list.py",
+    "tests/test_homes_verb.py",
+    "docs/specs/multi-fleet.md",
+    "docs/PLAN-PROGRESS.md",
+    "docs/lanes/w84.md",
+    "docs/lanes/w84.json"
+  ],
+  "tests": [
+    {
+      "command": "UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_homes_verb.py tests/test_homes_list.py tests/test_home_resolution.py tests/test_init_home.py tests/test_install_home_split.py tests/test_sid_collision.py tests/test_statusline_home.py tests/test_statusline_home_tag.py tests/test_subprocess_home_seam.py tests/test_terminal_surface.py tests/test_verb_effect_guard.py tests/test_views_doctrine.py tests/test_self_citations.py --deselect tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces --deselect tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command",
+      "rc": 0,
+      "passed": 932,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_homes_verb.py tests/test_homes_list.py tests/test_home_resolution.py tests/test_init_home.py tests/test_install_home_split.py tests/test_sid_collision.py tests/test_statusline_home.py tests/test_statusline_home_tag.py tests/test_subprocess_home_seam.py tests/test_terminal_surface.py tests/test_verb_effect_guard.py tests/test_views_doctrine.py tests/test_self_citations.py --deselect tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces --deselect tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command",
+      "rc": 0,
+      "passed": 932,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "The view showed 1 row while the guard counted 2; it now shows 2 labelled rows and the guard still counts 2",
+      "command": "python3 -c \"import sys;sys.path.insert(0,'bin');from pathlib import Path;import fleet;fleet.INSTALL_ROOT=Path('/home/altai/proga/fleet');print(fleet.render_homes_view());l=fleet.lookup_home_for_sid(None,install=fleet.INSTALL_ROOT);print(len(fleet.multi_fleet_arming(look=l,install=fleet.INSTALL_ROOT)['counted']))\""
+    },
+    {
+      "claim": "A single-fleet machine's output is unchanged",
+      "command": "pytest tests/test_homes_verb.py::TestTheView::test_an_empty_machine_says_so_and_exits_0"
+    },
+    {
+      "claim": "Once a home is listed, the legacy term is a labelled row",
+      "command": "pytest tests/test_homes_verb.py::TestTheView::test_the_legacy_term_is_a_labelled_row_once_a_home_is_listed"
+    },
+    {
+      "claim": "A retired home is still not rendered as a member",
+      "command": "pytest tests/test_homes_verb.py -k retired"
+    },
+    {
+      "claim": "The view takes no lock and performs no probe or write",
+      "command": "pytest tests/test_views_doctrine.py tests/test_homes_list.py -k 'lock or doctrine'"
+    },
+    {
+      "claim": "The two remaining failures are pre-existing at c05d6c3 with untouched source",
+      "command": "cd /home/altai/proga/fleet && pytest tests/test_terminal_surface.py -k CollaboratorInstall"
+    }
+  ],
+  "blockers": []
+}

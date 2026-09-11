@@ -102,10 +102,29 @@ class TestTheParserSurface:
 
 class TestTheView:
     def test_an_empty_machine_says_so_and_exits_0(self, capsys, sandboxed_list):
+        """w84 deliberately does NOT change this. The guard arms only at a
+        population of two or more, so a single-fleet machine has no inventory
+        disagreement to fix -- and changing its output would be a regression
+        bought for nothing. The legacy term is rendered as a row only when
+        something is listed alongside it."""
         rc, out = _run(["homes"], capsys)
         assert rc == 0
         assert "no homes listed" in out.out
         assert not sandboxed_list.exists(), "the view created the list"
+
+    def test_the_legacy_term_is_a_labelled_row_once_a_home_is_listed(
+            self, capsys, home, sandboxed_list):
+        """The measured defect: `fleet homes` showed one row while the arming
+        guard counted two, and `_refuse_wrong_home_destructive` printed both
+        counts in a single message."""
+        listed = home("listed")
+        sandboxed_list.write_text(f"{_ident(listed)}\n", encoding="utf-8")
+        rc, out = _run(["homes"], capsys)
+        assert rc == 0
+        assert _ident(listed) in out.out
+        assert fleet.home_identity(fleet.INSTALL_ROOT) in out.out
+        assert "install-root legacy term" in out.out
+        assert "listed record" in out.out
 
     def test_each_listed_home_renders_with_its_read_time_state(
             self, capsys, home, tmp_path, sandboxed_list):
@@ -193,8 +212,9 @@ class TestTheView:
         monkeypatch.setattr(fleet, "read_registry_at",
                             lambda h: (reads.append(str(h)), real(h))[1])
         fleet.render_homes_view()
-        assert sorted(reads) == sorted(_ident(h) for h in homes), (
-            f"each listed home must be read exactly once per view; got {reads}")
+        expected = [_ident(h) for h in homes] + [fleet.home_identity(fleet.INSTALL_ROOT)]
+        assert sorted(reads) == sorted(expected), (
+            f"each resolution-population home must be read exactly once per view; got {reads}")
 
     def test_the_view_takes_no_lock_and_never_quarantines(
             self, capsys, tmp_path, sandboxed_list, monkeypatch):
