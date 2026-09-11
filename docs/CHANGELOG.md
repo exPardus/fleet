@@ -1,4 +1,8 @@
 # Operator changelog
+- 2026-09-11 — `613da18`: retiring a supervisor's pre-steer process now requires a fork that has actually taken over, not merely one that is reachable.
+- 2026-09-11 — `7e5a0c9`: `fleet sup-guard` treats a roster row with a live pid as live even when the daemon reports `state: done`, so a supervisor hosted on an adopted bg-spare is woken rather than paged about.
+- 2026-09-11 — `d205e4d`: `fleet wave-close` refreshes the claim heartbeat, so a supervisor that closes waves no longer looks stale to the keeper for the length of the wave.
+- 2026-09-11 — `f1dcbf3`: the interface the keeper launches no longer inherits the inference-only OAuth token, which blocked Remote Control.
 - 2026-09-11 — `1a58339`: the keeper wakes an idle supervisor by sending it a wake brief through `fleet send` instead of writing to the Claude daemon's private socket, which is removed; it asks `fleet sup-guard --do` for the verdict rather than judging liveness itself, still never spawns a supervisor, and pages once for a limited body without retrying before its reset horizon.
 - 2026-09-11 — `502f3f7`: THROUGHPUT reads a lane's substrate from its record (`unknown` when none exists) instead of defaulting to `claude`, and `state/interface/board.md` lists a task file as a pending ruling only while it carries no `RULED:` line.
 - 2026-09-11 — `196e3de`: the keeper pages only a pane actually running `claude` — a pane that has dropped to a shell falls back to the window path, which recreates `work:fleet` — and `fleet wave-close` removes lane worktrees whose branch is merged, skipping unmerged or dirty ones.
