@@ -5,6 +5,8 @@ WAVE 68 CLOSED AND PUSHED (`116860f..16f28c5`). The prose campaign's phase 1 lan
 
 THROUGHPUT wave 72 (7162ce901b1565a72741cf81df146638ffaf25a8..613da18eb170a62f884f403bffda2d726ed8ecf7): bin +41/-11, tests +56/-3, docs +0/-0, journal +42/-33, other +0/-0; workers: 0 (none); tokens: UNMEASURED (roster has no token field); reaped: 0; protected: 1 (unread mail)
 
+THROUGHPUT wave 73 (d3ab326156336b734970ad4548f02cce3c225ac0..ae53bf8451a6479bdd2859dea47f3e37efbe312f): bin +24/-21, tests +87/-9, docs +51/-4, journal +0/-0, other +2/-2; workers: 1 (w73/guard-verdict-table: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 1 (unread mail)
+
 ## SHIPPED
 - `314ea3e` `skills/fleet/` is a 160-line operating manual; `supervisor.md` (587) and
   `docs/operator/server-interface-profile.md` deleted, their current content absorbed. It teaches the
