@@ -1115,7 +1115,7 @@ def _quarantine_artifacts() -> list:
     whose name they were never told.
 
       * `_print_snapshot_table` (:7897) -- `fleet status --stale-ok`.
-      * `_tombstone_releasing_body` (:19031) -- `sup-release`, whose registry
+      * `_tombstone_releasing_body` (:19115) -- `sup-release`, whose registry
         arm previously swallowed the quarantined case in silence.
 
     The operator clears the artifact (after restoring what it holds), which
@@ -16776,7 +16776,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     is wrong -- *"matching against `session_id` alone fails open on it
     (ND4a)"* -- for the eighteen other sites that already key on the union (`:2986, :3057,
     :3130, :3391, :3541, :5036, :10113, :10433, :10714, :10945, :11032, :11188,
-    :11200, :11211, :11360, :12177, :16646, :19488, :19489, :19540, :20486`). The thirteenth is multi-fleet §5 step 2's
+    :11200, :11211, :11360, :12177, :16646, :19572, :19573, :19624, :20570`). The thirteenth is multi-fleet §5 step 2's
     membership test (slice a2), which is the same argument one plane out: a
     home whose record was eagerly restamped would stop claiming its own
     fork-steered body mid-rotation. The fourteenth is
@@ -16801,7 +16801,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     comparison already caught. It cannot make one body answer for another
     either -- no FOREIGN sid ever enters a record's `retired_sids` (every
     writer appends that record's OWN prior sid alone: :8874, :9413, :14392,
-    :21149), the same safety invariant §7.1's send carve-out rests on. That
+    :21233), the same safety invariant §7.1's send carve-out rests on. That
     invariant is what makes the union SAFE; it is NOT what makes it correct,
     and `_releaser_live_sids`' fork-steer boundary is the difference.
 
@@ -17498,7 +17498,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     #   * SAFETY INVARIANT: the carve-out is sound only because a sid is globally
     #     unique AND no FOREIGN sid ever enters a record's `retired_sids` -- every
     #     writer appends that record's OWN prior sid alone (:8874, :9413, :14392,
-    #     :21149) -- so the sid union can never make one body answer for another.
+    #     :21233) -- so the sid union can never make one body answer for another.
     #     Those four are re-derived, not restated: `TestRetiredSidWritersAreWhere
     #     TheyAreCited` re-reads them out of this file on every run, because a
     #     citation nobody checks is this repo's named recurring defect and the
