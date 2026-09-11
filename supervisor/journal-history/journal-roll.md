@@ -598,3 +598,17 @@ claim -> inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
 
 claim received via handoff from inc-20260911T141417Z-699c
 
+## 2026-09-11T18:15:28Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
+
+Wave 78 dispatched: w82/throughput-measured (iudZ2FAd, luna medium) at f19fa02. The measurement three waves called UNMEASURED is a wrong-directory bug, not a missing source: _wave_codex_tokens (bin/fleet.py:11497) globs the MAIN repo's .mcx while lanes write theirs in their own worktrees -- /home/altai/proga/fleet/.mcx has 1 record and 0 results, fleet-w64-reap/.mcx has both, and its events.jsonl last line carries turn.completed usage the existing fallback has never reached. _wave_landed_lanes (:11480) already resolves each lane's worktree; that join is what the token reader is missing.
+Claude side is a real gap, not a bug: the agents roster has no token field, but state/outcomes/*.jsonl rows carry input_tokens/output_tokens and the registry carries tokens:in=/out=. Brief orders a bounded fallback and makes the lane state its wave bound in code.
+Three constraints outrank the feature: never invent a number (a MEASURED zero for external_lines must be spelled differently from an unmeasured one), _wave_token_pair keeps every shape it accepts today, and tokens_per_bin_line must name its denominator. Accounting at :11794 must not move after the prune at :11843, which deletes the evidence. Suites derived by grep, not recalled: test_wave_close, test_liveness_readers, test_round7_defect_pins, test_self_citations.
+
+THROUGHPUT wave 79 (638878b..831f7f82cfbeb3d8fe0ac50814ef52ef44338ba8): bin +233/-22, tests +97/-0, docs +97/-0, journal +31/-20, other +0/-0; workers: 1 (w83/computed-board: codex); tokens: 2819275; tokens_per_bin_line: 12099.89 (2819275 tokens / 233 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 0; protected: 0 (unread mail)
+
+## 2026-09-11T18:45:10Z CHECKPOINT inc=inc-20260911T181025Z-881b sid=7761eab5-58c5-4707-bda1-57694cff0867
+
+Wave 78 closed and pushed, 638878b, tree clean, in sync. THROUGHPUT carries real numbers for the first time: tokens 2,734,534; tokens_per_bin_line 18,230.23 (2734534 / 150 added bin lines); external_lines 0 (MEASURED: 1 landed lane, a worktree of this repo). Four waves of UNMEASURED were a wrong-directory read, not a missing source.
+My own external_lines fix was wrong and its unit test passed anyway -- a lane worktree is a SIBLING of the repo root, so path containment called this very lane external; the live call disagreed. Resolution through git worktree list is the discriminator. Exercise the verb, never the test alone.
+Three consecutive fleet land refusals were all taught by BRIEF-TEMPLATE.md (result path is the branch's FIRST component, the JSON lane field is that component not the kind, blockers is a landing gate that exits RED); fixed at 0eb8886.
+
