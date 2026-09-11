@@ -1,0 +1,60 @@
+{
+  "lane": "w80",
+  "base": "6cfdd288086d06daf7e47043822ddcdd0d621fe1",
+  "files_changed": [
+    "bin/fleet.py",
+    "bin/fleet_brief.py",
+    "tests/fleet_sources.py",
+    "tests/test_fleet_sources.py",
+    "tests/test_round7_defect_pins.py",
+    "tests/test_docs_currency.py",
+    "tests/test_fleet_brief.py",
+    "skills/fleet/SKILL.md",
+    "docs/lanes/BRIEF-TEMPLATE.md",
+    "docs/lanes/w80.md",
+    "docs/lanes/w80.json"
+  ],
+  "tests": [
+    {
+      "command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q -p no:cacheprovider tests/test_cli.py tests/test_core.py tests/test_views_doctrine.py tests/test_verb_effect_guard.py tests/test_destructive_guard.py tests/test_round7_defect_pins.py tests/test_sid_collision.py tests/test_fleet_sources.py tests/test_index_split.py tests/test_fleet_patch_audit.py tests/test_self_citations.py tests/test_doctrine_citations.py tests/test_fleet_land.py tests/test_fleet_brief.py",
+      "rc": 0,
+      "passed": 480,
+      "failed": 0,
+      "skipped": 4
+    },
+    {
+      "command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.12 --with pytest python -m pytest -q -p no:cacheprovider tests/test_cli.py tests/test_core.py tests/test_views_doctrine.py tests/test_verb_effect_guard.py tests/test_destructive_guard.py tests/test_round7_defect_pins.py tests/test_sid_collision.py tests/test_fleet_sources.py tests/test_index_split.py tests/test_fleet_patch_audit.py tests/test_self_citations.py tests/test_doctrine_citations.py tests/test_fleet_land.py tests/test_fleet_brief.py",
+      "rc": 0,
+      "passed": 480,
+      "failed": 0,
+      "skipped": 4
+    },
+    {
+      "command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q -p no:cacheprovider tests/test_doc_claims.py tests/test_docs_currency.py tests/test_prose_caps.py tests/test_lane_report_durability.py tests/test_receipts.py",
+      "rc": 1,
+      "passed": 184,
+      "failed": 1,
+      "skipped": 2
+    },
+    {
+      "command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.12 --with pytest python -m pytest -q -p no:cacheprovider tests/test_doc_claims.py tests/test_docs_currency.py tests/test_prose_caps.py tests/test_lane_report_durability.py tests/test_receipts.py",
+      "rc": 1,
+      "passed": 184,
+      "failed": 1,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "fleet brief emits a verified citation and refuses a missing or stale one",
+      "command": "env -u CLAUDE_CODE_SESSION_ID -u FLEET_HOME UV_OFFLINE=1 UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache uv run --no-project --python 3.10 --with pytest python -m pytest -q -p no:cacheprovider tests/test_fleet_brief.py"
+    },
+    {
+      "claim": "the report is at most forty lines",
+      "command": "wc -l docs/lanes/w80.md"
+    }
+  ],
+  "blockers": [
+    "Pre-existing docs-currency failure at 6cfdd28/569411d: bin/*.py changed without docs/ or Docs: n/a."
+  ]
+}

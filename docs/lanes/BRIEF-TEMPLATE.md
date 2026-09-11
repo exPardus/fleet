@@ -49,6 +49,13 @@ Old runtime task files are grandfathered by mtime; rewriting one brings it into 
 Task files include `.md` and `.txt`; generated boot-bundle output is not a task.
 The checks do not require old reports to masquerade as newly dispatched briefs.
 
+Every newly dispatched task also carries one product-line citation:
+`Serves: <product.md ## section> — "<exact phrase>"`. The section must be a real
+`##` heading in `product.md`, and the phrase must occur verbatim under that heading;
+`fleet brief <item>` and the docs-currency pin both refuse an absent or stale citation.
+The generated brief leaves its `Judgement:` paragraph blank: the model supplies that
+judgement and the citation, while the command supplies the checkable fields.
+
 ## The two lines that matter, and why
 
 **The report path is `docs/lanes/<name>.md` and it is committed.** Not `state/journals/`. The

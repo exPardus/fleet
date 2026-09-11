@@ -128,6 +128,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet index status [--path PATH]`: show index counts and stale shards.
 - `fleet q [QUERY] [--outline PATH] [--src] [--path GLOB] [--kind KIND] [--limit N] [--no-refresh]`: query the project symbol index.
 - `fleet doctor [--repair]`: run health checks; use `--repair` only when the operator authorizes quarantine of corrupt state.
+- `fleet brief ITEM`: render a task-file brief with DONE, base, files, tests, structured-result contract and a verified `Serves:` citation; stale or missing product citations refuse.
 - `fleet sup-boot [--sid SID] [--nonce VALUE] [--handoff-inc ID] [--handoff-token TOKEN]`: claim or resume supervisor duty and emit the boot bundle.
 - `fleet sup-spawn --task TEXT [--model MODEL] [--permission-mode MODE] [--setting-sources LIST] [--nonce VALUE]`: dispatch a gen-0 supervisor body.
 - `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat.

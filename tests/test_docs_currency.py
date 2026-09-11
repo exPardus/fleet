@@ -16,7 +16,11 @@ from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[1]
 ADOPTION_BASE = "708fa45246ca957263b3ce299add6f13efb8c330"
-TASK_CUTOFF = datetime(2026, 9, 10, 11, 54, tzinfo=timezone.utc).timestamp()
+# Wave 76 is the first dispatch covered by the product-line citation pin.
+# Older runtime briefs stay grandfathered; rewriting one puts it in scope.
+TASK_CUTOFF = datetime(2026, 9, 11, 21, 0, tzinfo=timezone.utc).timestamp()
+_SERVES_RE = re.compile(
+    r'^Serves:\s*(?P<section>[^—]+?)\s+—\s+"(?P<phrase>.+)"\s*$')
 WINDOW = 20
 
 
@@ -91,6 +95,32 @@ def dispatched_tasks(home):
             and p.stat().st_mtime >= TASK_CUTOFF]
 
 
+def valid_serves(text, product=None):
+    """Return whether one task has one exact, section-scoped product citation."""
+    product = REPO / "product.md" if product is None else Path(product)
+    citations = [line.strip() for line in text.splitlines()
+                 if line.strip().startswith("Serves:")]
+    if len(citations) != 1:
+        return False
+    match = _SERVES_RE.fullmatch(citations[0])
+    if not match:
+        return False
+    try:
+        lines = product.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    section = match.group("section").strip()
+    headings = [i for i, line in enumerate(lines)
+                if re.fullmatch(r"## (?!#).+?\s*", line)
+                and line[3:].strip() == section]
+    if len(headings) != 1:
+        return False
+    start = headings[0] + 1
+    end = next((i for i in range(start, len(lines))
+                if re.fullmatch(r"## (?!#).+?\s*", lines[i])), len(lines))
+    return match.group("phrase") in "\n".join(lines[start:end])
+
+
 def test_branch_docs_currency():
     assert_currency(REPO)
 
@@ -106,6 +136,13 @@ def test_dispatched_tasks_have_done():
     bad = [str(p) for p in dispatched_tasks(home)
            if not has_done_after_title(p.read_text(encoding="utf-8"))]
     assert not bad, f"Dispatched task missing DONE means immediately after title: {bad}"
+
+
+def test_dispatched_tasks_have_valid_serves():
+    home = Path(os.environ.get("FLEET_HOME", str(REPO)))
+    bad = [str(path) for path in dispatched_tasks(home)
+           if not valid_serves(path.read_text(encoding="utf-8"))]
+    assert not bad, f"Dispatched task missing a valid Serves citation: {bad}"
 
 
 def init_repo(tmp_path):
@@ -183,6 +220,19 @@ def test_done_detector_rejects_absent_empty_or_late_line():
     assert not has_done_after_title("# Task\nNo done line\n")
     assert not has_done_after_title("# Task\nDONE means: \n")
     assert not has_done_after_title("# Task\nPreface\nDONE means: result.\n")
+
+
+def test_serves_detector_checks_section_and_verbatim_phrase(tmp_path):
+    product = tmp_path / "product.md"
+    product.write_text(
+        "# product\n\n## Never\n\nNever build this.\n\n"
+        "## Other\n\nA phrase that must not cross sections.\n",
+        encoding="utf-8")
+    good = 'Serves: Never — "Never build this."'
+    assert valid_serves(good, product)
+    assert not valid_serves('Serves: Other — "Never build this."', product)
+    assert not valid_serves('Serves: Never — "A phrase that must not cross sections."', product)
+    assert not valid_serves("", product)
 
 
 def test_task_cutoff_checks_new_and_rewritten_tasks(tmp_path):

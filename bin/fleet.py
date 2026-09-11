@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -14003,7 +14003,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_land = sub.add_parser(
         "land",
         help="stage a lane result, rebase its branch, and run its checks")
-    p_land.add_argument("lane", help="lane name, such as w78")
+    p_land.add_argument("lane", help="lane name, such as w78"); p_brief = sub.add_parser("brief", help="render a validated brief from a task file"); p_brief.add_argument("item", help="task file path or task item name")
 
     # Query operations use only the target project, never fleet state.
     p_q = sub.add_parser("q", help="query this project's symbol index (M2)")
@@ -14268,8 +14268,9 @@ def main(argv=None) -> int:
     try:
         # Land is a repository operation owned by its leaf module. It must not
         # resolve or read fleet-home state before it can prepare a lane.
-        if args.command == "land":
-            return fleet_land.cmd_land(args)
+        if args.command == "land" or args.command == "brief":
+            return (fleet_land.cmd_land(args) if args.command == "land"
+                    else fleet_brief.cmd_brief(args))
         # Bare init creates in cwd; explicit selectors and statusline setup use the
         # normal resolver. Do not synthesize args.home, which also appends the
         # machine-list entry and invokes the destructive tier.

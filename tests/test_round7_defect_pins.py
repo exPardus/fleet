@@ -536,7 +536,10 @@ RATIFIED_BUT_UNBUILT = ()
 # But it commits on a lane branch and REBASES it, and a rebase rewrites branch
 # history: the one effect it has is irreversible and is the kind §5 calls
 # destructive. It is written here as a recommendation, not a classification.
-UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land")
+# `brief` is a repository-only renderer: it reads a task and product.md but
+# neither dispatches nor mutates fleet state. Its tier remains operator-owned;
+# this explicit entry prevents the new leaf from guessing a §5 classification.
+UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief")
 
 
 def _classified_verbs():
