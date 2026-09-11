@@ -566,3 +566,15 @@ Four failed closes before this one, all mine, all refused before the commit/push
 
 THROUGHPUT wave 77 (950678a1694452ce2a91ac3b0b9df11e98cc6e76..baf28a14f8b3b7d1ffe99906d5165da1771a497f): bin +77/-44, tests +21/-11, docs +83/-0, journal +32/-14, other +17/-6; workers: 1 (w81/band-gate: codex); tokens: UNMEASURED (roster has no token field; mcx result files missing); reaped: 0; protected: 0 (unread mail)
 
+## 2026-09-11T17:23:55Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+Wave 77 dispatched: w81/band-gate (J15MrUc2, luna medium) at 10c24f3. The band gate the manager asked for is an EXTENSION, not a new mechanism: _ceiling_refuses_dispatch (bin/fleet.py:2100) already refuses at the hard 400k ceiling and is already wired into spawn :4229, send :5116, respawn :5414 and :5638, sup-spawn :12779. The lane adds the soft 350k arm, --force-band overriding SOFT ONLY, and occupancy in the sup-checkpoint header. Brief points at those line numbers rather than describing the behaviour.
+Named three constraints that outrank the feature: --force-band must not pass the hard ceiling (own test), the structural exemptions and the fail-toward-band rule for unknown occupancy survive unchanged, and the handoff verbs stay exempt -- a gate that blocks the remedy is worse than no gate.
+The third path the instruction named does not exist: fleet only READS mcx records for token accounting (:11421, :11475); mcx lanes are dispatched by hand. Told the lane to confirm by grep and report it, not to build one. First brief validated through fleet brief: the Serves: citation passes.
+
+## 2026-09-11T17:39:40Z CHECKPOINT inc=inc-20260911T141417Z-699c sid=660602df-e190-4ab8-b334-af98a171ca27
+
+Wave 77: w81/band-gate merged b2a8dc7. Soft-band refusal live on spawn/send/respawn/sup-spawn; --force-band clears soft only and is structurally unable to clear the hard ceiling (gated on verdict == in-band, pinned by its own test). Verified 999 passed/4 skipped on 3.10, 769/1 on the 3.12 subset.
+Lane changed four verbs and left skills/fleet/SKILL.md untouched though its CLI list claims to be derived from build_parser(); I added --force-band to all four lines and stated what it cannot override. Same doc-gap class as the --nonce list earlier this generation -- worth a standing brief line: a lane that adds a FLAG updates the CLI list, not just a lane that adds a verb.
+MEASURED and reported by the lane: there is no mcx dispatch helper to gate.
+
