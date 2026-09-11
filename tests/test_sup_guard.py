@@ -199,6 +199,39 @@ def test_fresh_live_body_still_pages_on_ambiguity(home, ambiguity, reason):
     assert (verdict, actual_reason) == ("PAGE", reason)
 
 
+def test_held_over_band_claim_pages_with_recorded_context(home, monkeypatch):
+    claim = fleet.read_incarnation()
+    claim.update(context_occupancy=405000, context_verdict="over-band",
+                 context_measured_at="2026-09-12T00:00:00Z")
+    fleet.write_incarnation(claim)
+    obs = fleet._sup_guard_observe(snapshot_fn=lambda: snapshot(age=10),
+                                  roster_fn=roster(row(SID)))
+    verdict, reason, detail = fleet._sup_guard_decide(obs)
+    assert verdict == "PAGE"
+    assert "occupancy=405000" in reason
+    assert "ceiling=400000" in reason
+    assert detail["context_verdict"] == "over-band"
+
+
+def test_a_dead_over_band_claim_still_dispatches_a_replacement(home):
+    """The recorded verdict outlives the body that wrote it.
+
+    An over-band supervisor is the one most likely to die, and its claim keeps
+    saying `over-band` after it does. If the over-band arm fired on a stale
+    claim it would answer PAGE where the guard used to answer DISPATCH, so the
+    dead body would wait for a human instead of being replaced -- a downtime
+    regression in exactly the case the feature exists for.
+    """
+    claim = fleet.read_incarnation()
+    claim.update(context_occupancy=405000, context_verdict="over-band",
+                 context_measured_at="2026-09-12T00:00:00Z")
+    fleet.write_incarnation(claim)
+    obs = fleet._sup_guard_observe(snapshot_fn=lambda: snapshot(age=4000),
+                                  roster_fn=roster())
+    verdict, reason, _ = fleet._sup_guard_decide(obs)
+    assert (verdict, reason) == ("DISPATCH", "stale claim with no live body")
+
+
 @pytest.mark.parametrize("status", ["idle", "busy", "unknown"])
 @pytest.mark.parametrize("age", [None, 10, 4000])
 def test_live_body_never_dispatches(home, status, age):
