@@ -69,6 +69,7 @@ the selected fleet home:
 - Ask the operator before every destructive verb, including `kill`, `clean`, `archive`, repair, release, retirement, and home registration changes.
 - When more than one home is listed, pass `--fleet-home <path>` on every mutating verb.
 - Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity. `supervisor limited` means wait for the recorded roster horizon; do not wake or spawn around that limit. The keeper pages it once until that horizon.
+- `bin/fleet_keeper.py --once --fleet-home <PATH> ...` accepts repeatable homes; it observes, wakes, and pages each independently, prefixes every page/wake line with that home's statusline tag, and stores dedup state under that home's `state/keeper/last-page.json`.
 - Treat a `SUPERVISOR:` line as a graceful generation handoff: acknowledge it, read `fleet sup-status --json`, record the transfer, and use the guard before any stillborn-successor dispatch.
 - Relay every `THROUGHPUT` line and offer one idea per wave; record the relay in the interface log.
 

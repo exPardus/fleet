@@ -80,7 +80,8 @@ def test_manual_resume_in_claude_window_pages_registered_pane_without_creating(
     sends = runner.tmux("send-keys")
     assert len(sends) == 2, runner.calls
     assert sends[0][:5] == ["tmux", "send-keys", "-t", "%42", "-l"]
-    assert sends[0][-1].startswith("KEEPER: supervisor stalled")
+    assert sends[0][-1].startswith(
+        f"[{fleet.home_tag(tmp_path)}] KEEPER: supervisor stalled")
     assert sends[1] == ["tmux", "send-keys", "-t", "%42", "Enter"]
     assert (tmp_path / "state" / "interface-pane").read_text() == "%42\n"
 
