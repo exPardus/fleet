@@ -1,0 +1,55 @@
+{
+  "lane": "w85",
+  "base": "87c0b6a",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/PLAN-PROGRESS.md",
+    "docs/lanes/w85.md",
+    "docs/specs/three-tier-command.md",
+    "tests/test_sup_guard.py",
+    "tests/test_supervisor.py"
+  ],
+  "tests": [
+    {
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_sup_guard.py tests/test_supervisor.py tests/test_views_doctrine.py tests/test_round7_defect_pins.py tests/test_verb_effect_guard.py tests/test_respawn_ceiling.py tests/test_supervisor_ceiling.py tests/test_keeper_rules.py tests/test_keeper_doctrine.py tests/test_liveness_readers.py tests/test_computed_board.py tests/test_self_citations.py",
+      "rc": 0,
+      "passed": 775,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_sup_guard.py tests/test_supervisor.py tests/test_views_doctrine.py tests/test_round7_defect_pins.py tests/test_verb_effect_guard.py tests/test_respawn_ceiling.py tests/test_supervisor_ceiling.py tests/test_keeper_rules.py tests/test_keeper_doctrine.py tests/test_liveness_readers.py tests/test_computed_board.py tests/test_self_citations.py",
+      "rc": 0,
+      "passed": 775,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "sup-checkpoint and sup-heartbeat persist context_occupancy, context_verdict and context_measured_at on the incarnation record inside their existing lock",
+      "command": "pytest -q tests/test_supervisor.py -k context"
+    },
+    {
+      "claim": "sup-status --json publishes the three context fields via _project_claim",
+      "command": "pytest -q tests/test_supervisor.py -k context"
+    },
+    {
+      "claim": "a held, fresh-heartbeat claim recorded over-band makes _sup_guard_decide return PAGE naming occupancy and the 400k ceiling",
+      "command": "pytest -q tests/test_sup_guard.py::test_held_over_band_claim_pages_with_recorded_context"
+    },
+    {
+      "claim": "a STALE over-band claim with no live body still returns DISPATCH, so a dead over-band supervisor is replaced rather than paged; proven load-bearing by mutation (removing the liveness condition fails this test)",
+      "command": "pytest -q tests/test_sup_guard.py::test_a_dead_over_band_claim_still_dispatches_a_replacement"
+    },
+    {
+      "claim": "the five-site _ceiling_refuses_dispatch census is unchanged; no sixth call site was added",
+      "command": "pytest -q tests/test_respawn_ceiling.py"
+    },
+    {
+      "claim": "sup-guard remains a view: no lock, no probe, no write",
+      "command": "pytest -q tests/test_views_doctrine.py"
+    }
+  ],
+  "blockers": []
+}

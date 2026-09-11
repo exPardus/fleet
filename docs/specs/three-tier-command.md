@@ -1578,6 +1578,18 @@ for the operator. **No threshold, no verb enumeration, no ceiling arm below is c
 `knowledge/lessons.md#2026-09-09-keeper-revives`, `docs/specs/graceful-succession.md` §1.2's amendment
 box, `docs/operator/server-interface-profile.md`.)*
 
+*(**AMENDED 2026-09-12 by the context-observability build.** `sup-checkpoint` and
+`sup-heartbeat` measure the calling body's own transcript while holding their existing lock and
+persist `context_occupancy`, `context_verdict`, and `context_measured_at` on the incarnation record.
+An unreadable transcript persists null occupancy and null verdict. `sup-status --json` publishes the
+three fields, and the lock-free `sup-guard` reads the recorded over-band verdict and returns the
+existing `PAGE` arm with the occupancy and 400k ceiling named. The guard does not read transcripts or
+write state. **The arm requires a fresh heartbeat as well as the verdict**: the recorded verdict
+outlives the body that wrote it, and an over-band body is the one most likely to die, so firing on a
+stale claim would answer `PAGE` where the guard answers `DISPATCH` and leave a dead supervisor
+waiting for a human instead of being replaced. A stale over-band claim falls through to the
+unchanged `WAKE`/`DISPATCH` arms.)*
+
 The operator requirement **stands and is not weakened** (manager ruling, 2026-07-23): 150k → hand off at
 the next wave/task boundary; 200k → finish the current urgent task, no new work. B4's defect is that the
 earlier draft made this *self-enforced discretion* over an *undefined* "urgent" — a supervisor whose
