@@ -8,10 +8,10 @@ from test_index_compose import call_counts
 from test_load_registry_callers import _callers
 
 
-def test_implementation_population_has_all_three_modules():
+def test_implementation_population_has_every_module():
     paths = fleet_sources.fleet_implementation_paths()
     assert {path.name for path in paths} == {
-        "fleet.py", "fleet_index.py", "fleet_errors.py"}
+        "fleet.py", "fleet_index.py", "fleet_errors.py", "fleet_land.py"}
     names = {node.name for node in ast.parse(
         fleet_sources.fleet_implementation_source()).body
         if isinstance(node, (ast.ClassDef, ast.FunctionDef))}
