@@ -87,6 +87,15 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   waiter you do not need is a shell you are paying for on a box that kills shells. Same reasoning for
   long test runs: **run the floor in the FOREGROUND, split into halves** to stay inside the tool
   timeout — and note `ls tests/test_*.py` silently misses `tests/integration` (9 skips).
+- **`fleet wave-close` MUST be run DETACHED (`setsid`), not backgrounded. MEASURED 2026-09-11.**
+  The harness low-memory guard killed two wave-close runs and then two plain observer shells,
+  at `free` 275-582 MB while `available` held above 4 GB and nothing was actually short. A
+  foreground run is not an escape: the close outlives the 600s tool timeout, the harness moves
+  it to the background, and that is exactly where the guard reaches it. `setsid nohup ... &`
+  puts it in its own session and it survives; watch it with an observer that owns nothing and
+  re-arm when the guard takes that instead. **This matters more than it does for a lane:**
+  wave-close is NOT idempotent across failure. Both of mine died inside the floor, which is
+  the harmless phase -- a kill during landing or push would leave real partial state.
 - **mcx 0.2.0** (installed 2026-09-10T16:4xZ): `mcx spawn --wait` prints the ID, stays alive for that
   one run and exits with its status — sound on a host without a background-kill guard, but see the
   entry above for why it is not used here. **Poll loops

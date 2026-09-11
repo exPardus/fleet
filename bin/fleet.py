@@ -11343,8 +11343,8 @@ def _wave_worktree_entries(repo, run=subprocess.run):
     return entries
 
 
-def _wave_prune_landed_worktrees(repo, base, run=subprocess.run):
-    """Remove clean lane worktrees whose branches are ancestors of ``base``.
+def _wave_prune_landed_worktrees(repo, tip, run=subprocess.run):
+    """Remove clean lane worktrees whose branches are ancestors of ``tip``.
 
     This is intentionally conservative: a dirty, unmerged, protected, or
     otherwise failed entry is reported and left in place. In particular,
@@ -11364,7 +11364,7 @@ def _wave_prune_landed_worktrees(repo, base, run=subprocess.run):
             stats["skipped"] += 1
             stats["protected"] += 1
             continue
-        merged = _wave_git(repo, "merge-base", "--is-ancestor", branch, base,
+        merged = _wave_git(repo, "merge-base", "--is-ancestor", branch, tip,
                            run=run, check=False)
         if merged.returncode != 0:
             stats["skipped"] += 1
@@ -11817,7 +11817,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         _wave_git(repo, "commit", "-m", f"fleet wave-close: checkpoint push failure wave {wave_id}", run=run)
         raise FleetCliError(f"wave-close: push failed after {attempts} attempts: {push_failures}")
 
-    pruned = _wave_prune_landed_worktrees(repo, base, run=run)
+    pruned = _wave_prune_landed_worktrees(repo, "HEAD", run=run)
     notify_args = argparse.Namespace(text=throughput, tmux_session="work", window="fleet",
                                      dry_run=False, sid=getattr(args, "sid", None),
                                      nonce=getattr(args, "nonce", None))
