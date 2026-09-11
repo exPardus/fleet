@@ -24,6 +24,14 @@ If the lane is landable, also write `docs/lanes/<name>.json` with exactly these 
 `command`, `rc`, `passed`, `failed`, and `skipped`; each claim records `claim` and the command
 that proves it. `fleet land <lane>` reads this result, stages only its listed paths plus the
 report/result, rebases the lane, and reruns the recorded commands.
+**`<name>` is the FIRST PATH COMPONENT of the branch, not the whole branch** — branch
+`w82/throughput-measured` lands as `fleet land w82` and reads `docs/lanes/w82.json`
+(`bin/fleet_land.py:112`). **The JSON's `lane` field is that same component** — `"w82"`,
+never the full branch and never the `build|gate|research` kind from the header line
+above; `land` refuses a result whose `lane` disagrees with its argument.
+**And `blockers` is a LANDING GATE, not a notes field:** any non-empty list makes
+`fleet land` print `verdict: RED` and exit 1 (`:319`). A limitation that does not block
+the landing belongs in the report, not there.
 The report requires `docs updated: <files>`. Update the owning SPEC section and
 PLAN-PROGRESS row, and the SPEC §0 tree/line-count line if you moved it; a new host
 quirk belongs in `knowledge/projects/<p>.md`. No described behaviour change:
