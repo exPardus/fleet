@@ -42,7 +42,15 @@ def currency_violations(repo, cutoff=ADOPTION_BASE):
         # Archived prose is intentionally outside the current-tree currency
         # surface. A code change documented only by an archive move still needs
         # a live document or an explicit Docs: n/a trailer.
-        docs = any(p.startswith("docs/") and not p.startswith("docs/archive/")
+        #
+        # The surface is docs/, skills/ and knowledge/ (operator ruling,
+        # 2026-09-11). docs/ alone was too narrow to be true: `skills/fleet/`
+        # became the operating manual when 314ea3e absorbed
+        # docs/operator/server-interface-profile.md into it, and a host fact
+        # belongs in knowledge/projects/<p>.md by the brief template. A bin/
+        # change documented in either was properly documented and still failed.
+        docs = any((p.startswith("docs/") and not p.startswith("docs/archive/"))
+                   or p.startswith("skills/") or p.startswith("knowledge/")
                    for p in names)
         message = git(repo, "show", "-s", "--format=%B", commit)
         exempt = re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M)
