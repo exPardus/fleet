@@ -50,13 +50,16 @@ def test_a_held_stale_supervisor_stalled_page_dedups_across_a_tick():
         return {"goals_active": True, "claim_state": "held", "claim_sid": sid,
                 "claim_rows": {sid: "idle"}, "claim_sids": [sid],
                 "sid_union_ok": True,
-                "heartbeat_age_seconds": beat}
+                "heartbeat_age_seconds": beat,
+                "supervisor_guard": {"verdict": "PAGE roster says busy",
+                                     "reason": "roster says busy", "body_name": "body"}}
 
-    p1 = k.evaluate(obs(k.HEARTBEAT_STALE_SECONDS + 1), NOW)[0]
+    p1 = k.evaluate(obs(3601), NOW)[0]
     send1, state = k.dedup([p1], {}, NOW)
+    assert "roster says busy" in p1.text
     assert send1 == [p1]
 
-    p2 = k.evaluate(obs(k.HEARTBEAT_STALE_SECONDS + 901), NOW + 900)[0]
+    p2 = k.evaluate(obs(4501), NOW + 900)[0]
     send2, state2 = k.dedup([p2], state, NOW + 900)
     assert send2 == []
     assert state2 == state

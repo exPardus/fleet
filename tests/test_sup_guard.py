@@ -16,6 +16,7 @@ BODY = "sup|inc-guard|boot"
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.setattr(fleet, "_reap_current_supervisor_forks", lambda **_: [])
     for name in ("state", "supervisor", "mailbox", "logs"):
         (tmp_path / name).mkdir()
     (tmp_path / "supervisor" / "GOALS.md").write_text("# active\n")
@@ -150,7 +151,7 @@ def test_no_claim_with_live_supervisor_body_pages(home, monkeypatch, capsys):
         "PAGE live supervisor body without a safe claim\n")
 
 
-def test_do_reverifies_and_executes_only_the_second_verdict(
+def test_do_dispatch_never_spawns(
         home, monkeypatch, capsys):
     calls = []
     dispatch_observation = {
@@ -167,9 +168,7 @@ def test_do_reverifies_and_executes_only_the_second_verdict(
                         lambda args: calls.append(args) or 0)
     rc = fleet.cmd_sup_guard(SimpleNamespace(do=True, json=False))
     assert rc == 0
-    assert len(calls) == 1
-    assert calls[0].task == "@supervisor/briefs/server-standing.md"
-    assert calls[0].setting_sources == "project,local"
+    assert calls == []  # DISPATCH belongs to the interface, including --do
     assert capsys.readouterr().out == "DISPATCH\n"
 
 
@@ -188,3 +187,94 @@ def test_do_page_has_no_action(home, monkeypatch, capsys):
     assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=False)) == 0
     assert not calls
     assert capsys.readouterr().out == "PAGE claim seized\n"
+
+
+@pytest.mark.parametrize('second', ['busy', 'no-pid', 'fresh'])
+def test_do_reverifies_wake_before_send(home, monkeypatch, capsys, second):
+    calls = []
+    snapshots = iter([snapshot(), snapshot(age=10) if second == 'fresh' else snapshot()])
+    rows = iter([[row(SID)], [row(SID, status='busy')] if second == 'busy'
+                 else [row(SID, pid=None)] if second == 'no-pid' else [row(SID)]])
+    monkeypatch.setattr(fleet, 'cmd_send', lambda args: calls.append(args) or 0)
+    monkeypatch.setattr(fleet, 'cmd_sup_spawn', lambda _: pytest.fail('spawn forbidden'))
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=lambda: next(snapshots),
+                               roster_fn=lambda: (True, next(rows))) == 0
+    assert not calls
+    assert not json.loads(capsys.readouterr().out)['sent']
+
+
+def test_do_wake_sends_exact_brief_once(home, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(fleet, 'cmd_send', lambda args: calls.append(args) or 0)
+    monkeypatch.setattr(fleet, 'cmd_sup_spawn', lambda _: pytest.fail('spawn forbidden'))
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=snapshot, roster_fn=roster(row(SID))) == 0
+    assert len(calls) == 1
+    assert calls[0].name == 'supervisor'
+    assert calls[0].message == '@supervisor/briefs/wake.md'
+    assert json.loads(capsys.readouterr().out)['sent'] is True
+
+
+@pytest.mark.parametrize('failure', ['return', 'raise'])
+def test_send_failure_is_page_not_a_successful_wake(home, monkeypatch, capsys, failure):
+    def send(args):
+        if failure == 'raise':
+            raise fleet.FleetCliError('refused')
+        return 1
+    monkeypatch.setattr(fleet, 'cmd_send', send)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=snapshot, roster_fn=roster(row(SID))) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['verdict'].startswith('PAGE supervisor wake send failed')
+    assert result['sent'] is False
+
+
+@pytest.mark.parametrize('pid', [None, 42])
+def test_native_limited_row_never_sends_or_dispatches(home, monkeypatch, capsys, pid):
+    limited = row(SID, status='limited', pid=pid)
+    limited['limit_reset_at'] = '2099-01-01T00:00:00Z'
+    monkeypatch.setattr(fleet, 'cmd_send', lambda _: pytest.fail('send forbidden'))
+    monkeypatch.setattr(fleet, 'cmd_sup_spawn', lambda _: pytest.fail('spawn forbidden'))
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=snapshot, roster_fn=roster(limited)) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['verdict'] == 'PAGE supervisor limited'
+    assert result['limit_reset_at'] == limited['limit_reset_at']
+
+
+def test_projected_limited_park_overrides_idle_roster(home, monkeypatch, capsys):
+    snap = snapshot()
+    snap['workers'] = [{'name': BODY, 'status': 'limited',
+                        'limit_reset_at': '2099-01-01T00:00:00Z'}]
+    monkeypatch.setattr(fleet, 'cmd_send', lambda _: pytest.fail('send forbidden'))
+    fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True), snapshot_fn=lambda: snap,
+                        roster_fn=roster(row(SID)))
+    assert json.loads(capsys.readouterr().out)['verdict'] == 'PAGE supervisor limited'
+
+
+def test_guard_retries_deferred_fork_retirement_before_revalidation(home, monkeypatch):
+    calls = []
+    monkeypatch.setattr(fleet, '_reap_current_supervisor_forks',
+                        lambda **_: calls.append('reap'))
+    fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                        snapshot_fn=lambda: calls.append('observe') or snapshot(age=10),
+                        roster_fn=roster(row(SID)))
+    assert calls == ['observe', 'reap', 'observe']
+
+
+def test_limit_discovered_by_send_is_published_as_park_not_retry(home, monkeypatch, capsys):
+    snap = snapshot()
+    calls = []
+    def send(args):
+        calls.append(args)
+        snap['workers'] = [{'name': BODY, 'status': 'limited',
+                            'limit_reset_at': '2099-01-01T00:00:00Z'}]
+        raise fleet.FleetCliError('parked (limited)')
+    monkeypatch.setattr(fleet, 'cmd_send', send)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=lambda: snap, roster_fn=roster(row(SID))) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['verdict'] == 'PAGE supervisor limited'
+    assert result['limit_reset_at'] == '2099-01-01T00:00:00Z'
+    assert not result['sent'] and len(calls) == 1
