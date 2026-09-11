@@ -3,6 +3,8 @@
 WAVE 68 CLOSED AND PUSHED (`116860f..16f28c5`). The prose campaign's phase 1 landed and
 `fleet wave-close` closed a wave end to end for the first time.
 
+THROUGHPUT wave 72 (7162ce901b1565a72741cf81df146638ffaf25a8..613da18eb170a62f884f403bffda2d726ed8ecf7): bin +41/-11, tests +56/-3, docs +0/-0, journal +42/-33, other +0/-0; workers: 0 (none); tokens: UNMEASURED (roster has no token field); reaped: 0; protected: 1 (unread mail)
+
 ## SHIPPED
 - `314ea3e` `skills/fleet/` is a 160-line operating manual; `supervisor.md` (587) and
   `docs/operator/server-interface-profile.md` deleted, their current content absorbed. It teaches the
