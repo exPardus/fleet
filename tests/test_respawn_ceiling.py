@@ -134,7 +134,7 @@ class TestBareRespawnStaysPermittedOverTheCeiling:
         _as_over_ceiling_holder(monkeypatch, occupancy=999999)
         asked = []
         monkeypatch.setattr(fleet, "_ceiling_refuses_dispatch",
-                            lambda verb, now=None: asked.append(verb))
+                            lambda verb, now=None, force_band=False: asked.append(verb))
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_respawn(_respawn_args(task=None))
         assert asked == [], (
@@ -148,7 +148,7 @@ class TestBareRespawnStaysPermittedOverTheCeiling:
         _as_over_ceiling_holder(monkeypatch, occupancy=999999)
         asked = []
         monkeypatch.setattr(fleet, "_ceiling_refuses_dispatch",
-                            lambda verb, now=None: asked.append(verb))
+                            lambda verb, now=None, force_band=False: asked.append(verb))
         with pytest.raises(fleet.FleetCliError):
             fleet.cmd_respawn(_respawn_args(task="go"))
         assert asked == ["respawn"]

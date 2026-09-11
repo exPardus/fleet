@@ -390,7 +390,7 @@ class TestSupNotifyIsNotOnTheContextCeiling:
             self, sup_home, monkeypatch):
         nonce = _hold()
         monkeypatch.setattr(fleet, "_ceiling_refuses_dispatch",
-                            lambda verb, now=None: "at the ceiling")
+                            lambda verb, now=None, force_band=False: "at the ceiling")
         t = Tmux()
         assert fleet.cmd_sup_notify(_args(nonce=nonce), run=t) == 0
         assert len(t.typed()) == 1
@@ -402,7 +402,7 @@ class TestSupNotifyIsNotOnTheContextCeiling:
         `cmd_sup_spawn` IS armed, so under the same patch it must refuse."""
         _hold()
         monkeypatch.setattr(fleet, "_ceiling_refuses_dispatch",
-                            lambda verb, now=None: "at the ceiling")
+                            lambda verb, now=None, force_band=False: "at the ceiling")
         monkeypatch.setattr(fleet, "_supervisor_gate",
                             lambda *a, **kw: None)
         with pytest.raises(fleet.FleetCliError, match="at the ceiling"):
