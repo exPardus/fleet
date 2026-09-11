@@ -278,3 +278,16 @@ def test_limit_discovered_by_send_is_published_as_park_not_retry(home, monkeypat
     assert result['verdict'] == 'PAGE supervisor limited'
     assert result['limit_reset_at'] == '2099-01-01T00:00:00Z'
     assert not result['sent'] and len(calls) == 1
+
+
+def test_a_done_row_with_a_live_pid_is_live(home, monkeypatch, capsys):
+    """A bg-spare host reports `state: done` while still running.
+
+    Measured 2026-09-11: two sids of the live claim holder appeared as
+    `status: idle, state: done, pid: <live>` because the daemon had adopted
+    spare hosts as session hosts. Excluding `done` made the guard page a body it
+    could plainly see. The pid is the liveness fact.
+    """
+    run_guard(monkeypatch, snapshot(age=4000),
+              [row(RETIRED, status="idle", pid=3531952, state="done")])
+    assert capsys.readouterr().out == f"WAKE {BODY}\n"
