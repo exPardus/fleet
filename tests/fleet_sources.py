@@ -8,7 +8,8 @@ from pathlib import Path
 import fleet
 
 
-IMPLEMENTATION_FILES = ("fleet.py", "fleet_index.py", "fleet_errors.py")
+IMPLEMENTATION_FILES = ("fleet.py", "fleet_index.py", "fleet_errors.py",
+                        "fleet_land.py")
 
 
 def fleet_implementation_paths():

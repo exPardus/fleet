@@ -521,7 +521,22 @@ RATIFIED_BUT_UNBUILT = ()
 # `sup-spawn` in DESTRUCTIVE. So DISRUPTIVE is the shape the derivation
 # suggests. It is written here as a recommendation for the operator, in the
 # tuple that exists to force that escalation -- not as a classification.
-UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close")
+# `fleet land` joined this tuple on 2026-09-11 (w78/fleet-land) for the same
+# reason and by the same route: its tier is a ratified-section edit only the
+# operator may make, so it is escalated here rather than guessed.
+#
+# WHAT IT COSTS UNTIL THE OPERATOR RULES: nothing. An unclassified verb is
+# `"destructive"` by `fleet.verb_effect_tier`'s unknown-verb default, and that
+# is very likely where this verb belongs anyway, so the fail-safe default and
+# the candidate tier point the same way.
+#
+# THE CANDIDATE TIER, PRICED. `land` holds no claim, writes nothing under any
+# fleet home, dispatches nothing and steers no worker -- it touches no
+# home-scoped path at all, which is what would ordinarily argue for ORDINARY.
+# But it commits on a lane branch and REBASES it, and a rebase rewrites branch
+# history: the one effect it has is irreversible and is the kind §5 calls
+# destructive. It is written here as a recommendation, not a classification.
+UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land")
 
 
 def _classified_verbs():
