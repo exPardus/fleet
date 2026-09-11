@@ -16,8 +16,8 @@ def _obs(**over):
     supplied verdict. Other rules still consume their own observations.
     """
     base = {
-        "supervisor_guard": {"verdict": "PAGE heartbeat fresh",
-                             "reason": "heartbeat fresh", "quiet": True},
+        "supervisor_guard": {"verdict": "OK",
+                             "reason": "fresh heartbeat with live body"},
         "goals_active": True,
         "claim_state": "held",
         "claim_sid": LIVE_SID,

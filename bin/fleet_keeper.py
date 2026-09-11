@@ -123,6 +123,8 @@ def rule_supervisor_stalled(obs, now):
     if guard.get("quiet") or guard.get("sent"):
         return None
     verdict = guard.get("verdict", "PAGE guard unavailable")
+    if verdict == "OK":
+        return None
     reason = guard.get("reason", "guard unavailable")
     identity = guard.get("body_name") or guard.get("state") or "unknown"
     if reason.startswith("supervisor limited"):
@@ -301,7 +303,7 @@ def _supervisor_guard(home, run, *, do):
         cp = run(argv, capture_output=True, text=True, timeout=180, env=env)
         data = json.loads(cp.stdout or "")
         if (not isinstance(data, dict) or not isinstance(data.get("verdict"), str)
-                or data["verdict"].split(" ", 1)[0] not in {"WAKE", "DISPATCH", "PAGE"}):
+                or data["verdict"].split(" ", 1)[0] not in {"OK", "WAKE", "DISPATCH", "PAGE"}):
             raise ValueError("invalid guard verdict")
         if cp.returncode:
             raise ValueError(data.get("reason") or "guard action failed")

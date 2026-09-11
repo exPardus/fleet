@@ -64,7 +64,7 @@ the selected fleet home:
 
 ### Interface rules
 
-- Never run `sup-spawn` over a live supervisor body; run `fleet sup-guard --fleet-home <path>` first. Only the interface acts on `DISPATCH` with `sup-spawn`. For `WAKE`, `sup-guard --do` re-verifies and sends `@supervisor/briefs/wake.md`; it never spawns. `PAGE` needs an interface report; fresh healthy state needs no action.
+- Never run `sup-spawn` over a live supervisor body; run `fleet sup-guard --fleet-home <path>` first. Only the interface acts on `DISPATCH` with `sup-spawn`. For `WAKE`, `sup-guard --do` re-verifies and sends `@supervisor/briefs/wake.md`; it never spawns. `PAGE` needs an interface report; `OK` means a fresh heartbeat with a live busy or idle body and needs no page or wake.
 - Never tick an operator gate; carry open decisions to the operator and record the ruling with its task file.
 - Ask the operator before every destructive verb, including `kill`, `clean`, `archive`, repair, release, retirement, and home registration changes.
 - When more than one home is listed, pass `--fleet-home <path>` on every mutating verb.
@@ -136,7 +136,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-heartbeat`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
 - `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state.
-- `fleet sup-guard [--do] [--json]`: verify the two-live-body guard; `--do` re-verifies and sends the wake brief only on `WAKE`. `DISPATCH` and `PAGE` remain verdicts for the interface; no supervisor spawn occurs in the guard.
+- `fleet sup-guard [--do] [--json]`: verify the two-live-body guard: fresh heartbeat + live busy/idle PID → `OK` (no page or wake), stale + live idle PID → `WAKE <body>`, stale + no live PID → `DISPATCH`, fresh + no live PID or unreadable registry/roster → `PAGE`. Existing ambiguity checks still page, and a live body never permits `DISPATCH`. `--do` re-verifies and sends the wake brief only on `WAKE`; `OK` and `PAGE` perform no action. `DISPATCH` pages the interface, which alone owns `sup-spawn`; neither guard nor keeper spawns.
 - `fleet sup-context [--sid SID] [--json]`: report this session's context occupancy against its tier band.
 - `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json]`: route an operator-only decision.
 - `fleet sup-notify TEXT [--tmux-session SESSION] [--window WINDOW] [--dry-run]`: notify the interface through its tmux window.
