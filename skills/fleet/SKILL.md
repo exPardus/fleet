@@ -134,6 +134,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
 - `fleet wave-close --base SHA --changelog TEXT [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, and notifying.
+- `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
 - `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state.

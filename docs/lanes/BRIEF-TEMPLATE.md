@@ -19,6 +19,11 @@ DONE means: <one observable sentence>
 **Fence:** commit to your branch only. No push, no merge to `main`, no other ref moved.
 **Deliverables:** your branch, and your report **committed on that branch** at
 `docs/lanes/<name>.md` — MEASURED/BELIEVED per line, with a WHERE THIS BRIEF WAS WRONG section.
+If the lane is landable, also write `docs/lanes/<name>.json` with exactly these fields:
+`lane`, `base`, `files_changed`, `tests`, `claims`, and `blockers`. Each test entry records
+`command`, `rc`, `passed`, `failed`, and `skipped`; each claim records `claim` and the command
+that proves it. `fleet land <lane>` reads this result, stages only its listed paths plus the
+report/result, rebases the lane, and reruns the recorded commands.
 The report requires `docs updated: <files>`. Update the owning SPEC section and
 PLAN-PROGRESS row, and the SPEC §0 tree/line-count line if you moved it; a new host
 quirk belongs in `knowledge/projects/<p>.md`. No described behaviour change:
