@@ -19870,7 +19870,8 @@ def _sup_guard_decide(observation):
     if state in ("none", "released"):
         if obs.get("claim_sids") is None and state == "released":
             return "PAGE", "releasing body identity unavailable", detail
-        if obs.get("live_body_rows"):
+        if (obs.get("live_body_rows") or any(
+                obs["live_rows"].get(sid) for sid in (obs.get("claim_sids") or []))):
             return "PAGE", "live supervisor body without a safe claim", detail
         if state == "released":
             return "DISPATCH", "claim released", detail
@@ -19883,17 +19884,16 @@ def _sup_guard_decide(observation):
     if matching:
         statuses = {row.get("status") if isinstance(row.get("status"), str) else None
                     for row in matching}
+        age = obs.get("heartbeat_age_seconds")
+        if not isinstance(age, (int, float)):
+            return "PAGE", "claim heartbeat unreadable", detail
+        if (age <= SUPERVISOR_CLAIM_STALE_SECONDS
+                and ("busy" in statuses or statuses == {"idle"})):
+            detail["quiet"] = True
+            return "OK", "fresh heartbeat with live body", detail
         if "busy" in statuses:
-            age = obs.get("heartbeat_age_seconds")
-            detail["quiet"] = (isinstance(age, (int, float))
-                               and age <= SUPERVISOR_CLAIM_STALE_SECONDS)
             return "PAGE", "roster says busy", detail
         if statuses == {"idle"}:
-            age = obs.get("heartbeat_age_seconds")
-            if (not isinstance(age, (int, float))
-                    or age <= SUPERVISOR_CLAIM_STALE_SECONDS):
-                detail["quiet"] = isinstance(age, (int, float))
-                return "PAGE", "fresh heartbeat with live idle body", detail
             return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         return "PAGE", "live supervisor status unknown", detail
 
@@ -19911,24 +19911,25 @@ def _sup_guard_line(verdict, reason, target=None):
     if verdict == "WAKE":
         target = " ".join(str(target or SUPERVISOR_BODY_NAME).split())
         return f"WAKE {target}"
-    if verdict == "DISPATCH":
-        return "DISPATCH"
+    if verdict in {"OK", "DISPATCH"}:
+        return verdict
     reason = " ".join(str(reason).split())
     return f"PAGE {reason}"
 
 
 def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
-    """Observe twice before action; WAKE sends, DISPATCH/PAGE never spawn.
+    """Observe twice before action; only WAKE acts, and never spawns.
 
     JSON includes explicit sent/quiet flags so the keeper does not derive
-    liveness again. Plain output retains the three-verdict interface.
+    liveness again. Plain output uses the four-verdict interface, including OK.
     """
     do = getattr(args, "do", False)
     observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
     if do:
-        # Retry parents whose fork was not yet visible at the send's bounded
-        # retirement check. The helper independently proves safe retirement.
-        _reap_current_supervisor_forks(roster_fn=roster_fn)
+        # Only the WAKE path retries deferred fork retirement. OK and PAGE
+        # must stay action-free. Re-observe after any retirement before send.
+        if _sup_guard_decide(observation)[0] == "WAKE":
+            _reap_current_supervisor_forks(roster_fn=roster_fn)
         observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
     verdict, reason, detail = _sup_guard_decide(observation)
     sent, rc = False, 0
@@ -24621,7 +24622,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="one-line two-live-body verdict before supervisor revival")
     p_supguard.add_argument(
         "--do", action="store_true",
-        help="re-verify immediately, then send WAKE; DISPATCH/PAGE remain interface verdicts")
+        help="re-verify immediately, then send WAKE; OK does nothing; DISPATCH/PAGE remain interface verdicts")
     p_supguard.add_argument(
         "--json", action="store_true",
         help="include read-only guard detail as one JSON line")
