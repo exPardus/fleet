@@ -83,15 +83,37 @@ def test_manual_resume_in_claude_window_pages_registered_pane_without_creating(
     assert (tmp_path / "state" / "interface-pane").read_text() == "%42\n"
 
 
-@pytest.mark.parametrize("command", ["node", "zsh"])
-def test_registration_does_not_depend_on_current_command(
-        tmp_path, monkeypatch, command):
+def test_claude_registration_is_the_only_registered_pane(tmp_path, monkeypatch):
     register(tmp_path)
-    runner = TmuxRunner(command=command)
+    runner = TmuxRunner(command="claude")
     tick(tmp_path, runner, monkeypatch)
     assert runner.tmux("new-window") == []
     assert runner.tmux("kill-window") == []
     assert [argv[3] for argv in runner.tmux("send-keys")] == ["%42", "%42"]
+
+
+def test_shell_registration_falls_back_to_window_and_still_pages(
+        tmp_path, monkeypatch):
+    register(tmp_path)
+    runner = TmuxRunner(window="fleet", command="zsh")
+    out = tick(tmp_path, runner, monkeypatch)
+    assert out.count("keeper: registered pane %42 runs zsh, not claude; "
+                     "falling back to window") == 1
+    assert len(runner.tmux("kill-window")) == 1
+    assert len(runner.tmux("new-window")) == 1
+    assert [argv[3] for argv in runner.tmux("send-keys")] == ["work:fleet"] * 2
+    assert not (tmp_path / "state" / "interface-pane").exists()
+
+
+def test_dead_registration_falls_back_to_window_and_still_pages(
+        tmp_path, monkeypatch):
+    register(tmp_path)
+    runner = TmuxRunner(window="fleet", command="claude", dead=True)
+    tick(tmp_path, runner, monkeypatch)
+    assert len(runner.tmux("kill-window")) == 1
+    assert len(runner.tmux("new-window")) == 1
+    assert [argv[3] for argv in runner.tmux("send-keys")] == ["work:fleet"] * 2
+    assert not (tmp_path / "state" / "interface-pane").exists()
 
 
 @pytest.mark.parametrize("registered_window, warnings", [("claude", 1), ("fleet", 0)])
@@ -117,7 +139,10 @@ def test_missing_or_dead_registration_falls_back_to_window_creation(
     assert len(creates) == 1
     assert creates[0][:8] == ["tmux", "new-window", "-d", "-t", "work",
                             "-n", "fleet", "-c"]
-    assert runner.tmux("send-keys") == []  # Existing startup deferral.
+    if registration == "dead":
+        assert len(runner.tmux("send-keys")) == 2
+    else:
+        assert runner.tmux("send-keys") == []  # Existing startup deferral.
 
 
 def test_gone_registration_pages_existing_named_window(tmp_path, monkeypatch):
@@ -151,8 +176,8 @@ def test_unknown_registration_defers_without_creating_or_recording_pages(
     runner = TmuxRunner(scan_rc=1 if failure == "scan" else 0)
     out = tick(tmp_path, runner, monkeypatch)
     assert "interface pane unavailable" in out
-    assert all(argv[1] == "list-panes" for argv in runner.calls)
-    assert not (tmp_path / "state" / "keeper").exists()
+    assert len(runner.tmux("new-window")) == 1
+    assert "pages deferred to next tick" in out
 
 
 def test_failed_pane_send_retries_without_creating_a_window(tmp_path, monkeypatch):
