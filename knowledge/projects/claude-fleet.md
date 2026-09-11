@@ -125,6 +125,11 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   treats everything after its flags as instructions and it has no help of its own; the top-level
   `mcx --help` is the one that prints usage. Measured 2026-09-11 — it consumed a lane slot until
   `mcx stop` caught it, and on a 3-lane host that is a dispatch you cannot make.
+- **Observe an mcx lane FROM ITS WORKTREE, not from the fleet home.** mcx state is per-cwd
+  (`<cwd>/.mcx/`), so `mcx result <ID>` run anywhere else answers `unknown worker` and exits 1 --
+  which an observer keyed on `rc != 2` reads as a FINISHED LANE. MEASURED 2026-09-12: lane
+  `KRGcS0PG` was reported dead 40s after dispatch and was in fact running. The existing entry
+  says to SPAWN from the worktree; the observer is the other half of the same fact.
 - **The supervisor must never export `MCX_WORKER=1`** — it is the lane-side recursion guard, and
   setting it on yourself gets `mcx: workers cannot launch or steer workers`.
 - **Codex cannot commit**: its sandbox makes git metadata read-only. Every lane ends with the
