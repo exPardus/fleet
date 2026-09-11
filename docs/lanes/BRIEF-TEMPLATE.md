@@ -72,6 +72,31 @@ and add these whenever the lane does the matching thing:
 A pre-existing failure is not the lane's to fix: reproduce it at the base with
 untouched source and say so.
 
+## The pytest invocation, and the flag three lanes died without (2026-09-12)
+
+A Codex lane has NO DNS. Name BOTH the warm cache and `UV_OFFLINE=1`, or `uv`
+tries PyPI first, fails to resolve it, and the whole command dies **while the
+cache already holds everything it needs**:
+
+```
+UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache UV_OFFLINE=1 \
+  uv run --no-project --python 3.10 --with pytest python -m pytest -q <suites>
+```
+
+MEASURED 2026-09-12 in `fleet-w84-homes`, network blocked, on 3.10 and 3.12
+both: with the flag, 28 passed; without it, `uv` reports it could not resolve
+`pypi.org`. Lanes w83 and w84 each shipped code they had never executed, and
+each reported test coverage as a BELIEVED line, because the brief named the
+cache and omitted the flag. **That omission is the briefing supervisor's, not
+the lane's** — the earlier note that "a fresh `UV_CACHE_DIR` under
+`UV_OFFLINE=1` cannot resolve pytest" is about a FRESH cache, and dropping the
+flag was an over-correction of it. A warm cache plus the flag is the working
+pair.
+
+A lane that still cannot run pytest must say so **at the top of its report**
+and mark every test claim BELIEVED; the supervisor then runs every suite at
+landing and records the real numbers in `docs/lanes/<name>.json`.
+
 ## Task convention (2026-09-10)
 
 Every brief under `docs/lanes/` and every dispatched task under `state/tasks/`
