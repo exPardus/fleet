@@ -1,0 +1,40 @@
+{
+  "lane": "w86",
+  "base": "68d72f7",
+  "files_changed": [
+    "docs/lanes/w86.json",
+    "docs/lanes/w86.md"
+  ],
+  "tests": [],
+  "claims": [
+    {
+      "claim": "host-wide (91 session files, ~2026-09-08..09-15): 34,316 assistant turns, cache_read_input_tokens=9,794,651,109, output_tokens=23,628,854, input_tokens=140,552, cache_creation_input_tokens=84,402,633",
+      "command": "python3 script over glob('~/.claude/projects/*/*.jsonl') summing message.usage fields; see docs/lanes/w86.md 'The map'"
+    },
+    {
+      "claim": "grouped by project-dir role: home (sup+interface+keeper) = 53 sessions/23,769 turns/6,982,555,188 cache_read (71.3% of host); tap = 14/7,080/2,262,992,300 (23.1%); worker-worktree = 22/3,454/548,961,270 (5.6%)",
+      "command": "same script, grouped by dircat(project) on os.path.basename(os.path.dirname(p))"
+    },
+    {
+      "claim": "sessions sharing a first-recorded timestamp are one resumed conversation chain; in the home project one 21-session chain (turns growing 706->1067, 2026-09-10T15:29Z->2026-09-11T14:15Z) carries 5,683,903,210 cache_read tokens = 81.4% of the home project's cache_read and 58.1% of the host total; in tap a 2-session chain (up to 1,310 turns) carries 1,025,646,562 = 45.3% of tap's / 10.5% of host",
+      "command": "python3 script grouping (project, first_ts) and summing cache_read_input_tokens per group, sorted descending"
+    },
+    {
+      "claim": "the largest worker-worktree resume chain is 2 sessions / 335 turns / 95,645,074 cache_read tokens -- two orders of magnitude below the home/tap chains, i.e. disposable worker lanes do not show the growth pattern",
+      "command": "same chain-grouping script filtered to dircat=='worker'"
+    },
+    {
+      "claim": "turns with output_tokens<=80 (idle/trivial proxy) are 430 of 34,316 (1.3%) and carry 125,420,607 cache_read tokens (1.3% of host cache_read) -- disproved as a major lever",
+      "command": "python3 script bucketing assistant turns by output_tokens and summing cache_read per bucket"
+    },
+    {
+      "claim": "statusline output never enters any model's context: docs/SPEC.md terminal-surface doctrine and this repo's CLAUDE.md state that views (statusline, /fleet:*) are read-only and fleet injects context into no session -- confirmed by reading SPEC.md/CLAUDE.md text, not by transcript measurement",
+      "command": "grep -n statusline docs/SPEC.md; CLAUDE.md 'Views (statusline and /fleet:*) ... Fleet is pull-only'"
+    },
+    {
+      "claim": "skills/fleet/SKILL.md (14,242 bytes) and supervisor/briefs/server-standing.md (1,938 bytes) path-string occurrences across all transcripts are 1,504 and 1,530 respectively (ESTIMATED proxy, not confirmed unique read-call count); at bytes/4 even taken at face value this is roughly 0.06% of host cache_read",
+      "command": "wc -c skills/fleet/SKILL.md supervisor/briefs/server-standing.md; python3 re.findall over raw jsonl bytes, host-wide"
+    }
+  ],
+  "blockers": []
+}
