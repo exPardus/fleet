@@ -11,18 +11,23 @@
 ## Running the tests
 
 ```
-py -3.13 -m pytest tests/
-py -3.10 -m pytest tests/     # the declared floor — run this too, before you push
+uv run --no-project --python 3.10 --with pytest python -m pytest -q   # the declared floor
+uv run --no-project --python 3.12 --with pytest python -m pytest -q
 ```
 
-That runs the default tiers: unit (registry/parser/prompt logic, no `claude` invoked) and hooks (subprocess tests against the real hook scripts, still no `claude`). Both are fast — around a minute.
+Run from a fresh `git clone --no-local`, never from a fleet home with live workers: the suite
+reads the live registry through the install-root seam. Six failures are known host assumptions
+on Linux (four Windows drive-qualified-path escapes, two venv-shim re-execs) and carry no skip.
 
-**Run the floor, don't grep for it.** Twice now a change has shipped a 3.11+ API past a careful grep — `datetime.fromisoformat("…Z")` once and `BaseException.add_note` a second time — and both were caught only by *executing* the suite on 3.10. A version floor you never run at is a claim, not a constraint.
+That runs the default tiers: unit (registry/parser/prompt logic, no `claude` invoked) and hooks
+(subprocess tests against the real hook scripts, still no `claude`).
+
+**Run the floor, don't grep for it.** Twice a change shipped a 3.11+ API past a careful grep.
 
 A third tier exists: live integration (`tests/integration/`), gated behind `FLEET_LIVE=1`. It spends real (small, haiku-model) money dispatching an actual worker in a temp `FLEET_HOME` sandbox, and is required — not optional — before merging any change to `dispatch_bg`, the hook scripts, or the outcome-store parsers:
 
 ```
-FLEET_LIVE=1 py -3.13 -m pytest tests/integration/
+FLEET_LIVE=1 uv run --no-project --python 3.12 --with pytest python -m pytest tests/integration/
 ```
 
 It's skipped cleanly (not failed) when `FLEET_LIVE` isn't set, so your default `pytest tests/` run never spends money by accident.
@@ -53,7 +58,7 @@ Every non-trivial spec or code change goes through an adversarial review before 
 
 ## PR expectations
 
-- Run `py -3.13 -m pytest tests/` green before opening a PR. If your change touches `dispatch_bg`, `bin/hooks/*`, or an outcome-store parser, also run the `FLEET_LIVE=1` tier and say so in the PR description.
+- Run the two `uv run ... pytest` commands above green before opening a PR. If your change touches `dispatch_bg`, `bin/hooks/*`, or an outcome-store parser, also run the `FLEET_LIVE=1` tier and say so in the PR description.
 - Say which of `docs/SPEC.md`'s numbered invariants your change touches, and why it's still preserved, if it touches the core lifecycle at all.
 - Keep `bin/fleet.py` stdlib-only — no new dependencies.
 - Small, focused PRs beat large ones. This is a solo-maintainer project with a heavy review culture; a PR that's easy to attack adversarially is a PR that merges faster.
