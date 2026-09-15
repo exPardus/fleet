@@ -20,7 +20,9 @@ If a doc isn't listed here, that's a gap — file an issue or add it in the same
 
 | Doc | Audience | What it's for |
 |---|---|---|
-| [`README.md`](../README.md) | USERS | Pitch, quickstart, feature list, architecture sketch. |
+| [`README.md`](../README.md) | USERS | What fleet is, install, first run, everyday commands. |
+| [`product.md`](../product.md) | USERS | The one-page product definition. Binding: every fleet lane cites a line in it. |
+| [`skills/fleet/SKILL.md`](../skills/fleet/SKILL.md) | USERS | The operating manual: tiers, rituals, every verb in one line. |
 | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | CONTRIBUTORS | Dev setup, binding rules, how review works here, PR expectations. |
 | [`LICENSE`](../LICENSE) | USERS | MIT. |
 | [`CLAUDE.md`](../CLAUDE.md) | INTERNAL | Instructions Claude Code itself reads when working *in* this repo (rules a session must never violate: `py -3.13`, forward slashes in hook commands, no Git-Bash `&`, views are read-only, etc.). Useful to a contributor as a second binding-rules source, but written for an AI session, not a human onboarding doc. |
