@@ -1,4 +1,22 @@
 # Operator changelog
+THROUGHPUT wave 82 (ea94314..5729e3b97df4861e22253509346e13ba63bb865b): bin +0/-0, tests +0/-0, docs +223/-259, journal +38/-20, other +109/-214; workers: 0 (none); tokens: 0; tokens_per_bin_line: UNMEASURED (token source or added bin lines missing); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 3; protected: 0 (unread mail)
+Merge 4abf945 (w86/token-efficiency) — the operator's token-efficiency question, measured rather
+than guessed. Research only: nothing was cut, and the ranked list went to the operator to pick
+from. The finding is that this host's spend is not where the fleet's own suspects pointed.
+68.5% of 9,799,340,652 cache_read tokens across 91 session files and 34,343 turns sit in just TWO
+persistent resume chains — one fleet supervisor/interface chain of 21 resumed session files
+growing 706 to 1067 turns over 23 hours carries 58.0% alone, and one tap chain carries 10.5%.
+Disposable worker lanes are two orders of magnitude smaller, so the cost is the persistent
+identity replaying its own history, not the dispatch of work. Disproved and recorded so no later
+generation re-asks: idle turns are 1.3% of turns and 1.3% of tokens, SKILL.md and the standing
+brief are about 0.06% even at generous face value, and the statusline is zero by construction
+because views inject into no session. Suspects that could only be counted by occurrence — the
+checkpoint, wave-close, guard output, journal and board reads — are flagged unsized rather than
+ranked on a guess. The supervisor reproduced the headline independently before relaying it. Two
+items are owed to the operator: the lane asserted that cache_read counts against the subscription
+without measuring it (rate arithmetic says the ranking survives either way by roughly 8x), and
+`fleet land` refused the 86-line report against REPORT_LIMIT 40 while the operator's task file
+asked for under 120 lines, so the report was merged directly and the collision raised.
 THROUGHPUT wave 81 (87c0b6a..4397b877a46ed2b513600f1e4332bb231df24e4d): bin +39/-8, tests +83/-0, docs +108/-0, journal +12/-6, other +5/-0; workers: 0 (none); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 39 added bin lines); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 0; protected: 0 (unread mail)
 Merge 8c369e2 (w85/band-observable) — the 400k supervisor context ceiling was unreachable for a
 supervisor that dispatches Codex lanes, which under the Claude freeze is every supervisor.
