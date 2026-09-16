@@ -15,6 +15,14 @@ and the old 15-minute observation window are removed.
 | `quiet: true` (fresh healthy body or inactive goals) | No send or supervisor-stalled page. Other keeper rules still run. |
 | `PAGE supervisor limited` | Page once for that body and limit horizon; defer another attempt until the roster's horizon. An unknown horizon does not license a retry. |
 
+A plain `PAGE <reason>` is suppressed while an operator decision is parked
+(`sup-status --json`'s `pending_decision`): `rule_supervisor_frozen` owns that
+tick instead, so the operator sees "parked on decision" rather than a stall
+that duplicates it. `DISPATCH` and `PAGE supervisor limited` still page
+through a parked decision — a dead or limited body cannot answer the decision
+itself, so that page is what gets a replacement running or respects the reset
+horizon regardless.
+
 A stale idle body must have a live PID in its current body’s SID union before a wake is allowed.
 Stale state without a live body pages the interface. Busy, missing, ambiguous,
 handoff, or changed-claim observations never authorize a second supervisor.

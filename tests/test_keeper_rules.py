@@ -235,6 +235,32 @@ def test_no_pending_decision_is_silent():
     assert "supervisor-frozen" not in _rules(k.evaluate(_obs(pending_decision=None), NOW))
 
 
+def test_pending_decision_suppresses_the_plain_stalled_page():
+    """Measured 2026-09-15T21:1xZ: the keeper paged `supervisor-stalled` on
+    the same tick it separately reported `supervisor parked on decision`. The
+    wake brief already says to respect a pending operator decision; the page
+    rule must too -- `rule_supervisor_frozen` owns the tick instead."""
+    guard = _guard(verdict="PAGE fresh heartbeat but body is not roster-live",
+                   reason="fresh heartbeat but body is not roster-live")
+    pages = k.evaluate(_obs(supervisor_guard=guard, pending_decision="ship M-F?"), NOW)
+    assert _rules(pages) == ["supervisor-frozen"]
+
+
+def test_dispatch_still_pages_through_a_parked_decision():
+    """A dead supervisor (DISPATCH) can never answer a parked decision, so the
+    page that gets a replacement running must not be suppressed."""
+    guard = _guard(verdict="DISPATCH", reason="claim released", state="released")
+    pages = k.evaluate(_obs(supervisor_guard=guard, pending_decision="ship M-F?"), NOW)
+    assert set(_rules(pages)) == {"supervisor-stalled", "supervisor-frozen"}
+
+
+def test_supervisor_limited_still_pages_through_a_parked_decision():
+    guard = _guard(verdict="PAGE supervisor limited", reason="supervisor limited",
+                   limit_reset_at=NOW + 3600)
+    pages = k.evaluate(_obs(supervisor_guard=guard, pending_decision="ship M-F?"), NOW)
+    assert set(_rules(pages)) == {"supervisor-stalled", "supervisor-frozen"}
+
+
 def test_worker_anomalies_page_once_with_all_names():
     workers = [
         {"name": "a", "status": "dead-suspected", "mail": 0, "limit_kind": None},

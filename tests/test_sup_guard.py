@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+import fleet_keeper
 
 
 SID = "sid-current"
@@ -370,6 +371,86 @@ def test_limit_discovered_by_send_is_published_as_park_not_retry(home, monkeypat
     assert result['verdict'] == 'PAGE supervisor limited'
     assert result['limit_reset_at'] == '2099-01-01T00:00:00Z'
     assert not result['sent'] and len(calls) == 1
+
+
+INCIDENT_BODY = "sup|inc-20260911T195615Z-a6c9|successor"
+INCIDENT_LIVE = "612ed197-0000-0000-0000-000000000000"
+INCIDENT_RETIRED_1 = "2516bcf0-0000-0000-0000-000000000000"
+INCIDENT_RETIRED_2 = "e65ef203-0000-0000-0000-000000000000"
+
+
+def _install_2026_09_15_incident():
+    """Replay this host's 2026-09-15T21:1xZ roster: three fork-parent rows of
+    one body, left behind by three `fleet send` fork-steers, every one
+    `state: blocked, status: None, pid: None`. The claim names the third sid
+    as its live sid; the other two sit in `retired_sids`."""
+    record = fleet.new_worker_record(INCIDENT_LIVE, "irrelevant", "standing",
+                                     "bypass", dispatch_kind="bg")
+    record["retired_sids"] = [INCIDENT_RETIRED_1, INCIDENT_RETIRED_2]
+    fleet.save_registry({"workers": {INCIDENT_BODY: record}})
+    claim = {"incarnation_id": "inc-20260911T195615Z", "session_id": INCIDENT_LIVE,
+             "claimed_via": "handoff", "heartbeat_at": "2026-09-09T00:00:00Z"}
+    fleet.write_incarnation(claim)
+
+
+def _incident_rows():
+    return [{"sessionId": sid, "status": None, "pid": None,
+             "name": INCIDENT_BODY, "state": "blocked"}
+            for sid in (INCIDENT_LIVE, INCIDENT_RETIRED_1, INCIDENT_RETIRED_2)]
+
+
+def test_2026_09_15_blocked_fork_corpses_never_page_as_a_second_live_body(
+        home, monkeypatch, capsys):
+    """Measured 2026-09-15T21:1xZ (kz-work fleet home): this exact roster drove
+    `sup-guard` to `PAGE another live supervisor body is present`. `_sup_guard_
+    live_rows` already drops any row whose pid is in `(None, "", 0)` (present
+    since the guard's first commit, 6327ea9, 2026-09-11) -- so replayed against
+    HEAD the three corpses can never populate `live_rows`/`live_body_rows`, and
+    a stale claim reads as an ordinary dead body instead. A roster row with no
+    pid cannot be reached and must never count as a live supervisor body."""
+    _install_2026_09_15_incident()
+    run_guard(monkeypatch, snapshot(age=4000), _incident_rows())
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_2026_09_15_blocked_fork_corpses_never_page_as_live_fresh_heartbeat(
+        home, monkeypatch, capsys):
+    """Same roster, a fresh claim heartbeat: still never the 'another live
+    supervisor body' reason -- a pid-less row stays unreachable regardless of
+    how fresh the claim's own heartbeat is."""
+    _install_2026_09_15_incident()
+    run_guard(monkeypatch, snapshot(age=10), _incident_rows())
+    assert capsys.readouterr().out == (
+        "PAGE fresh heartbeat but body is not roster-live\n")
+
+
+def test_a_genuine_live_corpse_outside_the_claim_still_pages(home, monkeypatch, capsys):
+    """The positive control for the two tests above: a REAL second body (a
+    live pid, outside the claim's sid union) must still trip this arm. The
+    fix for the 09-15 incident is the pid filter, not disabling the arm."""
+    run_guard(monkeypatch, snapshot(age=4000),
+              [row("sid-other-body", name="sup|inc-other|boot", pid=99,
+                   state="working")])
+    assert capsys.readouterr().out == (
+        "PAGE another live supervisor body is present\n")
+
+
+def test_keeper_does_not_stall_page_the_2026_09_15_roster_while_parked(
+        home, monkeypatch, capsys):
+    """Full replay, guard through keeper: this exact roster (defect 1) plus a
+    parked decision (defect 2) must not produce a `supervisor-stalled` page --
+    the keeper paged it on every 09-15 tick even after the body raised and
+    parked a decision, reported separately as `supervisor parked on
+    decision`. `rule_supervisor_stalled` must yield to `rule_supervisor_frozen`."""
+    _install_2026_09_15_incident()
+    monkeypatch.setattr(fleet, "status_snapshot", lambda: snapshot(age=10))
+    fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True),
+                        roster_fn=roster(*_incident_rows()))
+    guard = json.loads(capsys.readouterr().out)
+    assert guard["reason"] == "fresh heartbeat but body is not roster-live"
+    pages = fleet_keeper.evaluate(
+        {"supervisor_guard": guard, "pending_decision": "ship M-F?"}, 0.0)
+    assert [p.rule for p in pages] == ["supervisor-frozen"]
 
 
 def test_a_done_row_with_a_live_pid_is_live(home, monkeypatch, capsys):
