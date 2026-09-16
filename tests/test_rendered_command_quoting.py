@@ -424,6 +424,7 @@ EXPECTED_RENDERS = (
     ("bin/fleet.py", "_install_statusline"),
     ("bin/fleet.py", "_render_sup_spawn_task"),
     ("bin/fleet.py", "_render_successor_task"),
+    ("bin/fleet.py", "_render_supervisor_wake_task"),
 )
 
 
@@ -636,11 +637,16 @@ def _drive_render_successor_task(tmp_path, monkeypatch):
     return fleet._render_successor_task("inc-new", "inc-old", "tok")
 
 
+def _drive_render_supervisor_wake_task(tmp_path, monkeypatch):
+    return fleet._render_supervisor_wake_task("sup|inc-l1|boot", "inc-l1", "tok", "wake up")
+
+
 RENDER_DRIVERS = {
     "_install_statusline": _drive_install_statusline,
     "_steer_supervisor_release": _drive_steer_supervisor_release,
     "_render_sup_spawn_task": _drive_render_sup_spawn_task,
     "_render_successor_task": _drive_render_successor_task,
+    "_render_supervisor_wake_task": _drive_render_supervisor_wake_task,
 }
 
 

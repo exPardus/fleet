@@ -620,13 +620,16 @@ def test_the_compose_census_sees_a_call_site_inside_a_class():
 
 
 def test_the_dispatch_census_reflects_five_paths():
-    """THE census that reflects five, and the reason there are two of them.
+    """THE census that reflects six, and the reason there are two of them.
 
     §11.8's four compose paths are not the four dispatch paths -- there are
-    FIVE launches of a worker session in this file, and the fifth,
-    `_dispatch_supervisor_body`, renders its own prompt through
-    `_render_sup_spawn_task` and has never called `compose_prompt` at all. The
-    compose census above cannot see it by construction.
+    SIX launches of a worker session in this file. `_dispatch_supervisor_body`
+    renders its own prompt through `_render_sup_spawn_task` and has never
+    called `compose_prompt` at all; `_wake_supervisor_native` (Cut 1, w87)
+    renders its own bootstrap through `_render_supervisor_wake_task` for the
+    same reason -- a supervisor's continuity is its incarnation file and
+    journal, not `compose_prompt`'s worker-brief framing. The compose census
+    above cannot see either by construction.
 
     That the supervisor body gets no teach lines is a FACT recorded here, not
     a property being endorsed: it is a deliberate scope boundary (the
@@ -639,7 +642,8 @@ def test_the_dispatch_census_reflects_five_paths():
     assert dispatchers == {"cmd_spawn": 1, "_cmd_send_native": 1,
                            "_resume_one_limited_native": 1,
                            "_cmd_respawn_native": 1,
-                           "_dispatch_supervisor_body": 1}, (
+                           "_dispatch_supervisor_body": 1,
+                           "_wake_supervisor_native": 1}, (
         f"the dispatch_bg call census changed: {sorted(dispatchers.items())}. "
         f"Every dispatch launches a worker session and pays a prompt: decide "
         f"whether the new one composes via compose_prompt (add it to the "
