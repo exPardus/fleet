@@ -5090,6 +5090,17 @@ def _cmd_send_native(name: str, message: str,
     append_mailbox(old_sid, message)
     append_event("mail_sent", name, sid=old_sid, status="idle",
                  caller_sid=caller_sid)
+
+    # Cut 1 (w87): a supervisor body's continuity is the incarnation file plus
+    # the journal/checkpoint trail sup-boot already reads, not the transcript --
+    # so waking one never needs the vendor's `--bg --resume` fork (G2, which
+    # ratified fork-with-transcript ONLY because ordinary workers have no
+    # other continuity channel). Ordinary workers still fork below, unchanged.
+    if _is_supervisor_shaped(name):
+        return _wake_supervisor_native(name, old_sid, cwd, mode, model,
+                                       setting_sources, prior_last_dispatch_at,
+                                       run=run, which=which, sleep=sleep)
+
     prompt, claim, mail = compose_prompt(name, cwd, "", old_sid)
     # A resumed session must receive the message inline, not only behind a pointer.
     # Use all drained mail when it fits. Over the head-first cap, use this message
@@ -5161,6 +5172,185 @@ def _cmd_send_native(name: str, message: str,
     _reap_current_supervisor_forks(name, expected_sid=new_sid, run=run,
                                    which=which, sleep=sleep, attempts=3)
     print(f"{name}: fork-steered (new session {short_id}) -- fork carries full transcript (G2b)")
+    return 0
+
+
+def _mint_wake_nonce(claim: dict, now=None) -> str:
+    """Mint a fresh pending-nonce credential a woken supervisor body presents
+    to `sup-boot --nonce` to resume ITS OWN incarnation without a vendor fork
+    (Cut 1, w87). The caller here is fleet's own dispatch path, not the live
+    holder, so there is no earlier plaintext to reuse -- always replace any
+    outstanding pending value. Preserve the replaced hash in the prior slot
+    (the same slot ordinary resumes use) so a slower body presenting an
+    earlier pending value is not needlessly locked out.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    outstanding = claim.get("pending_nonce_hash")
+    if outstanding:
+        claim["prior_pending_hash"] = outstanding
+    value = mint_nonce()
+    claim["pending_nonce_hash"] = nonce_digest(value)
+    claim["pending_at"] = now_iso()
+    return value
+
+
+def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str,
+                                 message: str) -> str:
+    """Render the wake bootstrap for an idle supervisor body's fresh, unforked
+    turn (Cut 1, w87). No new generation is minted: sup-boot's own `resume`
+    verdict (claim-nonce doctrine) restamps THIS incarnation onto the new sid
+    once the presented nonce matches the pending value this dispatch just
+    minted -- the same continuity proof a human's manual resume presents.
+    Same nonce hygiene as `_render_successor_task`: redirect, slice-read,
+    then delete the bundle so the nonce leaves no second durable plaintext copy.
+    """
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
+    py = Path(sys.executable).as_posix()
+    home = FLEET_HOME.as_posix()
+    bundle = boot_bundle_path(name).as_posix()
+    mail_block = f"<MANAGER MESSAGE>\n{message.strip()}\n</MANAGER MESSAGE>\n\n" if message.strip() else ""
+    return f"""You are the claude-fleet supervisor, incarnation {incarnation_id}, woken from idle
+by `fleet send`. This is NOT a new generation -- you are the SAME incarnation continuing on a
+fresh session; never a successor, never a fork.
+
+{mail_block}Do exactly this, in order:
+1. FIRST ACT, before anything else -- run sup-boot presenting your wake continuity proof, output
+   redirected to a file (class-4 nonce doctrine: never read a secret off the stream tail):
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-boot --nonce {wake_nonce} > "{bundle}" 2>&1
+   Note the command's exit code.
+2. Read the verdict FROM THE FILE:
+   grep -E "^(VERDICT|INCARNATION|NONCE):" "{bundle}"
+   The verdict must be `resume` for incarnation {incarnation_id}. Anything else means the claim
+   changed underneath this wake (a handoff, a seizure, a release) -- take NO fleet actions, report
+   the verdict to the interface via `fleet sup-notify`, and stop.
+   RECORD THE NONCE VALUE NOW -- it is printed exactly once. That is your generation for every
+   subsequent supervisor verb.
+3. Read the REST of the bundle file now (GOALS, journal tail, knowledge index, fleet status) so
+   its content is in your working context -- IN SLICES, never in one read:
+   sed -n '1,120p' "{bundle}"
+   then '121,240p', then '241,360p', and so on until a slice comes back empty. WHY IN SLICES: a
+   redirect protects the STREAM, not the READER -- a tool that persists a large result writes a
+   SECOND durable plaintext copy of it, in storage this ritual's `rm` cannot reach, and that copy
+   would carry the nonce. Then delete the file:
+   rm "{bundle}"
+   Carry the NONCE value in your working context ONLY -- never into the journal, never into any
+   file.
+4. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
+   skills/fleet/supervisor.md. Refresh the heartbeat through the normal protocol
+   (`sup-checkpoint`) before any other action; do not seize a changed claim or spawn another
+   supervisor.
+"""
+
+
+def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
+                            setting_sources, prior_last_dispatch_at, *,
+                            run, which, sleep) -> int:
+    """Give an idle supervisor body another turn WITHOUT forking (Cut 1, w87).
+    `--bg --resume` always forks the full transcript into a new sid (G2,
+    ratified, docs/specs/native-substrate.md) and leaves the old sid as a
+    `blocked`/no-pid roster corpse (state/tasks/20260915-guard-blocked-
+    corpses.md). A plain, unforked `--bg` dispatch that re-proves continuity
+    through a freshly minted pending nonce resumes the SAME incarnation with
+    zero transcript duplication and mints no new generation -- the same
+    checkpoint/journal-only boot `sup-boot` already runs for a successor
+    (Cut 2, w87), driven here for a same-generation wake instead.
+    The caller (`_cmd_send_native`) has already pre-claimed the registry row
+    as `working` and appended `message` to old_sid's mailbox; this drains
+    that mailbox itself (compose_prompt's worker-brief framing does not fit
+    a supervisor) and restores both the mailbox and the pre-claim on any
+    failure, exactly as the ordinary fork-steer path does.
+    """
+    incarnation_id = name.split("|")[1]
+    mail, claim_path = claim_mailbox(old_sid)
+
+    def _rollback_pre_claim():
+        restore_mailbox_claim(claim_path)
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if (r is not None and r.get("status") == "working"
+                    and r.get("session_id") == old_sid):
+                r["status"] = "idle"
+                r["last_dispatch_at"] = prior_last_dispatch_at
+                save_registry(data)
+
+    claim_changed = False
+    with fleet_lock():
+        claim = read_incarnation()
+        if (claim is None or claim.get("incarnation_id") != incarnation_id
+                or claim.get("state") == "released"):
+            # Another body already changed this claim (handoff, seizure,
+            # release) since the roster snapshot that made this a WAKE --
+            # nothing here could ever resume it. Refuse loudly rather than
+            # dispatch a body whose continuity proof can never match. Do NOT
+            # also require claim["session_id"] == old_sid: it legitimately
+            # still names an EARLIER retired sid until the fresh body's own
+            # sup-boot call restamps it (a second wake can fire before that
+            # first boot turn runs) -- the wake_nonce, not sid equality, is
+            # the actual continuity proof. Defer both the rollback and the
+            # raise until the lock is released -- _rollback_pre_claim
+            # acquires it again and fleet_lock is not reentrant.
+            claim_changed = True
+        else:
+            wake_nonce = _mint_wake_nonce(claim)
+            write_incarnation(claim)
+    if claim_changed:
+        _rollback_pre_claim()
+        raise FleetCliError(
+            f"{name}: claim changed since the wake decision (incarnation "
+            f"{incarnation_id}) -- refusing to dispatch a wake that "
+            f"cannot resume it; another body may already hold the claim")
+
+    prompt_body = _render_supervisor_wake_task(name, incarnation_id, wake_nonce, mail)
+    try:
+        result = dispatch_bg(
+            name, cwd, prompt_body, mode, model=model,
+            setting_sources=setting_sources,
+            run=run, which=which, sleep=sleep,
+        )
+        finalize_mailbox_claim(claim_path)
+    except BaseException:
+        _rollback_pre_claim()
+        raise
+
+    new_sid = result["session_id"]
+    short_id = result["short_id"]
+
+    # Restamp only a record still carrying old_sid, same discipline as the
+    # ordinary fork-steer commit below.
+    commit_orphaned = {"flag": False}
+
+    def _commit():
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("session_id") == old_sid:
+                _restamp_after_steer(r, new_sid, short_id)
+                r["status"] = "working"
+                r["last_activity"] = now_iso()
+                save_registry(data)
+                _migrate_residual_mailbox(old_sid, new_sid)
+                _append_event_quiet("woken", name, old_session_id=old_sid,
+                                    new_session_id=new_sid, short_id=short_id)
+            elif r is not None:
+                commit_orphaned["flag"] = True
+                _append_event_quiet("wake_orphaned", name, old_session_id=old_sid,
+                                    new_session_id=new_sid)
+
+    if not _commit_launched_turn(_commit, sleep=sleep):
+        _report_stranded_native_turn(name, new_sid, short_id)
+        return 1
+
+    if commit_orphaned["flag"]:
+        print(f"{name}: changed during dispatch (killed/interrupted?) -- "
+              f"new session {short_id} left for manual adoption or archive")
+        return 0
+
+    _reap_current_supervisor_forks(name, expected_sid=new_sid, run=run,
+                                   which=which, sleep=sleep, attempts=3)
+    print(f"{name}: woken (new session {short_id}) -- same incarnation, "
+          f"no fork, no transcript copy")
     return 0
 
 

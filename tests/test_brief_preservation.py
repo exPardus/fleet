@@ -640,6 +640,34 @@ def _driver_resume_limited(project, monkeypatch):
     return "w1"
 
 
+def _driver_wake(project, monkeypatch):
+    """Cut 1 (w87): an idle supervisor body's wake dispatches fresh, never
+    via `compose_prompt`/`write_brief` -- it renders its own bootstrap
+    (`_render_supervisor_wake_task`), same shape as `_dispatch_supervisor_body`.
+    Seed the brief a real supervisor would already carry from its original
+    dispatch/handoff: the wake path must not touch it, so it has to survive
+    UNCHANGED, not be (re)written correctly."""
+    name = "sup|inc-brief|boot"
+    old_sid = SID_1
+    rec = fleet.new_worker_record(old_sid, str(project), "supervisor duty", "bypass",
+                                  dispatch_kind="bg")
+    rec["status"] = "idle"
+    rec["native_short_id"] = old_sid[:8]
+    rec["last_dispatch_at"] = fleet.now_iso()
+    fleet.save_registry({"workers": {name: rec}})
+    fleet.write_brief(name, BRIEF)
+    fleet.append_outcome(name, {"ts": fleet.now_iso(), "session_id": old_sid, "kind": "result"})
+    fleet.write_incarnation({"incarnation_id": "inc-brief", "session_id": old_sid,
+                             "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                             "claimed_via": "fresh", "nonce_hash": "a" * 32, "nonce_seq": 1})
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        _roster((True, []), (True, []), (True, [_entry(SID_2)])))
+    rc = fleet.cmd_send(SimpleNamespace(name=name, message="wake up", nonce=None),
+                        run=_run_for(SID_2), which=_claude, sleep=lambda s: None)
+    assert rc == 0
+    return name
+
+
 #: Every `dispatch_bg` call site in `bin/fleet.py`, mapped to `(driver, calls)`
 #: -- a driver that runs the site END TO END, and how many times that function
 #: calls `dispatch_bg`.
@@ -660,6 +688,7 @@ BRIEF_DRIVERS = {
     "_cmd_send_native": (_driver_send, 1),
     "_resume_one_limited_native": (_driver_resume_limited, 1),
     "_dispatch_supervisor_body": (_drive_supervisor_body, 1),
+    "_wake_supervisor_native": (_driver_wake, 1),
 }
 
 

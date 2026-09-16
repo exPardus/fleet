@@ -356,7 +356,7 @@ made a retryable dead-daemon skip indistinguishable from a permanent one.
 
 ## Ratifications (Task 12 gate review, 2026-07-14)
 
-- RATIFIED 2026-07-14: G2 fallback — steering an idle worker = fork-with-transcript via `--bg --resume`; overlay restamps the sid; fresh `-n` renders category on every steer.
+- RATIFIED 2026-07-14: G2 fallback — steering an idle worker = fork-with-transcript via `--bg --resume`; overlay restamps the sid; fresh `-n` renders category on every steer. **Amended 2026-09-16 (w87, Cut 1):** this fallback still governs every ORDINARY worker. A supervisor-shaped idle target is carved out — `_wake_supervisor_native` dispatches fresh (`resume_sid=None`, no `--resume`) instead, since a supervisor's continuity is the incarnation file's nonce-proven claim plus the journal `sup-boot` already reads, not the transcript G2 exists to carry. See `docs/lanes/w87.md`.
 - RATIFIED 2026-07-14: spec v2.3 delta (§5.1.1 usage-limit continuity as first M-B feature, §5.1.2 auto-archival, §5.1.3 agents-menu categories; gates G11–G13).
 - RATIFIED 2026-07-14: G9 DEFERRED — operator runs the standalone probe below at a quiet moment; the roster-epoch freeze rule (spec §5) is binding regardless of outcome.
 - RATIFIED 2026-07-14: M-A plan authoring green-lit.

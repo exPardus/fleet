@@ -1,0 +1,74 @@
+{
+  "lane": "w87",
+  "base": "2127983",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/SPEC.md",
+    "docs/lanes/w87-appendix.md",
+    "docs/lanes/w87.json",
+    "docs/lanes/w87.md",
+    "docs/specs/native-substrate.md",
+    "tests/test_brief_preservation.py",
+    "tests/test_index_compose.py",
+    "tests/test_load_registry_callers.py",
+    "tests/test_rendered_command_quoting.py",
+    "tests/test_supervisor.py",
+    "tests/test_supervisor_wake.py",
+    "tests/test_wake_retirement.py"
+  ],
+  "tests": [
+    {
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/integration/test_native_pin.py tests/test_autoclean.py tests/test_b6_sid_union.py tests/test_boot_bundle_chunked_read.py tests/test_brief_preservation.py tests/test_clean_spares_tombstone.py tests/test_cli.py tests/test_core.py tests/test_fleet_sources.py tests/test_fork_steer_delivery.py tests/test_gate_arm_wedge.py tests/test_identity_fixwave2.py tests/test_identity_fixwave.py tests/test_identity_registry.py tests/test_index_compose.py tests/test_keeper_doctrine.py tests/test_keeper_wake.py tests/test_liveness_readers.py tests/test_load_registry_callers.py tests/test_native_daemon_wedge.py tests/test_native.py tests/test_permission_stall.py tests/test_rendered_command_quoting.py tests/test_resilience.py tests/test_respawn_ceiling.py tests/test_respawn_retired_sweep.py tests/test_send_provenance.py tests/test_steering.py tests/test_steer_seams.py tests/test_stillborn_handoff.py tests/test_supervisor_ceiling.py tests/test_supervisor_claim_sids.py tests/test_supervisor_gate.py tests/test_supervisor.py tests/test_supervisor_wake.py tests/test_sup_guard.py tests/test_sup_release_tombstone.py tests/test_supspawn_fixwave1.py tests/test_sup_spawn.py tests/test_sup_spawn_setting_sources.py tests/test_sup_tombstone_fixwave1.py tests/test_sup_tombstone_fixwave2.py tests/test_sup_tombstone_fixwave3.py tests/test_sup_tombstone.py tests/test_verb_effect_guard.py tests/test_wake_retirement.py tests/test_round7_defect_pins.py tests/test_views_doctrine.py",
+      "rc": 0,
+      "passed": 2535,
+      "failed": 0,
+      "skipped": 11
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/integration/test_native_pin.py tests/test_autoclean.py tests/test_b6_sid_union.py tests/test_boot_bundle_chunked_read.py tests/test_brief_preservation.py tests/test_clean_spares_tombstone.py tests/test_cli.py tests/test_core.py tests/test_fleet_sources.py tests/test_fork_steer_delivery.py tests/test_gate_arm_wedge.py tests/test_identity_fixwave2.py tests/test_identity_fixwave.py tests/test_identity_registry.py tests/test_index_compose.py tests/test_keeper_doctrine.py tests/test_keeper_wake.py tests/test_liveness_readers.py tests/test_load_registry_callers.py tests/test_native_daemon_wedge.py tests/test_native.py tests/test_permission_stall.py tests/test_rendered_command_quoting.py tests/test_resilience.py tests/test_respawn_ceiling.py tests/test_respawn_retired_sweep.py tests/test_send_provenance.py tests/test_steering.py tests/test_steer_seams.py tests/test_stillborn_handoff.py tests/test_supervisor_ceiling.py tests/test_supervisor_claim_sids.py tests/test_supervisor_gate.py tests/test_supervisor.py tests/test_supervisor_wake.py tests/test_sup_guard.py tests/test_sup_release_tombstone.py tests/test_supspawn_fixwave1.py tests/test_sup_spawn.py tests/test_sup_spawn_setting_sources.py tests/test_sup_tombstone_fixwave1.py tests/test_sup_tombstone_fixwave2.py tests/test_sup_tombstone_fixwave3.py tests/test_sup_tombstone.py tests/test_verb_effect_guard.py tests/test_wake_retirement.py tests/test_round7_defect_pins.py tests/test_views_doctrine.py",
+      "rc": 0,
+      "passed": 2536,
+      "failed": 0,
+      "skipped": 11
+    }
+  ],
+  "claims": [
+    {
+      "claim": "break-even band B* ~= 850,000 tokens (C = B*; C = 849,667 MEASURED becoming-cost, one clean 16-turn bootstrap sample 3742->291f; a turn's cache_read at context size X is ~=X, confirmed across 6 generations)",
+      "command": "python3 script over usage_until()/summarize() aggregating message.usage across ~/.claude/projects/*/*.jsonl; see docs/lanes/w87-appendix.md SS3-4 for the full arithmetic and script listing"
+    },
+    {
+      "claim": "curve at 150k/200k/250k/350k is 5.66x/4.25x/3.40x/2.43x overcost (C/B); every candidate band is below break-even and 150k is the worst of the four",
+      "command": "849667/150000, 849667/200000, 849667/250000, 849667/350000; see docs/lanes/w87-appendix.md SS4"
+    },
+    {
+      "claim": "a6c9's 4 retired fork-parent transcripts total 7,553,045 bytes = 76.4% of that generation's 9,881,553 on-disk transcript bytes",
+      "command": "os.path.getsize over the 5 sid .jsonl files named in docs/lanes/w87-appendix.md SS1/SS5"
+    },
+    {
+      "claim": "an idle supervisor's fleet send wake dispatches fresh (no --resume in argv) and restamps the registry to the new sid instead of forking",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestIdleSupervisorWake::test_idle_supervisor_wakes_without_forking"
+    },
+    {
+      "claim": "the wake credential is not decorative: driven through the real (unmocked) cmd_sup_boot/supervisor_claim_decision, a fresh body presenting it gets verdict=resume for the SAME incarnation_id, never a new one",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestIdleSupervisorWake::test_wake_token_lets_a_fresh_body_resume_the_same_incarnation"
+    },
+    {
+      "claim": "ordinary (non-supervisor) idle worker steer is unchanged -- still the ratified G2b fork-steer with --resume",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestIdleSupervisorWake::test_ordinary_worker_still_forks tests/test_fork_steer_delivery.py"
+    },
+    {
+      "claim": "a wake refuses to dispatch (rolling back the pre-claim and mailbox) when the claim's incarnation_id changed or it was released since the roster snapshot that decided WAKE",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestWakeRefusesOnChangedClaim"
+    },
+    {
+      "claim": "cmd_sup_handoff_begin already dispatches a successor fresh -- no --resume/--fork-session in its argv (Cut 2 needed a pinning test, not a code change)",
+      "command": "pytest -q tests/test_supervisor.py::TestHandoff::test_successor_boot_is_fresh_never_a_resume_or_fork"
+    },
+    {
+      "claim": "the five-site dispatch_bg census and the render-command census are updated for the two new call sites (_wake_supervisor_native, _render_supervisor_wake_task), each with a real driver, not just an allowlist entry",
+      "command": "pytest -q tests/test_brief_preservation.py tests/test_index_compose.py tests/test_load_registry_callers.py tests/test_rendered_command_quoting.py"
+    }
+  ],
+  "blockers": []
+}

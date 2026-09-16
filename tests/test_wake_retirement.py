@@ -159,7 +159,10 @@ def test_send_retires_parent_only_after_actual_new_roster_pid(home, monkeypatch)
     sleeps = []
 
     def dispatch(*args, **kwargs):
-        assert kwargs["resume_sid"] == OLD
+        # Cut 1 (w87): a supervisor wake dispatches fresh -- never
+        # `--resume <old sid>` (that forks the transcript, G2/G2b); the
+        # wake credential in the task file is the continuity proof instead.
+        assert kwargs.get("resume_sid") is None
         assert not stops(calls)
         return {"session_id": NEW, "short_id": NEW[:8]}
 
