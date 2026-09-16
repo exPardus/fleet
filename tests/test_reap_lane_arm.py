@@ -148,3 +148,84 @@ def test_landed_lane_protections_survive_the_real_writer(
     eligible, reason = fleet._reap_eligible(
         "w1", record, [_entry(status="idle", pid=4242)], None)
     assert (eligible, reason) == (False, "roster-live")
+
+
+def test_stopping_a_landed_session_clears_the_veto_so_the_lane_arm_fires(
+        tmp_path, monkeypatch, home):
+    """The missing step, exercised in the same shape `cmd_wave_close` uses:
+    mark landed under the lock, THEN stop the session, THEN reap again.
+
+    MEASURED by a real experiment against `claude --bg` (not by reading
+    `_stop_native_session_status`'s docstring): stopping an idle background
+    session makes its `claude agents --json` roster entry disappear
+    entirely, not merely lose its `pid`. That is simulated here by dropping
+    the roster entry after the (mocked) stop call, which is the same
+    "entry is None" shape `_reap_eligible`'s lane arm already handles via
+    its `record.get("status") == "idle"` fallback. `_reap_protection`
+    itself is never touched -- the veto still holds until the stop runs.
+    """
+    repo, lane, base = _repo_with_lane(tmp_path)
+    _land_lane(lane, base, monkeypatch, repo)
+    _merge_lane_into_main(repo)
+    _seed_worker(lane)
+
+    lanes = fleet._wave_landed_lanes(repo, base, run=subprocess.run)
+    with fleet.fleet_lock():
+        landed = fleet._wave_mark_landed_lanes(repo, lanes, run=subprocess.run)
+    assert landed == ["w1"]
+    record = fleet.load_registry()["workers"]["w1"]
+    assert record["lane_state"] == "landed"
+
+    live_roster = [_entry(status="idle", pid=4242)]
+    eligible, reason = fleet._reap_eligible("w1", record, live_roster, None)
+    assert (eligible, reason) == (False, "roster-live")
+
+    stop_calls = []
+
+    def fake_stop(sid, run=subprocess.run, which=None, timeout=30, ref=None):
+        stop_calls.append(sid)
+        return True, "ok"
+
+    monkeypatch.setattr(fleet, "_stop_native_session_status", fake_stop)
+    stopped, errors = fleet._wave_stop_landed_sessions(landed, run=subprocess.run)
+    assert stopped == ["w1"]
+    assert errors == []
+    assert stop_calls == [SID]
+
+    eligible, reason = fleet._reap_eligible("w1", record, [], None)
+    assert (eligible, reason) == (True, "lane-landed")
+
+
+def test_stop_landed_sessions_reports_a_non_ok_outcome_as_an_error(
+        tmp_path, monkeypatch, home):
+    """`daemon-transient` (or any other non-ok outcome) is not a stop and
+    must not be silently treated as one."""
+    repo, lane, base = _repo_with_lane(tmp_path)
+    _land_lane(lane, base, monkeypatch, repo)
+    _merge_lane_into_main(repo)
+    _seed_worker(lane)
+
+    lanes = fleet._wave_landed_lanes(repo, base, run=subprocess.run)
+    with fleet.fleet_lock():
+        landed = fleet._wave_mark_landed_lanes(repo, lanes, run=subprocess.run)
+
+    monkeypatch.setattr(fleet, "_stop_native_session_status",
+                        lambda sid, run=subprocess.run, which=None, timeout=30,
+                               ref=None: (False, "daemon-transient"))
+    stopped, errors = fleet._wave_stop_landed_sessions(landed, run=subprocess.run)
+    assert stopped == []
+    assert errors == ["w1: daemon-transient"]
+
+
+def test_reap_protection_veto_is_untouched_by_the_stop_and_reap_fix():
+    """REJECTED FIX for this lane: weaken `_reap_protection`'s live-PID veto
+    so it does not apply to landed rows. The accepted fix stops the session
+    before the second reap instead, so the veto's own source must be exactly
+    as strict as before -- pin its exact shape so a future diff that touches
+    it (even a passing one) is loud.
+    """
+    import inspect
+    src = inspect.getsource(fleet._reap_protection)
+    assert src.count('if entry is not None and ("pid" in entry or') == 1
+    assert src.count('("status" in entry and entry.get("status") != "idle")):') == 1
+    assert src.count('return "roster-live"') == 1

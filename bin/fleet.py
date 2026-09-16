@@ -825,7 +825,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12610) -- render the release explanation.
+      * `_tombstone_releasing_body` (:12657) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -10530,10 +10530,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
     :1950, :2012, :2090, :2915, :6171, :6333, :6530, :6650, :6686, :6848, :6849, :6919,
-    :6929, :6940, :7034, :7509, :10480, :12903, :12904, :12965, :13766`).
+    :6929, :6940, :7034, :7509, :10480, :12950, :12951, :13012, :13813`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :5436, :5772, :8954,
-    :14091. This makes union identity safe; the age boundary distinguishes respawn.
+    :14138. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11180,7 +11180,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:5436, :5772, :8954,
-    # :14091) -- so union identity cannot make one body answer for another.
+    # :14138) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -12065,6 +12065,38 @@ def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
     return marked
 
 
+def _wave_stop_landed_sessions(landed_names, run=subprocess.run, which=shutil.which):
+    """Stop the native session of each just-landed lane through the sanctioned
+    `claude stop` path, so the reap that follows can reach `_reap_eligible`'s
+    lane arm -- `_reap_protection`'s live-PID veto (`roster-live`) applies
+    until the stop actually clears the roster entry. Must never run under
+    `fleet_lock()`: each stop call can block up to its timeout. A
+    `daemon-transient` outcome (or any other non-ok outcome) is not a stop and
+    is reported, not silently dropped. Reads the registry read-only -- this
+    runs after the lock that wrote lane_state has already released.
+    """
+    if not landed_names:
+        return [], []
+    ok, reason, registry = _read_registry_readonly()
+    if not ok:
+        return [], [f"registry {reason}"]
+    workers = registry.get("workers", {})
+    stopped, errors = [], []
+    for name in landed_names:
+        record = workers.get(name)
+        if not isinstance(record, dict):
+            continue
+        sid = record.get("session_id")
+        if not sid:
+            continue
+        stop_ok, outcome = _stop_native_session_status(sid, run=run, which=which)
+        if stop_ok:
+            stopped.append(name)
+        else:
+            errors.append(f"{name}: {outcome}")
+    return stopped, errors
+
+
 def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
     """Sum Codex usage from mcx records in the landed lane worktrees.
 
@@ -12563,6 +12595,20 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                                      dry_run=False, sid=getattr(args, "sid", None),
                                      nonce=getattr(args, "nonce", None))
     cmd_sup_notify(notify_args, run=run)
+
+    # Stop each just-landed lane's session (never under fleet_lock(): each
+    # stop can block up to its timeout) and reap a second time so the lane
+    # arm frees the slot inside this same wave-close run, not the next one.
+    stopped_names, stop_errors = _wave_stop_landed_sessions(
+        landed_names, run=run, which=which)
+    if stop_errors:
+        print("wave-close: stop note: " + "; ".join(stop_errors), file=sys.stderr)
+    post_reap_stats = {}
+    post_reap_count, post_reap_error = _supervisor_reap(
+        run=run, which=which, caller_sid=caller, reap_stats=post_reap_stats)
+    if post_reap_error:
+        print(f"wave-close: reap note: {post_reap_error}", file=sys.stderr)
+
     print(throughput)
     print(f"wave-close: floor tree={tree}; journal rolled={roll['rolled']}; "
           f"progress rows refreshed={progress_rows}; push attempts={attempts}")
@@ -12571,7 +12617,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
           f"(unmerged: {pruned['unmerged']}, dirty: {pruned['dirty']}, "
           f"protected: {pruned['protected']}, failed: {pruned['failed']})")
     print(f"wave-close: lane_state=landed recorded for: "
-          f"{', '.join(landed_names) if landed_names else 'none'}")
+          f"{', '.join(landed_names) if landed_names else 'none'}; "
+          f"stopped: {len(stopped_names)}; reaped: {post_reap_count}")
     return 0
 
 

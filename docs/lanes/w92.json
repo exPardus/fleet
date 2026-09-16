@@ -1,0 +1,64 @@
+{
+  "lane": "w92",
+  "base": "9ee2b355ee115921b18a514abc4fe3d92bcfbe05",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/SPEC.md",
+    "skills/fleet/SKILL.md",
+    "tests/test_wave_close.py",
+    "tests/test_reap_lane_arm.py",
+    "docs/lanes/w92.md",
+    "docs/lanes/w92.json"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_reap_lane_arm.py tests/test_unlocked_quarantine.py tests/test_lifecycle_reap.py tests/test_load_registry_callers.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_liveness_readers.py tests/test_views_doctrine.py tests/test_docs_currency.py",
+      "rc": 0,
+      "passed": 219,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_reap_lane_arm.py tests/test_unlocked_quarantine.py tests/test_lifecycle_reap.py tests/test_load_registry_callers.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_liveness_readers.py tests/test_views_doctrine.py tests/test_docs_currency.py",
+      "rc": 0,
+      "passed": 219,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "the missing step is real: before this fix, a landed lane with a live-pid idle roster entry is protected (roster-live); after `_wave_mark_landed_lanes` marks it and `_wave_stop_landed_sessions` stops its session, `_reap_eligible` reaches the lane arm and returns (True, 'lane-landed') -- exercised through real git + fleet_land, not mocks",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_reap_lane_arm.py::test_stopping_a_landed_session_clears_the_veto_so_the_lane_arm_fires tests/test_reap_lane_arm.py::test_stop_landed_sessions_reports_a_non_ok_outcome_as_an_error tests/test_reap_lane_arm.py::test_reap_protection_veto_is_untouched_by_the_stop_and_reap_fix -v"
+    },
+    {
+      "claim": "cmd_wave_close calls _wave_stop_landed_sessions after _wave_mark_landed_lanes, never inside a `with fleet_lock():` block, and a second _supervisor_reap call follows it -- checked from the AST, not trusted from a comment",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_wave_close_stops_landed_sessions_outside_the_lock_then_reaps_again -v"
+    },
+    {
+      "claim": "verified by real experiment, not by reading: a `claude --bg` session stopped with `claude stop <id>` after reaching idle status with a live pid has its `claude agents --json` roster entry disappear ENTIRELY (not merely lose its pid) -- matches _reap_eligible's existing `entry is None and record.get(\"status\") == \"idle\"` fallback, so no workaround was needed and this is reported informationally, not as a blocker",
+      "command": "claude --bg 'reply with the single word: pong, then stop'  # then poll: claude agents --json | jq '.[] | select(.id==\"<id>\")'  # then: claude stop <id>  # then re-poll: claude agents --json | jq '.[] | select(.id==\"<id>\")' -> no match (entry gone); cleanup: claude rm <id>"
+    },
+    {
+      "claim": "self-citations and retired_sids-citation invariants (tests/test_self_citations.py, tests/test_retired_sid_citations.py) hold after this lane's bin/fleet.py edit -- the +47 net lines this lane inserted shifted four stale line-number citations elsewhere in the file (fixed: line 828's :12610->:12657; lines 10533/10536/11183's :12903,:12904,:12965,:13766->:12950,:12951,:13012,:13813 and :14091->:14138), a real regression this lane caused and fixed, same class w91 hit",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_self_citations.py tests/test_retired_sid_citations.py"
+    },
+    {
+      "claim": "docs currency passes for this lane's own commit and docs/SPEC.md + skills/fleet/SKILL.md were updated for the described behaviour change (SPEC.md's wave-close row no longer says the landed row reaps on the next boot/wave-close)",
+      "command": "python3 tests/test_docs_currency.py ."
+    },
+    {
+      "claim": "docs/specs/** receipts still reproduce exactly -- unaffected by this lane's bin/fleet.py/docs/SPEC.md edits",
+      "command": "python3 tools/verify_receipts.py --strict --skip-volatile docs/specs/*.md"
+    },
+    {
+      "claim": "full floor, 3.10: 5380 passed, 6 failed, 16 skipped, 3 xfailed in 586.32s -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5380 passed, 6 failed, 16 skipped, 3 xfailed in 545.75s -- exactly the same six pre-existing host-venv artifacts, not adopted",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    }
+  ],
+  "blockers": []
+}
