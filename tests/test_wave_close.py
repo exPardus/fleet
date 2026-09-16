@@ -590,3 +590,49 @@ def test_wave_close_marks_landed_lanes_under_the_lock_before_write_incarnation()
     before_write = after.split("write_incarnation(claim)", 1)[0]
     assert "_wave_mark_landed_lanes(repo, lanes, run=run)" in before_write, (
         "wave-close does not mark landed lanes before writing the claim")
+
+
+def test_wave_close_stops_landed_sessions_outside_the_lock_then_reaps_again():
+    """`_stop_native_session_status` can block up to its timeout, so stopping
+    a just-landed lane's session must never run under `fleet_lock()`; and it
+    must be followed by a SECOND `_supervisor_reap` pass, after
+    `_wave_mark_landed_lanes` records the landing, so `_reap_eligible`'s lane
+    arm can fire inside this same wave-close run rather than the next one.
+    """
+    import ast
+    import inspect
+    import re
+
+    src = inspect.getsource(fleet.cmd_wave_close)
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+    stop_calls = {c.lineno for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Name)
+                 and c.func.id == "_wave_stop_landed_sessions"}
+    assert stop_calls, (
+        "cmd_wave_close no longer calls _wave_stop_landed_sessions -- if "
+        "that is intended, this test (and the fix it pins) should be "
+        "revisited")
+    locked = set()
+    for w in ast.walk(fn):
+        if isinstance(w, ast.With) and any(
+                isinstance(i.context_expr, ast.Call)
+                and isinstance(i.context_expr.func, ast.Name)
+                and i.context_expr.func.id == "fleet_lock" for i in w.items):
+            locked |= {c.lineno for c in ast.walk(w) if isinstance(c, ast.Call)
+                      and isinstance(c.func, ast.Name)
+                      and c.func.id == "_wave_stop_landed_sessions"}
+    assert stop_calls.isdisjoint(locked), (
+        f"cmd_wave_close calls _wave_stop_landed_sessions INSIDE "
+        f"fleet_lock() at {sorted(stop_calls & locked)} -- each stop can "
+        "block up to its timeout and must run unlocked")
+
+    mark_at = src.index("_wave_mark_landed_lanes(repo, lanes, run=run)")
+    stop_at = src.index("_wave_stop_landed_sessions(")
+    reap_calls = [m.start() for m in re.finditer(r"_supervisor_reap\(", src)]
+    assert len(reap_calls) >= 2, (
+        "wave-close no longer reaps twice -- the lane arm needs a pass "
+        "after the stop, not just the pre-landing reap")
+    assert mark_at < stop_at < reap_calls[-1], (
+        "wave-close must mark landed lanes, then stop their sessions, then "
+        "reap a second time, in that order")
