@@ -814,18 +814,18 @@ def _quarantine_artifacts() -> list:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
       * `_sweep_husks` (:7483) -- hidden records can still own roster sessions.
       * `_doctor_check_autoclean` (:8378) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11481) -- legacy upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:11510) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2005) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11355) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:11384) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:2518) -- expose that distinction to views.
       * `_doctor_check_registry` (:8628) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12503) -- render the release explanation.
+      * `_tombstone_releasing_body` (:12532) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1987,7 +1987,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11481`), because legacy upgrades also require a complete registry.
+    (`:11510`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:892`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -9473,7 +9473,23 @@ SUPERVISOR_BOOT_VERDICTS = tuple(SUPERVISOR_BOOT_RC) + ("handshake-written",
 # confusing that terminal disposition with an ordinary occupied-claim refusal.
 SUPERVISOR_BOOT_HANDOFF_REFUSED_RC = 5
 SUPERVISOR_BODY_MAX_LINES = 3
-SUPERVISOR_BUNDLE_MAX_CHARS = 40_000
+# w90: only the NEWEST journal entry in the boot tail carries its body inline;
+# older entries in the same window render as one-line pointers (kind/ts/inc/sid,
+# "full text: supervisor/JOURNAL.md"). `SUPERVISOR_BODY_MAX_LINES` caps a
+# checkpoint's NEWLINE count, not its byte size -- three lines can each be an
+# arbitrarily long paragraph (measured: wave-83's THROUGHPUT line alone is
+# several hundred bytes) -- so the newest entry is also byte-capped here as a
+# backstop the line cap does not provide.
+SUPERVISOR_BOOT_JOURNAL_TAIL = 5
+SUPERVISOR_LATEST_ENTRY_MAX_CHARS = 2000
+# w90 (docs/lanes/w90-report.md): measured real bundle (this repo's own
+# supervisor/GOALS.md + JOURNAL.md + knowledge/INDEX.md, 2026-09-16) at 12,271
+# bytes before this lane's journal-tail cut and ~9.9KB after it, with 0-3 live
+# workers (the reap rule's own ceiling) adding at most a few hundred more
+# bytes. 20,000 gives about 2x headroom for GOALS.md growth or a full 3-worker
+# roster without leaving the cap effectively unbounded; the untested 40,000
+# predecessor was never exercised by a test and left slack nobody had measured.
+SUPERVISOR_BUNDLE_MAX_CHARS = 20_000
 
 _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
@@ -10500,10 +10516,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
     :1950, :2012, :2090, :2915, :6171, :6333, :6530, :6650, :6686, :6848, :6849, :6919,
-    :6929, :6940, :7034, :7509, :10450, :12796, :12797, :12858, :13659`).
+    :6929, :6940, :7034, :7509, :10466, :12825, :12826, :12887, :13688`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :5436, :5772, :8954,
-    :13984. This makes union identity safe; the age boundary distinguishes respawn.
+    :14013. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10809,13 +10825,26 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
     except OSError:
         goals = "(supervisor/GOALS.md missing)"
     out += ["", "--- supervisor/GOALS.md ---", goals]
-    out += ["", "--- supervisor/JOURNAL.md tail (last 5) ---"]
-    tail = journal_entries[-5:]
+    out += ["", f"--- supervisor/JOURNAL.md tail (last {SUPERVISOR_BOOT_JOURNAL_TAIL}; "
+                 "only the newest entry's body is inlined) ---"]
+    tail = journal_entries[-SUPERVISOR_BOOT_JOURNAL_TAIL:]
     if tail:
-        for e in tail:
+        last_index = len(tail) - 1
+        for i, e in enumerate(tail):
             out.append(f"## {e['ts']} {e['kind']} inc={e['inc']} sid={e['sid']}")
-            if e["body"].strip():
-                out.append(e["body"].rstrip())
+            if i != last_index:
+                if e["body"].strip():
+                    out.append("  (body omitted -- pointer only; "
+                               "full text: supervisor/JOURNAL.md)")
+                continue
+            body = e["body"].rstrip()
+            if not body:
+                continue
+            if len(body) > SUPERVISOR_LATEST_ENTRY_MAX_CHARS:
+                cut = len(body) - SUPERVISOR_LATEST_ENTRY_MAX_CHARS
+                body = (body[:SUPERVISOR_LATEST_ENTRY_MAX_CHARS].rstrip()
+                       + f"\n...[truncated {cut} chars -- full text: supervisor/JOURNAL.md]")
+            out.append(body)
     else:
         out.append("(no checkpoints yet)")
     out += ["", "--- knowledge/INDEX.md (first 20 non-blank lines) ---"]
@@ -11110,7 +11139,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:5436, :5772, :8954,
-    # :13984) -- so union identity cannot make one body answer for another.
+    # :14013) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11118,7 +11147,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:892`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10424`).
+        # names this gate as its reason (`:10440`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
