@@ -136,10 +136,15 @@ def rule_supervisor_stalled(obs, now):
         fingerprint = f"limited:{identity}:{guard.get('limit_reset_at')}:{reason}"
         text = f"KEEPER: {reason}. Report state; respect the reset horizon."
     elif verdict == "DISPATCH":
+        # A parked decision cannot be answered by a dead supervisor -- DISPATCH
+        # is itself the page that gets a replacement running to resume it, so
+        # it pages through even while `rule_supervisor_frozen` also fires.
         fingerprint = f"dispatch:{identity}"
         text = (f"KEEPER: supervisor stalled ({reason}). Report state, then "
                 "relaunch with sup-spawn; do not await the operator.")
     else:
+        if obs.get("pending_decision"):
+            return None  # rule_supervisor_frozen owns the tick
         fingerprint = f"page:{identity}:{reason}"
         text = f"KEEPER: supervisor stalled ({reason}). Report state."
     return Page("supervisor-stalled", fingerprint, text)

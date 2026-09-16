@@ -1,0 +1,43 @@
+{
+  "lane": "w88",
+  "base": "89d43918b833c0b50e50758055be4c01f13d9d7b",
+  "files_changed": [
+    "bin/fleet_keeper.py",
+    "docs/lanes/w88.json",
+    "docs/lanes/w88.md",
+    "docs/operator/keeper-wake.md",
+    "tests/test_keeper_rules.py",
+    "tests/test_sup_guard.py"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_interface_register.py tests/test_interface_state.py tests/test_keeper_collect.py tests/test_keeper_dedup.py tests/test_keeper_doctrine.py tests/test_keeper_main.py tests/test_keeper_pane.py tests/test_keeper_rules.py tests/test_keeper_wake.py tests/test_liveness_readers.py tests/test_permission_denials.py tests/test_supervisor_claim_sids.py tests/test_sup_guard.py tests/test_sup_notify.py tests/test_views_doctrine.py tests/test_wave_close.py",
+      "rc": 0,
+      "passed": 407,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_interface_register.py tests/test_interface_state.py tests/test_keeper_collect.py tests/test_keeper_dedup.py tests/test_keeper_doctrine.py tests/test_keeper_main.py tests/test_keeper_pane.py tests/test_keeper_rules.py tests/test_keeper_wake.py tests/test_liveness_readers.py tests/test_permission_denials.py tests/test_supervisor_claim_sids.py tests/test_sup_guard.py tests/test_sup_notify.py tests/test_views_doctrine.py tests/test_wave_close.py",
+      "rc": 0,
+      "passed": 407,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Defect 1 (guard, PAGE 'another live supervisor body is present' on a state:blocked/pid:None roster row) does not reproduce at HEAD: _sup_guard_live_rows already drops any row whose pid is in (None, '', 0), present since the guard's first commit 6327ea9 (2026-09-11), before the 2026-09-15 incident. Replayed the exact 09-15 roster (three sup|inc-20260911T195615Z-a6c9|successor rows, state:blocked/status:None/pid:None, claim naming one as live sid) and got DISPATCH or PAGE 'fresh heartbeat but body is not roster-live', never the reported reason; claim_sids is never [] (it's a non-empty sid union by construction). No code change for defect 1; pinned as regression tests.",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_sup_guard.py::test_2026_09_15_blocked_fork_corpses_never_page_as_a_second_live_body tests/test_sup_guard.py::test_2026_09_15_blocked_fork_corpses_never_page_as_live_fresh_heartbeat tests/test_sup_guard.py::test_a_genuine_live_corpse_outside_the_claim_still_pages"
+    },
+    {
+      "claim": "The keeper's dedup (dedup()/save_state, fingerprint-keyed, atomic write) has no bug: two pre-existing tests already pin a stable fingerprint suppressing repeats inside REPAGE_SECONDS. The 09-15 repeated pages at 19:12Z/21:0xZ are explained by the guard's `reason` legitimately changing across three live fork-steers in that window (a different diagnosis is correctly a new page), not by a dedup defect.",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_keeper_rules.py::test_guard_page_fingerprint_ignores_diagnostic_age_and_roster_changes tests/test_keeper_rules.py::test_guard_page_dedup_still_repages_an_unresolved_stall"
+    },
+    {
+      "claim": "FULL FLOOR run once on 3.10: 6 failed, 5345 passed, 16 skipped, 3 xfailed in 597.48s. All 6 failures are PRE-EXISTING host-venv artifacts unrelated to this lane's changes (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), matching the same six named in docs/lanes/w87.json's floor claim at base 2127983 -- not adopted, reported as a claim rather than a gate per the brief.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q"
+    }
+  ],
+  "blockers": []
+}
