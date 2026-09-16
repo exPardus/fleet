@@ -268,6 +268,21 @@ def test_new_lane_document_is_in_pin_population(tmp_path):
     assert not has_done_after_title(p.read_text(encoding="utf-8"))
 
 
+def test_main_runs_the_done_checks_not_just_currency_violations():
+    """`fleet land` shells this module's `__main__` directly, not through
+    pytest (queue item 12): it must run the same DONE checks the wave
+    floor's pytest pass does, not only `currency_violations`, or a lane
+    report missing its DONE-means line shows `land` GREEN and only fails
+    later, at the floor, after the whole two-interpreter run (w90,
+    2026-09-16). See test_fleet_land.py for the behavioral replay through
+    `fleet_land._check_commands`.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    main_block = source.split('if __name__ == "__main__":', 1)[1]
+    assert "test_new_lane_documents_have_done" in main_block
+    assert "test_dispatched_tasks_have_done" in main_block
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
@@ -275,5 +290,15 @@ if __name__ == "__main__":
     parser.add_argument("--cutoff", default=ADOPTION_BASE)
     args = parser.parse_args()
     errors = currency_violations(args.repo, args.cutoff)
+    # `fleet land` shells this module directly rather than through pytest (no
+    # pytest dependency guaranteed present), so __main__ must run every check
+    # the wave floor's pytest pass does -- not just `currency_violations` --
+    # or a lane can show `land`'s GREEN while failing the floor's DONE pin
+    # (w90, 2026-09-16).
+    for check in (test_new_lane_documents_have_done, test_dispatched_tasks_have_done):
+        try:
+            check()
+        except AssertionError as exc:
+            errors.append(str(exc))
     print("\n".join(errors) if errors else "PASS: docs currency (last 20 non-merge commits after cutoff)")
     raise SystemExit(bool(errors))

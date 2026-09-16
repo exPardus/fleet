@@ -322,12 +322,21 @@ def cmd_land(args) -> int:
         red.append("blockers")
 
     lines = [f"lane: {lane}", f"range: {base}..{tip}", f"diff: {stat}"]
-    available = 10 - 1 - len(lines)
+    # `wave-close` attributes a landed lane only by this literal merge subject
+    # convention (skills/fleet/SKILL.md#wave-boundary); a GREEN verdict prints
+    # the exact command here, where the supervisor about to merge will read
+    # it, rather than leaving it enforced by a regex documented nowhere.
+    next_line = (None if red else
+                 f"next: git merge --no-ff -m 'merge({lane}): <summary>' {lane_branch}")
+    trailer = 1 if red else 2
+    available = 10 - trailer - len(lines)
     if len(checks) <= available:
         lines.extend(f"check {name}: rc={rc}" for name, rc in checks)
     else:
         lines.extend(f"check {name}: rc={rc}" for name, rc in checks[:available - 1])
         lines.append(f"checks: {len(checks)} total; output capped at ten lines")
+    if next_line is not None:
+        lines.append(next_line)
     lines.append("verdict: RED" if red else "verdict: GREEN")
     print("\n".join(lines[:10]))
     return 1 if red else 0

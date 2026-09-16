@@ -1,0 +1,92 @@
+{
+  "lane": "w91",
+  "base": "b389af687529a55370df250b685bbb224dc062e0",
+  "files_changed": [
+    "bin/fleet.py",
+    "bin/fleet_land.py",
+    "docs/SPEC.md",
+    "skills/fleet/SKILL.md",
+    "tests/test_docs_currency.py",
+    "tests/test_fleet_land.py",
+    "tests/test_wave_close.py",
+    "docs/lanes/w91.md",
+    "docs/lanes/w91.json",
+    "docs/lanes/w91-report.md"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_fleet_land.py tests/test_docs_currency.py",
+      "rc": 0,
+      "passed": 53,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_fleet_land.py tests/test_docs_currency.py",
+      "rc": 0,
+      "passed": 53,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_reap_lane_arm.py tests/test_unlocked_quarantine.py tests/test_load_registry_callers.py tests/test_liveness_readers.py tests/test_views_doctrine.py",
+      "rc": 0,
+      "passed": 97,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_reap_lane_arm.py tests/test_unlocked_quarantine.py tests/test_load_registry_callers.py tests/test_liveness_readers.py tests/test_views_doctrine.py",
+      "rc": 0,
+      "passed": 97,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_round7_defect_pins.py tests/test_boot_bundle_cost.py",
+      "rc": 0,
+      "passed": 81,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "claims": [
+    {
+      "claim": "wave-close refuses (naming UNPARSED: N of M and the SHAs) before the claim, the reap, the floor, and every mutation (changelog prepend, journal prepend, _wave_mark_landed_lanes, commit) when base..HEAD holds a merge git's own default subject produced -- proven through real git with no mocks, and the working tree/CHANGELOG/commit log are asserted byte-identical afterward",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_wave_close_refuses_an_unattributable_range_before_any_mutation -v"
+    },
+    {
+      "claim": "a range with zero merges is the distinct, legitimate no-lanes wave (_wave_merge_audit returns lanes=[] and unparsed=[], never treated as an unparsed refusal)",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_merge_audit_zero_merges_is_not_the_same_as_unparsed -v"
+    },
+    {
+      "claim": "land's GREEN output prints the exact next merge command (merge(<lane>): <summary>); a RED verdict prints none",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_fleet_land.py::test_land_commits_allowed_dirty_paths_rebases_and_is_idempotent tests/test_fleet_land.py::test_land_red_verdict_prints_no_merge_command -v"
+    },
+    {
+      "claim": "land's docs-currency check (test_docs_currency.py's __main__, shelled without pytest) now catches a lane report missing its DONE-means line -- the w90 defect, replayed through the real subprocess call fleet_land._check_commands makes",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_fleet_land.py::test_check_commands_docs_currency_catches_a_lane_report_missing_done -v"
+    },
+    {
+      "claim": "docs currency passes for this lane's own commit(s) and the new lane docs carry DONE means: as their second non-blank line",
+      "command": "python3 tests/test_docs_currency.py . && uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_docs_currency.py -k done"
+    },
+    {
+      "claim": "docs/specs/** receipts still reproduce exactly -- unaffected by this lane's bin/fleet.py and bin/fleet_land.py edits",
+      "command": "python3 tools/verify_receipts.py --strict --skip-volatile docs/specs/*.md"
+    },
+    {
+      "claim": "full floor, 3.10: 5376 passed, 6 failed, 16 skipped, 3 xfailed in 521.24s -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5376 passed, 6 failed, 16 skipped, 3 xfailed in 483.65s -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "self-citation and retired_sids-citation invariants (tests/test_self_citations.py, tests/test_retired_sid_citations.py) hold after this lane's bin/fleet.py edit -- the +37 net lines this lane inserted shifted four stale line-number citations elsewhere in the file (fixed: line 828's :12573->:12610, lines 10533/10535-10536/11183's :14054->:14091 and :12866,:12867,:12928,:13729->:12903,:12904,:12965,:13766), a real regression this lane caused and fixed, distinct from the six pre-existing host-venv artifacts",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_retired_sid_citations.py tests/test_self_citations.py"
+    }
+  ],
+  "blockers": []
+}

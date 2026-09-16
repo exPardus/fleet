@@ -825,7 +825,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12573) -- render the release explanation.
+      * `_tombstone_releasing_body` (:12610) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -10530,10 +10530,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
     :1950, :2012, :2090, :2915, :6171, :6333, :6530, :6650, :6686, :6848, :6849, :6919,
-    :6929, :6940, :7034, :7509, :10480, :12866, :12867, :12928, :13729`).
+    :6929, :6940, :7034, :7509, :10480, :12903, :12904, :12965, :13766`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :5436, :5772, :8954,
-    :14054. This makes union identity safe; the age boundary distinguishes respawn.
+    :14091. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11180,7 +11180,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:5436, :5772, :8954,
-    # :14054) -- so union identity cannot make one body answer for another.
+    # :14091) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11998,21 +11998,38 @@ def _wave_record_substrate(repo, worktree):
     return "unknown"
 
 
-def _wave_landed_lanes(repo, base, run=subprocess.run):
-    """Return merge-commit lanes in ``base..HEAD`` with recorded substrate."""
+def _wave_merge_audit(repo, base, run=subprocess.run):
+    """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
+
+    ``lanes`` holds every merge whose subject matches the `merge(<lane>):`
+    convention, with its worktree-derived substrate. ``unparsed`` holds the
+    short SHAs of merges that did not -- e.g. git's own default
+    ``Merge <branch> into <branch>`` subject -- and a caller must never fold
+    those into a lane count it then reports as MEASURED: they are a range it
+    could not attribute, not lanes that landed nothing.
+    """
     result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
                        f"{base}..HEAD", run=run)
     lanes = []
+    unparsed = []
     for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
         commit, _, subject = line.partition("\t")
         match = re.search(r"^merge\(([^)]+)\):", subject, re.IGNORECASE)
         if not match:
+            unparsed.append(commit[:7])
             continue
         lane = match.group(1)
         substrate = _wave_record_substrate(
             repo, _wave_lane_worktree(repo, lane, run=run))
         lanes.append((lane, substrate, commit[:7]))
-    return lanes
+    return lanes, unparsed
+
+
+def _wave_landed_lanes(repo, base, run=subprocess.run):
+    """Return merge-commit lanes in ``base..HEAD`` with recorded substrate."""
+    return _wave_merge_audit(repo, base, run=run)[0]
 
 
 def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
@@ -12432,6 +12449,27 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "wave-close: git has no committer identity in this repo -- set "
             "`git config user.name` and `user.email` before closing a wave")
 
+    # Attribute every merge in range before the claim, the reap, or the
+    # interpreter floor -- all mutating or expensive -- so a range this
+    # regex cannot attribute is refused up front rather than after paying
+    # for a close it can never legitimately finish. Zero merges in range is
+    # the legitimate no-lanes wave and falls through to close cleanly; this
+    # is different -- merges DID land and one or more do not match the
+    # `merge(<lane>):` subject convention, so every figure this function
+    # would derive from the lane list (workers, tokens, external_lines,
+    # tokens_per_bin_line) is a confident zero it never measured.
+    lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run)
+    if unparsed_merges:
+        total = len(lanes) + len(unparsed_merges)
+        raise FleetCliError(
+            f"wave-close: UNPARSED: {len(unparsed_merges)} of {total} "
+            f"merge(s) in {base}..HEAD do not match the `merge(<lane>):` "
+            "subject convention and cannot be attributed to a lane "
+            f"({', '.join(unparsed_merges)}) -- refusing to publish "
+            "workers/tokens/external_lines/tokens_per_bin_line it could not "
+            "measure. Re-merge with a `merge(<lane>): <subject>` message (see "
+            "skills/fleet/SKILL.md#wave-boundary) and retry.")
+
     # Claim first: the reap, floor, and git operations below can take time,
     # but an unclaimed body must not perform even the janitorial mutation.
     with fleet_lock():
@@ -12452,7 +12490,6 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     floor, tree = _wave_floor(repo, wave_id, run=run, which=which)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
-    lanes = _wave_landed_lanes(repo, base, run=run)
     roster_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
                      f"UNMEASURED (roster unavailable: {roster})")
     # The roster's refusal is intentional: its schema has no usage field.
