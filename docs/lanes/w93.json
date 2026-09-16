@@ -1,0 +1,68 @@
+{
+  "lane": "w93",
+  "base": "edd30f67d377746136d3f8489b8b46f7aef2ffeb",
+  "files_changed": [
+    "bin/fleet.py",
+    "tests/conftest.py",
+    "tests/test_core.py",
+    "tests/test_wave_close.py",
+    "tests/test_openrouter_substrate.py",
+    "docs/lanes/w93.md",
+    "docs/lanes/w93.json"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py tests/test_wave_close.py tests/test_core.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_native.py",
+      "rc": 0,
+      "passed": 592,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_openrouter_substrate.py tests/test_wave_close.py tests/test_core.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_native.py",
+      "rc": 0,
+      "passed": 592,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "THE FORK settled by real experiment against the resident claude daemon on this host (not by reading): an env var set only on the dispatching `claude --bg` invocation never reaches the session (`--bg` hands off to the daemon's pre-warmed bg-spare pool -- same pid before/after claim in `claude agents --json`, whose OS env was fixed at daemon prewarm time). A `--settings` `env` block DOES reach the session's real process env, but values are literal -- `$VAR` is never expanded.",
+      "command": "cd /tmp && FLEET_PROBE_SRC2=hello-w93-direct-11223 claude --bg -n envprobe4 --dangerously-skip-permissions --permission-mode bypassPermissions 'Run: env | grep FLEET_PROBE_SRC2 ; if nothing, reply NONE.'  # session's own transcript reported NONE; then --settings '{\"env\":{\"FLEET_PROBE_DST\":\"$FLEET_PROBE_SRC\"}}' -> session's own env output showed the literal unexpanded string \"$FLEET_PROBE_SRC\""
+    },
+    {
+      "claim": "apiKeyHelper (a shell command the dispatched session executes itself, at auth time) works end-to-end against a real OpenRouter model through --bg: settings apiKeyHelper pointed at the key FILE (never the key's value) plus env.ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY=\"\" and --model stealth/union-alpha really dispatched, fixed two real bugs in a scratch calc.py, and ran it correctly. The session's own transcript JSONL reports assistant.message.model == \"stealth/union-alpha\" on every turn -- the substrate's own witness, not merely that the process started.",
+      "command": "claude --bg -n apihelper1 --dangerously-skip-permissions --settings '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://openrouter.ai/api\",\"ANTHROPIC_API_KEY\":\"\"},\"apiKeyHelper\":\"grep -m1 ^OPENROUTER_API_KEY= ~/.config/openrouter/env | cut -d= -f2-\"}' --model stealth/union-alpha 'Fix the two bugs in calc.py, run it, reply with the output.'  # then: python3 -c \"import json;[print(json.loads(l)['message']['model']) for l in open('<session>.jsonl') if json.loads(l).get('type')=='assistant']\" -> stealth/union-alpha on every line"
+    },
+    {
+      "claim": "the key's value never appears in any file fleet touches, any recorded argv, or the child env -- exercised through a fake runner (dispatch_bg), then every file under the sandboxed FLEET_HOME plus the captured argv/env grepped for the fake key's literal value and found absent",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestDispatchBgOpenrouterIntegration::test_the_key_value_never_appears_anywhere_fleet_touched -v"
+    },
+    {
+      "claim": "a missing/unreadable key file refuses before any write (no task file, no run() call) at both native dispatch sites: dispatch_bg (fleet spawn/respawn/steer/resume) and cmd_sup_handoff_begin (the successor path), naming the path",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestDispatchBgOpenrouterIntegration::test_missing_key_refuses_before_any_write_or_dispatch tests/test_openrouter_substrate.py::TestSupHandoffBeginOpenrouter::test_missing_key_refuses_before_the_claim_is_touched -v"
+    },
+    {
+      "claim": "cmd_spawn --model openrouter:<slug> records substrate: openrouter/<slug> on the registry row; a plain (non-openrouter) spawn's argv and --settings value are byte-for-byte unchanged from before this lane (out of scope: changing any default)",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestSpawnRecordsSubstrate tests/test_openrouter_substrate.py::TestDispatchBgOpenrouterIntegration::test_non_openrouter_dispatch_is_byte_for_byte_unchanged -v"
+    },
+    {
+      "claim": "wave-close accounts an OpenRouter lane as a real measured zero, not UNMEASURED: _wave_record_substrate now recognizes openrouter/<slug> instead of misclassifying it as \"claude\" via the dispatch_kind==\"bg\" fallback, and _wave_outcomes_claude_tokens already returns bare \"0\" (not UNMEASURED) once the substrate is correctly distinct from \"claude\"",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_landed_lane_with_an_openrouter_substrate_record_is_not_claude tests/test_wave_close.py::test_openrouter_lane_contributes_a_measured_zero_not_unmeasured -v"
+    },
+    {
+      "claim": "self-citations and retired_sids-citation invariants hold after this lane's bin/fleet.py edit -- the +131 net lines this lane inserted (mostly one contiguous helper block after _worker_env) shifted every self-citation below the insertion point; recomputed the exact per-hunk offset and fixed all of them (quarantine-artifact readers enumeration, _record_sids union-sites enumeration, retired_sids-writers enumeration, plus four prose citations: :892->:893, :2506->:2625, :10454->:10578, :7480->:7601, cmd_kill:6082->:6203, cmd_respawn:5898/5919-5921->:6019/6040-6042)",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_self_citations.py tests/test_retired_sid_citations.py"
+    },
+    {
+      "claim": "full floor, 3.10: 5410 passed, 6 failed, 16 skipped, 3 xfailed in 517.61s -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5410 passed, 6 failed, 16 skipped, 3 xfailed in 471.73s -- exactly the same six pre-existing host-venv artifacts, not adopted",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    }
+  ],
+  "blockers": []
+}

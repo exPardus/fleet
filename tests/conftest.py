@@ -71,6 +71,11 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
                         lambda: sandbox / ".claude" / "daemon.log")
     monkeypatch.setattr(fleet, "homes_list_path",
                         lambda: sandbox / ".claude" / "fleet-homes.list")
+    # item 24: a test that forgets to redirect this must not read the
+    # operator's real OpenRouter key file -- default it to a sandboxed path
+    # that does not exist, so "missing key" is the default, not an accident.
+    monkeypatch.setattr(fleet, "openrouter_key_path",
+                        lambda: sandbox / ".config" / "openrouter" / "env")
 
 
 # ---------------------------------------------------------------------------

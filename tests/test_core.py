@@ -149,6 +149,8 @@ class TestRegistry:
             # M-B native-substrate fields (spec §5).
             "dispatch_kind", "category", "native_short_id",
             "last_dispatch_at", "retired_sids", "archived_at",
+            # item 24: explicit non-Claude substrate marker, e.g. "openrouter/<slug>".
+            "substrate",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"
@@ -167,6 +169,7 @@ class TestRegistry:
         assert rec["max_budget_usd"] is None
         assert rec["setting_sources"] is None
         assert rec["last_activity"] == rec["created"]
+        assert rec["substrate"] is None
 
     def test_corrupt_registry_file_is_quarantined_and_raises(self, isolated_home):
         state = isolated_home / "state"
