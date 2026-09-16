@@ -169,6 +169,64 @@ def test_landed_lane_without_a_substrate_record_is_unknown(tmp_path):
         ("w68/alpha", "unknown", "abcdef1")]
 
 
+def _worktree_run(lane_worktree, branch):
+    def run(argv, **kwargs):
+        if argv[1:3] == ["worktree", "list"]:
+            return subprocess.CompletedProcess(
+                argv, 0, f"worktree {lane_worktree}\nbranch refs/heads/{branch}\n\n", "")
+        raise AssertionError(argv)
+    return run
+
+
+def _home(tmp_path, monkeypatch, workers):
+    home = tmp_path / "home"
+    (home / "state").mkdir(parents=True)
+    monkeypatch.setattr(fleet, "FLEET_HOME", home)
+    fleet.save_registry({"workers": workers})
+    return home
+
+
+def test_mark_landed_lanes_joins_by_worktree_cwd(tmp_path, monkeypatch):
+    lane_worktree = tmp_path / "lane-worktree"
+    _home(tmp_path, monkeypatch, {
+        "w68": {"cwd": str(lane_worktree), "status": "idle"},
+        "other": {"cwd": str(tmp_path / "elsewhere"), "status": "idle"},
+    })
+    marked = fleet._wave_mark_landed_lanes(
+        tmp_path, [("w68/alpha", "claude", "abcdef1")],
+        run=_worktree_run(lane_worktree, "w68/alpha"))
+    assert marked == ["w68"]
+    workers = fleet.load_registry()["workers"]
+    assert workers["w68"]["lane_state"] == "landed"
+    assert "lane_state" not in workers["other"]
+
+
+def test_mark_landed_lanes_skips_already_terminal_records(tmp_path, monkeypatch):
+    lane_worktree = tmp_path / "lane-worktree"
+    _home(tmp_path, monkeypatch, {
+        "w68": {"cwd": str(lane_worktree), "status": "idle", "lane_state": "abandoned"},
+    })
+    marked = fleet._wave_mark_landed_lanes(
+        tmp_path, [("w68/alpha", "claude", "abcdef1")],
+        run=_worktree_run(lane_worktree, "w68/alpha"))
+    assert marked == []
+    assert fleet.load_registry()["workers"]["w68"]["lane_state"] == "abandoned"
+
+
+def test_mark_landed_lanes_skips_an_unresolvable_worktree(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch, {
+        "w68": {"cwd": str(tmp_path / "lane-worktree"), "status": "idle"},
+    })
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    marked = fleet._wave_mark_landed_lanes(
+        tmp_path, [("w68/alpha", "claude", "abcdef1")], run=run)
+    assert marked == []
+    assert "lane_state" not in fleet.load_registry()["workers"]["w68"]
+
+
 def test_prune_removes_only_clean_merged_lane_worktrees(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     live = tmp_path / "live"
@@ -407,3 +465,17 @@ def test_tokens_per_bin_line_names_its_denominator_and_guards_zero(tmp_path):
     assert "added bin lines" in source
     assert 'tokens_per_bin_line = ("UNMEASURED' in source
     assert "if unknown or bin_added == 0 else" in source
+
+
+def test_wave_close_marks_landed_lanes_under_the_lock_before_write_incarnation():
+    """The lane-arm writer must run while `fleet_lock()` is still held, so a
+    landed row's `lane_state` is durable before the claim heartbeat commits.
+    """
+    import inspect
+    src = inspect.getsource(fleet.cmd_wave_close)
+    marker = "roll_supervisor_journal(home=repo)"
+    assert marker in src
+    after = src.split(marker, 1)[1]
+    before_write = after.split("write_incarnation(claim)", 1)[0]
+    assert "_wave_mark_landed_lanes(repo, lanes, run=run)" in before_write, (
+        "wave-close does not mark landed lanes before writing the claim")
