@@ -249,6 +249,11 @@ ALLOWED = {
     "cmd_doctor",
     # `cmd_peek` and `cmd_result` WERE HERE and are gone. Neither writes, neither
     # locks, and each reads exactly one field.
+    # `_wave_mark_landed_lanes` is lock-held by its ONE caller, `cmd_wave_close`,
+    # lexically inside its second `with fleet_lock():` block -- same shape as
+    # `_holder_is_limited`, verified from the AST by
+    # `tests/test_unlocked_quarantine.py::test_wave_mark_landed_lanes_really_is_lock_held_by_its_caller`.
+    "_wave_mark_landed_lanes",
 }
 
 

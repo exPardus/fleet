@@ -482,6 +482,11 @@ UNLOCKED_ALLOWED = {
     # is why P1-6 left it alone rather than folding an unrelated policy
     # decision (refuse the wait, or degrade it?) into a misreport fix.
     "cmd_wait", "wait_for_workers",
+    # Lock-held by its ONE caller, `cmd_wave_close`, lexically inside its
+    # second `with fleet_lock():` block -- verified from the AST by
+    # `test_wave_mark_landed_lanes_really_is_lock_held_by_its_caller` below,
+    # the same shape as `_holder_is_limited` above.
+    "_wave_mark_landed_lanes",
 }
 
 
@@ -587,6 +592,36 @@ class TestTheUnlockedCensusIsPinned:
             f"fleet_lock():` at {sorted(calls - locked)}. That helper calls "
             f"`load_registry`, so the call is now an unlocked quarantine on the "
             f"boot path and its UNLOCKED_ALLOWED entry is no longer true.")
+
+    def test_wave_mark_landed_lanes_really_is_lock_held_by_its_caller(self):
+        """The interprocedural argument for `_wave_mark_landed_lanes`, checked
+        instead of trusted, same shape as the `_holder_is_limited` pin above:
+        `cmd_wave_close` must call it only inside `with fleet_lock():`."""
+        tree = ast.parse(SRC)
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "cmd_wave_close")
+        calls = {c.lineno for c in ast.walk(fn) if isinstance(c, ast.Call)
+                 and isinstance(c.func, ast.Name)
+                 and c.func.id == "_wave_mark_landed_lanes"}
+        locked = set()
+        for w in ast.walk(fn):
+            if isinstance(w, ast.With) and any(
+                    isinstance(i.context_expr, ast.Call)
+                    and isinstance(i.context_expr.func, ast.Name)
+                    and i.context_expr.func.id == "fleet_lock" for i in w.items):
+                locked |= {c.lineno for c in ast.walk(w) if isinstance(c, ast.Call)
+                           and isinstance(c.func, ast.Name)
+                           and c.func.id == "_wave_mark_landed_lanes"}
+        assert calls, (
+            "cmd_wave_close no longer calls `_wave_mark_landed_lanes` -- if "
+            "that is intended, drop the UNLOCKED_ALLOWED entry and delete "
+            "this test")
+        assert calls == locked, (
+            f"cmd_wave_close calls `_wave_mark_landed_lanes` OUTSIDE `with "
+            f"fleet_lock():` at {sorted(calls - locked)}. That helper calls "
+            f"`load_registry`, so the call is now an unlocked quarantine on "
+            f"the wave-close path and its UNLOCKED_ALLOWED entry is no "
+            f"longer true.")
 
     def test_the_two_preflight_helpers_do_not_regain_load_registry(self):
         """Named individually so a revert is LOUD rather than merely
