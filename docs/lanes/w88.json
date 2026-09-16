@@ -3,8 +3,8 @@
   "base": "89d43918b833c0b50e50758055be4c01f13d9d7b",
   "files_changed": [
     "bin/fleet_keeper.py",
-    "docs/lanes/w88-guard-blocked-corpses.json",
-    "docs/lanes/w88-guard-blocked-corpses.md",
+    "docs/lanes/w88.json",
+    "docs/lanes/w88.md",
     "docs/operator/keeper-wake.md",
     "tests/test_keeper_rules.py",
     "tests/test_sup_guard.py"
