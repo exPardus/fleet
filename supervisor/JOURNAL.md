@@ -1,23 +1,17 @@
-## 2026-09-15T08:31:38Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=e65ef203-63dc-48e4-a408-ef85d70ef728
-
-w86 token-efficiency landed 4abf945, research only, nothing cut -- ranked list relayed for the operator's pick. HEADLINE, verified by me independently (91 files, 34,343 turns, 9,799,340,652 cache_read): 68.5% of this host's cache_read sits in TWO persistent resume chains, one fleet at 58.0% and one tap at 10.5%; worker lanes are two orders of magnitude smaller, so the cost is the persistent identity, not the dispatch.
-Disproved and recorded so nobody re-asks: idle turns 1.3%, SKILL.md/standing-brief reloads ~0.06%, statusline zero by construction. Occurrence-only suspects (checkpoint, wave-close, guard output, journal/board reads) are flagged unsized rather than guessed.
-Two things owed to the operator: the lane ASSERTED cache_read counts against the subscription without measuring it -- my rate arithmetic says the ranking survives by ~8x either way, but confirm before building item 1. And fleet land REFUSED the 86-line report against REPORT_LIMIT 40 while the operator's task file asked for under 120; I merged directly rather than mutilate it and raised the collision.
-
-THROUGHPUT wave 83 (89d43918b833c0b50e50758055be4c01f13d9d7b..95dbe50b4e97e15cad08ef02105eca3a66ecd4ac): bin +45/-4, tests +369/-0, docs +285/-1, journal +29/-13, other +0/-0; workers: 0 (none); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 45 added bin lines); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 0; protected: 0 (unread mail)
-
-## 2026-09-16T12:40:42Z BOOT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
-
-resumed own claim: resumed own claim after 55310s -- continuity proved, no seizure
-
-## 2026-09-16T12:41:33Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
-
-Woke on a fresh session, same incarnation; verdict resume after 55310s, no seizure. Manager handed me the self-improve queue (state/tasks/20260916-self-improve-standing.md): item 1 guard-blocked-corpses first, one sonnet lane at a time, one notify per landing.
-Keeper stays stopped until item 1 lands; the interface restarts it. Dispatch gates at boot: mem 3838 MB, live_lane_count=2 (w86/w87 worktrees still on disk after landing -- that is item 2's bug in view).
-Next action: read state/tasks/20260915-guard-blocked-corpses.md, brief it, dispatch one sonnet lane.
-
 ## 2026-09-16T13:44:31Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
 
 Queue items 1 and 2 landed: w88 a4db09f (keeper yields a stall page to a parked decision; guard defect 1 disproved -- the pid filter predates the incident by four days, verified by git log -S, so it was pinned not patched) and w89 3b26e78 (wave-close writes lane_state=landed under the lock, joined by worktree cwd, so the reap predicate's lane arm fires for the first time since it was written).
 Both lanes were told to reproduce before fixing, and both earned their keep by refusing a premise: w88 refused the filing's defect-1 narrative, w89 refused 'fleet land writes it' because fleet land resolves no home and would take the wrong fleet.lock from a worktree. Keeper timer is unblocked -- item 1 was its only gate.
 Filed queue items 8-11 from this wave's own friction; item 8 is the real one -- fleet wait was killed TWICE by the host memory guard mid-lane, so the supervisor's event-driven wake is not survivable on this 8 GB box and a sleeping poll loop is the proven substitute. Next: item 3, handoff cost.
+
+## 2026-09-16T14:24:34Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
+
+CORRECTION to the wave 83 THROUGHPUT line just published: it reads 'workers: 0 (none); tokens: 0; external_lines: 0 (MEASURED: no lanes landed this wave)' and that is FALSE. Wave 83 landed two lanes, w88 and w89, +699/-5 lines across bin, tests and docs. The zero is an artifact, not a measurement.
+Cause, mine: I merged with git's default subject 'Merge w88/...', while _wave_landed_lanes matches '^merge\(<lane>\):' only -- the convention 86 merges in history follow and that nothing in the skill, fleet land or wave-close --help states. So wave-close saw no lanes, and w89's brand-new lane_state writer recorded 'none', leaving its own fix inert for the wave that shipped it. w87's supervisor made the identical mistake one wave earlier.
+Filed as queue item 14: the defect is the word MEASURED on a zero that means 'I could not parse the range', and wave-close should refuse or report unmatched merges rather than publish a confident zero. Also filed item 15: the memory guard killed a wave-close mid-run; it died in the read-only floor phase so inspection proved the retry safe, but the verb is documented non-idempotent and a later kill would not be classifiable.
+
+## 2026-09-16T15:39:34Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
+
+w90 landed 80f3f96 (queue item 3), merged as merge(w90/boot-cost): so wave accounting sees it this time. The boot tail now inlines CHECKPOINT/PROPOSAL bodies only, never terse BOOT/SEIZED entries, bounded by a per-entry cap and a cumulative inline budget; the pre-existing 40,000-char bundle cap had ZERO test coverage and is now 20,000 with 15 tests behind it.
+I rejected the lane's first cut and it was right to be rejected: it inlined whichever entry was newest, and at THIS incarnation's own 12:40Z boot the newest entry was the BOOT line the boot had just written, so the PARKED checkpoint and both w86 checkpoints would have become pointers exactly when a resuming body needs them. The lane's fix added a cumulative budget I had not asked for and is better than the instruction.
+ITEM 3's PREMISE IS DEAD and item 4 inherits nothing: the whole bundle measures 3,068 tokens against w87's 849,667-token handoff, so deleting it entirely would cut 0.36%. Handoff cost is occupancy times turns via cache_read, which is w86's 'the cost is the persistent identity, not the dispatch' -- item 4 should be re-scoped to occupancy-per-turn or deferred behind the cheap wins, items 12 and 14. Filed items 16 and 17.

@@ -677,3 +677,21 @@ Resumed 09-15 and dispatched the one ruled lane: w86/token-efficiency (sonnet, e
 The brief's load-bearing clause is the METHOD: count tokens with scripts over the jsonl, never read a transcript into context, because a lane that reads transcripts to measure token use is the thing it is measuring. Disproved suspects get one line each so the next generation stops re-asking.
 Fixed two prerequisites rather than filing them (directive 3): the operator's task file could not render -- fleet brief needs DONE means: immediately after the title, and refuses a Serves phrase product.md wraps across two lines. Header-only fixes; operator content untouched.
 
+## 2026-09-15T08:31:38Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=e65ef203-63dc-48e4-a408-ef85d70ef728
+
+w86 token-efficiency landed 4abf945, research only, nothing cut -- ranked list relayed for the operator's pick. HEADLINE, verified by me independently (91 files, 34,343 turns, 9,799,340,652 cache_read): 68.5% of this host's cache_read sits in TWO persistent resume chains, one fleet at 58.0% and one tap at 10.5%; worker lanes are two orders of magnitude smaller, so the cost is the persistent identity, not the dispatch.
+Disproved and recorded so nobody re-asks: idle turns 1.3%, SKILL.md/standing-brief reloads ~0.06%, statusline zero by construction. Occurrence-only suspects (checkpoint, wave-close, guard output, journal/board reads) are flagged unsized rather than guessed.
+Two things owed to the operator: the lane ASSERTED cache_read counts against the subscription without measuring it -- my rate arithmetic says the ranking survives by ~8x either way, but confirm before building item 1. And fleet land REFUSED the 86-line report against REPORT_LIMIT 40 while the operator's task file asked for under 120; I merged directly rather than mutilate it and raised the collision.
+
+THROUGHPUT wave 83 (89d43918b833c0b50e50758055be4c01f13d9d7b..95dbe50b4e97e15cad08ef02105eca3a66ecd4ac): bin +45/-4, tests +369/-0, docs +285/-1, journal +29/-13, other +0/-0; workers: 0 (none); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 45 added bin lines); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 0; protected: 0 (unread mail)
+
+## 2026-09-16T12:40:42Z BOOT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
+
+resumed own claim: resumed own claim after 55310s -- continuity proved, no seizure
+
+## 2026-09-16T12:41:33Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
+
+Woke on a fresh session, same incarnation; verdict resume after 55310s, no seizure. Manager handed me the self-improve queue (state/tasks/20260916-self-improve-standing.md): item 1 guard-blocked-corpses first, one sonnet lane at a time, one notify per landing.
+Keeper stays stopped until item 1 lands; the interface restarts it. Dispatch gates at boot: mem 3838 MB, live_lane_count=2 (w86/w87 worktrees still on disk after landing -- that is item 2's bug in view).
+Next action: read state/tasks/20260915-guard-blocked-corpses.md, brief it, dispatch one sonnet lane.
+
