@@ -134,7 +134,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat; its header reports the caller's context occupancy and band verdict.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
-- `fleet wave-close --base SHA --changelog TEXT [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, and notifying.
+- `fleet wave-close --base SHA --changelog TEXT [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
