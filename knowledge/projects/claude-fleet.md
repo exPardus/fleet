@@ -130,6 +130,19 @@ Facts learned live while the fleet builds itself. Amended in each campaign's kno
   which an observer keyed on `rc != 2` reads as a FINISHED LANE. MEASURED 2026-09-12: lane
   `KRGcS0PG` was reported dead 40s after dispatch and was in fact running. The existing entry
   says to SPAWN from the worktree; the observer is the other half of the same fact.
+- **`DONE means:` must be the FIRST NONBLANK LINE AFTER THE TITLE of EVERY file under
+  `docs/lanes/` and every dispatched `state/tasks/` file — appendices and operator-written task
+  files included.** `tests/test_docs_currency.py::test_new_lane_documents_have_done` scans the
+  whole directory, and `fleet brief` refuses a task file that fails it. It also refuses a
+  `Serves:` phrase that `product.md` WRAPS ACROSS TWO LINES — quote a phrase that lives on one
+  line ("measured per landed line", not "Spend is measured per landed line"). This cost one turn
+  each on three separate occasions in the 09-12..09-16 campaign: a lane report, the operator's
+  own task file, and a report appendix.
+- **A lane that adds or removes `bin/fleet.py` lines MUST run
+  `tools/repoint_self_citations.py <base-sha>`**, and the brief must say so — the template's
+  line-count row exists for this. w87 reported "0 failed" from a 2,536-test SUBSET while the full
+  floor had 8 citation suites red. **Name the suites in the brief AND run the full floor yourself
+  at landing**; a lane's own green is a claim about whatever it chose to run.
 - **The supervisor must never export `MCX_WORKER=1`** — it is the lane-side recursion guard, and
   setting it on yourself gets `mcx: workers cannot launch or steer workers`.
 - **Codex cannot commit**: its sandbox makes git metadata read-only. Every lane ends with the
