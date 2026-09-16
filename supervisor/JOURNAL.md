@@ -4,6 +4,8 @@ Queue items 1 and 2 landed: w88 a4db09f (keeper yields a stall page to a parked 
 Both lanes were told to reproduce before fixing, and both earned their keep by refusing a premise: w88 refused the filing's defect-1 narrative, w89 refused 'fleet land writes it' because fleet land resolves no home and would take the wrong fleet.lock from a worktree. Keeper timer is unblocked -- item 1 was its only gate.
 Filed queue items 8-11 from this wave's own friction; item 8 is the real one -- fleet wait was killed TWICE by the host memory guard mid-lane, so the supervisor's event-driven wake is not survivable on this 8 GB box and a sleeping poll loop is the proven substitute. Next: item 3, handoff cost.
 
+THROUGHPUT wave 84 (ab92bf1ff3ee1a920763266e919a304afb460d33..38c9b33aee3023971c379ba346541041080558b1): bin +84/-14, tests +190/-0, docs +264/-1, journal +30/-18, other +0/-0; workers: 1 (w90/boot-cost: claude); tokens: 1031523; tokens_per_bin_line: 12280.04 (1031523 tokens / 84 added bin lines); external_lines: 0 (MEASURED: 1 landed lane(s), all worktrees of this repo); reaped: 1; protected: 0 (unread mail)
+
 ## 2026-09-16T14:24:34Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
 
 CORRECTION to the wave 83 THROUGHPUT line just published: it reads 'workers: 0 (none); tokens: 0; external_lines: 0 (MEASURED: no lanes landed this wave)' and that is FALSE. Wave 83 landed two lanes, w88 and w89, +699/-5 lines across bin, tests and docs. The zero is an artifact, not a measurement.
