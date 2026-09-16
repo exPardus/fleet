@@ -4,6 +4,8 @@ w86 token-efficiency landed 4abf945, research only, nothing cut -- ranked list r
 Disproved and recorded so nobody re-asks: idle turns 1.3%, SKILL.md/standing-brief reloads ~0.06%, statusline zero by construction. Occurrence-only suspects (checkpoint, wave-close, guard output, journal/board reads) are flagged unsized rather than guessed.
 Two things owed to the operator: the lane ASSERTED cache_read counts against the subscription without measuring it -- my rate arithmetic says the ranking survives by ~8x either way, but confirm before building item 1. And fleet land REFUSED the 86-line report against REPORT_LIMIT 40 while the operator's task file asked for under 120; I merged directly rather than mutilate it and raised the collision.
 
+THROUGHPUT wave 83 (89d43918b833c0b50e50758055be4c01f13d9d7b..95dbe50b4e97e15cad08ef02105eca3a66ecd4ac): bin +45/-4, tests +369/-0, docs +285/-1, journal +29/-13, other +0/-0; workers: 0 (none); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 45 added bin lines); external_lines: 0 (MEASURED: no lanes landed this wave); reaped: 0; protected: 0 (unread mail)
+
 ## 2026-09-16T12:40:42Z BOOT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
 
 resumed own claim: resumed own claim after 55310s -- continuity proved, no seizure
