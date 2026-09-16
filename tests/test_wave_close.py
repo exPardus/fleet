@@ -4,6 +4,7 @@ The expensive floor and real commit/push arm belong to the supervisor merge;
 these tests pin their input parsing and the fail-closed accounting seams.
 """
 import argparse
+import json
 import pathlib
 import subprocess
 
@@ -152,6 +153,49 @@ def test_landed_lanes_are_merge_branches_with_substrate(tmp_path):
 
     assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
         ("w68/alpha", "codex", "abcdef1")]
+
+
+def test_landed_lane_with_an_openrouter_substrate_record_is_not_claude(tmp_path):
+    """item 24: a native `dispatch_kind="bg"` record with an explicit
+    `openrouter/<slug>` substrate must not fall through to the pre-item-24
+    "bg means claude" inference -- that would double-count OpenRouter tokens
+    (real, but irrelevant to Claude spend) as Claude spend."""
+    lane_worktree = tmp_path / "lane-worktree"
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "fleet.json").write_text(json.dumps({
+        "workers": {"w93": {"cwd": str(lane_worktree),
+                            "dispatch_kind": "bg",
+                            "substrate": "openrouter/z-ai/glm-5.3-flash"}}}),
+        encoding="utf-8")
+
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge(w93/openrouter): landed\n", "")
+        if argv[1] == "worktree":
+            return subprocess.CompletedProcess(
+                argv, 0,
+                f"worktree {lane_worktree}\nbranch refs/heads/w93/openrouter\n\n", "")
+        raise AssertionError(argv)
+
+    assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
+        ("w93/openrouter", "openrouter/z-ai/glm-5.3-flash", "abcdef1")]
+
+
+def test_openrouter_lane_contributes_a_measured_zero_not_unmeasured(tmp_path):
+    """DONE (state/tasks/w93.md): wave-close accounts an OpenRouter lane as
+    cost 0, not UNMEASURED. `_wave_outcomes_claude_tokens` only sums lanes
+    whose substrate is exactly "claude" (`cmd_wave_close` applies the same
+    "codex" guard before ever calling `_wave_codex_tokens`), so an
+    OpenRouter-only lane list is real, measured evidence of zero Claude
+    tokens -- not a gap this helper papers over."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "fleet.json").write_text(
+        json.dumps({"workers": {}}), encoding="utf-8")
+    lanes = [("w93/openrouter", "openrouter/z-ai/glm-5.3-flash", "abc")]
+    never_called = lambda *a, **k: (_ for _ in ()).throw(  # noqa: E731
+        AssertionError("must not touch git for a non-claude lane"))
+    assert fleet._wave_outcomes_claude_tokens(tmp_path, lanes, run=never_called) == "0"
 
 
 def test_landed_lane_without_a_substrate_record_is_unknown(tmp_path):
