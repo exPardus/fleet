@@ -3,6 +3,7 @@
 The expensive floor and real commit/push arm belong to the supervisor merge;
 these tests pin their input parsing and the fail-closed accounting seams.
 """
+import argparse
 import pathlib
 import subprocess
 
@@ -167,6 +168,116 @@ def test_landed_lane_without_a_substrate_record_is_unknown(tmp_path):
 
     assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
         ("w68/alpha", "unknown", "abcdef1")]
+
+
+def test_merge_audit_names_a_merge_with_gits_own_default_subject(tmp_path):
+    """`Merge <branch>: ...` (git's own default subject) matches nothing --
+    the wave-83 defect (queue item 14). The audit must report it as
+    unparsed, not silently drop it from the lane count.
+    """
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "1234567890abcd\tMerge branch 'w83/x' into main\n", "")
+        raise AssertionError(argv)
+
+    lanes, unparsed = fleet._wave_merge_audit(tmp_path, "base", run=run)
+    assert lanes == []
+    assert unparsed == ["1234567"]
+
+
+def test_merge_audit_separates_parsed_lanes_from_unparsed_merges(tmp_path):
+    lane_worktree = tmp_path / "lane-worktree"
+
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0,
+                "abcdef1234567\tmerge(w68/alpha): landed\n"
+                "1234567890abcd\tMerge branch 'w83/x' into main\n", "")
+        if argv[1] == "worktree":
+            return subprocess.CompletedProcess(
+                argv, 0, f"worktree {lane_worktree}\nbranch refs/heads/w68/alpha\n\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    lanes, unparsed = fleet._wave_merge_audit(tmp_path, "base", run=run)
+    assert lanes == [("w68/alpha", "unknown", "abcdef1")]
+    assert unparsed == ["1234567"]
+
+
+def test_merge_audit_zero_merges_is_not_the_same_as_unparsed(tmp_path):
+    """A genuinely empty range is the legitimate no-lanes wave, distinct from
+    a range with merges wave-close could not attribute -- said explicitly
+    per the brief, so the next reader knows it was considered."""
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    lanes, unparsed = fleet._wave_merge_audit(tmp_path, "base", run=run)
+    assert lanes == []
+    assert unparsed == []
+
+
+def test_wave_close_refuses_an_unattributable_range_before_any_mutation(
+        tmp_path, monkeypatch):
+    """Replays the wave-83 defect end to end, through the real `git`: a
+    merge landed with git's own default subject cannot be attributed to a
+    lane, so `wave-close` must refuse -- naming the unparsed count -- rather
+    than publish workers/tokens/external_lines as a confident MEASURED
+    zero. The refusal must land before the claim, the reap and the floor
+    (all mutating or expensive), so this reaches it with none of that
+    machinery mocked: if the refusal came any later, this test would hang
+    or fail for an unrelated reason (no FLEET_HOME, no `uv`) instead of
+    exercising the refusal itself.
+    """
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True, encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q")
+    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.name", "wave-close tests")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "CHANGELOG.md").write_text("# Operator changelog\n\n", encoding="utf-8")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-qb", "w83/x")
+    (repo / "lane.txt").write_text("work\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "lane work")
+    git("checkout", "-q", "-")
+    git("merge", "--no-ff", "--no-edit", "w83/x")
+    merge_sha = git("rev-parse", "HEAD").stdout.strip()
+    changelog_before = (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    log_before = git("log", "--oneline").stdout
+
+    monkeypatch.chdir(repo)
+    args = argparse.Namespace(
+        base=base, changelog=f"- `{merge_sha[:7]}` lane work landed",
+        sid=None, nonce=None)
+    with pytest.raises(fleet.FleetCliError, match=r"UNPARSED: 1 of 1"):
+        fleet.cmd_wave_close(args)
+
+    assert (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8") == changelog_before
+    assert git("log", "--oneline").stdout == log_before
+    assert not git("status", "--porcelain").stdout.strip()
+
+
+def test_unparsed_merge_refusal_precedes_every_mutation_in_cmd_wave_close():
+    """Static ordering guard alongside the real-git proof above: the
+    UNPARSED refusal must sit, in source, before the first
+    `with fleet_lock():` -- the claim heartbeat write -- and therefore
+    before the changelog prepend, the journal prepend and the commit that
+    all follow it later in the function.
+    """
+    import inspect
+    src = inspect.getsource(fleet.cmd_wave_close)
+    refusal_at = src.index("UNPARSED:")
+    lock_at = src.index("with fleet_lock():")
+    assert refusal_at < lock_at
 
 
 def _worktree_run(lane_worktree, branch):
