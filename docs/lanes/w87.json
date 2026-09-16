@@ -1,0 +1,86 @@
+{
+  "lane": "w87",
+  "base": "2127983",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/SPEC.md",
+    "docs/lanes/w87-appendix.md",
+    "docs/lanes/w87.json",
+    "docs/lanes/w87.md",
+    "docs/specs/native-substrate.md",
+    "tests/test_brief_preservation.py",
+    "tests/test_index_compose.py",
+    "tests/test_load_registry_callers.py",
+    "tests/test_rendered_command_quoting.py",
+    "tests/test_supervisor.py",
+    "tests/test_supervisor_wake.py",
+    "tests/test_wake_retirement.py"
+  ],
+  "tests": [
+    {
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_supervisor_wake.py tests/test_supervisor.py tests/test_wake_retirement.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_docs_currency.py tests/test_round7_defect_pins.py tests/test_verb_effect_guard.py tests/test_views_doctrine.py tests/test_brief_preservation.py",
+      "rc": 0,
+      "passed": 697,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_supervisor_wake.py tests/test_supervisor.py tests/test_wake_retirement.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_docs_currency.py tests/test_round7_defect_pins.py tests/test_verb_effect_guard.py tests/test_views_doctrine.py tests/test_brief_preservation.py",
+      "rc": 0,
+      "passed": 697,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "FULL FLOOR run twice by the landing supervisor. 3.10 after corrections: 5337 passed, 7 failed. SIX are PRE-EXISTING at base 2127983 with untouched source and are NOT adopted (test_fleet_index containment 3, test_fleet_q outline 1, test_terminal_surface::TestCollaboratorInstall 2 - a host venv artifact); the seventh was this lane's appendix missing its DONE line, now fixed. The floor is recorded here as a claim rather than in `tests` because its rc is 1 from those six, which would make `fleet land` RED for failures the lane neither caused nor can fix.",
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.10 --with pytest python -m pytest -q"
+    },
+    {
+      "claim": "break-even band B* ~= 850,000 tokens (C = B*; C = 849,667 MEASURED becoming-cost, one clean 16-turn bootstrap sample 3742->291f; a turn's cache_read at context size X is ~=X, confirmed across 6 generations)",
+      "command": "python3 script over usage_until()/summarize() aggregating message.usage across ~/.claude/projects/*/*.jsonl; see docs/lanes/w87-appendix.md SS3-4 for the full arithmetic and script listing"
+    },
+    {
+      "claim": "curve at 150k/200k/250k/350k is 5.66x/4.25x/3.40x/2.43x overcost (C/B); every candidate band is below break-even and 150k is the worst of the four",
+      "command": "849667/150000, 849667/200000, 849667/250000, 849667/350000; see docs/lanes/w87-appendix.md SS4"
+    },
+    {
+      "claim": "a6c9's 4 retired fork-parent transcripts total 7,553,045 bytes = 76.4% of that generation's 9,881,553 on-disk transcript bytes",
+      "command": "os.path.getsize over the 5 sid .jsonl files named in docs/lanes/w87-appendix.md SS1/SS5"
+    },
+    {
+      "claim": "an idle supervisor's fleet send wake dispatches fresh (no --resume in argv) and restamps the registry to the new sid instead of forking",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestIdleSupervisorWake::test_idle_supervisor_wakes_without_forking"
+    },
+    {
+      "claim": "the wake credential is not decorative: driven through the real (unmocked) cmd_sup_boot/supervisor_claim_decision, a fresh body presenting it gets verdict=resume for the SAME incarnation_id, never a new one",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestIdleSupervisorWake::test_wake_token_lets_a_fresh_body_resume_the_same_incarnation"
+    },
+    {
+      "claim": "ordinary (non-supervisor) idle worker steer is unchanged -- still the ratified G2b fork-steer with --resume",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestIdleSupervisorWake::test_ordinary_worker_still_forks tests/test_fork_steer_delivery.py"
+    },
+    {
+      "claim": "a wake refuses to dispatch (rolling back the pre-claim and mailbox) when the claim's incarnation_id changed or it was released since the roster snapshot that decided WAKE",
+      "command": "pytest -q tests/test_supervisor_wake.py::TestWakeRefusesOnChangedClaim"
+    },
+    {
+      "claim": "cmd_sup_handoff_begin already dispatches a successor fresh -- no --resume/--fork-session in its argv (Cut 2 needed a pinning test, not a code change)",
+      "command": "pytest -q tests/test_supervisor.py::TestHandoff::test_successor_boot_is_fresh_never_a_resume_or_fork"
+    },
+    {
+      "claim": "the five-site dispatch_bg census and the render-command census are updated for the two new call sites (_wake_supervisor_native, _render_supervisor_wake_task), each with a real driver, not just an allowlist entry",
+      "command": "pytest -q tests/test_brief_preservation.py tests/test_index_compose.py tests/test_load_registry_callers.py tests/test_rendered_command_quoting.py"
+    },
+    {
+      "claim": "the lane's reported '0 failed' covered a 2536-test SUBSET, not the floor; the floor showed 8 citation suites red because ~185 added bin/fleet.py lines were never re-pointed. Fixed by the supervisor with tools/repoint_self_citations.py 2127983 (40 of 53 re-pointed); both citation suites then green, 23 passed.",
+      "command": "python3 tools/repoint_self_citations.py 2127983; uv run --python 3.12 -m pytest -q tests/test_retired_sid_citations.py tests/test_self_citations.py"
+    },
+    {
+      "claim": "the break-even RANKING in part 1 is REJECTED by the gate: it credits a band with avoiding ONE turn, whereas a band caps every request for the generation's life. Cumulatively B* = sqrt(2kC) = 41k-184k and total cost rises with B (150k 103,322 vs 350k 187,138 vs 850k 429,998 per unit work at k=5000), inverting the lane's order. Neither model is offered as the answer; no band moves on this pass. The measured C ~ 849,667 per handoff stands.",
+      "command": "docs/lanes/w87-appendix.md section 4b; arithmetic shown in full there"
+    }
+  ],
+  "blockers": []
+}

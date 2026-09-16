@@ -177,7 +177,8 @@ def _callers(source: str = SRC) -> dict:
 # `_registry_records_or_none()` / `_read_registry_readonly()` instead.
 ALLOWED = {
     # --- lifecycle verbs and their native halves: mutate under the lock ---
-    "cmd_spawn", "cmd_send", "_cmd_send_native", "cmd_kill", "_cmd_kill_native",
+    "cmd_spawn", "cmd_send", "_cmd_send_native", "_wake_supervisor_native",
+    "cmd_kill", "_cmd_kill_native",
     "cmd_respawn", "_cmd_respawn_native", "cmd_interrupt", "_cmd_interrupt_native",
     "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",

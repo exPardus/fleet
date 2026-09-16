@@ -2917,6 +2917,21 @@ class TestHandoff:
         dispatch = next(c for c in run.calls if "--bg" in c)
         assert any(a.startswith("sup|inc-") for a in dispatch)
 
+    def test_successor_boot_is_fresh_never_a_resume_or_fork(self, sup_home):
+        """Cut 2 (w87): a successor boots from the checkpoint/journal trail
+        `sup-boot` reads (`_render_boot_bundle`: GOALS + journal tail +
+        knowledge index + fleet status), never a vendor transcript -- the
+        dispatch itself must never carry `--resume`/`--fork-session`, which
+        would fork the PREDECESSOR's transcript into the successor (G2,
+        docs/specs/native-substrate.md) instead of a fresh boot."""
+        self._hold()
+        run = self._dispatch_then_roster()
+        rc = self._begin(run)
+        assert rc == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--resume" not in dispatch
+        assert "--fork-session" not in dispatch
+
     def test_begin_pre_snapshot_filters_hostile_sessionid_value(self, sup_home):
         # Roll-up item 3: a dict-valued sessionId in the roster payload (CLI
         # drift / hostile roster) must not raise TypeError from an
