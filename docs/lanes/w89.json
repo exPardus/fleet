@@ -1,0 +1,62 @@
+{
+  "lane": "w89",
+  "base": "a4db09f7237a3c1852d38bf56394e801aeae6df9",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/SPEC.md",
+    "tests/test_wave_close.py",
+    "tests/test_reap_lane_arm.py",
+    "tests/test_load_registry_callers.py",
+    "tests/test_unlocked_quarantine.py",
+    "docs/lanes/w89.md",
+    "docs/lanes/w89.json",
+    "docs/lanes/w89-report.md"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_reap_lane_arm.py tests/test_wave_close.py tests/test_fleet_land.py tests/test_lifecycle_reap.py tests/test_load_registry_callers.py tests/test_unlocked_quarantine.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 150,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_reap_lane_arm.py tests/test_wave_close.py tests/test_fleet_land.py tests/test_lifecycle_reap.py tests/test_load_registry_callers.py tests/test_unlocked_quarantine.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 150,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "claims": [
+    {
+      "claim": "a real lane landed through fleet land and merged is reaped by the lane arm specifically (reason lane-landed), not predecessor-supervisor or daemon-dead",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_reap_lane_arm.py::test_a_real_landed_lane_is_reaped_by_the_lane_arm_specifically"
+    },
+    {
+      "claim": "a lane that has not landed stays lane-not-terminal and is not reaped",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_reap_lane_arm.py::test_a_lane_that_has_not_landed_is_lane_not_terminal_and_survives"
+    },
+    {
+      "claim": "a live PID still vetoes reaping (roster-live) after the writer records lane_state=landed",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_reap_lane_arm.py::test_landed_lane_protections_survive_the_real_writer"
+    },
+    {
+      "claim": "wave-close calls the lane-state writer inside its locked block, before writing the claim, and the call is lexically lock-held (checked from the AST, not trusted)",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_wave_close_marks_landed_lanes_under_the_lock_before_write_incarnation tests/test_unlocked_quarantine.py::TestTheUnlockedCensusIsPinned::test_wave_mark_landed_lanes_really_is_lock_held_by_its_caller"
+    },
+    {
+      "claim": "docs currency passes with the SPEC.md wave-close row update",
+      "command": "python3 tests/test_docs_currency.py ."
+    },
+    {
+      "claim": "docs/specs/** receipts still reproduce exactly",
+      "command": "python3 tools/verify_receipts.py --strict --skip-volatile docs/specs/*.md"
+    },
+    {
+      "claim": "full repo floor: no new failures beyond the six documented pre-existing host-venv artifacts (verified: exactly those six failed, 5353 passed)",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    }
+  ],
+  "blockers": []
+}
