@@ -814,18 +814,18 @@ def _quarantine_artifacts() -> list:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
       * `_sweep_husks` (:7483) -- hidden records can still own roster sessions.
       * `_doctor_check_autoclean` (:8378) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11510) -- legacy upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:11551) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2005) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11384) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:11425) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:2518) -- expose that distinction to views.
       * `_doctor_check_registry` (:8628) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12532) -- render the release explanation.
+      * `_tombstone_releasing_body` (:12573) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1987,7 +1987,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11510`), because legacy upgrades also require a complete registry.
+    (`:11551`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:892`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -9473,15 +9473,29 @@ SUPERVISOR_BOOT_VERDICTS = tuple(SUPERVISOR_BOOT_RC) + ("handshake-written",
 # confusing that terminal disposition with an ordinary occupied-claim refusal.
 SUPERVISOR_BOOT_HANDOFF_REFUSED_RC = 5
 SUPERVISOR_BODY_MAX_LINES = 3
-# w90: only the NEWEST journal entry in the boot tail carries its body inline;
-# older entries in the same window render as one-line pointers (kind/ts/inc/sid,
-# "full text: supervisor/JOURNAL.md"). `SUPERVISOR_BODY_MAX_LINES` caps a
-# checkpoint's NEWLINE count, not its byte size -- three lines can each be an
-# arbitrarily long paragraph (measured: wave-83's THROUGHPUT line alone is
-# several hundred bytes) -- so the newest entry is also byte-capped here as a
+# w90: the boot tail inlines bodies only for CHECKPOINT/PROPOSAL entries --
+# the kinds that actually carry campaign content -- never for terse bookkeeping
+# kinds (BOOT/SEIZED/RELEASED/...), regardless of position in the window.
+# Supervisor gate, 2026-09-16: inlining "whichever entry is newest" is wrong --
+# a boot's own freshly-written BOOT entry would then consume the one inline
+# slot and pointer every checkpoint behind it, exactly when a resuming body
+# most needs "continue the campaign from the journal tail" (skills/fleet
+# boot step 4) to work. `SUPERVISOR_BODY_MAX_LINES` caps a checkpoint's
+# NEWLINE count, not its byte size -- three lines can each be an arbitrarily
+# long paragraph (measured: wave-83's THROUGHPUT line alone is several
+# hundred bytes) -- so each inlined entry is also byte-capped here as a
 # backstop the line cap does not provide.
 SUPERVISOR_BOOT_JOURNAL_TAIL = 5
+SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS = frozenset({"CHECKPOINT", "PROPOSAL"})
+SUPERVISOR_BOOT_INLINE_MIN = 2
 SUPERVISOR_LATEST_ENTRY_MAX_CHARS = 2000
+# Total inline budget for the tail section: 4x the per-entry cap. A 5-entry
+# window holds at most 5 substantive entries, so this bounds the section at
+# roughly "the newest 2 substantive entries, guaranteed, plus up to 2 more if
+# they fit" rather than "inline everything" -- which matters because GOALS.md
+# alone measures 7,056 bytes (docs/lanes/w90-report.md) and an unbounded tail
+# would crowd the 20,000 whole-bundle cap instead of leaving headroom under it.
+SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS = 4 * SUPERVISOR_LATEST_ENTRY_MAX_CHARS
 # w90 (docs/lanes/w90-report.md): measured real bundle (this repo's own
 # supervisor/GOALS.md + JOURNAL.md + knowledge/INDEX.md, 2026-09-16) at 12,271
 # bytes before this lane's journal-tail cut and ~9.9KB after it, with 0-3 live
@@ -10516,10 +10530,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:1885, :1920,
     :1950, :2012, :2090, :2915, :6171, :6333, :6530, :6650, :6686, :6848, :6849, :6919,
-    :6929, :6940, :7034, :7509, :10466, :12825, :12826, :12887, :13688`).
+    :6929, :6940, :7034, :7509, :10480, :12866, :12867, :12928, :13729`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :5436, :5772, :8954,
-    :14013. This makes union identity safe; the age boundary distinguishes respawn.
+    :14054. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -10814,6 +10828,32 @@ def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> l
     return out
 
 
+def _select_boot_journal_inline_indices(tail: list) -> set:
+    """Which indices of the boot journal tail window get their body inlined.
+
+    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL) entries
+    are eligible -- a terse bookkeeping entry (BOOT/SEIZED/...) is a pointer
+    regardless of position, including when it is the newest entry in the
+    window (a boot's own just-written BOOT entry must not crowd out the
+    checkpoints a resuming body needs to continue the campaign from). Walking
+    newest-first, at least `SUPERVISOR_BOOT_INLINE_MIN` eligible entries are
+    inlined; more are added while the cumulative per-entry-capped size stays
+    within `SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS`.
+    """
+    newest_first = [i for i in range(len(tail) - 1, -1, -1)
+                    if tail[i]["kind"] in SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS]
+    inline = set()
+    budget = 0
+    for rank, i in enumerate(newest_first):
+        capped = min(len(tail[i]["body"].rstrip()), SUPERVISOR_LATEST_ENTRY_MAX_CHARS)
+        if (rank >= SUPERVISOR_BOOT_INLINE_MIN
+                and budget + capped > SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS):
+            break
+        inline.add(i)
+        budget += capped
+    return inline
+
+
 def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
                         caller_sid=None, run=subprocess.run) -> str:
     """Render GOALS, journal tail, knowledge index, roster and fleet status.
@@ -10826,13 +10866,14 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
         goals = "(supervisor/GOALS.md missing)"
     out += ["", "--- supervisor/GOALS.md ---", goals]
     out += ["", f"--- supervisor/JOURNAL.md tail (last {SUPERVISOR_BOOT_JOURNAL_TAIL}; "
-                 "only the newest entry's body is inlined) ---"]
+                 "CHECKPOINT/PROPOSAL bodies inlined newest-first, bookkeeping "
+                 "kinds always pointers) ---"]
     tail = journal_entries[-SUPERVISOR_BOOT_JOURNAL_TAIL:]
     if tail:
-        last_index = len(tail) - 1
+        inline_indices = _select_boot_journal_inline_indices(tail)
         for i, e in enumerate(tail):
             out.append(f"## {e['ts']} {e['kind']} inc={e['inc']} sid={e['sid']}")
-            if i != last_index:
+            if i not in inline_indices:
                 if e["body"].strip():
                     out.append("  (body omitted -- pointer only; "
                                "full text: supervisor/JOURNAL.md)")
@@ -11139,7 +11180,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:5436, :5772, :8954,
-    # :14013) -- so union identity cannot make one body answer for another.
+    # :14054) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11147,7 +11188,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:892`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10440`).
+        # names this gate as its reason (`:10454`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None

@@ -10,17 +10,24 @@ caps a checkpoint's newline count (3), not the length of those three lines,
 and non-checkpoint kinds (BOOT/SEIZED/wave-close THROUGHPUT) go through
 `supervisor_journal_append` directly and carry no line cap either.
 
-THE CUT: only the newest of the last `SUPERVISOR_BOOT_JOURNAL_TAIL` journal
-entries renders its body in the bundle; older entries in the same window
-render as a one-line pointer (kind/ts/inc/sid, "full text:
-supervisor/JOURNAL.md"). A successor loses the PROSE of entries 2-5 of the
-tail, not their existence or timestamps -- and that prose is one `cat
-supervisor/JOURNAL.md` away, which is DONE's "pointers, never whole
-journals". The newest entry is additionally byte-capped
-(`SUPERVISOR_LATEST_ENTRY_MAX_CHARS`) as a backstop `SUPERVISOR_BODY_MAX_LINES`
-does not provide. `SUPERVISOR_BUNDLE_MAX_CHARS` (the whole-bundle backstop)
-drops from an untested 40,000 to a measured, justified 20,000 -- see the
-constant's comment in bin/fleet.py for the arithmetic.
+THE CUT, v2 (supervisor gate, 2026-09-16, rejecting v1's "inline only the
+newest entry"): the inline slot is spent on CONTENT, not on whichever entry
+happens to be newest. `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT,
+PROPOSAL) are eligible to inline; terse bookkeeping kinds (BOOT/SEIZED/...)
+are ALWAYS pointers, regardless of position -- counter-evidence was this
+repo's own 2026-09-16T12:40Z boot, whose newest tail entry was the BOOT the
+boot itself had just written (one line, zero campaign content); v1 would
+have pointered the checkpoints behind it, including the ones the supervisor
+brief's step 4 ("continue the campaign from the journal tail") needs inline.
+At least `SUPERVISOR_BOOT_INLINE_MIN` (2) substantive entries inline
+newest-first when that many exist; more inline while the cumulative
+per-entry-capped size stays within `SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS`.
+Each inlined entry is still byte-capped at `SUPERVISOR_LATEST_ENTRY_MAX_CHARS`
+as a backstop `SUPERVISOR_BODY_MAX_LINES` (newline count, not byte length)
+does not provide. `SUPERVISOR_BUNDLE_MAX_CHARS` (whole-bundle backstop) drops
+from an untested 40,000 to a measured, justified 20,000 -- see the
+constants' comments in bin/fleet.py for the arithmetic. Both caps are
+unchanged from v1 per the gate.
 """
 from pathlib import Path
 
@@ -55,33 +62,76 @@ def _bundle(snap=None):
         [], snap, fleet.supervisor_journal_entries(), caller_sid=None)
 
 
-class TestOnlyTheNewestEntryCarriesItsBody:
-    def test_older_entries_in_the_tail_are_pointers_not_bodies(self, sup_home):
-        for i in range(4):
-            _append("CHECKPOINT", "inc-1", "sid-1", f"OLD-BODY-MARKER-{i}")
-        _append("CHECKPOINT", "inc-1", "sid-1", "NEWEST-BODY-MARKER")
-        bundle = _bundle()
-        assert "NEWEST-BODY-MARKER" in bundle
-        for i in range(4):
-            assert f"OLD-BODY-MARKER-{i}" not in bundle
-        assert bundle.count("full text: supervisor/JOURNAL.md") == 4
+class TestSelectBootJournalInlineIndices:
+    """The pure selector, exercised directly against the real 2026-09-16 tail
+    shape the supervisor gate cited: a BOOT entry newest, CHECKPOINTs behind
+    it. Also covered end-to-end through `_render_boot_bundle` below."""
 
-    def test_fewer_than_the_tail_window_still_inlines_only_the_newest(self, sup_home):
-        _append("CHECKPOINT", "inc-1", "sid-1", "FIRST-BODY")
-        _append("CHECKPOINT", "inc-1", "sid-1", "SECOND-BODY")
-        bundle = _bundle()
-        assert "SECOND-BODY" in bundle
-        assert "FIRST-BODY" not in bundle
-        assert bundle.count("full text: supervisor/JOURNAL.md") == 1
+    def _tail(self, kinds):
+        return [{"ts": f"t{i}", "kind": k, "inc": "inc-1", "sid": "s1", "body": f"B{i}"}
+                for i, k in enumerate(kinds)]
 
-    def test_a_single_entry_needs_no_pointer(self, sup_home):
-        _append("BOOT", "inc-1", "sid-1", "ONLY-BODY")
+    def test_a_newest_boot_entry_does_not_crowd_out_checkpoints_behind_it(self):
+        # supervisor gate's own counter-example, 2026-09-16T12:40Z boot.
+        tail = self._tail(["CHECKPOINT", "CHECKPOINT", "BOOT"])
+        idx = fleet._select_boot_journal_inline_indices(tail)
+        assert idx == {0, 1}
+
+    def test_a_solitary_bookkeeping_entry_is_never_inlined(self):
+        tail = self._tail(["BOOT"])
+        assert fleet._select_boot_journal_inline_indices(tail) == set()
+
+    def test_bookkeeping_kinds_never_count_toward_the_minimum(self):
+        tail = self._tail(["CHECKPOINT", "SEIZED", "RELEASED", "BOOT"])
+        idx = fleet._select_boot_journal_inline_indices(tail)
+        assert idx == {0}  # only one substantive entry exists -- inline what there is
+
+    def test_at_least_the_minimum_inlines_even_with_only_that_many_available(self):
+        tail = self._tail(["PROPOSAL", "CHECKPOINT"])
+        idx = fleet._select_boot_journal_inline_indices(tail)
+        assert idx == {0, 1}
+
+
+class TestBookkeepingKindsAreAlwaysPointersInTheBundle:
+    def test_a_newest_boot_entry_is_a_pointer_even_though_it_is_newest(self, sup_home):
+        _append("CHECKPOINT", "inc-1", "sid-1", "OLD-CAMPAIGN-STATE")
+        _append("CHECKPOINT", "inc-1", "sid-1", "NEW-CAMPAIGN-STATE")
+        _append("BOOT", "inc-1", "sid-1", "resumed own claim -- continuity proved")
         bundle = _bundle()
-        assert "ONLY-BODY" in bundle
-        assert "full text: supervisor/JOURNAL.md" not in bundle
+        assert "OLD-CAMPAIGN-STATE" in bundle
+        assert "NEW-CAMPAIGN-STATE" in bundle
+        assert "resumed own claim -- continuity proved" not in bundle
+        assert "full text: supervisor/JOURNAL.md" in bundle
+
+    def test_a_solitary_bookkeeping_journal_is_pointered_not_inlined(self, sup_home):
+        _append("BOOT", "inc-1", "sid-1", "ONLY-ENTRY-BODY")
+        bundle = _bundle()
+        assert "ONLY-ENTRY-BODY" not in bundle
+        assert "full text: supervisor/JOURNAL.md" in bundle
 
     def test_no_checkpoints_yet_is_unchanged(self, sup_home):
         assert "(no checkpoints yet)" in _bundle()
+
+
+class TestSubstantiveEntriesInlineNewestFirstUpToBudget:
+    def test_two_small_checkpoints_both_inline(self, sup_home):
+        _append("CHECKPOINT", "inc-1", "sid-1", "FIRST-BODY")
+        _append("CHECKPOINT", "inc-1", "sid-1", "SECOND-BODY")
+        bundle = _bundle()
+        assert "FIRST-BODY" in bundle and "SECOND-BODY" in bundle
+        assert "full text: supervisor/JOURNAL.md" not in bundle
+
+    def test_the_oldest_eligible_entry_pointers_once_the_budget_is_exceeded(self, sup_home):
+        # 5 entries at the per-entry cap: budget (4x cap) covers exactly 4 of
+        # them, so the oldest of the five substantive entries is a pointer.
+        near_cap = "Y" * (fleet.SUPERVISOR_LATEST_ENTRY_MAX_CHARS + 1)
+        for i in range(5):
+            _append("CHECKPOINT", "inc-1", "sid-1", f"MARK{i}-{near_cap}")
+        bundle = _bundle()
+        for i in range(1, 5):
+            assert f"MARK{i}-" in bundle, f"entry {i} should still be inlined"
+        assert "MARK0-" not in bundle, "oldest of 5 near-cap entries should pointer"
+        assert "full text: supervisor/JOURNAL.md" in bundle
 
     def test_only_the_last_N_entries_enter_the_window_at_all(self, sup_home):
         """Entries older than the tail window are absent altogether, pointer
@@ -92,11 +142,11 @@ class TestOnlyTheNewestEntryCarriesItsBody:
         # window is the newest SUPERVISOR_BOOT_JOURNAL_TAIL entries: E3..E7
         for i in range(3):
             assert f"E{i}\n" not in bundle and f"E{i} " not in bundle
-        assert "E7" in bundle  # newest, inlined
+        assert "E7" in bundle  # newest, small enough to fit the budget
 
 
-class TestTheNewestEntryIsByteCapped:
-    def test_an_oversized_newest_body_is_truncated_with_a_pointer(self, sup_home):
+class TestInlinedEntriesAreByteCapped:
+    def test_an_oversized_body_is_truncated_with_a_pointer(self, sup_home):
         huge = "X" * (fleet.SUPERVISOR_LATEST_ENTRY_MAX_CHARS + 500)
         _append("CHECKPOINT", "inc-1", "sid-1", huge)
         bundle = _bundle()

@@ -58,54 +58,74 @@ consistent with being a small fraction of that total, which is the point: decomp
 
 ## The cut, and what a successor loses
 
-`_render_boot_bundle`'s journal-tail block now inlines the body of only the **newest** of the
-last `SUPERVISOR_BOOT_JOURNAL_TAIL` (5) entries; the older entries in the same window render as
-one-line pointers (`## <ts> <KIND> inc=<inc> sid=<sid>` + `(body omitted -- pointer only; full
-text: supervisor/JOURNAL.md)`). The newest entry's body is separately capped at
-`SUPERVISOR_LATEST_ENTRY_MAX_CHARS` (2,000 chars) with a truncation pointer, as a backstop
-`SUPERVISOR_BODY_MAX_LINES` does not provide (three lines can each be arbitrarily long).
+**v1 (rejected by the supervisor gate, 2026-09-16):** inline only the single newest tail entry.
+Counter-evidence was this repo's own 2026-09-16T12:40Z boot: the newest tail entry at that boot
+was the `BOOT` entry the boot itself had just written — one line, zero campaign content. v1 would
+have spent the one inline slot on it and pointered the checkpoints behind it, including the
+`PARKED` checkpoint and the w86 token-efficiency checkpoints that carried the actual campaign
+state — directly breaking the supervisor brief's step 4, "continue the campaign from the journal
+tail." Rejected: trading that for ~480 tokens (0.06% of w87's 849,667-token handoff) is a bad,
+asymmetric trade — a successor that has to re-derive campaign state pays thousands of tokens to
+recover hundreds.
 
-A successor loses the PROSE of checkpoints 2-5 back from the newest — not their existence,
-timestamp, kind, incarnation or session id, all of which stay in the pointer line. This is safe
-because: (1) the newest entry's body is exactly the "what to do next" continuity note the
-operator/supervisor writes for a resuming body (see this repo's own 2026-09-16T13:44 entry:
-"Next: item 3, handoff cost." — that is what a boot actually needs); (2) older bodies are one
-`cat supervisor/JOURNAL.md` (or `supervisor/journal-history/*.md` once rolled) away and rarely
-needed at boot, only during deep incident review; (3) `roll_supervisor_journal` already treats
-entries older than the newest 3 checkpoints as history, not live state — this cut narrows the
-same "history vs. live" line one step further, from "3 checkpoints with bodies" to "1 checkpoint
-with a body, 2-4 as pointers."
+**v2 (current):** the inline slot is spent on CONTENT, not on whichever entry is newest.
+`_select_boot_journal_inline_indices` inlines bodies only for `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS`
+(`CHECKPOINT`, `PROPOSAL`) — the kinds that carry campaign content — never for terse bookkeeping
+kinds (`BOOT`, `SEIZED`, `RELEASED`, ...), regardless of position. Walking newest-first, at least
+`SUPERVISOR_BOOT_INLINE_MIN` (2) substantive entries inline when that many exist; more inline
+while the cumulative per-entry-capped size stays within `SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS`
+(4x the per-entry cap = 8,000 chars — a 5-entry window holds at most 5 substantive entries, so
+this bounds the section to roughly "2 guaranteed, up to 2 more if they fit" rather than
+"everything," leaving headroom under the 20,000 whole-bundle cap alongside GOALS.md's measured
+7,056 bytes). Each inlined entry is still capped at `SUPERVISOR_LATEST_ENTRY_MAX_CHARS` (2,000
+chars) with a truncation pointer, unchanged from v1.
+
+A successor loses the PROSE only of substantive entries older than the inline budget covers, and
+of terse bookkeeping entries always — never their existence, timestamp, kind, incarnation or
+session id, all of which stay in the pointer line. Re-run against this repo's own real tail
+(CHECKPOINT, BOOT, CHECKPOINT, CHECKPOINT): the BOOT entry pointers even though it is newest, and
+all three CHECKPOINT bodies — including the wave-83 campaign summary — inline.
 
 Not cut: `VERDICT`/`INCARNATION`/`NONCE` lines, the `EPOCH` line, and the reap/doctrine trailer —
 none are journal content, and the continuity proof is explicitly out of scope for cutting.
 
-## Table — after this lane's cut
+## Table — after this lane's cut (v2)
+
+The journal-tail section depends only on `supervisor/GOALS.md`/`JOURNAL.md` content and the
+selection constants, all fixed for this measurement, so it reproduces exactly. The *total* bundle
+additionally includes `_supervisor_git_board`'s live `dirty=<N>` count for this worktree, which
+changes turn to turn as files are edited — reported here as one snapshot, not a reproducible
+figure; the deterministic tail-section number is the one to trust.
 
 | section | bytes | ~tokens |
 |---|---:|---:|
-| `supervisor/JOURNAL.md` tail — OLD (5 full bodies) | 3,526 | 882 |
-| `supervisor/JOURNAL.md` tail — NEW (1 body + 4 pointers) | 1,720 | 430 |
-| **`_render_boot_bundle()` total — OLD** | **12,271** | **3,068** |
-| **`_render_boot_bundle()` total — NEW** | **10,349** | **2,587** |
-| saved | 1,922 | 480 (15.7%) |
+| `supervisor/JOURNAL.md` tail — pre-w90 (5 full bodies, no kind-awareness) | 3,526 | 882 |
+| `supervisor/JOURNAL.md` tail — v2 (3 CHECKPOINT bodies inline, 1 BOOT pointer) | 3,640 | 910 |
+| **`_render_boot_bundle()` total — pre-w90** | **12,271** | **3,068** |
+| **`_render_boot_bundle()` total — v2 (one snapshot; git-board-dependent, ±~100)** | **≈12,270-12,340** | **≈3,070-3,085** |
 
-15.7% off the assembled bundle on this repo's *current* journal (4 entries, none pathological).
-The cut's real payoff is the ceiling it removes, not this one measurement: before it, a single
-large checkpoint or a wave-close `THROUGHPUT` line could make the tail arbitrarily large with no
-code-level limit; after it, only the newest entry can grow the tail, and it is byte-capped.
+On *this repo's current, non-pathological* tail (only one terse entry, three real checkpoints),
+v2's tail section costs slightly *more* than the naive pre-w90 whole-tail render (+114 bytes, the
+pointer line's overhead) — that is the correct, expected result of the supervisor gate's
+correction: this cut's value was never about shrinking today's ordinary tail, it is the CEILING it
+removes. Before it, a tail dominated by bookkeeping churn (repeated BOOT/SEIZED cycles) or a single
+pathologically large checkpoint had no code-level bound; after it, terse kinds never consume the
+inline budget and every inlined body is still byte-capped.
 
 ## The cap
 
 `SUPERVISOR_BUNDLE_MAX_CHARS` already existed (40,000 chars) as a whole-bundle backstop
 (`_render_boot_bundle` raises `FleetCliError` past it) but **no test exercised it** — grep
 confirmed zero references anywhere in `tests/` before this lane. Lowered to **20,000** chars
-(~5,000 tokens): roughly 2x the measured post-cut bundle (10,349 bytes) with 0 live workers,
-enough headroom for GOALS.md to grow moderately or for a full 3-worker roster (the reap rule's
-own ceiling) without the cap being effectively unbounded, and well below the untested 40,000
+(~5,000 tokens): roughly 1.6x the measured v2 bundle (≈12.3KB) with 0 live workers, enough
+headroom for GOALS.md to grow moderately or for a full 3-worker roster (the reap rule's own
+ceiling) without the cap being effectively unbounded, and well below the untested 40,000
 predecessor whose slack nobody had measured. **Today's real bundle does not violate either the
 old or the new cap** — the useful finding here is the missing test, not a status-quo violation.
-Pinned by `tests/test_boot_bundle_cost.py::TestBundleByteBudget` (both arms: realistic content
-stays under budget, and a synthetically oversized bundle is refused).
+Kept exactly as-is across the v1→v2 correction (supervisor gate, 2026-09-16): only the inline
+*selection rule* changed, not either cap's value. Pinned by
+`tests/test_boot_bundle_cost.py::TestBundleByteBudget` (both arms: realistic content stays under
+budget, and a synthetically oversized bundle is refused).
 
 ## Commands
 
