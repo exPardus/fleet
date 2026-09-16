@@ -1,0 +1,89 @@
+{
+  "lane": "w90",
+  "base": "ab92bf1ff3ee1a920763266e919a304afb460d33",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/SPEC.md",
+    "tests/test_boot_bundle_cost.py",
+    "docs/lanes/w90.md",
+    "docs/lanes/w90.json",
+    "docs/lanes/w90-report.md"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py",
+      "rc": 0,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py",
+      "rc": 0,
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py tests/test_boot_bundle_chunked_read.py tests/test_supspawn_fixwave2.py tests/test_liveness_readers.py tests/test_computed_board.py tests/test_status_render_tolerance.py tests/test_load_registry_callers.py tests/test_b6_released_wedge.py tests/test_supervisor.py tests/test_unlocked_quarantine.py tests/test_b6_sid_union.py tests/test_supspawn_fixwave1.py tests/test_supervisor_wake.py tests/test_lifecycle_reap.py tests/test_identity_fixwave2.py tests/test_handoff_seams.py tests/test_views_doctrine.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 1099,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py tests/test_boot_bundle_chunked_read.py tests/test_supspawn_fixwave2.py tests/test_liveness_readers.py tests/test_computed_board.py tests/test_status_render_tolerance.py tests/test_load_registry_callers.py tests/test_b6_released_wedge.py tests/test_supervisor.py tests/test_unlocked_quarantine.py tests/test_b6_sid_union.py tests/test_supspawn_fixwave1.py tests/test_supervisor_wake.py tests/test_lifecycle_reap.py tests/test_identity_fixwave2.py tests/test_handoff_seams.py tests/test_views_doctrine.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 1099,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "full repo floor on both interpreters: exactly the six documented pre-existing host-venv failures (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), no new failures -- verified after re-pointing bin/fleet.py's self-citations (both this lane's original +29 net lines and the supervisor-gate v2 fix's further +41 net lines shifted them; tools/repoint_self_citations.py ab92bf1 run after each)",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "v2 (supervisor gate correction): a newest BOOT/SEIZED/other bookkeeping entry never consumes the inline slot -- it renders as a pointer regardless of position, so the CHECKPOINT/PROPOSAL entries behind it stay inline",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py::TestSelectBootJournalInlineIndices::test_a_newest_boot_entry_does_not_crowd_out_checkpoints_behind_it tests/test_boot_bundle_cost.py::TestBookkeepingKindsAreAlwaysPointersInTheBundle::test_a_newest_boot_entry_is_a_pointer_even_though_it_is_newest"
+    },
+    {
+      "claim": "at least SUPERVISOR_BOOT_INLINE_MIN (2) substantive entries inline when that many exist, newest-first, and more inline while under SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS -- the oldest eligible entry pointers once the budget is exceeded",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py::TestSubstantiveEntriesInlineNewestFirstUpToBudget"
+    },
+    {
+      "claim": "each inlined entry is truncated with a pointer past SUPERVISOR_LATEST_ENTRY_MAX_CHARS (unchanged value from v1), and left untouched under it",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py::TestInlinedEntriesAreByteCapped"
+    },
+    {
+      "claim": "SUPERVISOR_BUNDLE_MAX_CHARS is exercised by a test on both arms (realistic content stays under budget; an oversized bundle is refused) and stays at the measured 20,000 (unchanged value from v1) across the v1->v2 selection-rule correction",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_boot_bundle_cost.py::TestBundleByteBudget"
+    },
+    {
+      "claim": "measured, on this repo's own real supervisor/GOALS.md + JOURNAL.md + knowledge/INDEX.md (2026-09-16, tail shape CHECKPOINT/BOOT/CHECKPOINT/CHECKPOINT): the BOOT entry pointers, all 3 CHECKPOINT bodies (including the wave-83 campaign summary) inline. Deterministic tail-section bytes (independent of the worktree's live git-dirty state): pre-lane 3,526, v2 3,640 (+114). Total bundle varies a little with _supervisor_git_board's live dirty count: pre-lane snapshot 12,271 bytes (~3,068 tokens), v2 snapshot ~12,270-12,340 bytes (~3,070-3,085 tokens). Full table: docs/lanes/w90-report.md",
+      "command": "python3 -c \"import sys; sys.path.insert(0,'bin'); import fleet, subprocess; e=fleet.supervisor_journal_entries(); s=fleet.status_snapshot(); b=fleet._render_boot_bundle([], s, e, caller_sid=None, run=subprocess.run); print(len(b))\""
+    },
+    {
+      "claim": "docs currency passes with the SPEC.md sup-boot row update",
+      "command": "python3 tests/test_docs_currency.py ."
+    },
+    {
+      "claim": "docs/specs/claim-nonce.md receipts (cmd_sup_boot/_render_boot_bundle citations pinned to a historical sha) still reproduce exactly -- unaffected by this branch's bin/fleet.py edits",
+      "command": "python3 tools/verify_receipts.py --strict --skip-volatile docs/specs/*.md"
+    },
+    {
+      "claim": "the new lane doc carries DONE means: as its second non-blank line",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_docs_currency.py -k done"
+    },
+    {
+      "claim": "full floor, 3.10: 5368 passed, 6 failed -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index TestPathContainment x3, test_fleet_q TestOutlinePathContainment x1, test_terminal_surface TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5368 passed, 6 failed -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index TestPathContainment x3, test_fleet_q TestOutlinePathContainment x1, test_terminal_surface TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    }
+  ],
+  "blockers": []
+}
