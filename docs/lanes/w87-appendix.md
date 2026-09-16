@@ -1,4 +1,5 @@
 # w87 appendix — the break-even curve, full tables and scripts
+DONE means: the full per-generation tables, the break-even arithmetic and its rejection, and the scripts behind every number in `docs/lanes/w87.md`.
 
 Part 1 only (research). Part 2 (the two no-handoff code cuts) is in `docs/lanes/w87.md` /
 `w87.json`, written by the parent lane after this appendix landed.
@@ -258,3 +259,48 @@ timestamps taken from the `usage`/`timestamp` fields.
   printed) were used only as a sanity cross-check against §2's `last_cr` column (same order of
   magnitude, consistent) — not as a primary source, since their exact derivation formula vs raw
   `cache_read_input_tokens` was not verified against fleet's own source.
+
+
+## 4b. The supervisor's gate: §4's ranking is rejected, its cost number is kept
+
+§4 solves `C = B*`, comparing one handoff against ONE avoided turn, and then states that this is
+"the MOST FAVORABLE framing for a low band". That is inverted. Crediting a low band with the
+smallest conceivable saving is the LEAST favorable framing for it. A band does not avoid one
+turn: it caps every request for the remainder of the generation's life, which is the whole point
+of capping.
+
+Cumulative model. Let per-request cache_read ~ current context X, context grow by k per request,
+and work be W requests. A generation runs 0 -> B, so it spans B/k requests at mean context B/2,
+and covers the work in W*k/B generations, each paying C:
+
+    total(B) = W*(B/2) + (W*k/B)*C        d/dB = W/2 - W*k*C/B^2 = 0  =>  B* = sqrt(2*k*C)
+
+With C = 849,667 (§3's clean sample):
+
+| k (tokens added per request) | B* = sqrt(2kC) |
+|---:|---:|
+| 1,000 | 41,223 |
+| 2,000 | 58,298 |
+| 5,000 | 92,177 |
+| 10,000 | 130,359 |
+| 20,000 | 184,355 |
+
+Total cost per unit work at k = 5,000 — monotonically INCREASING in B over the candidates:
+
+| band B | mean context B/2 | handoff term (W*k/B)*C | total |
+|---:|---:|---:|---:|
+| 150,000 | 75,000 | 28,322 | **103,322** |
+| 200,000 | 100,000 | 21,242 | 121,242 |
+| 250,000 | 125,000 | 16,993 | 141,993 |
+| 350,000 | 175,000 | 12,138 | 187,138 |
+| 850,000 | 425,000 | 4,998 | 429,998 |
+
+So the same measured C yields the OPPOSITE ranking: 150k best, 850k worst by ~4x.
+
+This model is not offered as the answer either. It assumes uniform growth and work proportional
+to requests, and it prices no re-derivation loss — a successor that re-reads and re-reasons what
+its predecessor already knew pays a real cost neither model carries, and C = 849,667 is n=1.
+
+VERDICT: the break-even RANKING is not established by this pass and no band should move on it.
+What IS established and useful: a handoff costs on the order of 850k tokens, large enough that
+reducing per-handoff cost beats tuning the band — which is what part 2 did.

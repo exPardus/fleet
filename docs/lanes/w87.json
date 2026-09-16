@@ -18,18 +18,18 @@
   ],
   "tests": [
     {
-      "command": "UV_CACHE_DIR=/home/altai/.cache/uv uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/integration/test_native_pin.py tests/test_autoclean.py tests/test_b6_sid_union.py tests/test_boot_bundle_chunked_read.py tests/test_brief_preservation.py tests/test_clean_spares_tombstone.py tests/test_cli.py tests/test_core.py tests/test_fleet_sources.py tests/test_fork_steer_delivery.py tests/test_gate_arm_wedge.py tests/test_identity_fixwave2.py tests/test_identity_fixwave.py tests/test_identity_registry.py tests/test_index_compose.py tests/test_keeper_doctrine.py tests/test_keeper_wake.py tests/test_liveness_readers.py tests/test_load_registry_callers.py tests/test_native_daemon_wedge.py tests/test_native.py tests/test_permission_stall.py tests/test_rendered_command_quoting.py tests/test_resilience.py tests/test_respawn_ceiling.py tests/test_respawn_retired_sweep.py tests/test_send_provenance.py tests/test_steering.py tests/test_steer_seams.py tests/test_stillborn_handoff.py tests/test_supervisor_ceiling.py tests/test_supervisor_claim_sids.py tests/test_supervisor_gate.py tests/test_supervisor.py tests/test_supervisor_wake.py tests/test_sup_guard.py tests/test_sup_release_tombstone.py tests/test_supspawn_fixwave1.py tests/test_sup_spawn.py tests/test_sup_spawn_setting_sources.py tests/test_sup_tombstone_fixwave1.py tests/test_sup_tombstone_fixwave2.py tests/test_sup_tombstone_fixwave3.py tests/test_sup_tombstone.py tests/test_verb_effect_guard.py tests/test_wake_retirement.py tests/test_round7_defect_pins.py tests/test_views_doctrine.py",
-      "rc": 0,
-      "passed": 2535,
-      "failed": 0,
-      "skipped": 11
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.10 --with pytest python -m pytest -q   # full floor, landing supervisor",
+      "rc": 1,
+      "passed": 5337,
+      "failed": 7,
+      "skipped": 16
     },
     {
-      "command": "UV_CACHE_DIR=/home/altai/.cache/uv uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/integration/test_native_pin.py tests/test_autoclean.py tests/test_b6_sid_union.py tests/test_boot_bundle_chunked_read.py tests/test_brief_preservation.py tests/test_clean_spares_tombstone.py tests/test_cli.py tests/test_core.py tests/test_fleet_sources.py tests/test_fork_steer_delivery.py tests/test_gate_arm_wedge.py tests/test_identity_fixwave2.py tests/test_identity_fixwave.py tests/test_identity_registry.py tests/test_index_compose.py tests/test_keeper_doctrine.py tests/test_keeper_wake.py tests/test_liveness_readers.py tests/test_load_registry_callers.py tests/test_native_daemon_wedge.py tests/test_native.py tests/test_permission_stall.py tests/test_rendered_command_quoting.py tests/test_resilience.py tests/test_respawn_ceiling.py tests/test_respawn_retired_sweep.py tests/test_send_provenance.py tests/test_steering.py tests/test_steer_seams.py tests/test_stillborn_handoff.py tests/test_supervisor_ceiling.py tests/test_supervisor_claim_sids.py tests/test_supervisor_gate.py tests/test_supervisor.py tests/test_supervisor_wake.py tests/test_sup_guard.py tests/test_sup_release_tombstone.py tests/test_supspawn_fixwave1.py tests/test_sup_spawn.py tests/test_sup_spawn_setting_sources.py tests/test_sup_tombstone_fixwave1.py tests/test_sup_tombstone_fixwave2.py tests/test_sup_tombstone_fixwave3.py tests/test_sup_tombstone.py tests/test_verb_effect_guard.py tests/test_wake_retirement.py tests/test_round7_defect_pins.py tests/test_views_doctrine.py",
-      "rc": 0,
-      "passed": 2536,
-      "failed": 0,
-      "skipped": 11
+      "command": "UV_CACHE_DIR=/home/altai/.cache/uv UV_OFFLINE=1 uv run --no-project --python 3.12 --with pytest python -m pytest -q   # full floor, landing supervisor",
+      "rc": 1,
+      "passed": 5328,
+      "failed": 16,
+      "skipped": 16
     }
   ],
   "claims": [
@@ -68,6 +68,18 @@
     {
       "claim": "the five-site dispatch_bg census and the render-command census are updated for the two new call sites (_wake_supervisor_native, _render_supervisor_wake_task), each with a real driver, not just an allowlist entry",
       "command": "pytest -q tests/test_brief_preservation.py tests/test_index_compose.py tests/test_load_registry_callers.py tests/test_rendered_command_quoting.py"
+    },
+    {
+      "claim": "FULL FLOOR by the landing supervisor, 3.10: 5337 passed, 7 failed. SIX are pre-existing at base 2127983 with untouched source (test_fleet_index containment 3, test_fleet_q 1, test_terminal_surface::TestCollaboratorInstall 2) and are NOT adopted. The seventh was the appendix missing its DONE line and is fixed.",
+      "command": "uv run --python 3.10 -m pytest -q  (full floor, twice: before and after the supervisor's corrections)"
+    },
+    {
+      "claim": "the lane's reported '0 failed' covered a 2536-test SUBSET, not the floor; the floor showed 8 citation suites red because ~185 added bin/fleet.py lines were never re-pointed. Fixed by the supervisor with tools/repoint_self_citations.py 2127983 (40 of 53 re-pointed); both citation suites then green, 23 passed.",
+      "command": "python3 tools/repoint_self_citations.py 2127983; uv run --python 3.12 -m pytest -q tests/test_retired_sid_citations.py tests/test_self_citations.py"
+    },
+    {
+      "claim": "the break-even RANKING in part 1 is REJECTED by the gate: it credits a band with avoiding ONE turn, whereas a band caps every request for the generation's life. Cumulatively B* = sqrt(2kC) = 41k-184k and total cost rises with B (150k 103,322 vs 350k 187,138 vs 850k 429,998 per unit work at k=5000), inverting the lane's order. Neither model is offered as the answer; no band moves on this pass. The measured C ~ 849,667 per handoff stands.",
+      "command": "docs/lanes/w87-appendix.md section 4b; arithmetic shown in full there"
     }
   ],
   "blockers": []
