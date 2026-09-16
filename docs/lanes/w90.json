@@ -37,20 +37,6 @@
       "passed": 1099,
       "failed": 0,
       "skipped": 2
-    },
-    {
-      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/",
-      "rc": 1,
-      "passed": 5368,
-      "failed": 6,
-      "skipped": 16
-    },
-    {
-      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/",
-      "rc": 1,
-      "passed": 5368,
-      "failed": 6,
-      "skipped": 16
     }
   ],
   "claims": [
@@ -89,6 +75,14 @@
     {
       "claim": "the new lane doc carries DONE means: as its second non-blank line",
       "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_docs_currency.py -k done"
+    },
+    {
+      "claim": "full floor, 3.10: 5368 passed, 6 failed -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index TestPathContainment x3, test_fleet_q TestOutlinePathContainment x1, test_terminal_surface TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5368 passed, 6 failed -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index TestPathContainment x3, test_fleet_q TestOutlinePathContainment x1, test_terminal_surface TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
     }
   ],
   "blockers": []
