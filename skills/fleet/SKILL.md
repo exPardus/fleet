@@ -160,6 +160,8 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 
 Run `fleet wave-close --base <sha> --changelog @<file>` at the wave boundary. Reserve about 12 minutes, configure a git identity, and retry only after inspecting a failure because the operation is not idempotent across failure.
 
+Merge every landing lane with a subject starting `merge(<lane>): <summary>` -- never git's own default `Merge <branch>: ...` subject. `wave-close` attributes lane workers/tokens/external_lines by matching that literal convention against `git log --merges` in the closing range; a merge subject it cannot match is not counted as a zero-lane wave, it makes `wave-close` refuse the close and name the unattributed commit(s).
+
 ## Handoff
 
 When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin`; it dispatches the successor itself. The successor boots with its token, then the current body runs `sup-handoff-complete`. Run `sup-release` only when the handoff is stillborn, then stop.
