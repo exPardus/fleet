@@ -1,4 +1,5 @@
 # Lane w89 — full report
+DONE means: a lane row whose lane landed or was abandoned is reaped by the lane arm of the reap predicate on the next boot or wave close, pinned by a test that lands a real lane through `fleet land` and shows the row reaped without the predecessor-supervisor or daemon-dead arms.
 
 (Overflow from `docs/lanes/w89.md`, which stays under the 40-line cap.)
 
