@@ -18,6 +18,7 @@ import math
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
@@ -812,20 +813,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7483) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8378) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11551) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:7604) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:8499) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:11675) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2005) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2124) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11425) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:2518) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8628) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:11549) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:2637) -- expose that distinction to views.
+      * `_doctor_check_registry` (:8749) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4577) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12657) -- render the release explanation.
+      * `_print_snapshot_table` (:4697) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:12782) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -993,7 +994,7 @@ a whole one must not fail at all."""
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
                        spawned_by=None, dispatch_kind=None, category=None,
-                       spawned_by_lineage=None) -> dict:
+                       spawned_by_lineage=None, substrate=None) -> dict:
     """Build a SPEC §4 worker record.
     Persist launch budgets and settings sources so every subsequent dispatch uses
     the same policy. Nullable additive fields preserve compatibility on reads.
@@ -1036,6 +1037,9 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # --- M-B native-substrate fields (spec §5; None/[] on legacy records) ---
         "dispatch_kind": dispatch_kind,      # "bg" = daemon-hosted; None = pre-pivot Popen
         "category": category,                # agents-menu category (spec §5.1.3)
+        # Explicit non-Claude substrate marker (item 24), e.g. "openrouter/<slug>".
+        # None here falls back to dispatch_kind=="bg" => "claude" (_wave_record_substrate).
+        "substrate": substrate,
         # The CLI-captured short id supports the gone-to-success inference. Fast
         # completion instead derives it from the sid; that provenance depends on the
         # vendor id format. See _native_job_ref before using it as a removal reference.
@@ -1517,6 +1521,121 @@ def _worker_env(name: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# OpenRouter substrate (item 24): `--model openrouter:<slug>` dispatch.
+#
+# THE FORK (state/tasks/w93.md), settled by experiment on 2026-09-17: `--bg`
+# hands the session to the resident daemon's pre-warmed spare pool, not a
+# fresh child of the dispatching process. A probe env var set only on the
+# `claude --bg` invocation (mirroring `_worker_env`) never appeared inside
+# the session's own `env` output. A `--settings` `"env"` block DOES reach the
+# session's real process environment, but its values are literal strings --
+# `"$VAR"` is not expanded. `apiKeyHelper` is a shell command the session
+# executes itself at auth time; pointing it at the key file (never at the
+# key's value) proved out end-to-end against `stealth/union-alpha`, with the
+# model string the session itself reports in its own transcript as the
+# witness that OpenRouter, not Anthropic, served the turn.
+# ---------------------------------------------------------------------------
+
+_OPENROUTER_MODEL_RE = re.compile(r"^openrouter:(?P<slug>.+)$")
+
+
+def openrouter_key_path() -> Path:
+    """~/.config/openrouter/env: `OPENROUTER_API_KEY=...`, mode 0600 (item 24
+    binding). Read here only to prove it exists and is readable; the value is
+    never loaded into a variable that outlives the read, logged, or written
+    to any file fleet touches -- apiKeyHelper (below) reads it again itself,
+    inside the dispatched session, at auth time.
+    """
+    return Path.home() / ".config" / "openrouter" / "env"
+
+
+def _openrouter_model_slug(model):
+    """The bare slug after `openrouter:`, or None for any other model string."""
+    if not isinstance(model, str):
+        return None
+    match = _OPENROUTER_MODEL_RE.match(model)
+    return match.group("slug") if match else None
+
+
+def _require_openrouter_key_readable(key_path=None) -> Path:
+    """Refuse an `openrouter:` dispatch when the key file is missing or unreadable."""
+    path = key_path or openrouter_key_path()
+    try:
+        path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise NativeDispatchError(
+            f"openrouter model refused: key file missing or unreadable at "
+            f"{path.as_posix()} ({exc})")
+    return path
+
+
+def _openrouter_api_key_helper(key_path: Path) -> str:
+    """A shell command that prints OPENROUTER_API_KEY's value by reading
+    `key_path` itself when the dispatched session runs it -- the literal key
+    never transits fleet or a file fleet writes, only this path (not a
+    secret). Uses this same interpreter so it needs no extra binary on PATH.
+    """
+    script = (
+        "import pathlib, sys\n"
+        "text = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')\n"
+        "for line in text.splitlines():\n"
+        "    if line.startswith('OPENROUTER_API_KEY='):\n"
+        "        print(line.split('=', 1)[1])\n"
+        "        break\n"
+    )
+    return shlex.join([sys.executable, "-c", script, key_path.as_posix()])
+
+
+def _openrouter_settings_arg(settings_path, key_path: Path) -> str:
+    """Merge the base worker settings with an OpenRouter env+apiKeyHelper
+    block, returned as an inline JSON string for this dispatch's --settings
+    argv value. The base settings FILE is only read, never written -- the
+    merge happens in memory, for one dispatch.
+    """
+    base = {}
+    try:
+        text = Path(settings_path).read_text(encoding="utf-8")
+        if text.strip():
+            base = json.loads(text)
+    except (OSError, json.JSONDecodeError, ValueError):
+        base = {}
+    if not isinstance(base, dict):
+        base = {}
+    merged = dict(base)
+    env = dict(merged.get("env") or {})
+    # Empty ANTHROPIC_API_KEY: apiKeyHelper supplies the bearer credential;
+    # a stale inherited API key must not silently win instead.
+    env["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
+    env["ANTHROPIC_API_KEY"] = ""
+    merged["env"] = env
+    merged["apiKeyHelper"] = _openrouter_api_key_helper(key_path)
+    return json.dumps(merged)
+
+
+def _openrouter_dispatch_args(model, settings_path):
+    """(bare_model, settings_arg) for a dispatch's argv.
+
+    `bare_model` is `model` with any `openrouter:` prefix stripped (so it
+    lands in --model as the slug OpenRouter itself expects); `settings_arg`
+    is the inline merged-settings JSON when `model` names an OpenRouter
+    model, else `settings_path` unchanged (as a posix string). Non-OpenRouter
+    dispatch is untouched: same argv shape as before this feature existed.
+    Raises NativeDispatchError when the key file is missing or unreadable.
+    """
+    slug = _openrouter_model_slug(model)
+    if slug is None:
+        return model, Path(settings_path).as_posix()
+    key_path = _require_openrouter_key_readable()
+    return slug, _openrouter_settings_arg(settings_path, key_path)
+
+
+def _openrouter_substrate(model):
+    """`openrouter/<slug>` for a registry `substrate` field, or None."""
+    slug = _openrouter_model_slug(model)
+    return f"openrouter/{slug}" if slug is not None else None
+
+
+# ---------------------------------------------------------------------------
 # Status recompute helpers (SPEC §4, §5 status row)
 # ---------------------------------------------------------------------------
 
@@ -1987,9 +2106,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11551`), because legacy upgrades also require a complete registry.
+    (`:11675`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:892`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:893`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -4337,7 +4456,8 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             spawned_by=_spawner,
             # Stamp proven lineage under the lock to preserve ownership across sid rotation.
             spawned_by_lineage=_spawning_claim_lineage(_spawner),
-            dispatch_kind="bg", category=args.category)
+            dispatch_kind="bg", category=args.category,
+            substrate=_openrouter_substrate(args.model))
         record["last_dispatch_at"] = now_iso()
         data["workers"][args.name] = record
         save_registry(data)
@@ -5766,7 +5886,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
             None, cwd, task_for_record, mode, model=model,
             setting_sources=setting_sources, token_ceiling=token_ceiling,
             spawned_by=spawned_by, spawned_by_lineage=spawned_by_lineage,
-            dispatch_kind="bg", category=category)
+            dispatch_kind="bg", category=category,
+            substrate=_openrouter_substrate(model))
         new_record["cost_usd"] = cost_usd
         new_record["cost_baseline"] = cost_usd
         new_record["retired_sids"] = prior_retired + [old_sid]
@@ -6153,7 +6274,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:6082` / `cmd_respawn:5898`, before
+    # resolution that runs from `cmd_kill:6203` / `cmd_respawn:6019`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -6184,9 +6305,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:6082` / `cmd_respawn:5898`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6203` / `cmd_respawn:6019`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:5919-5921` spells out that design -- resolve under the lock.
+    # `cmd_respawn:6040-6042` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -9213,6 +9334,9 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     except ClaudeNotFoundError as exc:
         raise NativeDispatchError(str(exc)) from exc
     settings = Path(settings_path) if settings_path else instance_settings_path()
+    # Resolve the openrouter: prefix (if any) once, before any write, so a
+    # missing/unreadable key file refuses cleanly with no partial dispatch state.
+    dispatch_model, settings_arg = _openrouter_dispatch_args(model, settings)
     try:
         tasks_dir().mkdir(parents=True, exist_ok=True)
         # Create journals_dir before --add-dir: nonexistent directories grant nothing
@@ -9248,7 +9372,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]
-    argv += ["-n", rendered, "--settings", settings.as_posix()]
+    argv += ["-n", rendered, "--settings", settings_arg]
     # Preauthorize task and journal directories: headless workers cannot answer
     # prompts for protocol-required files outside their cwd. Do not grant the whole home.
     argv += ["--add-dir", tasks_dir().as_posix(),
@@ -9258,7 +9382,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
         argv += ["--setting-sources", setting_sources]
     argv += mode_flags(mode)
     if model:
-        argv += ["--model", model]
+        argv += ["--model", dispatch_model]
     argv.append(tiny_prompt)
     def _dispatch_once():
         """Dispatch and join using a fresh per-attempt roster snapshot.
@@ -10454,10 +10578,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:892`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:893`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:2506`) applies here too. An unreadable registry
+    rule for the view path (`:2625`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -10528,12 +10652,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:1885, :1920,
-    :1950, :2012, :2090, :2915, :6171, :6333, :6530, :6650, :6686, :6848, :6849, :6919,
-    :6929, :6940, :7034, :7509, :10480, :12950, :12951, :13012, :13813`).
+    sites that already key on the union (`:2004, :2039,
+    :2069, :2131, :2209, :3034, :6292, :6454, :6651, :6771, :6807, :6969, :6970, :7040,
+    :7050, :7061, :7155, :7630, :10604, :13075, :13076, :13137, :13938`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5436, :5772, :8954,
-    :14138. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :5556, :5893, :9075,
+    :14269. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11179,16 +11303,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5436, :5772, :8954,
-    # :14138) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:5556, :5893, :9075,
+    # :14269) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:892`), which is a write. Routing the identity read
+        # file aside (`:893`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10454`).
+        # names this gate as its reason (`:10578`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11544,7 +11668,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7480`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:7601`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -11976,7 +12100,8 @@ def _wave_record_substrate(repo, worktree):
                     record.get("cwd"), worktree):
                 continue
             substrate = record.get("substrate")
-            if substrate in {"claude", "codex"}:
+            if substrate in {"claude", "codex"} or (
+                    isinstance(substrate, str) and substrate.startswith("openrouter/")):
                 return substrate
             # Native background records predate the explicit substrate field;
             # their dispatch kind is the durable Claude marker.
@@ -13839,6 +13964,11 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         exe = resolve_claude_executable(which=which)
     except ClaudeNotFoundError as exc:
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues")
+    try:
+        successor_model, settings_arg = _openrouter_dispatch_args(
+            getattr(args, "model", None), instance_settings_path())
+    except NativeDispatchError as exc:
+        raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues") from exc
     with fleet_lock():
         # Do not mint a pending generation before lock-free dispatch and handoff.
         # Deliver notices after commit: legacy upgrade may still create a generation
@@ -13924,15 +14054,16 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = _successor_worker_name(successor_inc)
-    # Use the rendered instance settings so the successor receives fleet hooks.
+    # Use the rendered instance settings (merged with the OpenRouter env block
+    # when the successor's model names one) so the successor receives fleet hooks.
     argv = [exe, "--bg", "-n", name,
-            "--settings", instance_settings_path().as_posix()]
+            "--settings", settings_arg]
     # Carry the claim holder's optional settings-source selection.
     succ_setting_sources = _claim_holder_setting_sources(claim)
     if succ_setting_sources:
         argv += ["--setting-sources", succ_setting_sources]
     if getattr(args, "model", None):
-        argv += ["--model", args.model]
+        argv += ["--model", successor_model]
     # Map both explicit and default fleet permission modes through mode_flags;
     # the parser rejects raw Claude mode spellings before dispatch.
     argv += mode_flags(getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE)
