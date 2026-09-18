@@ -138,7 +138,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
-- `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state.
+- `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state; `body` names the holder's registry model and substrate (e.g. `openrouter/<slug>`) when the row records them.
 - `fleet sup-guard [--do] [--json]`: verify the two-live-body guard: fresh heartbeat + live busy/idle PID → `OK` (no page or wake), stale + live idle PID → `WAKE <body>`, stale + no live PID → `DISPATCH`, fresh + no live PID or unreadable registry/roster → `PAGE`. Existing ambiguity checks still page, and a live body never permits `DISPATCH`. `--do` re-verifies and sends the wake brief only on `WAKE`; `OK` and `PAGE` perform no action. `DISPATCH` pages the interface, which alone owns `sup-spawn`; neither guard nor keeper spawns.
 - `fleet sup-context [--sid SID] [--json]`: report this session's context occupancy against its tier band.
 - `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json] [--nonce VALUE]`: route an operator-only decision.
