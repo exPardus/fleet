@@ -813,20 +813,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7657) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8552) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11743) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:7709) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:8604) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:11795) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2177) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2185) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11617) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:2690) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8802) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:11669) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:2736) -- expose that distinction to views.
+      * `_doctor_check_registry` (:8854) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4750) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12851) -- render the release explanation.
+      * `_print_snapshot_table` (:4799) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:13035) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -994,7 +994,7 @@ a whole one must not fail at all."""
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
                        spawned_by=None, dispatch_kind=None, category=None,
-                       spawned_by_lineage=None, substrate=None) -> dict:
+                       spawned_by_lineage=None, substrate=None, branch=None) -> dict:
     """Build a SPEC §4 worker record.
     Persist launch budgets and settings sources so every subsequent dispatch uses
     the same policy. Nullable additive fields preserve compatibility on reads.
@@ -1003,6 +1003,14 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
     return {
         "session_id": session_id,
         "cwd": str(cwd),
+        # The lane branch the worker was dispatched on, kept beside `cwd` because
+        # the worktree directory is temporary by design: the routine tidy-up
+        # (`git worktree remove`) deletes it, and a join key the cleanup step
+        # deletes is the defect (queue item 16). `wave-close` joins a merge
+        # subject to this record by branch, so a landed lane stays attributable
+        # after its worktree is pruned. None on a non-git cwd and on records
+        # written before this field existed -- those fall back to the worktree.
+        "branch": branch,
         # Share the cap with read_brief: equality means the snapshot may be truncated.
         "task": task[:LEGACY_TASK_SNAPSHOT_CHARS],
         "mode": mode,
@@ -2159,7 +2167,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11743`), because legacy upgrades also require a complete registry.
+    (`:11795`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:893`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -2609,6 +2617,44 @@ def _worktree_deny_rules(cwd) -> list:
     if not isinstance(deny, list):
         return []
     return [rule for rule in deny if isinstance(rule, str)]
+
+
+_HEAD_REF_PREFIX = "ref: refs/heads/"
+
+
+def _worktree_branch(cwd) -> str | None:
+    """Return the branch checked out at ``cwd``, or None if it has none.
+
+    Dispatched lanes are recorded with the branch they run on so `wave-close`
+    can join a merge subject to the lane's record without the worktree
+    directory that the tidy-up deletes (queue item 16).
+
+    Read from the worktree's own HEAD file rather than by running git: a
+    dispatch should not pay a subprocess for a record field, and the file is
+    exactly what `git symbolic-ref --short HEAD` reads. A linked worktree
+    keeps `.git` as a file naming its gitdir; a plain checkout keeps it as a
+    directory. A non-repository cwd, a detached HEAD and an unreadable file
+    all yield None -- absence must stay distinguishable from a branch name.
+    """
+    dot_git = Path(cwd) / ".git"
+    try:
+        if dot_git.is_dir():
+            gitdir = dot_git
+        elif dot_git.is_file():
+            pointer = dot_git.read_text(encoding="utf-8").strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            gitdir = Path(pointer[len("gitdir:"):].strip())
+            if not gitdir.is_absolute():
+                gitdir = Path(cwd) / gitdir
+        else:
+            return None
+        head = (gitdir / "HEAD").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not head.startswith(_HEAD_REF_PREFIX):
+        return None
+    return head[len(_HEAD_REF_PREFIX):].strip() or None
 
 
 def _permission_stalls(workers: dict, roster_entries: list, now=None) -> list:
@@ -4510,7 +4556,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             # Stamp proven lineage under the lock to preserve ownership across sid rotation.
             spawned_by_lineage=_spawning_claim_lineage(_spawner),
             dispatch_kind="bg", category=args.category,
-            substrate=_openrouter_substrate(args.model))
+            substrate=_openrouter_substrate(args.model),
+            # Item 16: the lane branch is the durable join key for wave-close;
+            # the worktree it is read from is the part that gets deleted.
+            branch=_worktree_branch(cwd))
         record["last_dispatch_at"] = now_iso()
         data["workers"][args.name] = record
         save_registry(data)
@@ -5940,7 +5989,10 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
             setting_sources=setting_sources, token_ceiling=token_ceiling,
             spawned_by=spawned_by, spawned_by_lineage=spawned_by_lineage,
             dispatch_kind="bg", category=category,
-            substrate=_openrouter_substrate(model))
+            substrate=_openrouter_substrate(model),
+            # Item 16: same durable join key as the initial dispatch -- a
+            # respawned lane must stay attributable after its worktree goes.
+            branch=_worktree_branch(cwd))
         new_record["cost_usd"] = cost_usd
         new_record["cost_baseline"] = cost_usd
         new_record["retired_sids"] = prior_retired + [old_sid]
@@ -6327,7 +6379,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:6256` / `cmd_respawn:6072`, before
+    # resolution that runs from `cmd_kill:6308` / `cmd_respawn:6124`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -6358,9 +6410,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:6256` / `cmd_respawn:6072`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6308` / `cmd_respawn:6124`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:6093-6095` spells out that design -- resolve under the lock.
+    # `cmd_respawn:6145-6147` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -10644,7 +10696,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:893`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:2678`) applies here too. An unreadable registry
+    rule for the view path (`:2724`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -10715,12 +10767,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:2004, :2039,
-    :2066, :2094, :2122, :2184, :2262, :3087, :6345, :6507, :6704, :6824, :6860, :7022, :7023, :7093,
-    :7103, :7114, :7208, :7683, :10667, :13153, :13154, :13215, :14019`).
+    sites that already key on the union (`:2012, :2047,
+    :2074, :2102, :2130, :2192, :2270, :3133, :6397, :6559, :6756, :6876, :6912, :7074, :7075, :7145,
+    :7155, :7166, :7260, :7735, :10719, :13337, :13338, :13399, :14203`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5609, :5946, :9128,
-    :14352. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :5658, :5998, :9180,
+    :14536. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11371,8 +11423,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5609, :5946, :9128,
-    # :14352) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:5658, :5998, :9180,
+    # :14536) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11380,7 +11432,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:893`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10641`).
+        # names this gate as its reason (`:10693`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11736,7 +11788,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7654`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:7706`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -12147,35 +12199,113 @@ def _wave_same_path(left, right):
         return False
 
 
-def _wave_record_substrate(repo, worktree):
+def _wave_registry_workers(repo) -> dict:
+    """Read this repo's worker records read-only, without repair or a lock.
+
+    `wave-close` derives every figure it publishes from these records, so an
+    unreadable registry must read as "no records" -- the callers then report
+    UNJOINED or UNMEASURED rather than a zero they did not measure.
+    """
+    registry = Path(repo) / "state" / "fleet.json"
+    try:
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return {}
+    workers = payload.get("workers") if isinstance(payload, dict) else None
+    return workers if isinstance(workers, dict) else {}
+
+
+def _wave_substrate_of_record(record):
+    """Read the substrate a registry record names, or None when it names none."""
+    if not isinstance(record, dict):
+        return None
+    substrate = record.get("substrate")
+    if substrate in {"claude", "codex"} or (
+            isinstance(substrate, str) and substrate.startswith("openrouter/")):
+        return substrate
+    # Native background records predate the explicit substrate field;
+    # their dispatch kind is the durable Claude marker.
+    if record.get("dispatch_kind") == "bg":
+        return "claude"
+    return None
+
+
+def _wave_lane_join(repo, lane, run=subprocess.run, workers=None):
+    """Join a merge-subject lane token to its registry record and worktree.
+
+    The merge subject carries the lane BRANCH (``merge(w99/lane-join): ...``,
+    the form `fleet land` prints), and the worker record keeps that branch
+    beside ``cwd``, so the join survives ``git worktree remove`` -- the
+    routine tidy-up step that used to delete the only join key (queue item
+    16). The worktree table stays as the fallback for records written before
+    the branch was kept and for lanes dispatched outside this home.
+
+    Returns ``(worktree, name, record)``. All three are None when the lane
+    joins to nothing at all; a caller must then report UNJOINED rather than
+    fold the lane into a figure it did not measure (queue item 26).
+    """
+    if workers is None:
+        workers = _wave_registry_workers(repo)
+    worktree = _wave_lane_worktree(repo, lane, run=run)
+    for name, record in workers.items():
+        if isinstance(record, dict) and record.get("branch") == lane:
+            return worktree, name, record
+    if worktree is None:
+        return None, None, None
+    for name, record in workers.items():
+        if isinstance(record, dict) and _wave_same_path(record.get("cwd"), worktree):
+            return worktree, name, record
+    # A worktree with no record: the lane is this repo's, its substrate is not.
+    return worktree, None, None
+
+
+def _wave_unjoined_lanes(repo, lanes, run=subprocess.run) -> list:
+    """Return the lanes that parsed from a merge subject but joined to nothing.
+
+    A parsed-but-unjoined lane is exactly as unattributable as an unparsed
+    merge: it has no substrate, no session and no token total, so every figure
+    derived from it would be a confident zero. `cmd_wave_close` refuses on this
+    list for the same reason it refuses on `unparsed` (queue item 14), and the
+    refusal names the lane instead of printing `unknown` (queue item 26).
+    """
+    if not lanes:
+        return []
+    workers = _wave_registry_workers(repo)
+    unjoined = []
+    for lane, _substrate, _sha in lanes:
+        worktree, name, _record = _wave_lane_join(
+            repo, lane, run=run, workers=workers)
+        if worktree is None and name is None:
+            unjoined.append(lane)
+    return unjoined
+
+
+def _wave_record_substrate(repo, worktree, record=None):
     """Read a substrate only from a record tied to ``worktree``.
 
     The fleet registry is the source for native worker records when it carries
     the explicit field. mcx records live in the lane worktree; their saved
     ``cwd`` plus the ``codex`` executable marker is the mcx record. Neither a
     branch name nor commit-message trailers are evidence of the substrate.
+
+    ``record`` is the record a caller already joined to the lane by branch;
+    it is read first so a lane whose worktree has been pruned still reports
+    its substrate.
     """
+    if record is not None:
+        substrate = _wave_substrate_of_record(record)
+        if substrate is not None:
+            return substrate
     if worktree is None:
         return "unknown"
-    registry = Path(repo) / "state" / "fleet.json"
-    try:
-        payload = json.loads(registry.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        payload = None
-    workers = payload.get("workers") if isinstance(payload, dict) else None
-    if isinstance(workers, dict):
-        for record in workers.values():
-            if not isinstance(record, dict) or not _wave_same_path(
-                    record.get("cwd"), worktree):
-                continue
-            substrate = record.get("substrate")
-            if substrate in {"claude", "codex"} or (
-                    isinstance(substrate, str) and substrate.startswith("openrouter/")):
-                return substrate
-            # Native background records predate the explicit substrate field;
-            # their dispatch kind is the durable Claude marker.
-            if record.get("dispatch_kind") == "bg":
-                return "claude"
+    workers = _wave_registry_workers(repo)
+    for record in workers.values():
+        if not isinstance(record, dict) or not _wave_same_path(
+                record.get("cwd"), worktree):
+            continue
+        substrate = _wave_substrate_of_record(record)
+        if substrate is not None:
+            return substrate
 
     jobs = Path(worktree) / ".mcx"
     try:
@@ -12206,6 +12336,7 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
                        f"{base}..HEAD", run=run)
     lanes = []
     unparsed = []
+    workers = _wave_registry_workers(repo)
     for line in result.stdout.splitlines():
         if not line.strip():
             continue
@@ -12215,8 +12346,12 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
             unparsed.append(commit[:7])
             continue
         lane = match.group(1)
-        substrate = _wave_record_substrate(
-            repo, _wave_lane_worktree(repo, lane, run=run))
+        # The subject token is a BRANCH: join it to the lane's record first,
+        # then read the substrate from that record, so the lane stays
+        # attributable after its worktree is pruned (queue items 16 and 26).
+        worktree, _name, record = _wave_lane_join(
+            repo, lane, run=run, workers=workers)
+        substrate = _wave_record_substrate(repo, worktree, record=record)
         lanes.append((lane, substrate, commit[:7]))
     return lanes, unparsed
 
@@ -12231,29 +12366,26 @@ def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
 
     A merged branch alone is not landing evidence for the reap predicate
     (SUPERVISOR_REAP_RULE); this is the writer. Joins lane branch ->
-    worktree (git) -> registry record by cwd, the same join
-    `_wave_record_substrate` uses, since a lane's worker name is not
-    otherwise recoverable from the merge subject. Caller must hold
-    fleet_lock(). Skips lanes with no resolvable worktree, no matching
-    record, or a record already lane_state landed/abandoned.
+    registry record by the branch the record keeps, falling back to the
+    worktree table for records written before that field existed, since a
+    lane's worker name is not otherwise recoverable from the merge subject
+    and the worktree the old join needed is deleted by the routine tidy-up
+    (queue item 16). Caller must hold fleet_lock(). Skips lanes that join to
+    no record, or to a record already lane_state landed/abandoned.
     """
     if not lanes:
         return []
     data = load_registry()
     marked = []
     for lane, _substrate, _sha in lanes:
-        worktree = _wave_lane_worktree(repo, lane, run=run)
-        if worktree is None:
+        _worktree, name, record = _wave_lane_join(
+            repo, lane, run=run, workers=data["workers"])
+        if name is None or not isinstance(record, dict):
             continue
-        for name, record in data["workers"].items():
-            if not isinstance(record, dict):
-                continue
-            if not _wave_same_path(record.get("cwd"), worktree):
-                continue
-            if record.get("lane_state") in ("landed", "abandoned"):
-                continue
-            record["lane_state"] = "landed"
-            marked.append(name)
+        if record.get("lane_state") in ("landed", "abandoned"):
+            continue
+        record["lane_state"] = "landed"
+        marked.append(name)
     if marked:
         save_registry(data)
     return marked
@@ -12305,10 +12437,12 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
         roots = [Path(repo)]
     else:
         roots = []
+        workers = _wave_registry_workers(repo)
         for lane, substrate, _sha in lanes:
             if substrate != "codex":
                 continue
-            worktree = _wave_lane_worktree(repo, lane, run=run)
+            worktree = _wave_lane_join(
+                repo, lane, run=run, workers=workers)[0]
             if worktree is not None:
                 roots.append(Path(worktree))
             else:
@@ -12397,31 +12531,40 @@ def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
 
     The roster has no usage field, so this reads ``state/outcomes``.  It is
     bounded to the current wave by first joining each landed Claude lane to
-    its current registry record through the lane worktree, then accepting only
-    outcome rows whose ``session_id`` equals that record's current session id.
-    Historical rows from other workers and retired session ids are excluded.
+    its current registry record by branch (worktree as the fallback), then
+    accepting only outcome rows whose ``session_id`` equals that record's
+    current session id. Historical rows from other workers and retired
+    session ids are excluded.
+
+    A lane whose substrate could not be read at all is not evidence of zero
+    Claude tokens: it may have been a Claude lane whose usage this function
+    then cannot see, so the total is UNMEASURED. Only a lane list in which
+    every lane names a non-Claude substrate is a measured zero (queue item
+    26: `tokens: 0` on an unattributable wave is the same lie `MEASURED 0`
+    was).
     """
-    registry = Path(repo) / "state" / "fleet.json"
-    try:
-        payload = json.loads(registry.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeError, ValueError):
-        return "UNMEASURED (outcomes ledger or registry missing)"
-    workers = payload.get("workers") if isinstance(payload, dict) else None
-    if not isinstance(workers, dict):
+    unreadable = [lane for lane, substrate, _sha in lanes
+                  if substrate == "unknown"]
+    if unreadable:
+        return ("UNMEASURED (lane substrate unknown: "
+                + ", ".join(unreadable) + ")")
+    claude_lanes = [lane for lane, substrate, _sha in lanes
+                    if substrate == "claude"]
+    if not claude_lanes:
+        # Every lane named a non-Claude substrate, so a zero here is measured
+        # evidence rather than a missing source.
+        return "0"
+    workers = _wave_registry_workers(repo)
+    if not workers:
         return "UNMEASURED (outcomes ledger or registry missing)"
     sessions = []
-    for lane, substrate, _sha in lanes:
-        if substrate != "claude":
-            continue
-        worktree = _wave_lane_worktree(repo, lane, run=run)
-        matches = [record for record in workers.values()
-                   if isinstance(record, dict)
-                   and _wave_same_path(record.get("cwd"), worktree)]
-        if len(matches) != 1 or not matches[0].get("session_id"):
+    for lane in claude_lanes:
+        _worktree, name, record = _wave_lane_join(
+            repo, lane, run=run, workers=workers)
+        if name is None or not isinstance(record, dict) \
+                or not record.get("session_id"):
             return "UNMEASURED (Claude lane session missing from registry)"
-        sessions.append(str(matches[0]["session_id"]))
-    if not sessions:
-        return "0"
+        sessions.append(str(record["session_id"]))
     outcome_root = Path(repo) / "state" / "outcomes"
     try:
         paths = sorted(outcome_root.glob("*.jsonl"))
@@ -12467,14 +12610,27 @@ def _wave_external_lines(repo, lanes, base, run=subprocess.run):
     THIS repository and nothing else: a lane ``_wave_lane_worktree`` resolves is
     by construction a worktree of this repository, so its lines landed here --
     even though the worktree directory is a SIBLING of the repository root, not
-    a child of it.  A lane it cannot resolve either worked in another repository
-    or has had its worktree pruned, and those two are indistinguishable from
-    here, so that lane leaves the count UNMEASURED rather than counted as zero.
+    a child of it.  A lane whose worktree has been pruned is still this repo's
+    lane when its registry record keeps the branch the merge subject names, so
+    the count survives the routine tidy-up (queue item 16). A lane that joins
+    to neither a worktree nor a record either worked in another repository or
+    was never registered here, and those two are indistinguishable from here,
+    so that lane leaves the count UNMEASURED rather than counted as zero.
     """
     if not lanes:
         return "0 (MEASURED: no lanes landed this wave)"
-    unresolved = [lane for lane, _substrate, _sha in lanes
-                  if _wave_lane_worktree(repo, lane, run=run) is None]
+    workers = _wave_registry_workers(repo)
+    unresolved = []
+    for lane, _substrate, _sha in lanes:
+        worktree, name, _record = _wave_lane_join(
+            repo, lane, run=run, workers=workers)
+        # A record joined by branch is this repo's lane even after its
+        # worktree is pruned: the branch is a ref of THIS repository (that is
+        # where the merge subject was read), so its lines landed here. Only a
+        # lane that joins to neither is indistinguishable from one that
+        # worked in another repository (queue item 16).
+        if worktree is None and name is None:
+            unresolved.append(lane)
     if unresolved:
         return ("UNMEASURED (no cross-repo line receipt; lane worktree not in "
                 "this repo: " + ", ".join(unresolved) + ")")
@@ -12696,6 +12852,25 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "measure. Re-merge with a `merge(<lane>): <subject>` message (see "
             "skills/fleet/SKILL.md#wave-boundary) and retry.")
 
+    # A lane that PARSED but joins to nothing is as unattributable as an
+    # unparsed merge: no substrate, no session, no token total, so every
+    # figure below would be a confident zero for it. Wave 86 published
+    # `workers: 2 (w93: unknown, w92: unknown); tokens: 0; ... reaped: 0` on a
+    # 701-line wave for exactly this reason (queue items 25 and 26). Refuse
+    # here, beside the unparsed refusal and before the claim, the reap and the
+    # floor, rather than after paying for a close that cannot be honest.
+    unjoined = _wave_unjoined_lanes(repo, lanes, run=run)
+    if unjoined:
+        raise FleetCliError(
+            f"wave-close: UNJOINED: {len(unjoined)} of {len(lanes)} landed "
+            f"lane(s) in {base}..HEAD resolve to no registry record and no "
+            f"worktree ({', '.join(unjoined)}) -- refusing to publish "
+            "workers/tokens/external_lines/tokens_per_bin_line it could not "
+            "measure. The merge subject names the lane BRANCH; `fleet spawn` "
+            "records that branch on the worker row, so a lane registered "
+            "before that field existed needs its row's `branch` set (or its "
+            "worktree restored) before this wave can close.")
+
     # Claim first: the reap, floor, and git operations below can take time,
     # but an unclaimed body must not perform even the janitorial mutation.
     with fleet_lock():
@@ -12731,12 +12906,21 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     token_values = [claude_tokens, codex_tokens]
     unknown = [value for value in token_values
                if value.startswith("UNMEASURED")]
-    token_text = ("UNMEASURED (" + "; ".join(value[len("UNMEASURED ("):-1]
-                                                for value in unknown) + ")"
-                  if unknown else str(sum(int(value) for value in token_values)))
+    # A lane whose substrate could not be read contributes to no token source
+    # here, so the total is short by an unknown amount. Summing what remains
+    # would print that shortfall as a measured total (queue item 26: wave 86
+    # printed `tokens: 0` on a wave whose two lanes' substrates both read
+    # `unknown`).
+    unknown_substrate = [name for name, substrate, _sha in lanes
+                         if substrate == "unknown"]
+    reasons = [value[len("UNMEASURED ("):-1] for value in unknown]
+    if unknown_substrate:
+        reasons.append("lane substrate unknown: " + ", ".join(unknown_substrate))
+    token_text = ("UNMEASURED (" + "; ".join(reasons) + ")" if reasons
+                  else str(sum(int(value) for value in token_values)))
     bin_added = buckets["bin"][0]
     tokens_per_bin_line = ("UNMEASURED (token source or added bin lines missing)"
-                           if unknown or bin_added == 0 else
+                           if reasons or bin_added == 0 else
                            f"{int(token_text) / bin_added:.2f}"
                            f" ({token_text} tokens / {bin_added} added bin lines)")
     external_lines = _wave_external_lines(repo, lanes, base, run=run)

@@ -84,7 +84,11 @@ def test_land_commits_allowed_dirty_paths_rebases_and_is_idempotent(
     # subject convention; a GREEN `land` prints the exact command so the
     # supervisor about to merge reads it, rather than the convention being
     # enforced by a regex documented nowhere (queue item 14).
-    assert "next: git merge --no-ff -m 'merge(w1): <summary>' w1/example" in out
+    # The subject carries the BRANCH, not the short lane: `wave-close` resolves
+    # that token as a branch name to join the lane to its registry record, so
+    # the short-lane form parsed and joined to nothing -- wave 86 published
+    # zeros on a 701-line wave that way (queue item 26). Printed and run agree.
+    assert "next: git merge --no-ff -m 'merge(w1/example): <summary>' w1/example" in out
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
     assert _git(lane, "rev-parse", "HEAD").stdout.strip() == first_tip
 

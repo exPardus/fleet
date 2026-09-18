@@ -326,8 +326,15 @@ def cmd_land(args) -> int:
     # convention (skills/fleet/SKILL.md#wave-boundary); a GREEN verdict prints
     # the exact command here, where the supervisor about to merge will read
     # it, rather than leaving it enforced by a regex documented nowhere.
+    # The subject carries the BRANCH, not the short lane: wave-close resolves
+    # the subject token as a branch name to join the lane to its registry
+    # record and worktree, and `merge(w93)` joins to nothing while
+    # `merge(w93/openrouter-substrate)` joins. Printed and run must agree --
+    # w91 shipped the short-lane form one wave after the convention it
+    # documents, and wave 86 published zeros on a 701-line wave because of it
+    # (queue item 26).
     next_line = (None if red else
-                 f"next: git merge --no-ff -m 'merge({lane}): <summary>' {lane_branch}")
+                 f"next: git merge --no-ff -m 'merge({lane_branch}): <summary>' {lane_branch}")
     trailer = 1 if red else 2
     available = 10 - trailer - len(lines)
     if len(checks) <= available:
