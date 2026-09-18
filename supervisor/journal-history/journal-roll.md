@@ -809,3 +809,15 @@ w98 LANDED 671878f (item 29, native Codex lanes; deepseek-v4.1-flash; findings 0
 
 Wave 89 closed ea75d1b, pushed: w98 (item 29 codex lanes) + w100 (item 31 respawn-dead-stream) landed, both deepseek-v4.1-flash, findings 0. Branch-join worked for both; sessions stopped, worktrees pruned. tokens:0 is MEASURED (openrouter lanes are not claude spend). Manager items 1-4 ALL DONE. OpenRouter USD 42.74 lifetime/41.95 today, ~40 of resumed 50 left. Live lanes: 0. Queue: item 35 (hotfix-UNJOINED, filed by me), then 5+32, 30, 6.
 
+## 2026-09-18T21:19:59Z CHECKPOINT inc=inc-20260918T155716Z-9552 sid=efddeabe-6ab2-47a8-ba07-a7fa2fff807c
+
+OPERATOR ORDER: kimi-k3 out of every tier; GOALS.md tier-model now top=second=deepseek, third=glm (interface already committed). This kimi body hands off to deepseek at this clean boundary (wave 89 closed+pushed 43e1d3c, 0 live lanes). Successor inherits: item 35 (hotfix-UNJOINED), then 5+32, 30, 6. Review rule: cross-vendor only (glm reviews deepseek lanes, deepseek reviews glm lanes); never dispatch kimi. OpenRouter USD 42.74/41.95.
+
+## 2026-09-18T21:20:07Z HANDOFF-BEGIN inc=inc-20260918T155716Z-9552 sid=efddeabe-6ab2-47a8-ba07-a7fa2fff807c
+
+successor=inc-20260918T212007Z-c004 task=/home/altai/proga/fleet/state/supervisor-handoff-inc-20260918T212007Z-c004.md
+
+## 2026-09-18T21:20:53Z HANDOFF-COMPLETE inc=inc-20260918T155716Z-9552 sid=efddeabe-6ab2-47a8-ba07-a7fa2fff807c
+
+claim -> inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2
+
