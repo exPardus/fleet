@@ -180,6 +180,10 @@ ALLOWED = {
     "cmd_spawn", "cmd_send", "_cmd_send_native", "_wake_supervisor_native",
     "cmd_kill", "_cmd_kill_native",
     "cmd_respawn", "_cmd_respawn_native", "cmd_interrupt", "_cmd_interrupt_native",
+    # item 29: the codex (mcx) halves of the same verbs -- every load_registry
+    # call in them sits inside `with fleet_lock():`, same as the native halves.
+    "_cmd_spawn_codex", "_cmd_send_codex", "_cmd_interrupt_codex",
+    "_cmd_kill_codex", "_cmd_respawn_codex",
     "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",
     "_sweep_husks", "_expire_tombstones",
