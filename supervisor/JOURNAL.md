@@ -1,19 +1,3 @@
-## 2026-09-18T21:21:20Z CHECKPOINT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
-
-claim received via handoff from inc-20260918T155716Z-9552
-
-## 2026-09-18T21:26:50Z BOOT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
-
-resumed own claim: resumed own claim after 331s -- continuity proved, no seizure
-
-## 2026-09-18T21:29:19Z BOOT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
-
-resumed own claim: resumed own claim after 149s -- continuity proved, no seizure
-
-## 2026-09-18T21:31:28Z BOOT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
-
-resumed own claim: resumed own claim after 130s -- continuity proved, no seizure
-
 ## 2026-09-18T21:32:22Z CHECKPOINT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
 
 MANAGER ORDER (interface relay, 09-19): polymarket gets this host's lane capacity; fleet dispatches no new lanes. Nothing in flight; wave 89 already closed and pushed.
@@ -27,3 +11,7 @@ resumed own claim: resumed own claim after 699s -- continuity proved, no seizure
 ## 2026-09-18T21:45:56Z CHECKPOINT inc=inc-20260918T212007Z-c004 sid=a3ca3705-4384-440e-9703-52e2358c196c substrate=openrouter/deepseek/deepseek-v4.1-flash
 
 Boot bundle: verdict resume after 699s, continuity proved, no seizure. Manager order 09-19: kimi-k3 banned outright; every review glm<->deepseek; OpenRouter USD 34, hard floor 20, interface stops all at 22; no speculative lanes, short turns. Fleet dispatches no new lanes (polymarket holds lane capacity); wave 89 closed and pushed. Beat: status clean, autoclean archived 0 / skipped 57, no limited rows. Holding claim idle.
+
+## 2026-09-18T21:50:04Z CHECKPOINT inc=inc-20260918T212007Z-c004 sid=a3ca3705-4384-440e-9703-52e2358c196c substrate=openrouter/deepseek/deepseek-v4.1-flash
+
+Kimi ban verified mechanically: grep over tracked config finds kimi only in historical docs/journals and one test docstring -- no tier, worker-settings or spawn path references it, so the ban needs no code change. Found and raised the real residue defect: hotfix-wake-after-seize is unsweepable (dead, landed, session_id=null; archive skips 'not-native', reap needs a session) -- parked via sup-decision for the operator, notified the interface. Predecessor row 7b7c is only ttl-not-elapsed and self-resolves; its unread mail is not the blocker. Holding claim idle, no dispatch.

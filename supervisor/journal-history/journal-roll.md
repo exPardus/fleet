@@ -821,3 +821,19 @@ successor=inc-20260918T212007Z-c004 task=/home/altai/proga/fleet/state/superviso
 
 claim -> inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2
 
+## 2026-09-18T21:21:20Z CHECKPOINT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
+
+claim received via handoff from inc-20260918T155716Z-9552
+
+## 2026-09-18T21:26:50Z BOOT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
+
+resumed own claim: resumed own claim after 331s -- continuity proved, no seizure
+
+## 2026-09-18T21:29:19Z BOOT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
+
+resumed own claim: resumed own claim after 149s -- continuity proved, no seizure
+
+## 2026-09-18T21:31:28Z BOOT inc=inc-20260918T212007Z-c004 sid=5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2 substrate=openrouter/deepseek/deepseek-v4.1-flash
+
+resumed own claim: resumed own claim after 130s -- continuity proved, no seizure
+
