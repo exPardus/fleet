@@ -236,9 +236,13 @@ class TestWakeRefusesOnChangedClaim:
         return run
 
     def test_refuses_when_incarnation_mismatches(self, wake_home, monkeypatch):
+        """Someone else holds the claim: a different incarnation AND a
+        different sid. (A different incarnation under this body's OWN sid is
+        a seize by this body, which a wake must resume -- item 27a,
+        `TestWakeAfterSeize`.)"""
         _seed_supervisor_worker(wake_home, sid=OLD_SID, status="idle")
         fleet.append_outcome(NAME, {"ts": _iso(NOW), "session_id": OLD_SID, "kind": "result"})
-        _seed_claim(incarnation_id="inc-SOMEONE-ELSE")
+        _seed_claim(incarnation_id="inc-SOMEONE-ELSE", session_id="someone-elses-sid")
         monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence((True, [])))
 
         with pytest.raises(fleet.FleetCliError, match="claim changed"):
@@ -280,3 +284,66 @@ class TestWakeRefusesOnChangedClaim:
         with pytest.raises(fleet.FleetCliError, match="claim changed"):
             fleet.cmd_send(_send_args(message="wake up"), run=self._run(),
                            which=lambda _: "claude", sleep=lambda s: None)
+
+
+class TestWakeAfterSeize:
+    """Queue item 27a (MEASURED 2026-09-18): a seize keeps the body's sid but
+    mints a new incarnation id, and never renames the roster row. The wake
+    path used to take the incarnation from the ROW NAME, so after any seize
+    every wake to that body refused with `claim changed since the wake
+    decision` for the rest of the generation, while mailbox delivery to the
+    same body -- mid-turn -- kept working. The live claim is the authority
+    when its holder record is this very body."""
+
+    SEIZED = "inc-seized-by-this-body"
+
+    def test_wake_resumes_a_body_that_seized_under_a_new_incarnation(
+            self, wake_home, monkeypatch):
+        _seed_supervisor_worker(wake_home, sid=OLD_SID, status="idle")
+        fleet.append_outcome(NAME, {"ts": _iso(NOW), "session_id": OLD_SID, "kind": "result"})
+        _seed_claim(incarnation_id=self.SEIZED, session_id=OLD_SID,
+                    extra={"claimed_via": "seize"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []), (True, []),
+            (True, [_make_roster_entry(NEW_SID, status="idle", state="working")]),
+        ))
+
+        rc = fleet.cmd_send(_send_args(message="wake up"), run=_fake_dispatch_run(),
+                            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+
+        task = fleet.task_file_path(NAME).read_text(encoding="utf-8")
+        assert self.SEIZED in task                  # the claim's incarnation, not the row's
+        assert "incarnation inc-wtest," not in task
+
+        wake_nonce = re.search(r"--nonce (\S+)", task).group(1)
+
+        def boot_roster_run(argv, **kw):
+            entries = [_make_roster_entry(NEW_SID, status="idle", state="working")]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(entries), stderr="")
+
+        boot_rc = fleet.cmd_sup_boot(
+            SimpleNamespace(sid=NEW_SID, handoff_inc=None, nonce=wake_nonce),
+            which=lambda _: "C:/fake/claude.cmd", run=boot_roster_run)
+        assert boot_rc == 0
+        claim = fleet.read_incarnation()
+        assert claim["incarnation_id"] == self.SEIZED   # resumed, not a new generation
+        assert claim["session_id"] == NEW_SID
+
+    def test_a_different_body_holding_the_claim_still_refuses(self, wake_home, monkeypatch):
+        """The guard's real job survives: a claim held by ANOTHER sid under
+        another incarnation is a body this wake could never resume."""
+        _seed_supervisor_worker(wake_home, sid=OLD_SID, status="idle")
+        fleet.append_outcome(NAME, {"ts": _iso(NOW), "session_id": OLD_SID, "kind": "result"})
+        _seed_claim(incarnation_id=self.SEIZED, session_id="another-body-entirely",
+                    extra={"claimed_via": "seize"})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence((True, [])))
+
+        def run(argv, **kw):
+            raise AssertionError("must not dispatch a wake that cannot resume the claim")
+
+        with pytest.raises(fleet.FleetCliError, match="claim changed"):
+            fleet.cmd_send(_send_args(message="wake up"), run=run,
+                           which=lambda _: "claude", sleep=lambda s: None)
+        rec = fleet.load_registry()["workers"][NAME]
+        assert rec["status"] == "idle"

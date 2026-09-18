@@ -5434,7 +5434,7 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
     a supervisor) and restores both the mailbox and the pre-claim on any
     failure, exactly as the ordinary fork-steer path does.
     """
-    incarnation_id = name.split("|")[1]
+    incarnation_id = _wake_incarnation(name, old_sid)  # queue item 27a
     mail, claim_path = claim_mailbox(old_sid)
 
     def _rollback_pre_claim():
@@ -15286,6 +15286,29 @@ def _absorb_minted_flag_values(argv: list) -> list:
             out.append(tok)
             i += 1
     return out
+
+
+def _wake_incarnation(name: str, old_sid: str) -> str:
+    """The incarnation a wake of supervisor row `name` must resume.
+
+    A seize keeps the body's sid but mints a new incarnation id, and it never
+    renames the roster row. Taken from the row name alone, the incarnation
+    names a dead generation for the rest of the seized one, so every wake
+    refused with `claim changed since the wake decision` while mailbox
+    delivery to the same body, mid-turn, kept working (queue item 27a,
+    MEASURED 2026-09-18). When the live claim's holder record IS this body,
+    the claim's incarnation is the one to resume. A claim held by any other
+    sid keeps the row-name value, and `_wake_supervisor_native` still refuses
+    it under the lock. Defined here, after every cited line, so the fix
+    shifts no self-citation.
+    """
+    incarnation_id = name.split("|")[1]
+    live_claim = read_incarnation()
+    live_sids = supervisor_claim_sids(live_claim)
+    if (isinstance(live_claim, dict) and live_sids and old_sid in live_sids
+            and live_claim.get("incarnation_id")):
+        return live_claim["incarnation_id"]
+    return incarnation_id
 
 
 def main(argv=None) -> int:
