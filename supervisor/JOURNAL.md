@@ -1,17 +1,17 @@
-## 2026-09-16T20:58:22Z CHECKPOINT inc=inc-20260916T205711Z-ad2a sid=d3779e11-2878-4ff7-a2cb-899b10b94949
-
-SEIZED the claim from a6c9 (sid acd22c30): holder roster-gone, heartbeat stale 6646s > 3600s -- the vanishing the interface filed as item 21, and the seizure path handled it without operator action. Boot reap collected w88/w90/w91 as daemon-dead rows, so live_lane_count=0, available_memory=4479MB, and the slot block that parked a6c9 is gone; note that the lane arm still never fired (item 19 stands exactly as filed).
-Inbox drained: the interface note of 20:30Z moved to state/inbox/done/. Queue order inherited and not re-raised: item 19 next, then 5, 6, 4 re-scoped, 8, 15, 16, 17, 7, with 20/21/22 after 19. a6c9's w92 brief was lost with its job dir; redrafting from item 19's own shape.
-Dispatching lane w92 (branch w92/stop-landed-lanes, base 9ee2b35): wave-close stops a marked-landed session via _stop_native_session_status, then reaps, so the lane arm fires in the same wave-close; live-PID protection stays exactly as strict and weakening it is a named rejected fix.
-
-## 2026-09-16T21:31:45Z CHECKPOINT inc=inc-20260916T205711Z-ad2a sid=d3779e11-2878-4ff7-a2cb-899b10b94949
-
-w92 landed and merged at edd30f6: wave-close now stops each session it marks lane_state=landed via _stop_native_session_status (outside fleet_lock, after push/prune/notify) and reaps a second time, so the lane arm fires inside the same run. Item 19 closed; item 2's three-year-old complaint with it. The lane proved by real claude --bg + claude stop that a stopped session's roster entry disappears ENTIRELY, which is why _reap_protection needed no weakening -- the rejected fix stayed rejected. land GREEN, floor 5380 passed / 6 pre-existing host-venv failures on both interpreters.
-Interface filed items 20-24 and reordered: 24 (OpenRouter substrate) jumps to right after 19, before 5. Operator widened it -- openrouter:stealth/union-alpha becomes the DEFAULT builder substrate for worker lanes in both homes once it lands, sonnet only with a written reason, opus keeps reviews and the supervisor tier. Roster of 16 measured slugs is in state/tasks/20260916-openrouter-roster.md; I am treating it as data and briefing the verb generic (--model openrouter:<slug>).
-Dispatched w93 (branch w93/openrouter-substrate, base edd30f6, sonnet -- item 24 is not landed yet, so sonnet is still the builder tier). The brief names the one fork that decides the lane: whether env set on the dispatching process reaches a claude --bg session the daemon owns. If it does not, writing the key into state/worker-settings.json is forbidden and the lane must blocker out rather than let fleet report openrouter/<slug> while silently running on Anthropic.
-
 ## 2026-09-16T22:38:07Z CHECKPOINT inc=inc-20260916T205711Z-ad2a sid=d3779e11-2878-4ff7-a2cb-899b10b94949
 
 Wave 86 closed a6f68b0 and pushed: w92 (item 19) and w93 (item 24) both landed, 701 lines. Its accounting is false and I am not letting it stand as measured -- workers unknown, tokens 0, external_lines UNMEASURED, lane_state none, stopped 0.
 CAUSE, and it is not what the interface filed. Not item 16: wave-close's own run pruned 2 worktrees at the END, so both existed when the marking ran. It is bin/fleet_land.py:330, which prints merge('{lane}') with the SHORT lane while passing the FULL branch to git. I followed that hint; every green wave before me used the branch form. _wave_lane_worktree looks up refs/heads/<lane>, so refs/heads/w93 never existed. MEASURED after the close with w93's worktree recreated: lookup 'w93' -> None, lookup 'w93/openrouter-substrate' -> the worktree. Item 14's refusal did not fire because the subject PARSES; it just cannot JOIN, which is the same measured-zero lie one layer down. Filed as item 26 with a correction appended to the interface's item 25.
 Then I fed the branch-form lane to item 19's path by hand: marked ['w93'], stopped ['w93'], reaped 1. w93's slot is free without a kill, and that is the lane arm's FIRST real firing on a live lane -- w92's fix is correct and was simply never reached in the wave that shipped it. Next lane is item 16 per the interface, which subsumes 26's join; I will brief them together and fix :330 in the same lane.
+
+## 2026-09-18T15:57:16Z SEIZED inc=inc-20260918T155716Z-9552 sid=ba86f8e4-0726-4324-9f88-a911d3f04f2d
+
+seized from inc-20260916T205711Z-ad2a: holder roster-gone, heartbeat stale (148750s > 3600s)
+
+## 2026-09-18T15:59:36Z CHECKPOINT inc=inc-20260918T155716Z-9552 sid=ba86f8e4-0726-4324-9f88-a911d3f04f2d
+
+SEIZED stale claim (148750s). Inherit w97c (openrouter-supervisor, item 28) and w98c (native codex, item 29, deadline 2026-09-20T18:16Z). Queue: w99 next when slot frees, then 5, 30, 27, 6. Memory 4245MB avail, 2 lanes live -- hold w99.
+
+## 2026-09-18T16:34:41Z CHECKPOINT inc=inc-20260918T155716Z-9552 sid=ba86f8e4-0726-4324-9f88-a911d3f04f2d
+
+w98c died on OpenRouter stream close (item 31); respawned 76b6b822, interface instructions relayed (thick journal, no subagents). w99 brief carries standing host rule. Queue: w99 next slot, then 31, then 5+32, 30, 6.
