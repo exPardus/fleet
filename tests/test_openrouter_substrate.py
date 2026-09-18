@@ -373,3 +373,200 @@ class TestSupHandoffBeginOpenrouter:
                 args, which=_fake_which,
                 run=_dispatch_then_roster(), sleep=lambda s: None)
         assert fleet.read_incarnation() == before  # claim unchanged, duty continues
+
+
+# ---------------------------------------------------------------------------
+# Item 28 (w94): the supervisor tier runs on OpenRouter too.
+# The dispatch half already routes through dispatch_bg's _openrouter_dispatch_args
+# (interface-measured live on 2026-09-18); what item 28 adds is RECORDING the
+# substrate -- on the gen-0 and successor registry rows, on the supervisor
+# journal entry header, and in sup-status -- plus the refusal/unchanged pins.
+# ---------------------------------------------------------------------------
+
+
+def _sup_spawn_args(**kw):
+    base = dict(task="run the campaign", model=None, permission_mode=None,
+                nonce=None, force_band=False, setting_sources=None)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _the_one_sup_record():
+    workers = fleet.load_registry()["workers"]
+    assert len(workers) == 1, workers
+    name = next(iter(workers))
+    assert name.startswith("sup|") and name.endswith("|boot"), name
+    return name, workers[name]
+
+
+class TestSupSpawnOpenrouter:
+    def test_dispatch_builds_bare_slug_argv_and_records_the_substrate(
+            self, native_home, openrouter_key, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        calls = []
+        rc = fleet.cmd_sup_spawn(
+            _sup_spawn_args(model="openrouter:z-ai/glm-5.3-flash"),
+            run=_fake_run_factory(calls=calls),
+            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        argv, _ = calls[0]
+        # The bare slug lands in --model; the prefix never reaches argv.
+        assert argv[argv.index("--model") + 1] == "z-ai/glm-5.3-flash"
+        assert "openrouter:" not in " ".join(argv)
+        # --settings is the inline merged blob with the apiKeyHelper, and the
+        # key's VALUE appears nowhere (item 24's binding rule, supervisor arm).
+        payload = json.loads(argv[argv.index("--settings") + 1])
+        assert payload["env"]["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+        assert "apiKeyHelper" in payload
+        assert FAKE_KEY_VALUE not in json.dumps(argv)
+        # The substrate is recorded on the supervisor's registry row.
+        _name, rec = _the_one_sup_record()
+        assert rec["model"] == "openrouter:z-ai/glm-5.3-flash"
+        assert rec["substrate"] == "openrouter/z-ai/glm-5.3-flash"
+
+    def test_missing_key_refuses_with_the_worker_paths_message(
+            self, native_home, tmp_path, monkeypatch):
+        missing = tmp_path / "nope" / "env"
+        monkeypatch.setattr(fleet, "openrouter_key_path", lambda: missing)
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        calls = []
+        with pytest.raises(fleet.FleetCliError,
+                           match="key file missing or unreadable at "
+                                 + re_escape_path(missing)):
+            fleet.cmd_sup_spawn(
+                _sup_spawn_args(model="openrouter:z-ai/glm-5.3-flash"),
+                run=_fake_run_factory(calls=calls),
+                which=lambda _: "claude", sleep=lambda s: None)
+        assert calls == []  # never reached the runner
+        assert fleet.load_registry()["workers"] == {}  # rollback left no row
+
+    def test_plain_model_spawn_is_unchanged(self, native_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_with())
+        calls = []
+        rc = fleet.cmd_sup_spawn(
+            _sup_spawn_args(model="haiku"),
+            run=_fake_run_factory(calls=calls),
+            which=lambda _: "claude", sleep=lambda s: None)
+        assert rc == 0
+        argv, _ = calls[0]
+        assert argv[argv.index("--model") + 1] == "haiku"
+        # --settings stays the plain file path, not a merged blob.
+        assert argv[argv.index("--settings") + 1] == \
+            fleet.instance_settings_path().as_posix()
+        _name, rec = _the_one_sup_record()
+        assert rec["substrate"] is None
+
+
+class TestSupHandoffBeginRecordsSubstrate:
+    def test_successor_row_records_the_substrate(self, sup_home, openrouter_key):
+        _hold()
+        calls = []
+        args = SimpleNamespace(sid="sid-old",
+                               model="openrouter:stealth/union-alpha",
+                               permission_mode=None, nonce=None)
+        rc = fleet.cmd_sup_handoff_begin(
+            args, which=_fake_which,
+            run=_dispatch_then_roster(calls=calls), sleep=lambda s: None)
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        succ = [rec for name, rec in workers.items() if name.endswith("|successor")]
+        assert len(succ) == 1, workers
+        assert succ[0]["model"] == "openrouter:stealth/union-alpha"
+        assert succ[0]["substrate"] == "openrouter/stealth/union-alpha"
+
+    def test_plain_successor_row_keeps_substrate_none(self, sup_home):
+        _hold()
+        args = SimpleNamespace(sid="sid-old", model="haiku",
+                               permission_mode=None, nonce=None)
+        rc = fleet.cmd_sup_handoff_begin(
+            args, which=_fake_which, run=_dispatch_then_roster(),
+            sleep=lambda s: None)
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        succ = [rec for name, rec in workers.items() if name.endswith("|successor")]
+        assert len(succ) == 1, workers
+        assert succ[0]["substrate"] is None
+
+
+def _register_sup_body(sid, model, substrate, name="sup|inc-body|boot"):
+    rec = fleet.new_worker_record(sid, "C:/proj", "campaign", "accept",
+                                  model=model, dispatch_kind="bg",
+                                  category=None, substrate=substrate)
+    data = fleet.load_registry()
+    data["workers"][name] = rec
+    fleet.save_registry(data)
+
+
+class TestSupStatusReportsBodySubstrate:
+    def test_json_names_the_body_model_and_substrate(self, sup_home, capsys):
+        _hold(sid="sup-sid-1")
+        _register_sup_body("sup-sid-1", "openrouter:stealth/union-alpha",
+                           "openrouter/stealth/union-alpha")
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        info = json.loads(capsys.readouterr().out)
+        assert info["body"] == {"model": "openrouter:stealth/union-alpha",
+                                "substrate": "openrouter/stealth/union-alpha"}
+
+    def test_human_form_names_the_body_model(self, sup_home, capsys):
+        _hold(sid="sup-sid-2")
+        _register_sup_body("sup-sid-2", "openrouter:z-ai/glm-5.3-flash",
+                           "openrouter/z-ai/glm-5.3-flash")
+        assert fleet.cmd_sup_status(SimpleNamespace(json=False)) == 0
+        out = capsys.readouterr().out
+        assert "body model: openrouter:z-ai/glm-5.3-flash" in out
+        assert "substrate=openrouter/z-ai/glm-5.3-flash" in out
+
+    def test_plain_body_reports_no_substrate(self, sup_home, capsys):
+        _hold(sid="sup-sid-3")
+        _register_sup_body("sup-sid-3", "sonnet", None)
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        info = json.loads(capsys.readouterr().out)
+        assert info["body"] == {"model": "sonnet", "substrate": None}
+
+    def test_no_claim_means_no_body(self, sup_home, capsys):
+        assert fleet.cmd_sup_status(SimpleNamespace(json=True)) == 0
+        info = json.loads(capsys.readouterr().out)
+        assert info["body"] is None
+
+
+class TestSupervisorJournalSubstrate:
+    def test_append_writes_and_parses_the_substrate_token(self, sup_home):
+        fleet.supervisor_journal_append(
+            "CHECKPOINT", "inc-x", "sid-1", "body text",
+            substrate="openrouter/stealth/union-alpha")
+        text = fleet.supervisor_journal_path().read_text(encoding="utf-8")
+        assert " substrate=openrouter/stealth/union-alpha\n" in text
+        entry = fleet.parse_supervisor_journal(text)[-1]
+        assert entry["kind"] == "CHECKPOINT"
+        assert entry["substrate"] == "openrouter/stealth/union-alpha"
+
+    def test_append_without_substrate_keeps_the_legacy_header(self, sup_home):
+        fleet.supervisor_journal_append("CHECKPOINT", "inc-x", "sid-1", "body text")
+        text = fleet.supervisor_journal_path().read_text(encoding="utf-8")
+        header = next(line for line in text.splitlines()
+                      if line.startswith("## ") and " CHECKPOINT " in line)
+        assert " substrate=" not in header
+        entry = fleet.parse_supervisor_journal(text)[-1]
+        assert entry["substrate"] is None
+
+    def test_legacy_headers_still_parse(self, sup_home):
+        fleet.supervisor_journal_append("BOOT", "inc-x", "sid-1", "fresh claim: x")
+        fleet.supervisor_journal_append(
+            "CHECKPOINT", "inc-x", "sid-1", "note",
+            substrate="openrouter/z-ai/glm-5.3-flash")
+        entries = fleet.parse_supervisor_journal(
+            fleet.supervisor_journal_path().read_text(encoding="utf-8"))
+        assert [e["kind"] for e in entries] == ["BOOT", "CHECKPOINT"]
+        assert entries[0]["substrate"] is None
+        assert entries[1]["substrate"] == "openrouter/z-ai/glm-5.3-flash"
+
+    def test_checkpoint_stamps_the_holder_rows_substrate(self, sup_home):
+        _hold(sid="sup-sid-9")
+        _register_sup_body("sup-sid-9", "openrouter:z-ai/glm-5.3-flash",
+                           "openrouter/z-ai/glm-5.3-flash")
+        args = SimpleNamespace(body="progress note", kind="CHECKPOINT",
+                               sid="sup-sid-9")
+        assert fleet.cmd_sup_checkpoint(args) == 0
+        entry = fleet.parse_supervisor_journal(
+            fleet.supervisor_journal_path().read_text(encoding="utf-8"))[-1]
+        assert entry["substrate"] == "openrouter/z-ai/glm-5.3-flash"

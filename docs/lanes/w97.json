@@ -1,0 +1,61 @@
+{
+  "lane": "w97",
+  "base": "3b11e0a6c6a4f2e3fbae541ff37d3cba6485618c",
+  "files_changed": [
+    "bin/fleet.py",
+    "tests/test_openrouter_substrate.py",
+    "skills/fleet/SKILL.md",
+    "docs/lanes/w94.json"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py tests/test_sup_spawn.py tests/test_supspawn_fixwave1.py tests/test_supspawn_fixwave2.py tests/test_supervisor.py tests/test_journal_roll.py tests/test_views_doctrine.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_identity_registry.py tests/test_handoff_seams.py tests/test_sup_spawn_setting_sources.py",
+      "rc": 0,
+      "passed": 829,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_openrouter_substrate.py tests/test_sup_spawn.py tests/test_supspawn_fixwave1.py tests/test_supspawn_fixwave2.py tests/test_supervisor.py tests/test_journal_roll.py tests/test_views_doctrine.py tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_identity_registry.py tests/test_handoff_seams.py tests/test_sup_spawn_setting_sources.py",
+      "rc": 0,
+      "passed": 829,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "fleet sup-spawn --model openrouter:<slug> dispatches the gen-0 supervisor body through dispatch_bg's existing _openrouter_dispatch_args route: argv carries the bare slug in --model, the inline merged settings carry env.ANTHROPIC_BASE_URL=https://openrouter.ai/api plus an apiKeyHelper that reads the key FILE, and the key's value appears nowhere in argv. The dispatch half pre-existed (dispatch_bg applies the helper to every caller; the interface measured a live openrouter supervisor body, sup|inc-20260918T155320Z-1c39|boot sid 9c41cfb7, on 2026-09-18T15:53Z) -- this lane pins it by test rather than re-deriving it.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestSupSpawnOpenrouter -v"
+    },
+    {
+      "claim": "the supervisor rows now RECORD the substrate the way the worker row does: the gen-0 record built in _dispatch_supervisor_body and the successor record built in cmd_sup_handoff_begin both stamp substrate=openrouter/<slug> via _openrouter_substrate (plain models keep None). These are the assertions that FAIL against the pre-change tree (red-first verified by stash: 10 of the 13 new tests fail pre-change; the argv/refusal/plain-model pins pass pre-change because the dispatch half already worked -- manager-confirmed, not re-derived).",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestSupSpawnOpenrouter::test_dispatch_builds_bare_slug_argv_and_records_the_substrate tests/test_openrouter_substrate.py::TestSupHandoffBeginRecordsSubstrate -v"
+    },
+    {
+      "claim": "a missing/unreadable key file refuses sup-spawn with the same message the worker path uses ('openrouter model refused: key file missing or unreadable at <path>'), before the runner is ever called, and the rollback leaves zero registry rows; a plain model keeps --settings as the plain file path and substrate None -- non-OpenRouter dispatch is byte-for-byte unchanged.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestSupSpawnOpenrouter::test_missing_key_refuses_with_the_worker_paths_message tests/test_openrouter_substrate.py::TestSupSpawnOpenrouter::test_plain_model_spawn_is_unchanged -v"
+    },
+    {
+      "claim": "sup-status names the model the body runs on: --json gains a 'body' key ({model, substrate} from the holder's registry row, None when no claim or indeterminate) and the human form prints 'body model: X substrate=Y'. The read goes through _registry_records_or_none like supervisor_claim_sids -- no lock, no probe, no quarantine; tests/test_views_doctrine.py stays green.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestSupStatusReportsBodySubstrate tests/test_views_doctrine.py -v"
+    },
+    {
+      "claim": "the supervisor journal entry header carries an optional trailing ' substrate=<s>' token: supervisor_journal_append writes it when given, _SUPERVISOR_ENTRY_RE parses it (legacy headers parse with substrate None), the seed documents it, and cmd_sup_boot (BOOT/SEIZED/LIMIT-TRANSFER) plus cmd_sup_checkpoint stamp the holder row's recorded substrate via _record_substrate_for_sid. Claim, nonce, and handoff protocols untouched; _require_openrouter_key_readable untouched.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py::TestSupervisorJournalSubstrate tests/test_journal_roll.py -v"
+    },
+    {
+      "claim": "self-citation and retired_sids-citation invariants hold after this lane's edits: the +~90 inserted lines shifted every citation below the insertion points; recomputed and fixed the quarantine-artifact readers enumeration (9 sites), the sid-union sites enumeration (25 sites, now including the two new helper sites at :2184 and :2262), the retired_sids writers enumeration (4 sites), and prose citations cmd_kill:6203->:6256, cmd_respawn:6019->:6072, cmd_respawn:6040-6042->:6093-6095, D4 :2625->:2678, _registry_records_or_none :10578->:10641, _sweep_husks :7601->:7654, _require_claim_holder :11675->:11743.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_self_citations.py tests/test_retired_sid_citations.py"
+    },
+    {
+      "claim": "full floor, 3.10: 5423 passed, 6 failed, 16 skipped, 3 xfailed in 678s -- exactly the six documented pre-existing host-venv artifacts already reported by w93 (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per item 17, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5423 passed, 6 failed, 16 skipped, 3 xfailed in 490s -- exactly the same six pre-existing host-venv artifacts, not adopted",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    }
+  ],
+  "blockers": []
+}
