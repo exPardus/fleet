@@ -1,0 +1,86 @@
+{
+  "lane": "w100",
+  "base": "5bac842731d199526034f4839c78d7f826d0e0bb",
+  "files_changed": [
+    "bin/fleet.py",
+    "docs/SPEC.md",
+    "tests/test_respawn_dead_stream.py"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py",
+      "rc": 0,
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py",
+      "rc": 0,
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py tests/test_respawn_retired_sweep.py tests/test_respawn_ceiling.py tests/test_liveness_readers.py tests/test_supervisor.py",
+      "rc": 0,
+      "passed": 525,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py tests/test_respawn_retired_sweep.py tests/test_respawn_ceiling.py tests/test_liveness_readers.py tests/test_supervisor.py",
+      "rc": 0,
+      "passed": 525,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "claims": [
+    {
+      "claim": "the measured w98c row respawns without `--force`: a keyed-but-idle roster entry (Q1 says live), no outcome record, past the dispatch grace window, transcript tail `API Error: stream closed before completion` now reaches the dispatch boundary, and the old session is STILL stopped (`claude stop <job-ref>`) and tombstoned (`stopped`), with the acceptance announced on stderr. Before this lane the identical drive raised `w: turn is running -- pass --force to interrupt it first, or wait for it to finish`.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py::test_dead_suspected_stream_death_respawns_without_force tests/test_respawn_dead_stream.py::test_the_predicate_is_the_verdict_not_the_status_field -v"
+    },
+    {
+      "claim": "the acceptance reads the PROBE's verdict, not the persisted `status` string: the fixture record still says `working` (it was never rewritten, exactly as w98c's was) and is accepted because `recompute_worker_native` concludes `dead-suspected` for it. A guard that read `record[\"status\"]` would refuse.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py::test_the_predicate_is_the_verdict_not_the_status_field -v"
+    },
+    {
+      "claim": "the marker set is the MEASURED stream-death family, not one string: all four texts tallied from real `isApiErrorMessage` records on this host (`stream closed before completion`, `Connection lost mid-response`, `Server error mid-response`, `The response stopped arriving`) are accepted.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py::test_the_measured_stream_death_family_is_accepted -v"
+    },
+    {
+      "claim": "the refusal survives for every row that is genuinely running a turn, and each of the four refusal tests also proves the acceptance exists, so a blanket refusal cannot satisfy them: a roster `busy` entry (the probe says `working`), a 429 `limited` tail, no transcript evidence at all, and a death buried under newer chatter each refuse with `turn is running` while the same row with the one differing fact changed reaches dispatch.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py::test_a_busy_roster_entry_still_refuses_without_force tests/test_respawn_dead_stream.py::test_a_rate_limit_tail_is_not_a_stream_death tests/test_respawn_dead_stream.py::test_no_transcript_evidence_still_refuses tests/test_respawn_dead_stream.py::test_chatter_after_the_death_refuses -v"
+    },
+    {
+      "claim": "RED-FIRST, measured not asserted: with the FINAL test file in place and `bin/fleet.py` restored from HEAD (`git checkout -- bin/fleet.py`), the file ran `12 failed` on 3.10 -- 6 on the missing acceptance (`FleetCliError: w: turn is running -- pass --force ...`) and 2 on the missing scanner (`AttributeError: module 'fleet' has no attribute 'transcript_stream_death_scan'`), the remaining 4 being the refusal tests' second limb. Post-change the same file is `12 passed`.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_respawn_dead_stream.py"
+    },
+    {
+      "claim": "the ~89-line insertion rotted every self-citation below it, so this lane re-pinned them rather than leaving them stale: `tools/repoint_self_citations.py HEAD` re-pointed 44 of the 55 citations in `bin/fleet.py` (the `_quarantine_artifacts` reader list, the `_sweep_husks` sites, `cmd_kill`, `cmd_respawn` and the ranged `cmd_respawn:6145-6147`), and `tests/test_self_citations.py` (7 tests) plus `tests/test_retired_sid_citations.py` (2) went from 9 failures to green.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_self_citations.py tests/test_retired_sid_citations.py"
+    },
+    {
+      "claim": "the spec's described behaviour was updated with the code: `docs/SPEC.md`'s respawn row now states the evidence-based acceptance and enumerates the refusals that survive, and the §5 `dead-suspected` bullet keeps `never auto-respawned` while naming the explicit-verb exception. No claim-shaped line was added, so `tests/test_doc_claims.py` and `tests/test_docs_currency.py` stay green.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_doc_claims.py tests/test_docs_currency.py"
+    },
+    {
+      "claim": "full floor, 3.10: 5454 passed, 6 failed, 16 skipped, 3 xfailed in 492s -- exactly the six documented pre-existing host-venv artifacts (`test_fleet_index.py::TestPathContainment` x3, `test_fleet_q.py::TestOutlinePathContainment` x1, `test_terminal_surface.py::TestCollaboratorInstall` x2), not adopted; reported as a claim per item 17, since a non-zero rc in tests[] is a landing gate.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5454 passed, 6 failed, 16 skipped, 3 xfailed in 462s -- exactly the same six pre-existing host-venv artifacts, not adopted.",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "SCOPE FENCE, deliberate: the change is in `_cmd_respawn_native` only. The supervisor-husk branch of `_cmd_respawn_supervisor` carries its own copy of the running-turn refusal and was NOT widened -- the measured defect was a worker row, and that path has no probe call to agree with. Worth a look if a supervisor husk is ever measured dying this way.",
+      "command": "grep -n \"turn is running\" bin/fleet.py"
+    },
+    {
+      "claim": "`docs/SPEC.md`'s `@NNNN` citations are stale and PREDATE this lane: the respawn row cites `_cmd_respawn_native` @3620 against an actual 5949, and `write_tombstone_outcome` @5834 against an actual 9219. No test holds them (the suite is green on the six known artifacts only), so they were left alone; re-pinning 50 numbers is a separate lane, not this one.",
+      "command": "grep -n \"def _cmd_respawn_native\" bin/fleet.py"
+    }
+  ],
+  "blockers": []
+}

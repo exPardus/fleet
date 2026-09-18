@@ -813,20 +813,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:8268) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:9163) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:12354) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:8357) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:9252) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:12443) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2348) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:12228) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:2936) -- expose that distinction to views.
-      * `_doctor_check_registry` (:9413) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:12317) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:2991) -- expose that distinction to views.
+      * `_doctor_check_registry` (:9502) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:5067) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:13646) -- render the release explanation.
+      * `_print_snapshot_table` (:5122) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:13735) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2330,7 +2330,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:12354`), because legacy upgrades also require a complete registry.
+    (`:12443`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:893`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -2581,10 +2581,65 @@ def _is_substantive_transcript_record(rec: dict) -> bool:
     return False
 
 
+# Transcript tails that prove a turn died mid-stream instead of finishing.
+# These are the stream deaths MEASURED on this host (tally of every
+# isApiErrorMessage record, 2026-09-19); the family is the OpenRouter/native
+# transport dying between the request and the response. Rate-limit (429),
+# credit (402) and model_not_found records are deliberately absent: each is a
+# different condition with its own verdict and its own recovery verb.
+STREAM_DEATH_MARKERS = (
+    "stream closed before completion",
+    "connection lost mid-response",
+    "server error mid-response",
+    "the response stopped arriving",
+)
+
+
+def transcript_stream_death_scan(sid: str, transcript_path=None) -> bool:
+    """Whether the transcript tail's newest qualifying record is an API stream death.
+    Walk newest-first past bookkeeping exactly as `transcript_limit_scan` does, so
+    a stale death cannot be read through newer chatter: the first error-shaped or
+    substantive record is the authoritative last thing that happened. Missing or
+    unreadable transcript access returns False -- absence never licenses the guess.
+    An explicit path avoids repeating the caller's resolution.
+    """
+    try:
+        path = Path(transcript_path) if transcript_path else find_transcript_path(None, sid)
+        if path is None or not path.exists():
+            return False
+        lines = _read_tail_lines(path)
+    except OSError:
+        return False
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        is_error = bool(rec.get("isApiErrorMessage"))
+        if not is_error and not _is_substantive_transcript_record(rec):
+            continue  # bookkeeping record -- keep walking backward
+        if not is_error:
+            return False
+        msg = rec.get("message") or {}
+        parts = [c.get("text", "") for c in (msg.get("content") or [])
+                 if isinstance(c, dict) and c.get("type") == "text"]
+        text = "\n".join(parts).lower()
+        return any(marker in text for marker in STREAM_DEATH_MARKERS)
+    return False
+
+
 # Native verdicts use roster and Stop-hook outcomes. _limit_scan_hook is the
 # injectable transcript reader for turns whose limit wall leaves no fresh outcome.
 
 _limit_scan_hook = transcript_limit_scan  # Injectable transcript-tail limit scanner.
+
+# Injectable companion reader for turns whose transport died with no outcome.
+_stream_death_scan_hook = transcript_stream_death_scan
 
 NATIVE_TERMINAL_STATUSES = {"idle", "dead", "dead-suspected", "limited",
                             "over_ceiling", "interrupted"}
@@ -6310,6 +6365,27 @@ def cmd_release(args) -> int:
 
 # CLI resilience commands (SPEC §5, §7, §11).
 
+def _dead_suspected_hung_stream(name: str, record: dict,
+                                roster_entries: list) -> bool:
+    """Whether a roster-live row is a turn that died mid-stream, not a live turn.
+    The status probe and the respawn guard answer different questions about the
+    same record, and a stream death makes them disagree (queue item 31): the
+    session process outlives its stream, so the roster stays keyed while the
+    probe -- no fresh outcome, past dispatch grace, no limit wall -- concludes
+    dead-suspected. Accept that row without --force only when BOTH agree on a
+    hung turn: the probe's verdict is dead-suspected AND the transcript tail's
+    newest qualifying record is an API stream death. A genuinely running turn
+    (roster busy/waiting, or a tail that ends in chatter) keeps the refusal.
+    """
+    if recompute_worker_native(name, record, roster_entries).get("status") != "dead-suspected":
+        return False
+    scan = _stream_death_scan_hook
+    sid = record.get("session_id")
+    if scan is None or not sid:
+        return False
+    return bool(scan(sid, transcript_path=find_transcript_path(name, sid)))
+
+
 def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.which,
                         sleep=time.sleep, clock=time.monotonic) -> int:
     """Reset context with a fresh native dispatch under the same worker name.
@@ -6373,10 +6449,23 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
 
     stopped_ok = None
     if old_live:
-        if not getattr(args, "force", False):
+        force = getattr(args, "force", False)
+        # A stream death leaves the session process resident with no outcome
+        # record, so the roster says live while the status probe says
+        # dead-suspected and the safe verb demanded the unsafe flag (item 31).
+        # Accept that row without --force; the stop below still runs, because
+        # the acceptance is about the flag, never about skipping the teardown.
+        if not force and not _dead_suspected_hung_stream(name, before, entries):
             raise FleetCliError(
                 f"{name}: turn is running -- pass --force to interrupt it first, "
                 "or wait for it to finish"
+            )
+        if not force:
+            print(
+                f"fleet: {name}: session is live but its turn died mid-stream "
+                "(no outcome record; transcript tail is an API stream error) -- "
+                "stopping it and respawning without --force",
+                file=sys.stderr,
             )
         stopped_ok = _stop_native_session(old_sid, run=run, which=which)
         # Stop fires no Stop hook; record the operator stop attempt even if unverified.
@@ -6933,7 +7022,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:6854` / `cmd_respawn:6564`, before
+    # resolution that runs from `cmd_kill:6943` / `cmd_respawn:6653`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -6964,9 +7053,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:6854` / `cmd_respawn:6564`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6943` / `cmd_respawn:6653`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:6585-6587` spells out that design -- resolve under the lock.
+    # `cmd_respawn:6674-6676` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -11255,7 +11344,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:893`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:2924`) applies here too. An unreadable registry
+    rule for the view path (`:2979`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -11327,11 +11416,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2175, :2210,
-    :2237, :2265, :2293, :2355, :2433, :3333, :6951, :7113, :7310, :7430, :7466, :7633, :7634, :7704,
-    :7714, :7725, :7819, :8294, :11278, :13948, :13949, :14010, :14814`).
+    :2237, :2265, :2293, :2355, :2433, :3388, :7040, :7202, :7399, :7519, :7555, :7722, :7723, :7793,
+    :7803, :7814, :7908, :8383, :11367, :14037, :14038, :14099, :14903`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :6043, :6438, :9739,
-    :15147. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :6098, :6527, :9828,
+    :15236. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11982,8 +12071,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:6043, :6438, :9739,
-    # :15147) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:6098, :6527, :9828,
+    # :15236) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11991,7 +12080,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:893`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:11252`).
+        # names this gate as its reason (`:11341`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -12347,7 +12436,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:8265`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:8354`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
