@@ -63,7 +63,7 @@ today's Anthropic resolution, illustrative only.
 <!-- fleet-tier-policy
 supervisor-tier-chain: top, second
 worker-tiers: second, third
-tier-model: top=opus, second=opus, third=sonnet
+tier-model: top=openrouter:moonshotai/kimi-k3, second=openrouter:deepseek/deepseek-v4.1-flash, third=openrouter:z-ai/glm-5.3-flash
 -->
 
 ## Context band (150–200k, supervisor AND workers — spec §11, §11.4)

@@ -729,3 +729,15 @@ PARKED on a raised decision. Wave 85 closed db4dc57, item 14 landed 5f7852e. Thr
 CORRECTION to my wave-84 report: I said lane_state=landed recorded for w90 was the reap arm firing in production. It was the WRITER firing. The reap arm has still never fired on a real lane -- w89 was collected by the daemon-dead arm after its session exited, with no lane_state set at all. Item 2 is not fixed; filed as item 19 with the fix shape (stop the finished session via _stop_native_session_status after marking landed, then reap; never weaken the live-PID protection).
 Decision asks the interface for a one-off kill of the three merged-and-pushed rows to unblock, and whether item 19 jumps ahead of item 5. I recommend both. Nothing else is in flight; tree clean and pushed; occupancy 235k, well below the 350k band, so this body can resume the moment the decision lands.
 
+## 2026-09-16T19:06:25Z CHECKPOINT inc=inc-20260911T195615Z-a6c9 sid=acd22c30-c5ed-41e8-9f68-6fd6702625ca
+
+Decision answered (b) and cleared: item 19 jumps ahead of item 5, the kill stays with the operator. Item 19's brief is drafted and ready at $CLAUDE_JOB_DIR/tmp/w92-task.md -- lane w92, branch w92/stop-landed-lanes, base 9ee2b35: stop a finished landed lane's session via _stop_native_session_status, then reap, so the lane arm fires; the live-PID protection stays exactly as strict and weakening it is named as a rejected fix.
+Standing down from the slot watch on the interface's instruction -- it owns the wake. Every Monitor re-arm was a full-context turn, which is the occupancy-per-turn cost item 4 was re-scoped to measure; four re-arms bought nothing but a status line. Blocked purely on a free slot: w88/w90/w91 idle with live PIDs, live_lane_count=3, w88 idles out around 20:45Z if the operator's kill does not land first.
+Wave 85 closed db4dc57 and pushed; tree clean bar these journal lines; nothing in flight; occupancy 250k against the 350k band, so this body can take w92 through without a handoff.
+
+THROUGHPUT wave 86 (9ee2b35..a6f68b002c00272d60f1f4994aaff4c567782d91): bin +214/-36, tests +554/-0, docs +212/-1, journal +41/-13, other +1/-1; workers: 2 (w93: unknown, w92: unknown); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 214 added bin lines); external_lines: UNMEASURED (no cross-repo line receipt; lane worktree not in this repo: w93, w92); reaped: 0; protected: 0 (unread mail)
+
+## 2026-09-16T20:57:11Z SEIZED inc=inc-20260916T205711Z-ad2a sid=d3779e11-2878-4ff7-a2cb-899b10b94949
+
+seized from inc-20260911T195615Z-a6c9: holder roster-gone, heartbeat stale (6646s > 3600s)
+
