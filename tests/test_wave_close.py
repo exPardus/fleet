@@ -619,7 +619,9 @@ def test_tokens_per_bin_line_names_its_denominator_and_guards_zero(tmp_path):
     # `bin/` lines stays UNMEASURED rather than dividing by zero.
     assert "added bin lines" in source
     assert 'tokens_per_bin_line = ("UNMEASURED' in source
-    assert "if unknown or bin_added == 0 else" in source
+    # `reasons` also carries an unreadable lane substrate, so a wave whose
+    # tokens are short by an unknown amount cannot print a ratio either.
+    assert "if reasons or bin_added == 0 else" in source
 
 
 def test_wave_close_marks_landed_lanes_under_the_lock_before_write_incarnation():
@@ -680,3 +682,192 @@ def test_wave_close_stops_landed_sessions_outside_the_lock_then_reaps_again():
     assert mark_at < stop_at < reap_calls[-1], (
         "wave-close must mark landed lanes, then stop their sessions, then "
         "reap a second time, in that order")
+
+
+# ---------------------------------------------------------------------------
+# Queue items 26 and 16: the merge subject must JOIN, and the join key must
+# not be a directory the routine tidy-up deletes.
+# ---------------------------------------------------------------------------
+
+def test_worktree_branch_reads_a_linked_worktree_head(tmp_path):
+    """Item 16: the branch `fleet spawn` records is read from the worktree's
+    own HEAD, so a dispatch pays no subprocess for it. Proved through real
+    git for both shapes -- a linked worktree (`.git` is a file naming a
+    gitdir) and a plain checkout (`.git` is a directory)."""
+    def git(*args, cwd=None):
+        return subprocess.run(["git", "-C", str(cwd or repo), *args], check=True,
+                              capture_output=True, text=True, encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q")
+    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.name", "wave-close tests")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    linked = tmp_path / "lane"
+    git("worktree", "add", "-q", "-b", "w99/lane-join", str(linked))
+
+    assert fleet._worktree_branch(linked) == "w99/lane-join"
+    assert fleet._worktree_branch(repo) in ("main", "master")
+    assert fleet._worktree_branch(tmp_path / "not-a-repo") is None
+    git("checkout", "-q", "--detach", cwd=linked)
+    assert fleet._worktree_branch(linked) is None, (
+        "a detached HEAD has no branch; None must not read as a branch name")
+
+
+def test_lane_join_keeps_the_branch_after_the_worktree_is_removed(tmp_path):
+    """Queue item 16, the headline: the join key is the lane BRANCH on the
+    registry record, not the worktree directory. MEASURED 2026-09-16: the
+    supervisor merged three lanes, removed their worktrees to tidy up, and
+    `wave-close` could no longer join any of them -- a join key that the
+    routine cleanup step deletes is the defect."""
+    gone = tmp_path / "removed-worktree"
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "fleet.json").write_text(json.dumps({
+        "workers": {"w99": {"cwd": str(gone), "branch": "w99/lane-join",
+                            "dispatch_kind": "bg",
+                            "substrate": "openrouter/deepseek/deepseek-v4.1-flash"}}}),
+        encoding="utf-8")
+
+    def run(argv, **kwargs):
+        if argv[1:3] == ["worktree", "list"]:
+            return subprocess.CompletedProcess(
+                argv, 0, f"worktree {tmp_path}\nHEAD base\n"
+                "branch refs/heads/server/persistent-fleet\n\n", "")
+        raise AssertionError(argv)
+
+    worktree, name, record = fleet._wave_lane_join(
+        tmp_path, "w99/lane-join", run=run)
+    assert worktree is None, "the worktree really is gone in this fixture"
+    assert name == "w99"
+    assert record["branch"] == "w99/lane-join"
+
+
+def test_landed_lane_reads_substrate_from_the_branch_join_without_a_worktree(
+        tmp_path):
+    """The same join, through the audit that feeds every wave figure: a lane
+    whose worktree is gone still reports its substrate, so `substrate:
+    unknown` no longer means "the tidy-up ran" (queue items 16 and 26)."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state" / "fleet.json").write_text(json.dumps({
+        "workers": {"w99": {"cwd": str(tmp_path / "removed-worktree"),
+                            "branch": "w99/lane-join",
+                            "substrate": "openrouter/deepseek/deepseek-v4.1-flash"}}}),
+        encoding="utf-8")
+
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge(w99/lane-join): landed\n", "")
+        if argv[1:3] == ["worktree", "list"]:
+            return subprocess.CompletedProcess(
+                argv, 0, f"worktree {tmp_path}\nHEAD base\n"
+                "branch refs/heads/server/persistent-fleet\n\n", "")
+        raise AssertionError(argv)
+
+    assert fleet._wave_landed_lanes(tmp_path, "base", run=run) == [
+        ("w99/lane-join", "openrouter/deepseek/deepseek-v4.1-flash", "abcdef1")]
+
+
+def test_mark_landed_lanes_joins_by_branch_after_the_worktree_is_removed(
+        tmp_path, monkeypatch):
+    """Item 19's stop-then-reap arm reads the names this writes. With the
+    worktree pruned before the close -- the supervisor's natural tidy-up --
+    the old cwd-only join marked nothing, so no session was stopped and the
+    lane arm could not fire (queue items 16, 19 and 25)."""
+    _home(tmp_path, monkeypatch, {
+        "w99": {"cwd": str(tmp_path / "removed-worktree"), "status": "idle",
+                "branch": "w99/lane-join"},
+        "other": {"cwd": str(tmp_path / "elsewhere"), "status": "idle"},
+    })
+
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    marked = fleet._wave_mark_landed_lanes(
+        tmp_path, [("w99/lane-join", "openrouter/deepseek/deepseek-v4.1-flash",
+                    "abcdef1")], run=run)
+    assert marked == ["w99"]
+    assert fleet.load_registry()["workers"]["w99"]["lane_state"] == "landed"
+    assert "lane_state" not in fleet.load_registry()["workers"]["other"]
+
+
+def test_wave_close_refuses_a_lane_that_parses_but_joins_to_nothing(
+        tmp_path, monkeypatch):
+    """Replays wave 86 end to end, through the real `git`: both merges used
+    the subject `fleet land` printed, so `_wave_landed_lanes` parsed them
+    happily and item 14's refusal never fired -- and then the join collapsed,
+    publishing `workers: 2 (w93: unknown, w92: unknown); tokens: 0;
+    tokens_per_bin_line: 0.00` on a 701-line wave. A parsed-but-unjoined lane
+    is as unattributable as an unparsed merge and must refuse the same way,
+    before the claim, the reap and the floor."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True, encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q")
+    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.name", "wave-close tests")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "CHANGELOG.md").write_text("# Operator changelog\n\n",
+                                                encoding="utf-8")
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-qb", "w99/lane-join")
+    (repo / "lane.txt").write_text("work\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "lane work")
+    git("checkout", "-q", "-")
+    git("merge", "--no-ff", "-m", "merge(w99/lane-join): lane work", "w99/lane-join")
+    merge_sha = git("rev-parse", "HEAD").stdout.strip()
+    changelog_before = (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    log_before = git("log", "--oneline").stdout
+
+    monkeypatch.chdir(repo)
+    args = argparse.Namespace(
+        base=base, changelog=f"- `{merge_sha[:7]}` lane work landed",
+        sid=None, nonce=None)
+    with pytest.raises(fleet.FleetCliError, match=r"UNJOINED: 1 of 1"):
+        fleet.cmd_wave_close(args)
+
+    assert (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8") == changelog_before
+    assert git("log", "--oneline").stdout == log_before
+    assert not git("status", "--porcelain").stdout.strip()
+
+
+def test_unjoined_refusal_precedes_every_mutation_in_cmd_wave_close():
+    """Static ordering guard beside the real-git proof above: the UNJOINED
+    refusal must sit, in source, before the first `with fleet_lock():`."""
+    import inspect
+    src = inspect.getsource(fleet.cmd_wave_close)
+    assert src.index("UNJOINED:") < src.index("with fleet_lock():")
+
+
+def test_claude_tokens_are_unmeasured_when_a_lane_substrate_is_unknown():
+    """Wave 86 printed `tokens: 0` on a wave whose two lanes both read
+    `substrate: unknown`. A lane whose substrate could not be read may have
+    been a Claude lane whose usage this total then cannot see, so the total is
+    UNMEASURED -- summing what remains would print the shortfall as measured."""
+    never_called = lambda *a, **k: (_ for _ in ()).throw(  # noqa: E731
+        AssertionError("an unreadable substrate must not reach git"))
+    verdict = fleet._wave_outcomes_claude_tokens(
+        pathlib.Path("/nonexistent-repo"), [("w99/lane-join", "unknown", "abc")],
+        run=never_called)
+    assert verdict.startswith("UNMEASURED")
+    assert "w99/lane-join" in verdict
+
+
+def test_new_worker_record_keeps_the_lane_branch():
+    """Item 16's field, at the record builder: `wave-close` joins a merge
+    subject to this value, so it must round-trip and stay nullable for the
+    records that predate it."""
+    record = fleet.new_worker_record(None, "/tmp/lane", "task", "accept",
+                                     branch="w99/lane-join")
+    assert record["branch"] == "w99/lane-join"
+    assert fleet.new_worker_record(None, "/tmp/lane", "task", "accept")["branch"] is None

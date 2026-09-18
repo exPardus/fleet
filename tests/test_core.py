@@ -151,6 +151,9 @@ class TestRegistry:
             "last_dispatch_at", "retired_sids", "archived_at",
             # item 24: explicit non-Claude substrate marker, e.g. "openrouter/<slug>".
             "substrate",
+            # item 16: the branch the lane was dispatched on, so `wave-close`
+            # can join a merge subject to this record after the worktree is gone.
+            "branch",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"

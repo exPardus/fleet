@@ -1,0 +1,68 @@
+{
+  "lane": "w99",
+  "base": "1699d716045e8e23b9cf5d222d57fd304501afc4",
+  "files_changed": [
+    "bin/fleet.py",
+    "bin/fleet_land.py",
+    "docs/SPEC.md",
+    "skills/fleet/SKILL.md",
+    "tests/test_core.py",
+    "tests/test_fleet_land.py",
+    "tests/test_wave_close.py"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_core.py tests/test_cli.py tests/test_wave_close.py tests/test_fleet_land.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 267,
+      "failed": 0,
+      "skipped": 2
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_core.py tests/test_cli.py tests/test_wave_close.py tests/test_fleet_land.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 267,
+      "failed": 0,
+      "skipped": 2
+    }
+  ],
+  "claims": [
+    {
+      "claim": "the merge subject `fleet land` PRINTS is the one it tells the supervisor to RUN: `next: git merge --no-ff -m 'merge(w1/example): <summary>' w1/example`. Before this lane it printed the short lane (`merge(w1)`) beside a command merging `w1/example`, and `wave-close` resolves that subject token as a BRANCH, so every lane merged the documented way joined to nothing (queue item 26-i).",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_fleet_land.py::test_land_commits_allowed_dirty_paths_rebases_and_is_idempotent -v"
+    },
+    {
+      "claim": "the worker record keeps the BRANCH it was dispatched on: `new_worker_record(..., branch=...)` writes it beside `cwd`, `cmd_spawn` and `_cmd_respawn_native` fill it from `_worktree_branch(cwd)` (which reads the worktree's own `.git`/HEAD file -- stdlib, no subprocess on the dispatch path), and `tests/test_core.py`'s schema test pins the field. That branch is the join key the routine `git worktree remove` does NOT delete (queue item 16).",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_worktree_branch_reads_a_linked_worktree_head tests/test_wave_close.py::test_new_worker_record_keeps_the_lane_branch tests/test_core.py::TestRegistry::test_new_worker_record_matches_schema_and_defaults -v"
+    },
+    {
+      "claim": "`_wave_lane_join` resolves a merge-subject lane to its registry record by BRANCH first and by worktree `cwd` second, so a lane stays attributable after its worktree is pruned: `_wave_merge_audit`, `_wave_record_substrate`, `_wave_codex_tokens`, `_wave_outcomes_claude_tokens`, `_wave_external_lines` and `_wave_mark_landed_lanes` all read through it. Item 19's stop-then-reap arm marks the lane landed by the branch join with the worktree gone.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_lane_join_keeps_the_branch_after_the_worktree_is_removed tests/test_wave_close.py::test_landed_lane_reads_substrate_from_the_branch_join_without_a_worktree tests/test_wave_close.py::test_mark_landed_lanes_joins_by_branch_after_the_worktree_is_removed -v"
+    },
+    {
+      "claim": "a lane that PARSES but joins to no registry record and no worktree REFUSES the close -- `wave-close: UNJOINED: N of M landed lane(s) in <base>..HEAD resolve to no registry record and no worktree (...)`, beside item 14's `UNPARSED` refusal and before the claim, the reap and the floor, so an unjoinable lane can no longer be published as `unknown`/`0`/`UNMEASURED`. Wave 86's `workers: 2 (w93: unknown, w92: unknown); tokens: 0; tokens_per_bin_line: 0.00; ... reaped: 0` on a 701-line wave is unreachable three ways now.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_wave_close_refuses_a_lane_that_parses_but_joins_to_nothing tests/test_wave_close.py::test_unjoined_refusal_precedes_every_mutation_in_cmd_wave_close -v"
+    },
+    {
+      "claim": "an unreadable substrate is no longer a confident zero: a lane whose substrate reads `unknown` makes `tokens` and `tokens_per_bin_line` UNMEASURED rather than `0`, and `_wave_outcomes_claude_tokens` returns UNMEASURED (lane substrate unknown) instead of summing the remaining lanes and printing the shortfall as measured (queue item 26-a).",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py::test_claude_tokens_are_unmeasured_when_a_lane_substrate_is_unknown tests/test_wave_close.py::test_tokens_per_bin_line_names_its_denominator_and_guards_zero -v"
+    },
+    {
+      "claim": "RED-FIRST, measured not asserted: the 9 new/changed tests were re-run against a `git archive HEAD` copy of the pre-change tree with the new test files copied in, and 10 failed there -- 8 for the missing join or the missing refusal (`AttributeError: module 'fleet' has no attribute '_wave_lane_join'`, `assert [] == ['w99']`, the UNJOINED regex matching nothing, `TypeError: new_worker_record() got an unexpected keyword argument 'branch'`) and 2 on real assertions (`unknown` versus the recorded substrate, and the printed short-lane merge subject).",
+      "command": "cd \"$CLAUDE_JOB_DIR/tmp/oldtree\" && uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_wave_close.py tests/test_fleet_land.py"
+    },
+    {
+      "claim": "the ~380-line insertion shifted every self-citation below it, so this lane re-pinned them rather than leaving them stale: 51 bare `:NNNN` citations in `bin/fleet.py` (the `_quarantine_artifacts` reader list, the `_record_sids` union sites, the `retired_sids` writers at both spelling sites, `cmd_kill`/`cmd_respawn`, `load_registry`'s rename, `_sweep_husks`, D4) plus the one ranged citation `cmd_respawn:6145-6147`. `tests/test_self_citations.py` and `tests/test_retired_sid_citations.py` are green, and they are the reason a stale number cannot ship silently.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_self_citations.py tests/test_retired_sid_citations.py"
+    },
+    {
+      "claim": "full floor, 3.10: 5440 passed, 6 failed, 16 skipped, 3 xfailed in 635s -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per item 17, since a non-zero rc in tests[] is a landing gate. The session drift fixture (`code_plane_drift`) reported no install-plane change.",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5440 passed, 6 failed, 16 skipped, 3 xfailed in 658s -- exactly the same six pre-existing host-venv artifacts, not adopted.",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    }
+  ],
+  "blockers": []
+}

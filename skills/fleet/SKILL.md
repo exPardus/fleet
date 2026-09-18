@@ -162,6 +162,8 @@ Run `fleet wave-close --base <sha> --changelog @<file>` at the wave boundary. Re
 
 Merge every landing lane with a subject starting `merge(<lane>): <summary>` -- never git's own default `Merge <branch>: ...` subject. `wave-close` attributes lane workers/tokens/external_lines by matching that literal convention against `git log --merges` in the closing range; a merge subject it cannot match is not counted as a zero-lane wave, it makes `wave-close` refuse the close and name the unattributed commit(s).
 
+`<lane>` is the lane **branch**, not its short name: `merge(w99/lane-join)`, never `merge(w99)`. `wave-close` resolves that token as a branch to join the lane to its registry record, and the worker record keeps the branch it was dispatched on, so the join survives `git worktree remove`. `fleet land` prints the exact command to run, in that form. A lane that parses but resolves to no record and no worktree is refused with `UNJOINED: N of M`, exactly as an unparsed subject is: a lane it cannot join has no substrate, no session and no token total, and publishing a zero for it is the lie wave 86 told on a 701-line wave.
+
 ## Handoff
 
 When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin`; it dispatches the successor itself. The successor boots with its token, then the current body runs `sup-handoff-complete`. Run `sup-release` only when the handoff is stillborn, then stop.
