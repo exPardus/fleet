@@ -154,6 +154,8 @@ class TestRegistry:
             # item 16: the branch the lane was dispatched on, so `wave-close`
             # can join a merge subject to this record after the worktree is gone.
             "branch",
+            # item 29: the mcx worker id of a codex-substrate lane.
+            "mcx_id",
         }
         assert rec["session_id"] == "sid-1"
         assert rec["cwd"] == r"C:\proga\x"
@@ -173,6 +175,7 @@ class TestRegistry:
         assert rec["setting_sources"] is None
         assert rec["last_activity"] == rec["created"]
         assert rec["substrate"] is None
+        assert rec["mcx_id"] is None
 
     def test_corrupt_registry_file_is_quarantined_and_raises(self, isolated_home):
         state = isolated_home / "state"

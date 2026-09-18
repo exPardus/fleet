@@ -813,20 +813,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7709) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8604) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11795) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:8268) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:9163) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:12354) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2185) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2348) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11669) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:2736) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8854) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:12228) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:2936) -- expose that distinction to views.
+      * `_doctor_check_registry` (:9413) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4799) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:13035) -- render the release explanation.
+      * `_print_snapshot_table` (:5067) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:13646) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1052,6 +1052,9 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # completion instead derives it from the sid; that provenance depends on the
         # vendor id format. See _native_job_ref before using it as a removal reference.
         "native_short_id": None,
+        # Codex substrate (item 29): the mcx worker id captured from
+        # `mcx spawn` stdout; the job lives at <cwd>/.mcx/<mcx_id>.
+        "mcx_id": None,
         "last_dispatch_at": None,            # stamped at every dispatch/steer/resume;
                                              # anchor for the fresh-outcome predicate
         "retired_sids": [],                  # prior sids retired by fork-steer/respawn
@@ -1644,6 +1647,166 @@ def _openrouter_substrate(model):
 
 
 # ---------------------------------------------------------------------------
+# Codex substrate (item 29): `--model codex:<model>` dispatch through mcx.
+#
+# mcx (/home/altai/proga/multi-codex, on PATH) spawns and steers Codex CLI
+# workers: `mcx spawn -m MODEL "instructions"` prints an 8-char worker id and
+# keeps one directory per worker under $MCX_DIR (default $PWD/.mcx) holding
+# `log`, `events.jsonl`, `result` and `state`. `mcx result <id>` exits 2 while
+# the run is live, 0 when done (result on stdout), 1 when stopped or unknown.
+# `mcx steer <id> -` stops the worker and relaunches it on the same Codex
+# thread -- steering RESTARTS the run. `mcx stop <id>` kills the process group.
+#
+# COMMIT VERDICT (2026-09-18, verified from the mcx launcher source; a live
+# probe was impossible -- the Codex weekly limit is exhausted until
+# 2026-09-20T18:16Z): mcx `_run` launches
+# `codex exec -a never --sandbox workspace-write`. Workspace-write confines
+# writes to the worker's cwd; a lane worktree's real gitdir lives under the
+# main repo's .git/worktrees/, OUTSIDE the cwd, so `git commit` cannot write
+# refs or objects. A Codex worker therefore CANNOT commit on this machine
+# under the default approval mode. `fleet land` already commits a dirty
+# worktree's listed files (`fleet_land._commit_dirty`), so it commits on the
+# worker's behalf; the asymmetry is documented in skills/fleet/SKILL.md.
+#
+# mcx state lives in the lane worktree's gitignored `.mcx/` directory: the
+# spawn runs with cwd=worktree and MCX_DIR pinned to <worktree>/.mcx, so every
+# later verb finds the job from the registry row's `mcx_id` alone.
+# ---------------------------------------------------------------------------
+
+_CODEX_MODEL_RE = re.compile(r"^codex:(?P<bare>.+)$")
+_CODEX_WORKER_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
+MCX_DISPATCH_TIMEOUT_SECONDS = 60.0
+MCX_VERB_TIMEOUT_SECONDS = 30.0
+
+
+def _codex_model_slug(model):
+    """The bare model after `codex:`, or None for any other model string."""
+    if not isinstance(model, str):
+        return None
+    match = _CODEX_MODEL_RE.match(model)
+    return match.group("bare") if match else None
+
+
+def _codex_substrate(model):
+    """`codex` for a registry `substrate` field, or None."""
+    return "codex" if _codex_model_slug(model) is not None else None
+
+
+def _substrate_for_model(model):
+    """The registry substrate for a `--model` value across every substrate."""
+    return _openrouter_substrate(model) or _codex_substrate(model)
+
+
+def _is_codex_record(record) -> bool:
+    return isinstance(record, dict) and record.get("substrate") == "codex"
+
+
+def _require_mcx(which=shutil.which) -> str:
+    """Refuse a `codex:` dispatch when the mcx helper is not on PATH."""
+    path = which("mcx")
+    if not path:
+        raise NativeDispatchError(
+            "codex model refused: mcx not found on PATH (the multi-codex "
+            "helper; see skills/fleet/SKILL.md)")
+    return path
+
+
+def _mcx_dir(record) -> Path:
+    return Path(record.get("cwd") or ".") / ".mcx"
+
+
+def _mcx_env(cwd) -> dict:
+    """MCX_DIR pinned to <cwd>/.mcx so every verb finds the job regardless of
+    its own cwd; MCX_WORKER stripped -- mcx refuses spawn/steer under it, and a
+    fleet session that is itself an mcx worker must not inherit the guard."""
+    env = dict(os.environ)
+    env.pop("MCX_WORKER", None)
+    env["MCX_DIR"] = (Path(cwd) / ".mcx").as_posix()
+    return env
+
+
+def _mcx_run(record, args, run=subprocess.run, which=shutil.which,
+             input_text=None, timeout=MCX_VERB_TIMEOUT_SECONDS):
+    """Run one mcx verb against the record's job directory."""
+    exe = which("mcx")
+    if not exe:
+        raise FleetCliError(
+            "mcx not found on PATH (the multi-codex helper; see "
+            "skills/fleet/SKILL.md)")
+    cwd = record.get("cwd")
+    run_cwd = cwd if cwd and Path(cwd).is_dir() else None
+    try:
+        return run([exe, *args], cwd=run_cwd, env=_mcx_env(record.get("cwd") or "."),
+                   capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", input=input_text, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FleetCliError(f"mcx {args[0] if args else ''} failed: {exc}") from exc
+
+
+def _mcx_probe(record, run=subprocess.run, which=shutil.which):
+    """'working' | 'idle' | 'dead' from `mcx result`'s exit code (2 live, 0
+    done, 1 stopped/unknown); None when the probe itself could not run -- never
+    assume dead on ambiguity."""
+    mcx_id = record.get("mcx_id")
+    if not mcx_id:
+        return None
+    try:
+        proc = _mcx_run(record, ["result", mcx_id], run=run, which=which)
+    except FleetCliError:
+        return None
+    return {2: "working", 0: "idle"}.get(proc.returncode, "dead")
+
+
+def dispatch_codex(name, cwd, prompt_body, model,
+                   run=subprocess.run, which=shutil.which):
+    """Dispatch a Codex worker through mcx for `--model codex:<model>`.
+
+    Same task-file bootstrap a native dispatch uses: the composed body goes to
+    the task file, the tiny argv prompt points at it. The mcx worker id is
+    captured from spawn stdout and returned for the registry row's `mcx_id`.
+    """
+    if (not name or not NAME_RE.match(name) or _SID_SHAPE_RE.match(name)):
+        raise NativeDispatchError(
+            f"invalid worker name: {name!r} (must match {NAME_RE.pattern})")
+    bare = _codex_model_slug(model)
+    if bare is None:
+        raise NativeDispatchError(
+            f"dispatch_codex requires a codex:<model> string, got {model!r}")
+    exe = _require_mcx(which)
+    try:
+        tasks_dir().mkdir(parents=True, exist_ok=True)
+        task_path = task_file_path(name)
+        task_path.write_text(prompt_body, encoding="utf-8")
+    except OSError as exc:
+        raise NativeDispatchError(f"task-file write failed: {exc}") from exc
+    tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
+    argv = [exe, "spawn", "-m", bare, tiny_prompt]
+    try:
+        proc = run(argv, cwd=str(cwd), env=_mcx_env(cwd),
+                   capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", timeout=MCX_DISPATCH_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise NativeDispatchError(f"mcx spawn failed: {exc}") from exc
+    if proc.returncode != 0:
+        # Concat, not an f-string: two interpolations separated by whitespace
+        # trip the command-render census (tests/test_rendered_command_quoting)
+        # on an error message that never reaches a shell.
+        detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
+        raise NativeDispatchError(
+            f"mcx spawn exited {proc.returncode}: {detail[:400]}")
+    mcx_id = ""
+    for line in reversed((proc.stdout or "").splitlines()):
+        if line.strip():
+            mcx_id = line.strip()
+            break
+    if not _CODEX_WORKER_ID_RE.match(mcx_id):
+        raise NativeDispatchError(
+            "could not parse mcx worker id from spawn stdout: "
+            f"{(proc.stdout or '').strip()[:400]}")
+    return {"mcx_id": mcx_id}
+
+
+# ---------------------------------------------------------------------------
 # Status recompute helpers (SPEC §4, §5 status row)
 # ---------------------------------------------------------------------------
 
@@ -2167,7 +2330,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11795`), because legacy upgrades also require a complete registry.
+    (`:12354`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:893`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -2511,6 +2674,43 @@ def recompute_worker_native(name: str, record: dict, roster_entries: list) -> di
         updated["status"] = "idle"
         return updated
     return _investigate_no_outcome(name, record, updated)
+
+
+def recompute_worker_codex(name: str, record: dict,
+                           run=subprocess.run, which=shutil.which) -> dict:
+    """Derive a codex lane's verdict from its mcx job (item 29).
+    Sticky statuses persist; an id-less launch claim stays working until
+    expiry; otherwise `mcx result`'s exit code maps 2/0/1 to
+    working/idle/dead. A failed probe keeps the committed status -- the G9
+    doctrine (never assume dead on ambiguity) applies to mcx too."""
+    updated = dict(record)
+    updated.pop("waiting_for_permission", None)
+
+    status = record.get("status")
+    if status in _NATIVE_STICKY:
+        updated["status"] = status
+        return updated
+
+    if not record.get("mcx_id"):
+        if not _launch_claim_expired(record.get("last_activity")):
+            updated["status"] = "working"
+        else:
+            updated["status"] = "dead"
+        return updated
+
+    verdict = _mcx_probe(record, run=run, which=which)
+    if verdict is None:
+        return updated
+    updated["status"] = verdict
+    return updated
+
+
+def recompute_worker(name: str, record: dict, roster_entries: list,
+                     run=subprocess.run, which=shutil.which) -> dict:
+    """Substrate router: codex rows probe mcx, everything else reads the roster."""
+    if _is_codex_record(record):
+        return recompute_worker_codex(name, record, run=run, which=which)
+    return recompute_worker_native(name, record, roster_entries)
 
 
 def native_epoch_suspicious(roster_ok: bool, entries: list, workers: dict) -> bool:
@@ -4555,8 +4755,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             spawned_by=_spawner,
             # Stamp proven lineage under the lock to preserve ownership across sid rotation.
             spawned_by_lineage=_spawning_claim_lineage(_spawner),
-            dispatch_kind="bg", category=args.category,
-            substrate=_openrouter_substrate(args.model),
+            dispatch_kind=("mcx" if _codex_model_slug(args.model) is not None
+                           else "bg"),
+            category=args.category,
+            substrate=_substrate_for_model(args.model),
             # Item 16: the lane branch is the durable join key for wave-close;
             # the worktree it is read from is the part that gets deleted.
             branch=_worktree_branch(cwd))
@@ -4566,6 +4768,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         append_event("spawned", args.name, cwd=str(cwd), mode=args.mode)
 
     pre_claim_at = record["last_dispatch_at"]
+
+    if _codex_model_slug(args.model) is not None:
+        return _cmd_spawn_codex(args, cwd, task, prompt, record,
+                                run=run, which=which, sleep=sleep)
 
     # No sid exists yet, so composition claims no mailbox and needs no restore.
     # Context digests are spawn-only; resumed turns do not repay the same digest.
@@ -4663,6 +4869,66 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     return 0
 
 
+def _cmd_spawn_codex(args, cwd, task, prompt, record,
+                     run=subprocess.run, which=shutil.which,
+                     sleep=time.sleep) -> int:
+    """Commit a codex lane's mcx dispatch (item 29).
+    Same pre-claim/rollback envelope as the native path: the sid-less row is
+    popped when dispatch fails, and the mcx id commits with retries. There is
+    no roster join and no sid-keyed ceiling file on this substrate."""
+    name = args.name
+    try:
+        # Store the full brief once, inside the rollback envelope: an I/O failure
+        # after pre-claim must not leave a worker that never launched.
+        write_brief(name, task)
+        result = dispatch_codex(name, cwd, prompt, args.model,
+                                run=run, which=which)
+    except NativeDispatchError as exc:
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(name)
+            if rec is not None and rec.get("mcx_id") is None:
+                data["workers"].pop(name, None)
+                save_registry(data)
+                append_event("spawn_failed", name, error=str(exc))
+        raise FleetCliError(f"{name}: codex spawn failed -- {exc}") from exc
+    except BaseException:
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(name)
+            if rec is not None and rec.get("mcx_id") is None:
+                data["workers"].pop(name, None)
+                save_registry(data)
+        raise
+
+    mcx_id = result["mcx_id"]
+
+    def _commit_codex_stamp():
+        with fleet_lock():
+            data = load_registry()
+            rec = data["workers"].get(name)
+            # Emit the event only alongside an actual record mutation.
+            if rec is not None:
+                rec["mcx_id"] = mcx_id
+                rec["status"] = "working"
+                rec["turns"] = 1
+                rec["last_activity"] = now_iso()
+                save_registry(data)
+                _append_event_quiet("turn_started", name, mcx_id=mcx_id,
+                                    substrate="codex")
+
+    if not _commit_launched_turn(_commit_codex_stamp, sleep=sleep):
+        print(f"fleet: {name}: could not commit mcx worker {mcx_id} to the "
+              "registry -- the worker is LIVE; recover it under "
+              f"{record.get('cwd')}/.mcx/{mcx_id} or `fleet kill {name}`",
+              file=sys.stderr)
+        return 1
+
+    print(f"model: codex:{_codex_model_slug(args.model)} (via mcx)")
+    print(f"{name} mcx {mcx_id} (codex worker)")
+    return 0
+
+
 _HOOK_ERROR_TAIL = 5  # doctor/status: how many trailing hook-error lines to show
 
 
@@ -4717,10 +4983,11 @@ def cmd_status(args) -> int:
     # dead-suspected/limited state. Preserve the committed tombstone.
     active_names = [n for n in names if not before[n].get("archived_at")]
 
-    # Share one roster fetch outside the lock, only when a live worker needs probing.
+    # Share one roster fetch outside the lock, only when a live native worker
+    # needs probing. Codex lanes probe mcx instead and never need the roster.
     roster_entries = []
     epoch_frozen = False
-    if active_names:
+    if any(not _is_codex_record(before[n]) for n in active_names):
         roster_ok, payload = _fetch_agents_roster()
         roster_entries = payload if roster_ok else []
         epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
@@ -4728,13 +4995,14 @@ def cmd_status(args) -> int:
     # Recompute every named worker without holding the lock.
     after = {}
     for n in names:
-        if n not in active_names or epoch_frozen:
+        if n not in active_names or (epoch_frozen and not _is_codex_record(before[n])):
             # Archived: frozen, never recomputed. Epoch-frozen (G9): roster
-            # suspicious -- no record is recomputed or written this
-            # invocation; display whatever is last-committed.
+            # suspicious -- no NATIVE record is recomputed or written this
+            # invocation; display whatever is last-committed. A codex lane's
+            # verdict does not depend on the Claude roster, so it recomputes.
             after[n] = before[n]
         else:
-            after[n] = recompute_worker_native(n, before[n], roster_entries)
+            after[n] = recompute_worker(n, before[n], roster_entries)
 
     display = {}
     with fleet_lock():
@@ -4971,6 +5239,31 @@ def _cmd_peek_native(name: str, sid, n: int) -> int:
     return 0
 
 
+def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
+    """Print the tail of the codex lane's mcx job log (item 29)."""
+    mcx_id = rec.get("mcx_id")
+    if not mcx_id:
+        print(f"-- {name} (codex) --")
+        print("(no mcx worker id recorded -- dispatch may not have committed)")
+        return 1
+    log_path = _mcx_dir(rec) / mcx_id / "log"
+    try:
+        lines = log_path.read_text(encoding="utf-8",
+                                   errors="replace").splitlines()
+    except OSError as exc:
+        print(f"{name}: cannot read mcx log {log_path.as_posix()}: {exc}",
+              file=sys.stderr)
+        return 1
+    print(f"-- {name} ({mcx_id}) --")
+    tail = lines[-n:] if n else lines
+    if not tail:
+        print("(empty mcx log)")
+        return 0
+    for line in tail:
+        print(line)
+    return 0
+
+
 def cmd_peek(args) -> int:
     """Print a digest of recent substantive records from the native transcript."""
     args.name = _resolve_worker_target(args.name)
@@ -4982,6 +5275,8 @@ def cmd_peek(args) -> int:
         raise FleetCliError(f"unknown worker: {args.name!r}")
     rec = data["workers"][args.name]
 
+    if _is_codex_record(rec):
+        return _cmd_peek_codex(args.name, rec, args.lines)
     return _cmd_peek_native(args.name, rec.get("session_id"), args.lines)
 
 
@@ -5012,7 +5307,30 @@ def _cmd_result_native(name: str, sid) -> int:
     return 0
 
 
-def cmd_result(args) -> int:
+def _cmd_result_codex(name: str, rec: dict,
+                      run=subprocess.run, which=shutil.which) -> int:
+    """Print the codex lane's mcx result (item 29). A live run and a failed or
+    unknown worker exit 1 with distinct reasons, never an empty success."""
+    mcx_id = rec.get("mcx_id")
+    if not mcx_id:
+        print(f"{name}: no mcx worker id recorded -- dispatch may not have "
+              "committed", file=sys.stderr)
+        return 1
+    proc = _mcx_run(rec, ["result", mcx_id], run=run, which=which)
+    if proc.returncode == 2:
+        print(f"{name}: turn still running (mcx {mcx_id})", file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()
+        print(f"{name}: no result -- "
+              f"{detail or f'mcx result exited {proc.returncode}'}",
+              file=sys.stderr)
+        return 1
+    print((proc.stdout or "").rstrip("\n"))
+    return 0
+
+
+def cmd_result(args, run=subprocess.run, which=shutil.which) -> int:
     """Print the last completed turn result from the current sid outcome store."""
     args.name = _resolve_worker_target(args.name)
     # D1/D4: read the sid without lock or repair, as for peek.
@@ -5021,6 +5339,8 @@ def cmd_result(args) -> int:
         raise FleetCliError(f"unknown worker: {args.name!r}")
     rec = data["workers"][args.name]
 
+    if _is_codex_record(rec):
+        return _cmd_result_codex(args.name, rec, run=run, which=which)
     return _cmd_result_native(args.name, rec.get("session_id"))
 
 
@@ -5043,7 +5363,7 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
                         if n in workers and not workers[n].get("archived_at")]
         roster_entries = []
         epoch_frozen = False
-        if live_pending:
+        if any(not _is_codex_record(workers[n]) for n in live_pending):
             roster_ok, payload = _fetch_agents_roster()
             roster_entries = payload if roster_ok else []
             epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, workers)
@@ -5058,9 +5378,9 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
                 finished[n] = rec.get("status")
                 pending.discard(n)
                 continue
-            if epoch_frozen:
+            if epoch_frozen and not _is_codex_record(rec):
                 continue
-            status = recompute_worker_native(n, rec, roster_entries)["status"]
+            status = recompute_worker(n, rec, roster_entries)["status"]
             if status in NATIVE_TERMINAL_STATUSES:
                 finished[n] = status
                 pending.discard(n)
@@ -5104,7 +5424,7 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                          and not snap_workers[n].get("archived_at")]
         roster_entries = []
         epoch_frozen = False
-        if live_finished:
+        if any(not _is_codex_record(snap_workers[n]) for n in live_finished):
             roster_ok, payload = _fetch_agents_roster()
             roster_entries = payload if roster_ok else []
             epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, snap_workers)
@@ -5118,10 +5438,10 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                     continue
                 if rec.get("archived_at") is not None:
                     continue  # frozen tombstone -- never recompute/persist/event
-                if epoch_frozen:
+                if epoch_frozen and not _is_codex_record(rec):
                     # Suspicious roster: preserve this record without writing.
                     continue
-                updated = recompute_worker_native(n, rec, roster_entries)
+                updated = recompute_worker(n, rec, roster_entries)
                 # Never persist the transient waiting_for_permission roster flag.
                 persisted = dict(updated)
                 persisted.pop("waiting_for_permission", None)
@@ -5601,8 +5921,73 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
         before = dict(data["workers"][args.name])
 
     refuse_if_archived(args.name, before, "send")
+    if _is_codex_record(before):
+        return _cmd_send_codex(args.name, message, run=run, which=which)
     return _cmd_send_native(args.name, message,
                             run=run, which=which, sleep=sleep)
+
+
+def _cmd_send_codex(name: str, message: str,
+                    run=subprocess.run, which=shutil.which) -> int:
+    """Steer a codex lane via `mcx steer` (item 29).
+    Steering RESTARTS the run on the same Codex thread, and mcx has no
+    mailbox, so a live turn refuses instead of queueing. The message goes on
+    stdin (`mcx steer <id> -`) so size is not argv-bound."""
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if rec is None:
+            raise FleetCliError(f"unknown worker: {name!r}")
+        status = rec.get("status")
+        if status in ("dead", "interrupted"):
+            raise FleetCliError(
+                f"{name}: worker is {status} -- run `fleet respawn {name}` first")
+        if not rec.get("mcx_id"):
+            raise FleetCliError(
+                f"{name}: dispatch in flight -- retry in a few seconds")
+        rec = dict(rec)
+
+    verdict = _mcx_probe(rec, run=run, which=which)
+    if verdict is None:
+        raise FleetCliError(
+            f"{name}: mcx probe unavailable -- refusing to steer blind; "
+            "check mcx and the lane's .mcx directory")
+    if verdict == "working":
+        raise FleetCliError(
+            f"{name}: turn running -- codex steering RESTARTS the run; wait "
+            f"for idle, or `fleet interrupt {name}` first")
+    if verdict == "dead":
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("status") not in _NATIVE_STICKY:
+                r["status"] = "dead"
+                save_registry(data)
+                append_event("status_changed", name,
+                             old=rec.get("status"), new="dead")
+        raise FleetCliError(
+            f"{name}: worker is dead -- run `fleet respawn {name}` first")
+
+    proc = _mcx_run(rec, ["steer", rec["mcx_id"], "-"],
+                    run=run, which=which, input_text=message)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise FleetCliError(f"{name}: mcx steer failed -- {detail[:300]}")
+
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if r is not None and r.get("mcx_id") == rec["mcx_id"]:
+            r["status"] = "working"
+            r["last_dispatch_at"] = now_iso()
+            r["last_activity"] = now_iso()
+            r["turns"] = r.get("turns", 0) + 1
+            save_registry(data)
+            append_event("steered", name, mcx_id=rec["mcx_id"],
+                         substrate="codex")
+    print(f"{name}: steered via mcx ({rec['mcx_id']}) -- steering RESTARTED "
+          "the run on the same Codex thread; re-arm this lane's observer")
+    return 0
 
 
 def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, category,
@@ -5821,6 +6206,53 @@ def _cmd_interrupt_native(name: str, rec: dict, run=subprocess.run, which=shutil
     return 0
 
 
+def _cmd_interrupt_codex(name: str, rec: dict,
+                         run=subprocess.run, which=shutil.which) -> int:
+    """Stop a codex lane's live run via `mcx stop` and mark it interrupted.
+    Same gates as the native path; the interrupted mark commits even when the
+    stop itself is unverified. Interrupted stays sticky until respawn."""
+    mcx_id = rec.get("mcx_id")
+    if mcx_id is None:
+        print(
+            f"fleet: {name}: dispatch in flight -- no live worker yet to "
+            "interrupt; retry in a few seconds",
+            file=sys.stderr,
+        )
+        return 1
+
+    status = rec.get("status")
+    if status in ("dead", "interrupted", "idle"):
+        print(f"{name}: no turn running -- nothing to interrupt")
+        return 0
+    if status != "working":
+        print(
+            f"fleet: {name}: status is {status!r}, not a live running turn "
+            "-- refusing to interrupt",
+            file=sys.stderr,
+        )
+        return 1
+
+    proc = _mcx_run(rec, ["stop", mcx_id], run=run, which=which)
+    stopped_ok = proc.returncode == 0
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if r is not None:
+            r["status"] = "interrupted"
+            data["workers"][name] = r
+            save_registry(data)
+        append_event("interrupted", name, mcx_id=mcx_id, stopped=stopped_ok)
+    if stopped_ok:
+        note = "stopped via mcx stop"
+    else:
+        detail = (proc.stderr or "").strip()[:200]
+        note = (f"mcx stop exited {proc.returncode} ({detail}) -- marked "
+                "interrupted anyway")
+    print(f"{name}: {note}. Respawn is a separate decision "
+          f"(fleet respawn {name}).")
+    return 0
+
+
 def cmd_interrupt(args, run=subprocess.run, which=shutil.which) -> int:
     """Apply the continuity gate, then interrupt only a working native turn."""
     _supervisor_gate("interrupt", nonce=getattr(args, "nonce", None))
@@ -5832,6 +6264,8 @@ def cmd_interrupt(args, run=subprocess.run, which=shutil.which) -> int:
         rec = dict(data["workers"][args.name])
 
     refuse_if_archived(args.name, rec, "interrupt")
+    if _is_codex_record(rec):
+        return _cmd_interrupt_codex(args.name, rec, run=run, which=which)
     return _cmd_interrupt_native(args.name, rec, run=run, which=which)
 
 
@@ -5842,6 +6276,12 @@ def cmd_attach(args) -> int:
         if args.name not in data["workers"]:
             raise FleetCliError(f"unknown worker: {args.name!r}")
         before = data["workers"][args.name]
+    if _is_codex_record(before):
+        raise FleetCliError(
+            f"{args.name}: codex lane -- no interactive attach; watch the log "
+            f"at {before.get('cwd')}/.mcx/{before.get('mcx_id')}/log "
+            f"(fleet peek {args.name})"
+        )
     raise FleetCliError(
         f"{args.name}: native worker -- attach via the agents menu (Ctrl+T in claude) "
         f"or: claude attach {before.get('session_id')}"
@@ -6160,7 +6600,73 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
         # holdership or bypass a live claim.
         return _cmd_respawn_supervisor(args, args.name, before, None,
                                        run=run, which=which, sleep=sleep, clock=clock)
+    if _is_codex_record(before):
+        return _cmd_respawn_codex(args, before, run=run, which=which,
+                                  sleep=sleep)
     return _cmd_respawn_native(args, before, run=run, which=which, sleep=sleep, clock=clock)
+
+
+def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
+                       which=shutil.which, sleep=time.sleep) -> int:
+    """Fresh mcx worker under the same codex lane name (item 29).
+    A still-live old run must be --force-stopped first (mcx stop is the
+    sanctioned kill; there is no raw-pid hazard on this substrate, but a blind
+    double dispatch would fork the lane). The new mcx id commits only after a
+    successful dispatch; on failure the record is untouched and the prior
+    row's staleness surfaces through the next status recompute."""
+    name = args.name
+    model = before.get("model")
+    if _codex_model_slug(model) is None:
+        raise FleetCliError(
+            f"{name}: codex record without a codex:<model> model "
+            f"({model!r}) -- kill it and spawn a replacement")
+    cwd = Path(before["cwd"])
+    if not cwd.is_dir():
+        raise FleetCliError(
+            f"{name}: lane worktree is gone ({cwd}) -- kill the row instead")
+    # --task or the stored brief only; the registry's capped task snapshot is
+    # provenance, never a dispatch source (tests/test_brief_preservation).
+    task = getattr(args, "task", None) or read_brief(name, before)
+
+    mcx_id = before.get("mcx_id")
+    if mcx_id:
+        verdict = _mcx_probe(before, run=run, which=which)
+        if verdict == "working":
+            if not getattr(args, "force", False):
+                raise FleetCliError(
+                    f"{name}: turn still running -- use --force to stop it "
+                    "and respawn")
+            proc = _mcx_run(before, ["stop", mcx_id], run=run, which=which)
+            if proc.returncode != 0 and "unknown worker" not in (proc.stderr or ""):
+                raise FleetCliError(
+                    f"{name}: could not stop the live mcx worker -- "
+                    f"{(proc.stderr or '').strip()[:300]}")
+
+    # dispatch_codex writes the brief itself and hands mcx a pointer to it;
+    # a codex lane never gets compose_prompt's Claude-worker preamble, so the
+    # compose census (tests/test_index_compose) does not count this path.
+    result = dispatch_codex(name, cwd, task, model, run=run, which=which)
+    new_id = result["mcx_id"]
+
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if rec is not None:
+            rec["mcx_id"] = new_id
+            # Write-only, via update(): the brief-preservation census flags any
+            # literal ["task"] subscript as a capped-snapshot READ; the capped
+            # field is provenance and this respawn never reads it back.
+            rec.update({"task": task[:LEGACY_TASK_SNAPSHOT_CHARS]})
+            rec["status"] = "working"
+            rec["turns"] = 1
+            rec["last_dispatch_at"] = now_iso()
+            rec["last_activity"] = now_iso()
+            save_registry(data)
+            append_event("respawned", name, mcx_id=new_id, substrate="codex")
+            append_event("turn_started", name, mcx_id=new_id,
+                         substrate="codex")
+    print(f"{name} mcx {new_id} (codex worker, context reset)")
+    return 0
 
 
 _RETIRED_SID_SWEEP_TIMEOUT_SECONDS = 5
@@ -6298,6 +6804,46 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     return 0
 
 
+def _cmd_kill_codex(name: str, rec: dict, run=subprocess.run,
+                    which=shutil.which) -> int:
+    """Stop the mcx worker and mark the codex lane dead (item 29).
+    An already-gone mcx job is success-equivalent (the mcx parallel of the
+    native gone-to-success inference); an unverifiable stop warns and exits 1,
+    but kill is still terminal."""
+    mcx_id = rec.get("mcx_id")
+    stopped_ok = True
+    stop_outcome = "no-mcx-id"
+    if mcx_id:
+        proc = _mcx_run(rec, ["stop", mcx_id], run=run, which=which)
+        if proc.returncode == 0:
+            stop_outcome = "ok"
+        elif "unknown worker" in (proc.stderr or ""):
+            stop_outcome = "gone"
+        else:
+            stopped_ok = False
+            stop_outcome = ((proc.stderr or "").strip()[:200]
+                            or f"exit {proc.returncode}")
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if r is not None:
+            r["status"] = "dead"
+            save_registry(data)
+        append_event("killed", name, mcx_id=mcx_id,
+                     interrupt_outcome=stopped_ok)
+
+    if not stopped_ok:
+        print(
+            f"fleet: {name}: mcx stop could not be verified ({stop_outcome}) "
+            "-- marked dead anyway (kill is a terminal action); investigate "
+            "the worker manually",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"{name}: killed")
+    return 0
+
+
 def cmd_kill(args, run=subprocess.run, which=shutil.which,
              sleep=time.sleep, clock=time.monotonic) -> int:
     """Stop a native worker, tombstone it and terminally mark it dead.
@@ -6323,7 +6869,12 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which,
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
         refuse_if_archived(args.name, rec, "kill")
-        if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+        if _is_codex_record(rec):
+            if rec.get("mcx_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+                raise FleetCliError(
+                    f"launch in flight for {args.name}; retry in a few seconds"
+                )
+        elif rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
             )
@@ -6333,6 +6884,9 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which,
     _confirm_destructive("kill", [args.name], workers_snapshot,
                          assume_yes=getattr(args, "yes", False), nonce=getattr(args, "nonce", None))
 
+    if _is_codex_record(workers_snapshot[args.name]):
+        return _cmd_kill_codex(args.name, workers_snapshot[args.name],
+                               run=run, which=which)
     return _cmd_kill_native(args.name, workers_snapshot[args.name], run=run, which=which)
 
 
@@ -6379,7 +6933,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:6308` / `cmd_respawn:6124`, before
+    # resolution that runs from `cmd_kill:6854` / `cmd_respawn:6564`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -6410,9 +6964,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:6308` / `cmd_respawn:6124`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6854` / `cmd_respawn:6564`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:6145-6147` spells out that design -- resolve under the lock.
+    # `cmd_respawn:6585-6587` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -6930,9 +7484,14 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
     doomed_archived_names = [n for n in doomed_archived_names if n not in spared]
 
     after = {}
-    if live_names and not epoch_frozen:
+    if live_names:
         for n in live_names:
-            after[n] = recompute_worker_native(n, before[n], roster_entries)
+            # A frozen epoch spares native records; codex rows probe mcx and
+            # do not depend on the Claude roster.
+            if epoch_frozen and not _is_codex_record(before[n]):
+                continue
+            after[n] = recompute_worker(n, before[n], roster_entries,
+                                        run=run, which=which)
 
     doomed_now = []  # (name, before) -- verdict already final
     doomed_now.extend((n, before[n]) for n in doomed_archived_names)
@@ -10696,7 +11255,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:893`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:2724`) applies here too. An unreadable registry
+    rule for the view path (`:2924`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -10767,12 +11326,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:2012, :2047,
-    :2074, :2102, :2130, :2192, :2270, :3133, :6397, :6559, :6756, :6876, :6912, :7074, :7075, :7145,
-    :7155, :7166, :7260, :7735, :10719, :13337, :13338, :13399, :14203`).
+    sites that already key on the union (`:2175, :2210,
+    :2237, :2265, :2293, :2355, :2433, :3333, :6951, :7113, :7310, :7430, :7466, :7633, :7634, :7704,
+    :7714, :7725, :7819, :8294, :11278, :13948, :13949, :14010, :14814`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5658, :5998, :9180,
-    :14536. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :6043, :6438, :9739,
+    :15147. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11423,8 +11982,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5658, :5998, :9180,
-    # :14536) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:6043, :6438, :9739,
+    # :15147) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11432,7 +11991,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:893`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10693`).
+        # names this gate as its reason (`:11252`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11788,7 +12347,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7706`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:8265`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -12412,6 +12971,24 @@ def _wave_stop_landed_sessions(landed_names, run=subprocess.run, which=shutil.wh
         record = workers.get(name)
         if not isinstance(record, dict):
             continue
+        if _is_codex_record(record):
+            # Codex lane: stop its mcx worker so the lane arm frees the slot
+            # in the same run. An already-gone job (worktree pruned) is a stop.
+            mcx_id = record.get("mcx_id")
+            if not mcx_id:
+                continue
+            try:
+                proc = _mcx_run(record, ["stop", mcx_id], run=run, which=which)
+            except FleetCliError as exc:
+                errors.append(f"{name}: {exc}")
+                continue
+            if proc.returncode == 0 or "unknown worker" in (proc.stderr or ""):
+                stopped.append(name)
+            else:
+                errors.append(
+                    f"{name}: mcx stop exited {proc.returncode} "
+                    f"({(proc.stderr or '').strip()[:200]})")
+            continue
         sid = record.get("session_id")
         if not sid:
             continue
@@ -12423,6 +13000,31 @@ def _wave_stop_landed_sessions(landed_names, run=subprocess.run, which=shutil.wh
     return stopped, errors
 
 
+def _wave_registry_mcx_ids(repo, worktree) -> set:
+    """mcx ids from registry rows tied to ``worktree`` with substrate codex
+    (item 29: the registry row, not the .mcx marker file, is the substrate
+    record; the marker stays only as a fallback for rows that predate it)."""
+    registry = Path(repo) / "state" / "fleet.json"
+    try:
+        payload = json.loads(registry.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return set()
+    workers = payload.get("workers") if isinstance(payload, dict) else None
+    ids = set()
+    if isinstance(workers, dict):
+        for record in workers.values():
+            if not isinstance(record, dict):
+                continue
+            if not _wave_same_path(record.get("cwd"), worktree):
+                continue
+            if record.get("substrate") != "codex":
+                continue
+            mcx_id = record.get("mcx_id")
+            if isinstance(mcx_id, str) and mcx_id:
+                ids.add(mcx_id)
+    return ids
+
+
 def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
     """Sum Codex usage from mcx records in the landed lane worktrees.
 
@@ -12431,7 +13033,9 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
     consult its event log only when the result has no machine-readable usage,
     so one job cannot be counted twice.  ``lanes`` is the already-resolved
     landed-lane list; using its worktree join is essential because the main
-    checkout's ``.mcx`` is not where lane jobs live.
+    checkout's ``.mcx`` is not where lane jobs live.  Job ids come from the
+    landed lane's registry row (item 29); the ``.mcx/*/result`` glob remains
+    only as a fallback for rows with no recorded ``mcx_id``.
     """
     if lanes is None:
         roots = [Path(repo)]
@@ -12449,6 +13053,13 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
                 roots.append(Path(repo) / f"<worktree for {lane}>")
     result_paths = []
     for root in roots:
+        mcx_ids = _wave_registry_mcx_ids(repo, root)
+        if mcx_ids:
+            result_paths.extend(sorted(
+                path for path in (root / ".mcx" / mcx_id / "result"
+                                  for mcx_id in mcx_ids)
+                if path.is_file()))
+            continue
         try:
             result_paths.extend(sorted(root.glob(".mcx/*/result")))
         except OSError:

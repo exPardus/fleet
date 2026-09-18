@@ -89,14 +89,19 @@ the selected fleet home:
 - Dispatch only when at least 1.5 GB of memory is available.
 - Give each lane a disjoint write set, its branch snapshot, a bounded task, and a structured result format.
 - A lane works on the snapshot it received; do not assume later changes are present.
-- Codex workers cannot commit; the supervisor or interface lands their changes.
+- A Codex worker cannot commit; the supervisor or interface lands its work (see Codex lanes).
 
-## mcx worker control
+## Codex lanes
 
-- Run `mcx spawn` detached with no `--wait`; save the worker ID and keep its logs in files.
+Dispatch a codex lane with `fleet spawn --model codex:<model>`. Fleet runs `mcx` for
+you and routes `status`, `peek`, `result`, `send`, `interrupt`, `kill`, `respawn`
+and wave accounting through it; do not drive `mcx` by hand for a lane fleet
+dispatched.
+
 - Run one observer per lane; break its loop when `mcx result` returns anything other than 2 (`2` live, `0` done, `1` stopped or unknown).
-- Re-arm the observer after every `mcx steer`; steering starts a new run.
+- Re-arm the observer after every `mcx steer`; steering RESTARTS the run.
 - Use `gpt-5.6-luna` by default; use Astra only by exception and run at most one Astra lane at a time.
+- A Codex worker cannot commit: mcx runs `codex exec` under the default `workspace-write` sandbox, and a worktree's gitdir lives outside the worker's cwd, so `fleet land` commits the dirty worktree on the worker's behalf.
 - Do not use mcx to commit, steer unrelated workers, or create a second worker for a lane without an explicit split.
 
 ## CLI verbs

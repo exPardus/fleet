@@ -1,0 +1,83 @@
+{
+  "lane": "w98",
+  "base": "3b11e0a6c6a4f2e3fbae541ff37d3cba6485618c",
+  "files_changed": [
+    "bin/fleet.py",
+    "skills/fleet/SKILL.md",
+    "tests/test_codex_substrate.py",
+    "tests/test_core.py",
+    "tests/test_index_compose.py",
+    "tests/test_load_registry_callers.py",
+    "docs/lanes/w98.md",
+    "docs/lanes/w98.json"
+  ],
+  "tests": [
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_openrouter_substrate.py tests/test_wave_close.py tests/test_native.py tests/test_fleet_land.py tests/test_views_doctrine.py",
+      "rc": 0,
+      "passed": 476,
+      "failed": 0,
+      "skipped": 3
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_openrouter_substrate.py tests/test_wave_close.py tests/test_native.py tests/test_fleet_land.py tests/test_views_doctrine.py",
+      "rc": 0,
+      "passed": 476,
+      "failed": 0,
+      "skipped": 3
+    },
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_codex_substrate.py tests/test_core.py tests/test_index_compose.py tests/test_load_registry_callers.py",
+      "rc": 0,
+      "passed": 258,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_codex_substrate.py tests/test_core.py tests/test_index_compose.py tests/test_load_registry_callers.py",
+      "rc": 0,
+      "passed": 258,
+      "failed": 0,
+      "skipped": 1
+    }
+  ],
+  "claims": [
+    {
+      "claim": "full floor, 3.10: 5445 passed, 6 failed, 16 skipped, 3 xfailed in 612.61s -- exactly the six documented pre-existing host-venv artifacts (test_fleet_index.py::TestPathContainment x3, test_fleet_q.py::TestOutlinePathContainment x1, test_terminal_surface.py::TestCollaboratorInstall x2), not adopted; reported as a claim per the brief, since a non-zero rc in tests[] is a landing gate",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "full floor, 3.12: 5445 passed, 6 failed, 16 skipped, 3 xfailed in 500.20s -- the SAME six node ids as 3.10, compared name-for-name rather than counted, not adopted",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/"
+    },
+    {
+      "claim": "COMMIT VERDICT, re-derived from mcx's launcher source on this machine (no live probe is possible: the Codex weekly limit is exhausted until 2026-09-20T18:16Z). mcx's default approval is `never`, and that arm launches `codex exec -a never --sandbox workspace-write`; workspace-write confines writes to the worker's cwd, and this lane worktree's `.git` file points at `/home/altai/proga/fleet/.git/worktrees/fleet-w98-codex`, outside the cwd -- so `git commit` cannot write objects/refs and a Codex worker cannot commit. `fleet land` already commits a dirty worktree's listed files (`fleet_land._commit_dirty`), so it commits on the worker's behalf and no bin/fleet.py change was needed for the asymmetry",
+      "command": "sed -n '196,199p' /home/altai/proga/multi-codex/mcx; cat .git"
+    },
+    {
+      "claim": "no test makes a Codex API call and none is needed: every test in the new suite runs offline against a stub `mcx` on a redirected PATH (FLEET_HOME redirected too, MCX_DIR poisoned to prove fleet overrides it). Grepped for the four markers that would mean a real call -- zero hits",
+      "command": "grep -c \"codex exec\\|api.openai.com\\|OPENAI_API_KEY\\|chatgpt.com\" tests/test_codex_substrate.py"
+    },
+    {
+      "claim": "cmd_spawn --model codex:<model> records a row with substrate \"codex\", dispatch_kind \"mcx\" and the captured 8-char mcx_id, and it runs mcx inside the lane worktree with MCX_DIR pinned there -- the registry row is what every later verb resolves the job from",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_codex_substrate.py::TestSpawn::test_spawn_records_a_codex_row tests/test_codex_substrate.py::TestSpawn::test_spawn_runs_mcx_inside_the_lane_worktree -v"
+    },
+    {
+      "claim": "G9's never-assume-dead-on-ambiguity reaches mcx: a probe that cannot run (`mcx` missing, or the verb failing) keeps the committed status instead of demoting the lane to dead",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_codex_substrate.py::TestRecompute::test_a_failed_probe_keeps_the_committed_status -v"
+    },
+    {
+      "claim": "steering a codex lane RESTARTS the run and mcx has no mailbox, so `fleet send` to a lane whose turn is live refuses instead of queueing, naming the restart semantics",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_codex_substrate.py::TestSend::test_send_to_a_running_lane_refuses_without_queueing -v"
+    },
+    {
+      "claim": "wave accounting reads a codex lane's token cost from the landed lane's registry row (mcx_id -> <worktree>/.mcx/<id>/result), keeping the .mcx/*/result glob only as a fallback for rows that predate the field",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_codex_substrate.py::TestWaveAccounting::test_codex_tokens_prefer_the_registry_row tests/test_codex_substrate.py::TestWaveAccounting::test_codex_tokens_fall_back_to_the_glob_for_old_rows -v"
+    },
+    {
+      "claim": "the +695-line bin/fleet.py insertion did not break the citation invariants: test_self_citations, test_retired_sid_citations and test_doctrine_citations are 37 passed on 3.12 with no doc repoint needed",
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_self_citations.py tests/test_retired_sid_citations.py tests/test_doctrine_citations.py"
+    }
+  ],
+  "blockers": []
+}
