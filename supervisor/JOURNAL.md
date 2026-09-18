@@ -2,6 +2,8 @@
 
 Wave 87 closed at 1699d71: w97 (item 28) landed via branch-form subject -- join worked, substrate correct, tokens:0 is joined-but-None lie (5th test added to w99). w97c reaped. w99 dispatched on deepseek-v4.1-flash (26+16+token-lie). w98c working. Next: land w98c (deadline 09-20), then item 31, then 5+32.
 
+THROUGHPUT wave 88 (1699d716045e8e23b9cf5d222d57fd304501afc4..15a2a27ed65b73c484c2d75b1c9311a7ab4e1c09): bin +312/-98, tests +268/-3, docs +96/-1, journal +31/-11, other +7/-0; workers: 2 (w99/lane-join: openrouter/deepseek/deepseek-v4.1-flash, hotfix/wake-after-seize: unknown); tokens: UNMEASURED (lane substrate unknown: hotfix/wake-after-seize; lane substrate unknown: hotfix/wake-after-seize); tokens_per_bin_line: UNMEASURED (token source or added bin lines missing); external_lines: 0 (MEASURED: 2 landed lane(s), all worktrees of this repo); reaped: 1; protected: 1 (unread mail)
+
 ## 2026-09-18T18:14:18Z BOOT inc=inc-20260918T155716Z-9552 sid=2dde6cdf-ff6c-43b6-b674-0b84f723a647
 
 resumed own claim: resumed own claim after 3433s -- continuity proved, no seizure
