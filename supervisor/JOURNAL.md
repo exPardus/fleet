@@ -2,6 +2,8 @@
 
 WAKE resume 9552. Spending resumed (USD 100 credits, ~50 left). Plan: (1) LAND w99 fa8c6aa (review, 3.10+3.12 suites, merge branch-form, verify tokens-None=UNMEASURED). (2) RESPAWN w98c on deepseek-v4.1-flash (3.12 regression, full floor, SKILL.md, lane files, commit; deadline 09-20T18:16Z). (3) Push ec98a7d+ at wave close. (4) Then item 31.
 
+THROUGHPUT wave 89 (5bac842731d199526034f4839c78d7f826d0e0bb..1674ae7304106545cd8beeccfd47098d1f9d4860): bin +743/-43, tests +810/-0, docs +249/-2, journal +24/-16, other +9/-4; workers: 2 (w100/respawn-dead-suspected: openrouter/deepseek/deepseek-v4.1-flash, w98/native-codex: openrouter/deepseek/deepseek-v4.1-flash); tokens: 0; tokens_per_bin_line: 0.00 (0 tokens / 743 added bin lines); external_lines: 0 (MEASURED: 2 landed lane(s), all worktrees of this repo); reaped: 1; protected: 1 (unread mail)
+
 ## 2026-09-18T19:59:20Z CHECKPOINT inc=inc-20260918T155716Z-9552 sid=efddeabe-6ab2-47a8-ba07-a7fa2fff807c
 
 Wave 88 closed 5bac842 and pushed (ec98a7d included). w99 landed: review 0 findings, 165+1skip on 3.10/3.12, branch-form merge 4c14d34; joined-but-no-token-source verified UNMEASURED. w98c archived by reap at boot -- spawned successor w98d (cd64b45b, deepseek-v4.1-flash) on same worktree, already committing (e231d2b). Item 35 filed: UNJOINED refusal has no interface-hotfix class; wave 88 unblocked via post-hoc row. Item 31 dispatched as w100 (1d80ed8e, deepseek). OpenRouter spend USD 32.96 lifetime / 32.17 today. Live lanes: w98d, w100. Next: land both, wave 89.
