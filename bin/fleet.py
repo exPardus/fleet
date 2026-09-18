@@ -813,20 +813,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:7604) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:8499) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:11675) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:7657) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:8552) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:11743) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2124) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2177) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:11549) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:2637) -- expose that distinction to views.
-      * `_doctor_check_registry` (:8749) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:11617) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:2690) -- expose that distinction to views.
+      * `_doctor_check_registry` (:8802) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:4697) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:12782) -- render the release explanation.
+      * `_print_snapshot_table` (:4750) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:12851) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2044,6 +2044,59 @@ def supervisor_claim_sids(claim=None, registry=None):
         return None
 
 
+def _supervisor_body_row(claim=None, registry=None):
+    """The claim holder's registry row (read-only), or None if indeterminate.
+    Same evidence discipline as supervisor_claim_sids: a held claim, a readable
+    holder sid, and a readable registry are all required; any failure is None,
+    never a quarantine or a traceback. Views use this to name the body's model
+    and substrate (item 28)."""
+    try:
+        if claim is None:
+            claim = read_incarnation()
+        if not isinstance(claim, dict) or claim.get("state") == "released":
+            return None
+        holder_sid = claim.get("session_id")
+        if not isinstance(holder_sid, str) or not holder_sid:
+            return None
+        if registry is None:
+            registry = _registry_records_or_none()
+        if not isinstance(registry, dict):
+            return None
+        for rec in (registry.get("workers") or {}).values():
+            if isinstance(rec, dict) and holder_sid in _record_sids(rec):
+                return rec
+        return None
+    except Exception:  # noqa: BLE001 -- a view never surfaces a traceback
+        return None
+
+
+def _supervisor_body_status(claim=None, registry=None):
+    """{"model", "substrate"} of the claim holder's registry row, or None when
+    the row is indeterminate (item 28). Either field is itself None when the
+    row does not record it (legacy rows, plain models)."""
+    rec = _supervisor_body_row(claim, registry)
+    if rec is None:
+        return None
+    return {"model": rec.get("model"), "substrate": rec.get("substrate")}
+
+
+def _record_substrate_for_sid(sid, registry=None):
+    """Best-effort substrate string of the registry row carrying `sid`, else
+    None. Read-only; used to stamp journal headers (item 28) with the body's
+    recorded substrate without trusting caller-supplied identity."""
+    if not isinstance(sid, str) or not sid:
+        return None
+    if registry is None:
+        registry = _registry_records_or_none()
+    if not isinstance(registry, dict):
+        return None
+    for rec in (registry.get("workers") or {}).values():
+        if isinstance(rec, dict) and sid in _record_sids(rec):
+            sub = rec.get("substrate")
+            return sub if isinstance(sub, str) and sub else None
+    return None
+
+
 def band_tier_for_sid(sid):
     """Return supervisor for a resolved claim-holder; otherwise return worker.
     Unknown identity selects the lower advisory band, prompting earlier handoff.
@@ -2106,7 +2159,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:11675`), because legacy upgrades also require a complete registry.
+    (`:11743`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:893`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -6274,7 +6327,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:6203` / `cmd_respawn:6019`, before
+    # resolution that runs from `cmd_kill:6256` / `cmd_respawn:6072`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -6305,9 +6358,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:6203` / `cmd_respawn:6019`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:6256` / `cmd_respawn:6072`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:6040-6042` spells out that design -- resolve under the lock.
+    # `cmd_respawn:6093-6095` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -9634,6 +9687,8 @@ _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 Append-only checkpoint log (spec §4). Single writer: the current claim
 holder, via `fleet sup-*` commands only. Never edit or delete entries.
 Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
+plus an optional trailing ` substrate=<substrate>` when the body's registry row
+records one (item 28, e.g. `substrate=openrouter/stealth/union-alpha`).
 Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
 
 <!-- entries below -->
@@ -10383,7 +10438,9 @@ def mint_lineage_id() -> str:
 
 
 _SUPERVISOR_ENTRY_RE = re.compile(
-    r"^## (?P<ts>\S+) (?P<kind>[A-Z][A-Z-]*) inc=(?P<inc>\S+) sid=(?P<sid>\S+)\s*$")
+    r"^## (?P<ts>\S+) (?P<kind>[A-Z][A-Z-]*) inc=(?P<inc>\S+) sid=(?P<sid>\S+)"
+    # Optional item-28 substrate token; entries predating it parse with None.
+    r"(?: substrate=(?P<substrate>\S+))?\s*$")
 
 
 def parse_supervisor_journal(text: str) -> list:
@@ -10502,10 +10559,13 @@ def supervisor_journal_latest():
     return entries[-1] if entries else None
 
 
-def supervisor_journal_append(kind: str, inc: str, sid: str, body: str) -> None:
+def supervisor_journal_append(kind: str, inc: str, sid: str, body: str,
+                              substrate: str = None) -> None:
     """Append one checkpoint entry. Caller MUST hold fleet_lock and MUST be
     the verified claim holder (enforced by the cmd layer via
-    _require_claim_holder) -- spec §4: append-only, single-writer."""
+    _require_claim_holder) -- spec §4: append-only, single-writer.
+    `substrate` (item 28) adds a header token naming the body's registry
+    substrate, e.g. openrouter/<slug>; None keeps the pre-item-28 header."""
     if kind not in SUPERVISOR_JOURNAL_KINDS:
         raise ValueError(f"unknown journal kind {kind!r}; allowed: {', '.join(SUPERVISOR_JOURNAL_KINDS)}")
     path = supervisor_journal_path()
@@ -10517,7 +10577,10 @@ def supervisor_journal_append(kind: str, inc: str, sid: str, body: str) -> None:
         f" {line}" if _SUPERVISOR_ENTRY_RE.match(line) else line
         for line in body.rstrip().splitlines()
     )
-    entry = f"\n## {now_iso()} {kind} inc={inc} sid={sid}\n\n{safe_body}\n"
+    header = f"\n## {now_iso()} {kind} inc={inc} sid={sid}"
+    if substrate:
+        header += f" substrate={substrate}"
+    entry = f"{header}\n\n{safe_body}\n"
     with open(path, "a", encoding="utf-8") as f:
         f.write(entry)
 
@@ -10581,7 +10644,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:893`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:2625`) applies here too. An unreadable registry
+    rule for the view path (`:2678`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -10653,11 +10716,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2004, :2039,
-    :2069, :2131, :2209, :3034, :6292, :6454, :6651, :6771, :6807, :6969, :6970, :7040,
-    :7050, :7061, :7155, :7630, :10604, :13075, :13076, :13137, :13938`).
+    :2066, :2094, :2122, :2184, :2262, :3087, :6345, :6507, :6704, :6824, :6860, :7022, :7023, :7093,
+    :7103, :7114, :7208, :7683, :10667, :13153, :13154, :13215, :14019`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :5556, :5893, :9075,
-    :14269. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :5609, :5946, :9128,
+    :14352. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -11109,6 +11172,8 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     holder_limited=claim is not None and _holder_is_limited(
                         claim.get("session_id")),
                     registry=_registry_records_or_none())
+            # Item 28: stamp this body's recorded substrate on the entry header.
+            _body_substrate = _record_substrate_for_sid(caller_sid)
             if verdict == "claim":
                 inc = mint_incarnation_id()
                 value = mint_nonce()
@@ -11120,7 +11185,8 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                          "lineage_id": mint_lineage_id()}
                 _carry_handoff_pending(claim, fresh)
                 write_incarnation(fresh)
-                supervisor_journal_append("BOOT", inc, caller_sid, f"fresh claim: {reason}")
+                supervisor_journal_append("BOOT", inc, caller_sid, f"fresh claim: {reason}",
+                                          substrate=_body_substrate)
                 inc_line = inc
                 notices.append(f"NONCE: {value}")
             elif verdict == "resume":
@@ -11132,7 +11198,8 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 notices.append(_mint_pending_nonce(claim))
                 write_incarnation(claim)
                 supervisor_journal_append("BOOT", claim["incarnation_id"], caller_sid,
-                                          f"resumed own claim: {reason}")
+                                          f"resumed own claim: {reason}",
+                                          substrate=_body_substrate)
                 inc_line = claim["incarnation_id"]
             elif verdict in ("seize", "limit-transfer"):
                 inc = mint_incarnation_id()
@@ -11157,7 +11224,8 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 _carry_handoff_pending(claim, taken)
                 write_incarnation(taken)
                 supervisor_journal_append(kind, inc, caller_sid,
-                                          f"{took} {dead}: {reason}")
+                                          f"{took} {dead}: {reason}",
+                                          substrate=_body_substrate)
                 inc_line = inc
                 notices.append(f"NONCE: {value}")
             # refuse / freeze: strictly read-only.
@@ -11303,8 +11371,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:5556, :5893, :9075,
-    # :14269) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:5609, :5946, :9128,
+    # :14352) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -11312,7 +11380,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:893`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:10578`).
+        # names this gate as its reason (`:10641`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -11668,7 +11736,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:7601`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:7654`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -11727,7 +11795,8 @@ def cmd_sup_checkpoint(args) -> int:
         claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-checkpoint")
-        supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body)
+        supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body,
+                                  substrate=_record_substrate_for_sid(caller))
         roll = roll_supervisor_journal()
         occupancy = _transcript_occupancy(find_transcript_path(None, caller))
         verdict = supervisor_band_verdict(occupancy, "supervisor")
@@ -12976,6 +13045,9 @@ def cmd_sup_status(args) -> int:
         # so the union and incarnation describe the same snapshot; no claim means
         # no extra registry read. None preserves an indeterminate resolution.
         "claim_sids": supervisor_claim_sids(claim) if claim is not None else None,
+        # Item 28: the holder body's registry model/substrate (read-only row),
+        # so the view can say which model the body actually runs on.
+        "body": _supervisor_body_status(claim),
     }
     if getattr(args, "json", False):
         print(json.dumps(info, indent=2))
@@ -13000,6 +13072,12 @@ def cmd_sup_status(args) -> int:
         if _others:
             print("  same body, retired sids: " + ", ".join(_others)
                   + " -- a roster row under ANY of these is this body alive")
+        # Item 28: name the model/substrate the body runs on (registry row).
+        _body = info["body"]
+        if _body is not None:
+            print(f"  body model: {_body['model'] or '(claude default)'}"
+                  + (f" substrate={_body['substrate']}"
+                     if _body["substrate"] else ""))
         # Render the freeze-window note only for a held claim; the no-claim and
         # released branches already describe their own state.
         if beat_age is not None:
@@ -13765,7 +13843,10 @@ def _dispatch_supervisor_body(campaign, mode, model, *, setting_sources=None,
             # §10.2: null at gen-0 falls out naturally -- the caller holds no
             # claim, so `_spawning_claim_lineage` returns None (design §3).
             spawned_by_lineage=_spawning_claim_lineage(_spawner),
-            dispatch_kind="bg", category=None)
+            dispatch_kind="bg", category=None,
+            # Item 28: name the body's substrate on the row so sup-status and
+            # journal headers can say which model the supervisor runs on.
+            substrate=_openrouter_substrate(model))
         record["last_dispatch_at"] = now_iso()
         data["workers"][name] = record
         save_registry(data)
@@ -14165,7 +14246,9 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 succ_mode, model=getattr(args, "model", None),
                 setting_sources=succ_setting_sources,
                 spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
-                dispatch_kind="bg", category=None)
+                dispatch_kind="bg", category=None,
+                # Item 28: same substrate stamping as the gen-0 dispatch.
+                substrate=_openrouter_substrate(getattr(args, "model", None)))
             succ_rec["turns"] = 1
             succ_rec["last_dispatch_at"] = now_iso()
             data["workers"][name] = succ_rec
