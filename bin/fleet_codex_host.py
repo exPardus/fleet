@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import os
 import signal
 import socket
@@ -20,6 +21,7 @@ from typing import Any, Mapping
 
 from fleet_codex import (
     IPC_PROTOCOL_VERSION,
+    MAX_OPERATION_TIMEOUT_SECONDS,
     MAX_IPC_BYTES,
     HostRejected,
     OperationJournal,
@@ -31,6 +33,7 @@ from fleet_codex import (
     _public_method,
     _process_identity,
     _read_key,
+    _remaining,
     _send_frame,
     reconcile_home,
 )
@@ -50,6 +53,15 @@ def _response(request: Mapping[str, Any] | None, *, ok: bool,
         "result": result if ok else None,
         "error": error if not ok else None,
     }
+
+
+def _bounded_rpc_timeout(payload: Mapping[str, Any], operation_timeout: float,
+                         deadline: float) -> float:
+    requested = payload.get("timeout", min(30.0, operation_timeout))
+    if (not isinstance(requested, (int, float)) or isinstance(requested, bool)
+            or not math.isfinite(requested) or requested <= 0):
+        raise ValueError("rpc timeout must be a positive finite number")
+    return min(float(requested), operation_timeout, _remaining(deadline))
 
 
 class Host:
@@ -259,12 +271,14 @@ class Host:
                 elif method == "rpc":
                     if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
                         raise ValueError("rpc payload is malformed")
+                    rpc_timeout = _bounded_rpc_timeout(
+                        payload, float(request["operation_timeout"]), deadline)
                     assert self.client is not None
                     public_method = _public_method("rpc", payload)
                     if public_method is None:
                         result = self.client.request(
                             payload["method"], payload.get("params", {}),
-                            timeout=float(payload.get("timeout", 30)))
+                            timeout=rpc_timeout)
                     else:
                         operation_id = request["operation_id"]
                         record = self.journal.load(operation_id)
@@ -295,7 +309,7 @@ class Host:
                             try:
                                 result = self.client.request(
                                     payload["method"], payload.get("params", {}),
-                                    timeout=float(payload.get("timeout", 30)))
+                                    timeout=rpc_timeout)
                             except Exception as exc:
                                 self.journal.uncertain(
                                     operation_id,
@@ -344,7 +358,9 @@ class Host:
             return "invalid method"
         if (not isinstance(operation_timeout, (int, float))
                 or isinstance(operation_timeout, bool)
-                or operation_timeout <= 0 or operation_timeout > 120):
+                or not math.isfinite(operation_timeout)
+                or operation_timeout <= 0
+                or operation_timeout > MAX_OPERATION_TIMEOUT_SECONDS):
             return "invalid operation timeout"
         try:
             expected = _digest(method, request.get("payload", {}))

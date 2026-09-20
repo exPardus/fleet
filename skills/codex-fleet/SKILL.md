@@ -40,9 +40,14 @@ Fleet's `fleet send supervisor` has different idle-wake semantics.
 
 ## Worker
 
-Keep cwd bound to the assigned worktree. Read one brief and its result contract,
-edit only the assigned write set, run the named checks, and return the exact
-commit, tests, risks, and remaining gaps. Do not take another role or worktree.
+Keep cwd bound to the assigned worktree and own the bounded deliverable end to
+end. Read one goal, constraints, acceptance criteria, write set, and result
+contract. Choose routine implementation details, fix discovered in-scope
+defects, and treat named checks as a floor. Escalate only a real scope or
+ownership conflict, missing authority or input, or a money/VPS action. Return
+the exact commit, tests, risks, and remaining gaps. Do not take another role or
+worktree, and do not dispatch descendants or reviewers; the Supervisor owns
+every dispatch and independent review assignment.
 
 ## Refusal boundary
 

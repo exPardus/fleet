@@ -189,6 +189,64 @@ def test_host_rejects_wrong_home_generation_and_digest(tmp_path, mutation, error
         _shutdown(client)
 
 
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"),
+                                      float("-inf"), 0, -1, True])
+def test_client_rejects_nonfinite_or_nonpositive_operation_timeout(
+        tmp_path, timeout):
+    _, client, _ = _ensure(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="positive finite"):
+            client.call(_operation("invalid-timeout"), timeout=timeout)
+        assert client.call(_operation("after-invalid-timeout"), timeout=1).result[
+            "generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"),
+                                      float("-inf"), 0, -1, True, 121])
+def test_host_rejects_invalid_authenticated_operation_timeout(tmp_path, timeout):
+    _, client, _ = _ensure(tmp_path)
+    try:
+        envelope = _envelope(client, "invalid-operation-timeout")
+        envelope["operation_timeout"] = timeout
+        response = _raw_call(client, envelope)
+        assert response["ok"] is False
+        assert "operation timeout" in response["error"]
+        assert client.call(_operation("after-invalid-operation-timeout"), timeout=1).result[
+            "generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"),
+                                      float("-inf"), 0, -1, True, "30"])
+def test_host_rejects_invalid_nested_rpc_timeout_without_crashing(
+        tmp_path, timeout):
+    _, client, _ = _ensure(tmp_path)
+    try:
+        envelope = _envelope(
+            client, "invalid-rpc-timeout", "rpc",
+            {"method": "test/echo", "params": {"value": 7},
+             "timeout": timeout})
+        response = _raw_call(client, envelope)
+        assert response["ok"] is False
+        assert "timeout" in response["error"]
+        assert client.call(_operation("after-invalid-rpc-timeout"), timeout=1).result[
+            "generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+def test_nested_rpc_timeout_is_capped_by_authenticated_operation_deadline():
+    import fleet_codex_host
+
+    deadline = time.monotonic() + 10
+    bounded = fleet_codex_host._bounded_rpc_timeout(
+        {"timeout": 10_000_000}, 0.25, deadline)
+    assert 0 < bounded <= 0.25
+
+
 def test_transport_rejects_wrong_authentication_key(tmp_path):
     _, client, _ = _ensure(tmp_path)
     try:
