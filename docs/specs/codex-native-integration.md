@@ -167,7 +167,10 @@ supported cross-process interrupt surface for a managed supervisor. Rejected.
 | Portability | Filesystem locking/permissions differ | Small platform seam chooses owner-only local transport |
 
 The authenticated endpoint is chosen. POSIX uses an owner-only AF_UNIX socket
-under `state/codex/`; Windows uses an owner-scoped named pipe. Peers exchange
+under `state/codex/`. The initial native adapter refuses on Windows: enabling a
+named-pipe implementation requires explicit owner-only DACL creation and a
+negative cross-user connection test. Inherited default ACLs are not evidence of
+confinement. Peers exchange
 length-bounded UTF-8 JSON bytes, never pickle. A random host secret is stored
 owner-only through the platform adapter. It authenticates local Fleet IPC; it
 is not a Codex ID, supervisor nonce, or model-visible authority token.

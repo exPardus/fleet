@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
-import multiprocessing.connection
 import os
 import secrets
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
@@ -25,6 +27,8 @@ IPC_PROTOCOL_VERSION = 1
 MAX_IPC_BYTES = 1024 * 1024
 MAX_METADATA_BYTES = 64 * 1024
 HOST_LOCK_STALE_SECONDS = 30.0
+HOST_HEARTBEAT_STALE_SECONDS = 3.0
+IPC_AUTH_CHALLENGE_BYTES = 32
 SCHEMA_MANIFEST = (
     Path(__file__).resolve().parents[1]
     / "tests" / "fixtures" / "codex_app_server" / "0.155.1" / "manifest.json"
@@ -71,6 +75,18 @@ _SENSITIVE_KEYS = frozenset({
 
 
 def _canonical_home(home: Path) -> Path:
+    lexical = Path(os.path.abspath(os.fspath(home)))
+    current = Path(lexical.anchor)
+    for part in lexical.parts[1:]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise UnsafeHostState(f"cannot inspect Fleet home path {current}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise UnsafeHostState(f"Fleet home path contains a symlink: {current}")
     try:
         resolved = Path(home).resolve(strict=True)
     except OSError as exc:
@@ -191,7 +207,37 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 
 
 def _validate_fixed_paths(state_dir: Path) -> None:
-    _require_directory(state_dir, create=True)
+    if os.name == "nt":
+        raise HostUnavailable(
+            "native Codex hosting is unsupported on Windows until owner-only "
+            "named-pipe DACLs have cross-user acceptance proof")
+    home = state_dir.parent.parent
+    for parent in (home, home / "state"):
+        info = _require_owner(parent)
+        if not stat.S_ISDIR(info.st_mode):
+            raise UnsafeHostState(f"Codex host parent is not a directory: {parent}")
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    home_fd = state_fd = codex_fd = None
+    try:
+        home_fd = os.open(str(home), directory_flags)
+        state_fd = os.open("state", directory_flags, dir_fd=home_fd)
+        try:
+            os.mkdir("codex", mode=0o700, dir_fd=state_fd)
+        except FileExistsError:
+            pass
+        codex_fd = os.open("codex", directory_flags, dir_fd=state_fd)
+        info = os.fstat(codex_fd)
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise UnsafeHostState(
+                f"Codex host directory lacks owner-only confinement: {state_dir}")
+    except OSError as exc:
+        raise UnsafeHostState(
+            f"cannot create Codex state below verified home {home}: {exc}") from exc
+    finally:
+        for descriptor in (codex_fd, state_fd, home_fd):
+            if descriptor is not None:
+                os.close(descriptor)
+    _require_directory(state_dir)
     for path in (state_dir / "host.json", state_dir / "host.key",
                  state_dir / "codex-host.lock"):
         if path.exists() or path.is_symlink():
@@ -208,7 +254,9 @@ def _validate_fixed_paths(state_dir: Path) -> None:
 @contextmanager
 def _host_lock(path: Path, timeout: float) -> Iterator[None]:
     deadline = time.monotonic() + timeout
-    token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("ascii")
+    identity = _process_identity(os.getpid())
+    token = (json.dumps({"pid": os.getpid(), "identity": identity,
+                         "nonce": uuid.uuid4().hex}, sort_keys=True) + "\n").encode("ascii")
     while True:
         try:
             fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -219,7 +267,8 @@ def _host_lock(path: Path, timeout: float) -> Iterator[None]:
             break
         except FileExistsError:
             info = _require_regular(path)
-            if time.time() - info.st_mtime > HOST_LOCK_STALE_SECONDS:
+            if (time.time() - info.st_mtime > HOST_LOCK_STALE_SECONDS
+                    and not _lock_holder_is_live(path)):
                 try:
                     path.unlink()
                 except FileNotFoundError:
@@ -236,6 +285,91 @@ def _host_lock(path: Path, timeout: float) -> Iterator[None]:
                 path.unlink()
         except OSError:
             pass
+
+
+def _process_identity(pid: int) -> str | None:
+    """Return a PID-reuse-resistant Linux identity when public procfs exposes one."""
+    if os.name == "nt":
+        return None
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
+        return fields[21]
+    except (OSError, IndexError, UnicodeError):
+        return None
+
+
+def _lock_holder_is_live(path: Path) -> bool:
+    try:
+        value = json.loads(path.read_text(encoding="ascii"))
+        pid = value.get("pid")
+        identity = value.get("identity")
+    except (OSError, UnicodeError, json.JSONDecodeError, AttributeError):
+        return True
+    if not isinstance(pid, int) or pid <= 0:
+        return True
+    current = _process_identity(pid)
+    if current is not None:
+        return isinstance(identity, str) and hmac.compare_digest(current, identity)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Codex host IPC deadline expired")
+    return remaining
+
+
+def _recv_exact(connection: socket.socket, size: int, deadline: float) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        connection.settimeout(_remaining(deadline))
+        chunk = connection.recv(remaining)
+        if not chunk:
+            raise EOFError("Codex host IPC peer disconnected")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _recv_frame(connection: socket.socket, deadline: float,
+                maximum: int = MAX_IPC_BYTES) -> bytes:
+    size = struct.unpack("!I", _recv_exact(connection, 4, deadline))[0]
+    if size > maximum:
+        raise ValueError(f"Codex host IPC frame exceeds {maximum} bytes")
+    return _recv_exact(connection, size, deadline)
+
+
+def _send_frame(connection: socket.socket, payload: bytes, deadline: float) -> None:
+    if len(payload) > MAX_IPC_BYTES:
+        raise ValueError(f"Codex host IPC frame exceeds {MAX_IPC_BYTES} bytes")
+    connection.settimeout(_remaining(deadline))
+    connection.sendall(struct.pack("!I", len(payload)) + payload)
+
+
+def _connect_authenticated(endpoint: str, authkey: bytes,
+                           deadline: float) -> socket.socket:
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connection.settimeout(_remaining(deadline))
+        connection.connect(endpoint)
+        challenge = _recv_frame(connection, deadline, IPC_AUTH_CHALLENGE_BYTES)
+        if len(challenge) != IPC_AUTH_CHALLENGE_BYTES:
+            raise HostUnavailable("Codex host sent an invalid authentication challenge")
+        _send_frame(connection, hmac.digest(authkey, challenge, "sha256"), deadline)
+        if _recv_frame(connection, deadline, 16) != b"OK":
+            raise HostUnavailable("Codex host authentication failed")
+        return connection
+    except BaseException:
+        connection.close()
+        raise
 
 
 def _digest(method: str, payload: Any) -> str:
@@ -417,11 +551,13 @@ class CodexHostClient:
         self.key_path = self.state_dir / "host.key"
         self.generation = str(metadata["generation"])
         self.schema_digest = metadata.get("schema_digest")
-        self.protocol_version = 2
+        self.protocol_version = metadata["codex_protocol_version"]
         self._endpoint = metadata["endpoint"]
         self._transport = metadata["transport"]
         self._encoded_key = encoded_key
         self._authkey = authkey
+        self._pid = metadata["pid"]
+        self._process_identity = metadata["process_identity"]
         self._launched_process: subprocess.Popen[Any] | None = None
 
     @classmethod
@@ -440,12 +576,18 @@ class CodexHostClient:
         existing = cls._existing(home)
         if existing is not None and existing._ping(0.5):
             return existing
+        if (existing is not None
+                and (not existing._metadata_stale() or existing._owner_live())):
+            raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
 
         with _host_lock(state_dir / "codex-host.lock", ready_timeout):
             _validate_fixed_paths(state_dir)
             existing = cls._existing(home)
             if existing is not None and existing._ping(0.5):
                 return existing
+            if (existing is not None
+                    and (not existing._metadata_stale() or existing._owner_live())):
+                raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
             key_path = state_dir / "host.key"
             if key_path.exists():
                 _read_key(key_path)
@@ -471,6 +613,7 @@ class CodexHostClient:
                 "--transport", family,
                 "--app-server-command-json", json.dumps(command),
                 "--schema-manifest", str(SCHEMA_MANIFEST),
+                "--schema-command-json", json.dumps(["codex"]),
                 "--idle-timeout", str(idle_timeout),
             ]
             child_env = dict(os.environ if env is None else env)
@@ -511,19 +654,76 @@ class CodexHostClient:
             if key_path.exists() or key_path.is_symlink():
                 _read_key(key_path)
             return None
-        required = {"home", "generation", "endpoint", "transport", "ready"}
+        manifest = json.loads(SCHEMA_MANIFEST.read_text(encoding="utf-8"))
+        endpoint, transport = _endpoint_for(home, state_dir)
+        required = {
+            "schema", "home", "generation", "endpoint", "transport", "ready",
+            "ipc_protocol_version", "codex_protocol_version", "codex_version",
+            "schema_digest", "heartbeat",
+            "pid", "process_identity",
+        }
         if not required.issubset(metadata) or metadata.get("home") != str(home):
             raise UnsafeHostState("Codex host metadata has wrong home or missing fields")
+        try:
+            generation = uuid.UUID(metadata["generation"])
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise UnsafeHostState("Codex host metadata has invalid generation") from exc
+        expected = {
+            "schema": 1,
+            "endpoint": endpoint,
+            "transport": transport,
+            "ipc_protocol_version": IPC_PROTOCOL_VERSION,
+            "codex_protocol_version": manifest["protocol_version"],
+            "codex_version": manifest["codex_version"],
+            "schema_digest": manifest["schema_sha256"],
+        }
+        if generation.version != 4 or str(generation) != metadata["generation"]:
+            raise UnsafeHostState("Codex host metadata generation is not canonical UUIDv4")
+        if any(metadata.get(key) != value for key, value in expected.items()):
+            raise UnsafeHostState("Codex host metadata does not match the reviewed endpoint contract")
+        if not isinstance(metadata.get("heartbeat"), (int, float)):
+            raise UnsafeHostState("Codex host metadata has invalid heartbeat")
+        if (not isinstance(metadata.get("pid"), int)
+                or metadata["pid"] <= 0
+                or not isinstance(metadata.get("process_identity"), str)
+                or not metadata["process_identity"]):
+            raise UnsafeHostState("Codex host metadata has invalid process identity")
         if metadata.get("ready") is not True:
             return None
         encoded, decoded = _read_key(key_path)
         return cls(home, metadata, encoded, decoded)
 
+    def _metadata_stale(self) -> bool:
+        metadata = _read_json(self.metadata_path)
+        heartbeat = metadata.get("heartbeat") if metadata else None
+        return (not isinstance(heartbeat, (int, float))
+                or time.time() - heartbeat > HOST_HEARTBEAT_STALE_SECONDS)
+
+    def _owner_live(self) -> bool:
+        current = _process_identity(self._pid)
+        if current is not None:
+            return hmac.compare_digest(current, self._process_identity)
+        try:
+            os.kill(self._pid, 0)
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True
+        return True
+
     def _ping(self, timeout: float) -> bool:
         try:
-            self.call({"operation_id": f"ping-{uuid.uuid4()}",
-                       "method": "ping", "payload": {}}, timeout=timeout)
-            return True
+            observation = self.call({"operation_id": f"ping-{uuid.uuid4()}",
+                                     "method": "ping", "payload": {}}, timeout=timeout)
+            return observation.result == {
+                "generation": self.generation,
+                "home": str(self.home),
+                "endpoint": self._endpoint,
+                "transport": self._transport,
+                "ipc_protocol_version": IPC_PROTOCOL_VERSION,
+                "codex_protocol_version": self.protocol_version,
+                "schema_digest": self.schema_digest,
+            }
         except (OSError, EOFError, TimeoutError, HostUnavailable, HostRejected):
             return False
 
@@ -554,22 +754,22 @@ class CodexHostClient:
             "payload_digest": digest,
             "recovery": operation.get("recovery", {}),
             "secret": self._encoded_key,
+            "operation_timeout": min(timeout, 120.0),
         }
         encoded = json.dumps(envelope, separators=(",", ":"),
                              sort_keys=True, ensure_ascii=False).encode("utf-8")
         if len(encoded) > MAX_IPC_BYTES:
             raise ValueError(f"Codex host request exceeds {MAX_IPC_BYTES} bytes")
+        deadline = time.monotonic() + timeout
         try:
-            connection = multiprocessing.connection.Client(
-                self._endpoint, family=self._transport, authkey=self._authkey)
-        except (OSError, EOFError) as exc:
+            connection = _connect_authenticated(
+                self._endpoint, self._authkey, deadline)
+        except (OSError, EOFError, TimeoutError, ValueError, HostUnavailable) as exc:
             raise HostUnavailable("authenticated Codex host connection failed") from exc
         try:
-            connection.send_bytes(encoded)
-            if not connection.poll(timeout):
-                raise TimeoutError(f"Codex host operation {operation_id} timed out")
-            raw = connection.recv_bytes(MAX_IPC_BYTES)
-        except (OSError, EOFError) as exc:
+            _send_frame(connection, encoded, deadline)
+            raw = _recv_frame(connection, deadline)
+        except (OSError, EOFError, TimeoutError, ValueError) as exc:
             raise HostUnavailable("Codex host response was lost") from exc
         finally:
             connection.close()
@@ -608,8 +808,9 @@ class CodexHostClient:
 
 def _endpoint_for(home: Path, state_dir: Path) -> tuple[str, str]:
     if os.name == "nt":
-        suffix = hashlib.sha256(str(home).encode("utf-8")).hexdigest()[:24]
-        return rf"\\.\pipe\fleet-codex-{suffix}", "AF_PIPE"
+        raise HostUnavailable(
+            "native Codex hosting is unsupported on Windows until owner-only "
+            "named-pipe DACLs have cross-user acceptance proof")
     return str(state_dir / "ipc.sock"), "AF_UNIX"
 
 

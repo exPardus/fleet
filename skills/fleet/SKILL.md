@@ -154,6 +154,13 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 
 ## Supervisor guard and generations
 
+Read `supervisor.md` before taking the Supervisor role. Persist each child's
+canonical ID, worktree, brief, and writer/reviewer role; after compaction query
+the full canonical roster, refuse active-writer worktree collisions, and
+reconcile every required nested review before accepting the parent. For Codex
+collaboration, `send_message` only queues delivery; use `followup_task` to wake
+an idle or completed agent. This differs from `fleet send supervisor`.
+
 - Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. Omitting it on one of these is refused as a continuity failure naming a second body, which reads like an incident and is not one.
 - Treat `sup-boot` exit 0 as a held or transferred claim, exit 2 as refusal, exit 3 as freeze, exit 4=continuity refusal, and exit 5 as handoff refusal.
 - Reconcile `fleet status` outcomes before dispatching; do not treat a limited worker as dead.

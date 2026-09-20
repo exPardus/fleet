@@ -76,7 +76,10 @@
 - Produces: `CodexHostClient.ensure(home: Path)`; `call(operation, timeout) -> CodexObservation`; host entrypoint with exact home/generation.
 
 - [ ] Write failing tests: two concurrent starters yield one host/child; wrong home/generation/auth/digest refuse; symlink, wrong owner/mode/type, hostile JSON, and oversized frames refuse without replacement.
-- [ ] Implement owner-only AF_UNIX on POSIX and owner-scoped named pipe on Windows, bounded UTF-8 JSON bytes only, owner-only secret, fixed-path `lstat` checks, and exact-home authentication.
+- [ ] Implement owner-only AF_UNIX on POSIX, bounded UTF-8 JSON bytes only,
+  owner-only secret, descriptor-relative fixed-path checks, and exact-home
+  authentication. Refuse Windows until owner-only named-pipe DACL creation and
+  a negative cross-user test prove the platform seam.
 - [ ] Implement `host.json`, heartbeat, bounded ready wait, `codex-host.lock` replacement, initialize/schema gate, and graceful idle shutdown.
 - [ ] Assert `fleet.lock` and host lock are never nested and PID is only a liveness hint.
 - [ ] Run tests on 3.10/3.12; commit as `feat(codex): add per-home app-server host`.

@@ -3,6 +3,7 @@ import hashlib
 import json
 import multiprocessing.connection
 import os
+import socket
 import stat
 import sys
 import threading
@@ -135,15 +136,19 @@ def test_two_concurrent_starters_share_one_host_and_one_app_server(tmp_path):
 
 
 def _raw_call(client, envelope, *, authkey=None):
+    module = _modules()
     metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
     family = metadata["transport"]
     address = metadata["endpoint"]
     key = base64.b64decode(client.key_path.read_text(encoding="ascii"))
-    connection = multiprocessing.connection.Client(
-        address, family=family, authkey=key if authkey is None else authkey)
+    assert family == "AF_UNIX"
+    deadline = time.monotonic() + 1
+    connection = module._connect_authenticated(
+        address, key if authkey is None else authkey, deadline)
     try:
-        connection.send_bytes(json.dumps(envelope, sort_keys=True).encode("utf-8"))
-        return json.loads(connection.recv_bytes(1024 * 1024).decode("utf-8"))
+        module._send_frame(
+            connection, json.dumps(envelope, sort_keys=True).encode("utf-8"), deadline)
+        return json.loads(module._recv_frame(connection, deadline).decode("utf-8"))
     finally:
         connection.close()
 
@@ -162,6 +167,7 @@ def _envelope(client, operation_id, method="ping", payload=None):
         "payload": payload,
         "payload_digest": digest,
         "secret": client.key_path.read_text(encoding="ascii").strip(),
+        "operation_timeout": 1.0,
     }
 
 
@@ -259,6 +265,21 @@ def test_symlinked_state_directory_is_not_followed_or_chmodded(tmp_path):
     assert stat.S_IMODE(target.stat().st_mode) == 0o755
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink confinement")
+def test_symlinked_state_parent_is_rejected_without_creating_foreign_state(tmp_path):
+    module = _modules()
+    home = tmp_path / "home"
+    home.mkdir()
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (home / "state").symlink_to(foreign, target_is_directory=True)
+
+    with pytest.raises(module.UnsafeHostState, match="symlink"):
+        module.CodexHostClient.ensure(home, ready_timeout=0.2)
+
+    assert not (foreign / "codex").exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX owner check")
 def test_wrong_owner_refuses_without_starting_a_replacement(tmp_path, monkeypatch):
     module = _modules()
@@ -297,6 +318,89 @@ def test_host_state_is_owner_only_and_pid_does_not_decide_identity(tmp_path):
         assert again.generation == client.generation
     finally:
         _shutdown(client)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("generation", "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"),
+    ("endpoint", "/tmp/not-the-derived-endpoint"),
+    ("transport", "AF_PIPE"),
+    ("ipc_protocol_version", 999),
+    ("codex_protocol_version", 999),
+    ("schema_digest", "0" * 64),
+])
+def test_existing_host_metadata_must_match_the_exact_reviewed_contract(
+        tmp_path, field, value):
+    module, client, _ = _ensure(tmp_path)
+    original = client.metadata_path.read_bytes()
+    metadata = json.loads(original)
+    metadata[field] = value
+    client.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    client.metadata_path.chmod(0o600)
+    try:
+        with pytest.raises(module.UnsafeHostState):
+            module.CodexHostClient.ensure(client.home, ready_timeout=0.2)
+    finally:
+        client.metadata_path.write_bytes(original)
+        client.metadata_path.chmod(0o600)
+        _shutdown(client)
+
+
+def test_silent_and_disconnected_clients_cannot_wedge_or_crash_host(tmp_path):
+    _, client, _ = _ensure(tmp_path)
+    endpoint = json.loads(client.metadata_path.read_text())["endpoint"]
+    silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        silent.connect(endpoint)
+        time.sleep(1.2)
+        silent.close()
+        disconnected = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        disconnected.connect(endpoint)
+        disconnected.close()
+        assert client.call(_operation("after-hostile-peers"), timeout=2).result[
+            "generation"] == client.generation
+    finally:
+        silent.close()
+        _shutdown(client)
+
+
+def test_busy_host_is_not_replaced_when_ping_deadline_expires(tmp_path):
+    module, client, log = _ensure(tmp_path)
+    endpoint = json.loads(client.metadata_path.read_text())["endpoint"]
+    silent = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        silent.connect(endpoint)
+        started = time.monotonic()
+        with pytest.raises(module.HostUnavailable, match="refusing replacement"):
+            module.CodexHostClient.ensure(client.home, ready_timeout=0.7)
+        assert time.monotonic() - started < 1.5
+        assert [json.loads(line) for line in log.read_text().splitlines()] == [
+            {"event": "started", "inherited_claude_sid": False}]
+    finally:
+        silent.close()
+        time.sleep(1.1)
+        _shutdown(client)
+
+
+def test_live_stale_lock_is_never_stolen_and_dead_lock_is_recoverable(tmp_path):
+    module = _modules()
+    path = tmp_path / "host.lock"
+    live = {"pid": os.getpid(), "identity": module._process_identity(os.getpid()),
+            "nonce": "live"}
+    path.write_text(json.dumps(live), encoding="ascii")
+    path.chmod(0o600)
+    old = time.time() - module.HOST_LOCK_STALE_SECONDS - 2
+    os.utime(path, (old, old))
+    with pytest.raises(module.HostUnavailable):
+        with module._host_lock(path, 0.05):
+            pass
+    assert json.loads(path.read_text())["nonce"] == "live"
+
+    dead = {"pid": 999_999_999, "identity": "dead", "nonce": "dead"}
+    path.write_text(json.dumps(dead), encoding="ascii")
+    path.chmod(0o600)
+    os.utime(path, (old, old))
+    with module._host_lock(path, 0.2):
+        assert json.loads(path.read_text())["pid"] == os.getpid()
 
 
 def test_idle_host_shuts_down_without_killing_or_signaling_provider_pid(tmp_path):
@@ -345,26 +449,48 @@ def test_unreviewed_app_server_version_never_publishes_ready(tmp_path):
     assert not (home / "state" / "codex" / "host.json").exists()
 
 
+def test_installed_schema_digest_mismatch_never_publishes_ready(
+        tmp_path, monkeypatch):
+    module = _modules()
+    home = _home(tmp_path)
+    manifest = tmp_path / "manifest.json"
+    value = json.loads(module.SCHEMA_MANIFEST.read_text())
+    value["schema_sha256"] = "0" * 64
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setattr(module, "SCHEMA_MANIFEST", manifest)
+    log = tmp_path / "app-server.jsonl"
+
+    with pytest.raises(module.HostUnavailable):
+        module.CodexHostClient.ensure(
+            home, app_server_command=[str(_fake_app_server(tmp_path))],
+            env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)), ready_timeout=1)
+
+    assert not log.exists()
+    assert not (home / "state" / "codex" / "host.json").exists()
+
+
 def test_host_rejects_oversized_and_non_json_ipc_frames(tmp_path):
+    module = _modules()
     _, client, _ = _ensure(tmp_path)
     metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
     key = base64.b64decode(client.key_path.read_text(encoding="ascii"))
     try:
-        connection = multiprocessing.connection.Client(
-            metadata["endpoint"], family=metadata["transport"], authkey=key)
+        deadline = time.monotonic() + 1
+        connection = module._connect_authenticated(metadata["endpoint"], key, deadline)
         try:
-            connection.send_bytes(b"{not json")
-            response = json.loads(connection.recv_bytes(1024 * 1024).decode())
+            module._send_frame(connection, b"{not json", deadline)
+            response = json.loads(module._recv_frame(connection, deadline).decode())
             assert response["ok"] is False
         finally:
             connection.close()
 
-        connection = multiprocessing.connection.Client(
-            metadata["endpoint"], family=metadata["transport"], authkey=key)
+        deadline = time.monotonic() + 1
+        connection = module._connect_authenticated(metadata["endpoint"], key, deadline)
         try:
-            with pytest.raises((BrokenPipeError, EOFError, OSError)):
-                connection.send_bytes(b"x" * (1024 * 1024 + 1))
-                connection.recv_bytes(1024 * 1024)
+            connection.sendall((1024 * 1024 + 1).to_bytes(4, "big"))
+            response = json.loads(module._recv_frame(connection, deadline).decode())
+            assert response["ok"] is False
+            assert "exceeds" in response["error"]
         finally:
             connection.close()
         assert client.call(_operation("after-hostile"), timeout=1).result["generation"] == client.generation
