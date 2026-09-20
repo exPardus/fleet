@@ -563,6 +563,17 @@ class CodexHostClient:
         self._launched_process: subprocess.Popen[Any] | None = None
 
     @classmethod
+    def connect_existing(cls, home: Path) -> "CodexHostClient":
+        """Attach to reviewed exact-home metadata without starting a host."""
+        home = _canonical_home(home)
+        state_dir = home / "state" / "codex"
+        _validate_fixed_paths(state_dir)
+        existing = cls._existing(home)
+        if existing is None:
+            raise HostUnavailable("no ready Codex host exists for this Fleet home")
+        return existing
+
+    @classmethod
     def ensure(
         cls,
         home: Path,
@@ -905,7 +916,13 @@ def reconcile_home(home: Path, *, observer=None) -> ReconcileReport:
     )
 
 
+def connect_existing(home: Path) -> CodexHostClient:
+    """Return the existing exact-home client; never launch or reconcile a host."""
+    return CodexHostClient.connect_existing(home)
+
+
 __all__ = [
     "CodexHostClient", "CodexObservation", "HostRejected", "HostUnavailable",
-    "OperationJournal", "ReconcileReport", "UnsafeHostState", "reconcile_home",
+    "OperationJournal", "ReconcileReport", "UnsafeHostState", "connect_existing",
+    "reconcile_home",
 ]

@@ -91,6 +91,21 @@ def _operation(operation_id="op-1", method="ping", payload=None):
             "payload": {} if payload is None else payload}
 
 
+def test_connect_existing_never_ensures_or_launches_a_host(tmp_path, monkeypatch):
+    module = _modules()
+    home = _home(tmp_path)
+    sentinel = object()
+    monkeypatch.setattr(
+        module.CodexHostClient, "_existing",
+        classmethod(lambda cls, exact_home: sentinel))
+    monkeypatch.setattr(
+        module.CodexHostClient, "ensure",
+        classmethod(lambda cls, *args, **kwargs: pytest.fail(
+            "connect_existing must not ensure or launch a host")))
+
+    assert module.connect_existing(home) is sentinel
+
+
 def _shutdown(client):
     try:
         client.call(_operation("shutdown", "host/shutdown"), timeout=2)

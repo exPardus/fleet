@@ -350,6 +350,7 @@ def test_guard_retries_deferred_fork_retirement_before_revalidation(home, monkey
     calls = []
     monkeypatch.setattr(fleet, '_reap_current_supervisor_forks',
                         lambda **_: calls.append('reap'))
+    monkeypatch.setattr(fleet, 'cmd_send', lambda _: 0)
     fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
                         snapshot_fn=lambda: calls.append('observe') or snapshot(),
                         roster_fn=roster(row(SID)))

@@ -132,15 +132,20 @@
 **Interfaces:**
 - Produces: `ProviderIdentity(provider, value)`; provider-tagged holder; Codex sup-spawn/boot/status/guard/wake/checkpoint/release.
 
-**Bounded landing (2026-09-21):** explicit `sup-spawn --codex-adapter
-native --model codex:<model>` now implements only the preclaim, genuine public
-thread binding, first-turn boot, and held-claim promotion slice. Provider
-mutation is guarded by the exact provider-tagged incarnation and holder, so a
-stale predecessor or a supplied UUID cannot authorize a call. The default
-supervisor route remains unchanged. Guard, mail/wake, checkpoint/release,
-handoff, host-restart recovery, and native Interface ownership remain
-unsupported; this does not enable native dispatch by default or complete this
-task.
+**Bounded landings (2026-09-21):** explicit `sup-spawn --codex-adapter native
+--model codex:<model>` implements preclaim, genuine public thread binding,
+first-turn boot, and held-claim promotion. The next slice adds exact-home,
+claim-bound `sup-status`, `sup-guard`, active `turn/steer`, stale-idle
+`turn/start`, and public active/completed/failed result distinction. Status
+remains a file-only view; guard and send use `thread/read(includeTurns=true)`
+and refuse incomplete, waiting, not-loaded, system-error, generation-mismatched,
+or conflicting evidence. A durable per-claim operation reservation prevents a
+second mutation; ambiguous recovery queues no second turn and never resumes or
+creates a thread. A stale predecessor or supplied UUID cannot authorize a
+call. The default supervisor route remains unchanged. Checkpoint/release,
+handoff, host-restart resumption, paged result hydration, permissions, and
+native Interface ownership remain unsupported; these slices do not enable
+native dispatch by default or complete this task.
 
 - [ ] Write failing tests for genuine thread holder with no Claude SID/nonce, cross-home/fake refusal, first-turn pending/held states, guard table, busy steer, idle wake, host restart, and unchanged Claude claims.
 - [ ] Decode legacy Claude claims unchanged; write Codex `holder={provider:codex,thread_id:<real>}`; never infer provider from UUID shape.
