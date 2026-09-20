@@ -57,6 +57,7 @@ import ast
 import json
 import os
 import re
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +66,22 @@ import pytest
 
 import fleet
 from fleet_sources import fleet_implementation_source
+
+
+def test_codex_protocol_imports_only_stdlib_and_fleet_errors():
+    path = Path(__file__).resolve().parents[1] / "bin" / "fleet_codex_protocol.py"
+    if not path.exists():
+        pytest.fail("bin/fleet_codex_protocol.py is not implemented")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    roots = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.extend(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "relative imports break standalone CLI use"
+            if node.module != "__future__":
+                roots.append(node.module.split(".", 1)[0])
+    assert set(roots) <= sys.stdlib_module_names | {"fleet_errors"}
 
 
 # ---------------------------------------------------------------------------
