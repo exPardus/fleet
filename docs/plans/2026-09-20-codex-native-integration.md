@@ -171,7 +171,15 @@
 - [ ] Create/bind empty successor while predecessor holds; conditionally transfer claim to successor `state=activating` before starting work.
 - [ ] Start successor boot after transfer; promote held only on matching `turn/started`. Proved no-start may restore predecessor; unknown acceptance stays activating/PAGE.
 - [ ] After promotion, interrupt/retire predecessor only with supported terminal proof.
-- [ ] Resolve home before public thread read; label explicit-ID registration as membership proof if supported automatic caller identity is unavailable.
+- [ ] Resolve an explicitly named home before public thread read. Permit the
+  Interface cwd to remain the Fleet repo while it explicitly drives Fleet,
+  PM, or tap; keep worker/supervisor cwd binding strict and allow no fallback.
+- [ ] Require supported genuine caller/source authorization in addition to
+  public thread membership. A supplied UUID plus `thread/read` never grants
+  mutation; if caller/source proof is unavailable, refuse without a write.
+- [ ] Keep external bridge registration/read observational: it never resumes
+  or owns that Interface thread, starts a turn, or creates a second writer.
+- [ ] Prove a stale predecessor cannot mutate after claim handoff.
 - [ ] Run tests on both interpreters; commit as `feat(codex): add handoff and interface registration`.
 
 ### Task 9: Preserve mcx and stage migration
