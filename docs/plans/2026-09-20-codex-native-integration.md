@@ -148,7 +148,10 @@ call. The default supervisor route remains unchanged. Checkpoint/release,
 handoff, and explicit `sup-reconcile` now extend that same binding: checkpoint
 requires complete current evidence; release enters a mutation-disarmed
 `releasing` state until terminal public proof; handoff binds an empty successor,
-transfers to `activating`, and only then starts its first turn; host restart uses
+rejects every registered/reused ID, reads back zero turns before transfer,
+transfers to `activating`, and only then starts its first turn. Promotion to
+`held` requires a second complete read with that returned turn as the sole
+newest turn. Host restart uses
 `thread/resume` plus a complete exact-ID read and never starts a thread or turn.
 Lost activation/restart responses freeze without retry. Paged result hydration,
 permissions, predecessor interruption/retirement, activating-state restart

@@ -12342,7 +12342,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     :8725, :8736, :8830, :9305, :12289, :15269, :15270, :15331, :16525`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :6995, :7447, :10750,
-    :17157. This makes union identity safe; the age boundary distinguishes respawn.
+    :17233. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -12994,7 +12994,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:6995, :7447, :10750,
-    # :17157) -- so union identity cannot make one body answer for another.
+    # :17233) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -16575,6 +16575,61 @@ def _rollback_codex_handoff_activation(successor_inc, operation_id):
         return True
 
 
+def _codex_handoff_thread_read(
+        client, thread_id, generation, *, expected_turn_id=None):
+    """Prove an empty successor, or its exact single first turn, publicly."""
+    observation = client.call({
+        "operation_id": f"supervisor-handoff-read-{uuid.uuid4()}",
+        "method": "rpc",
+        "payload": {"method": "thread/read", "params": {
+            "threadId": thread_id, "includeTurns": True,
+        }},
+    }, timeout=10)
+    if observation.generation != generation:
+        raise FleetCliError("native Codex successor host generation changed")
+    result = observation.result
+    thread = result.get("thread") if isinstance(result, dict) else None
+    if not isinstance(thread, dict):
+        raise FleetCliError("native Codex successor read returned no thread")
+    observed_id = _provider_codex_id(
+        thread.get("id"), "observed successor thread")
+    if observed_id != thread_id:
+        raise FleetCliError("native Codex successor read returned the wrong thread")
+    if thread.get("cwd") != str(FLEET_HOME.resolve()):
+        raise FleetCliError("native Codex successor read returned the wrong home")
+    status = thread.get("status")
+    if not isinstance(status, dict) or status.get("activeFlags", []) != []:
+        raise FleetCliError("native Codex successor status is ambiguous")
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        raise FleetCliError("native Codex successor turn history is incomplete")
+    if expected_turn_id is None:
+        if status.get("type") != "idle" or turns:
+            raise FleetCliError(
+                "native Codex successor thread is not provably empty")
+        return observation
+    if status.get("type") != "active" or len(turns) != 1:
+        raise FleetCliError(
+            "native Codex successor does not have exactly one active turn")
+    turn = turns[0]
+    if not isinstance(turn, dict):
+        raise FleetCliError("native Codex successor first turn is malformed")
+    observed_turn_id = _provider_codex_id(
+        turn.get("id"), "observed successor turn")
+    if (observed_turn_id != expected_turn_id
+            or turn.get("status") != "inProgress"
+            or turn.get("itemsView") != "full"
+            or not isinstance(turn.get("items"), list)):
+        raise FleetCliError(
+            "native Codex successor first turn does not match activation")
+    for item in turn["items"]:
+        if (not isinstance(item, dict)
+                or not isinstance(item.get("id"), str)
+                or not item["id"] or len(item["id"]) > 160):
+            raise FleetCliError("native Codex successor first-turn item is malformed")
+    return observation
+
+
 def _cmd_codex_sup_handoff_begin(args) -> int:
     """Transfer to one empty public thread before starting its first turn."""
     binding = _codex_supervisor_binding()
@@ -16622,10 +16677,19 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
             raise FleetCliError("native Codex handoff returned no successor thread")
         thread_id = _provider_codex_id(
             thread.get("id"), "supervisor successor thread")
+        registry = read_registry_no_repair()
+        registered = [name for name, row in registry.get("workers", {}).items()
+                      if isinstance(row, dict)
+                      and row.get("codex_thread_id") == thread_id]
+        if thread_id == binding.authority.value or registered:
+            raise FleetCliError(
+                "native Codex handoff reused a registered provider thread")
         if {thread.get("cwd"), thread_result.get("cwd")} != {
                 str(FLEET_HOME.resolve())}:
             raise FleetCliError("native Codex handoff successor cwd mismatch")
         _validate_codex_thread_effective(thread_result, bare_model, profile)
+        _codex_handoff_thread_read(
+            client, thread_id, thread_observation.generation)
     except BaseException as exc:
         _freeze_codex_supervisor_preclaim(
             binding.name, binding.incarnation_id, thread_operation_id, exc)
@@ -16655,7 +16719,10 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
                 and isinstance(pending, dict)
                 and pending.get("operation_id") == thread_operation_id
                 and isinstance(old_record, dict)
-                and successor_name not in data["workers"]):
+                and successor_name not in data["workers"]
+                and not any(isinstance(row, dict)
+                            and row.get("codex_thread_id") == thread_id
+                            for row in data["workers"].values())):
             successor = new_worker_record(
                 None, FLEET_HOME.resolve(), campaign, mode, model=model,
                 setting_sources=binding.record.get("setting_sources"),
@@ -16722,6 +16789,9 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
                 substrate="codex")
             transferred = True
     if not transferred:
+        _freeze_codex_supervisor_preclaim(
+            binding.name, binding.incarnation_id, thread_operation_id,
+            "successor identity collision or predecessor claim changed")
         raise FleetCliError(
             "native Codex handoff claim changed; successor remains an empty orphan")
 
@@ -16757,6 +16827,9 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
             turn.get("id"), "supervisor successor turn")
         if turn.get("status") != "inProgress":
             raise FleetCliError("native Codex handoff successor turn is not active")
+        _codex_handoff_thread_read(
+            client, thread_id, turn_observation.generation,
+            expected_turn_id=turn_id)
     except BaseException as exc:
         from fleet_codex import HostRejected
         if isinstance(exc, HostRejected):
@@ -16795,7 +16868,10 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
                 and isinstance(row, dict)
                 and row.get("codex_thread_id") == thread_id
                 and row.get("codex_turn_id") is None
-                and row.get("last_operation_id") == turn_operation_id):
+                and row.get("last_operation_id") == turn_operation_id
+                and sum(1 for candidate in data["workers"].values()
+                        if isinstance(candidate, dict)
+                        and candidate.get("codex_thread_id") == thread_id) == 1):
             claim.pop("pending_operation", None)
             claim.update({"state": "held", "current_turn_id": turn_id,
                           "heartbeat_at": now_iso()})
