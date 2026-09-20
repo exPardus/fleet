@@ -1,37 +1,38 @@
 {
   "lane": "w101-codex-notify",
-  "base": "f8852278a55d7b2d5f54728558fa3ce8e61f195a",
+  "base": "f8852278a55d7b2d5f54728558fa3ce8e61f1956",
   "files_changed": [
     "bin/fleet.py",
     "tests/test_sup_notify.py",
     "docs/SPEC.md",
     "docs/PLAN-PROGRESS.md",
     "docs/lanes/w101-codex-notify.md",
-    "docs/lanes/w101-codex-notify.json"
+    "docs/lanes/w101-codex-notify.json",
+    "docs/lanes/w101-codex-notify-deepseek-review.md"
   ],
   "tests": [
     {
-      "command": "python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py",
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
       "rc": 0,
-      "passed": 42,
+      "passed": 65,
       "failed": 0,
       "skipped": 0
     },
     {
-      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py",
-      "rc": 2,
-      "passed": 0,
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py tests/test_self_citations.py tests/test_retired_sid_citations.py",
+      "rc": 0,
+      "passed": 65,
       "failed": 0,
-      "skipped": 0,
-      "blocked": "uv could not fetch pytest: DNS/network unavailable"
+      "skipped": 0
     },
     {
-      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py",
-      "rc": 2,
-      "passed": 0,
-      "failed": 0,
-      "skipped": 0,
-      "blocked": "uv could not fetch pytest: DNS/network unavailable"
+      "command": "python3 -m pytest -q --tb=no",
+      "rc": 1,
+      "passed": 5492,
+      "failed": 9,
+      "skipped": 16,
+      "xfailed": 3,
+      "baseline_failure_identities": "identical to the stored f885227 base set (9 of 9; no changed-only or base-only nodes)"
     }
   ],
   "claims": [
@@ -42,10 +43,15 @@
     {
       "claim": "Both literal-send failure and Enter failure preserve the sender contract.",
       "command": "python -m pytest -q tests/test_sup_notify.py::TestTypeInterfaceLine"
+    },
+    {
+      "claim": "The corrected changed tree has exactly the base run's nine full-suite failure identities.",
+      "command": "python3 -c 'import json,pathlib; a=json.loads(pathlib.Path(\".pytest_cache/v/cache/lastfailed\").read_text()); b=json.loads(pathlib.Path(\"/home/altai/.claude/jobs/044278a3/tmp/fleet-base/.pytest_cache/v/cache/lastfailed\").read_text()); print(len(a), len(b), set(a)==set(b), sorted(set(a)-set(b)), sorted(set(b)-set(a)))'"
+    },
+    {
+      "claim": "Codex 0.155.1 executed local /status when the changed helper routed its literal-send, 0.5s settle, and single Enter through the isolated fleet-notify-verify tmux server.",
+      "command": "PYTHONPATH=bin python3 -c 'import subprocess,sys,fleet; runner=lambda argv, **kwargs: subprocess.run([\"tmux\",\"-L\",\"fleet-notify-verify\",*argv[1:]], **kwargs); ok=fleet.type_interface_line(runner,\"verify:0.0\",\"/status\",prefix=\"\",out=sys.stdout); print(f\"sender_return={ok}\")'"
     }
   ],
-  "blockers": [
-    "Prescribed uv 3.10/3.12 checks blocked by unavailable DNS/package fetch; system Python 3.12 targeted suite passed.",
-    "Live scratch-Codex proof is pending interface execution."
-  ]
+  "blockers": []
 }

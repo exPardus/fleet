@@ -97,3 +97,29 @@ the docs-currency gate requires a `DONE means:` line after the title. Fixed in t
 - Merge into the persistent fleet home: **HELD**, on two counts — the citation regressions above, and
   the live scratch-Codex `/status` repro that the host-wide Codex usage limit (reset ~15:21 local)
   still blocks. Do not merge `a9beefc` until both are green.
+
+## Closure evidence — 2026-09-20 (integration lane, not a reviewer re-signoff)
+
+The historical review above is preserved as written. Its `Base:` SHA ends in
+`195a`; the actual base used by both worktrees is
+`f8852278a55d7b2d5f54728558fa3ce8e61f1956`.
+
+The later Codex integration lane closed the two holds without changing the
+reviewer's sender-contract conclusion:
+
+- Re-anchored the shifted `bin/fleet.py` self-citations. The two citation files
+  pass 23 tests, and both prescribed Python 3.10 and 3.12 targeted commands pass
+  all 65 selected tests.
+- `python3 -m pytest -q --tb=no` on the corrected tree reports 9 failed, 5492
+  passed, 16 skipped, and 3 xfailed. Comparing pytest's stored failure node IDs
+  against the reviewer's preserved base worktree reports 9 versus 9, identical,
+  with no changed-only or base-only nodes.
+- Against Codex 0.155.1 in isolated tmux server `fleet-notify-verify`, the changed
+  `type_interface_line` was called through an injected runner for local `/status`.
+  It returned true after 0.521 seconds; the transcript then showed `/status`,
+  status-only `Account` and `Weekly limit` labels, and a fresh composer in that
+  order. Account values were not recorded. Ctrl-C exited Codex and the isolated
+  server ended normally.
+
+These are closure measurements by the integration lane. They do not claim that
+the DeepSeek reviewer reviewed or signed the later citation-only edits.
