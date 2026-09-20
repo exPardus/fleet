@@ -1,0 +1,198 @@
+{
+  "client_methods": {
+    "account/rateLimits/read": {
+      "params_required": [],
+      "request_required": [
+        "id",
+        "method"
+      ]
+    },
+    "account/usage/read": {
+      "params_required": [],
+      "request_required": [
+        "id",
+        "method"
+      ]
+    },
+    "configRequirements/read": {
+      "params_required": [],
+      "request_required": [
+        "id",
+        "method"
+      ]
+    },
+    "initialize": {
+      "params_required": [
+        "clientInfo"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "thread/items/list": {
+      "params_required": [
+        "threadId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "thread/list": {
+      "params_required": [],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "thread/read": {
+      "params_required": [
+        "threadId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "thread/resume": {
+      "params_required": [
+        "threadId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "thread/start": {
+      "params_required": [],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "thread/turns/list": {
+      "params_required": [
+        "threadId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "turn/interrupt": {
+      "params_required": [
+        "threadId",
+        "turnId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "turn/start": {
+      "params_required": [
+        "input",
+        "threadId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "turn/steer": {
+      "params_required": [
+        "expectedTurnId",
+        "input",
+        "threadId"
+      ],
+      "request_required": [
+        "id",
+        "method",
+        "params"
+      ]
+    }
+  },
+  "client_notifications": [
+    "initialized"
+  ],
+  "enums": {
+    "approval_policy": [
+      "never",
+      "on-request",
+      "untrusted"
+    ],
+    "approvals_reviewer": [
+      "auto_review",
+      "guardian_subagent",
+      "user"
+    ],
+    "codex_error_codes": [
+      "activeTurnNotSteerable",
+      "badRequest",
+      "contextWindowExceeded",
+      "cyberPolicy",
+      "httpConnectionFailed",
+      "internalServerError",
+      "misalignmentPolicyViolation",
+      "other",
+      "rateLimitExceeded",
+      "responseStreamConnectionFailed",
+      "responseStreamDisconnected",
+      "responseTooManyFailedAttempts",
+      "sandboxError",
+      "serverOverloaded",
+      "sessionBudgetExceeded",
+      "threadRollbackFailed",
+      "unauthorized",
+      "usageLimitExceeded"
+    ],
+    "sandbox_mode": [
+      "danger-full-access",
+      "read-only",
+      "workspace-write"
+    ],
+    "thread_active_flags": [
+      "waitingOnApproval",
+      "waitingOnUserInput"
+    ],
+    "thread_status": [
+      "active",
+      "idle",
+      "notLoaded",
+      "systemError"
+    ],
+    "turn_status": [
+      "completed",
+      "failed",
+      "inProgress",
+      "interrupted"
+    ]
+  },
+  "protocol_version": 2,
+  "server_notifications": [
+    "account/rateLimits/updated",
+    "item/completed",
+    "thread/status/changed",
+    "thread/tokenUsage/updated",
+    "turn/completed",
+    "turn/started"
+  ],
+  "thread_start_effective_fields": [
+    "thread",
+    "cwd",
+    "model",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "sandbox"
+  ]
+}

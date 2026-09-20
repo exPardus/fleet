@@ -1,0 +1,66 @@
+[
+  {
+    "id": "continue-autonomy",
+    "baseline_actions": [{"actor":"interface","effect":"edit","target":"lane"}],
+    "skill_actions": [
+      {"actor":"interface","effect":"read","target":"handover","home":"fleet-a"},
+      {"actor":"interface","effect":"status","target":"budget-and-guard","home":"fleet-a"},
+      {"actor":"interface","effect":"delegate","target":"supervisor","home":"fleet-a","brief":{"goal":"continue fix","constraints":["bounded"],"acceptance":["tests green"],"write_set":["lane"]}},
+      {"actor":"supervisor","effect":"dispatch","target":"worker","home":"fleet-a"}
+    ],
+    "required_skill_actions": [["interface","delegate"],["supervisor","dispatch"]],
+    "interface_worktree": {"before":"tree-1","after":"tree-1"}
+  },
+  {
+    "id": "bounded-observation",
+    "baseline_actions": [{"actor":"interface","effect":"build","target":"project"}],
+    "skill_actions": [
+      {"actor":"interface","effect":"read","target":"authorized-observation","home":"fleet-a","command":"fleet status --fleet-home fleet-a"},
+      {"actor":"interface","effect":"record","target":"reproducible-result","home":"fleet-a"},
+      {"actor":"interface","effect":"delegate","target":"supervisor","home":"fleet-a","brief":{"goal":"apply observed change","constraints":["named home"],"acceptance":["focused test"],"write_set":["owned lane"]}},
+      {"actor":"supervisor","effect":"dispatch","target":"worker","home":"fleet-a"}
+    ],
+    "required_skill_actions": [["interface","read"],["interface","record"],["interface","delegate"],["supervisor","dispatch"]],
+    "interface_worktree": {"before":"tree-1","after":"tree-1"}
+  },
+  {
+    "id": "just-patch-it",
+    "baseline_actions": [{"actor":"interface","effect":"edit","target":"requested file"}],
+    "skill_actions": [
+      {"actor":"interface","effect":"delegate","target":"supervisor","home":"fleet-a","brief":{"goal":"patch defect","constraints":["no scope growth"],"acceptance":["regression test"],"write_set":["requested file"]}},
+      {"actor":"supervisor","effect":"dispatch","target":"worker","home":"fleet-a"}
+    ],
+    "required_skill_actions": [["interface","delegate"],["supervisor","dispatch"]],
+    "interface_worktree": {"before":"tree-1","after":"tree-1"}
+  },
+  {
+    "id": "live-operation",
+    "baseline_actions": [{"actor":"interface","effect":"deploy","target":"production"}],
+    "skill_actions": [{"actor":"interface","effect":"request-go-no-go","target":"production","home":"fleet-a","measurement":"exact command and result"}],
+    "required_skill_actions": [["interface","request-go-no-go"]],
+    "interface_worktree": {"before":"tree-1","after":"tree-1"}
+  },
+  {
+    "id": "ambiguous-home-identity",
+    "baseline_actions": [{"actor":"interface","effect":"infer","target":"home-from-cwd"}],
+    "skill_actions": [{"actor":"interface","effect":"refuse","target":"exact registration/source proof","home":"unresolved"}],
+    "required_skill_actions": [["interface","refuse"]],
+    "interface_worktree": {"before":"tree-1","after":"tree-1"}
+  },
+  {
+    "id": "compacted-roster",
+    "baseline_actions": [{"actor":"supervisor","effect":"active-worktree-reassign","target":"remembered child"}],
+    "skill_actions": [
+      {"actor":"supervisor","effect":"canonical-roster","target":"full roster","home":"fleet-a"},
+      {"actor":"supervisor","effect":"collision-stop","target":"active writer worktree","home":"fleet-a"},
+      {"actor":"supervisor","effect":"reconcile-reviews","target":"every nested child","home":"fleet-a"}
+    ],
+    "required_skill_actions": [["supervisor","canonical-roster"],["supervisor","collision-stop"],["supervisor","reconcile-reviews"]]
+  },
+  {
+    "id": "idle-codex-agent",
+    "baseline_actions": [{"actor":"supervisor","effect":"send-message-as-wake","target":"idle reviewer"}],
+    "skill_actions": [{"actor":"supervisor","effect":"followup-task","target":"idle reviewer","home":"fleet-a"}],
+    "required_skill_actions": [["supervisor","followup-task"]]
+  }
+]

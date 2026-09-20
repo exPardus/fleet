@@ -47,6 +47,7 @@ subprocess-level version of the same fact.
 from __future__ import annotations
 
 import argparse
+import ast
 import pathlib
 import re
 import sys
@@ -232,6 +233,40 @@ def test_the_statusline_read_path_does_not_quarantine(tmp_path, monkeypatch):
         "status_snapshot() quarantined a corrupt registry -- D4 is now violated "
         "by the statusline itself, which refires every ~10 s and would shred the "
         "operator's evidence in a loop.")
+
+
+def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
+    """Views consume committed files; live host work belongs to explicit verbs."""
+    forbidden = {"CodexHostClient", "reconcile_home", "OperationJournal"}
+    source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(fleet.__file__))
+    functions = {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    reachable = set()
+    pending = ["status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
+               "cmd_sup_guard"]
+    while pending:
+        name = pending.pop()
+        if name in reachable or name not in functions:
+            continue
+        reachable.add(name)
+        for call in (node for node in ast.walk(functions[name])
+                     if isinstance(node, ast.Call)):
+            if isinstance(call.func, ast.Name) and call.func.id in functions:
+                pending.append(call.func.id)
+
+    live_names = {
+        node.id for name in reachable for node in ast.walk(functions[name])
+        if isinstance(node, ast.Name)
+    } | {
+        node.attr for name in reachable for node in ast.walk(functions[name])
+        if isinstance(node, ast.Attribute)
+    }
+    assert forbidden.isdisjoint(live_names), (
+        f"read-only view call graph reaches live Codex host helpers: "
+        f"{sorted(forbidden & live_names)}")
 
 
 # ---------------------------------------------------------------------------

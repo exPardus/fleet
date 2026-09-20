@@ -1,0 +1,4 @@
+interface:
+  display_name: Codex Fleet
+  short_description: Route Codex sessions into safe Fleet roles
+  default_prompt: Use $codex-fleet to operate the explicitly named Fleet home.
