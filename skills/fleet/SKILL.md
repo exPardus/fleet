@@ -14,7 +14,9 @@ home.
 
 - Interface: the operator's own persistent session; decide intent and choices; never recycle this session.
 - Supervisor: a swappable body; split work into lanes, dispatch, review, land, and close waves.
-- Worker: a long-lived session on its own branch; own the assigned work, subagents, and structured result.
+- Worker: a long-lived session on its own branch; own the assigned work and
+  structured result. Workers never dispatch workers or reviewers; the
+  supervisor owns every dispatch and review assignment.
 
 Output is compressed. Facts, numbers, paths, commands. No preamble, no recap, no
 narration of tool calls, no praise, no hedging, no essays. One line per finding.
