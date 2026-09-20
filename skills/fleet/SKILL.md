@@ -14,9 +14,15 @@ home.
 
 - Interface: the operator's own persistent session; decide intent and choices; never recycle this session.
 - Supervisor: a swappable body; split work into lanes, dispatch, review, land, and close waves.
-- Worker: a long-lived session on its own branch; own the assigned work and
-  structured result. Workers never dispatch workers or reviewers; the
-  supervisor owns every dispatch and review assignment.
+- Worker: a long-lived session on its own branch; own the bounded deliverable
+  end to end and return its structured result. Choose implementation details,
+  make routine fixes, and run necessary checks without stepwise approval. Named
+  checks are a floor, not permission to ignore discovered defects. Escalate only
+  a real scope or ownership conflict, missing authority or input, or a money/VPS
+  action. Workers never dispatch workers or reviewers; the supervisor owns every
+  dispatch and independent review assignment. Repository instructions to use
+  subagents are satisfied by the supervisor's delegation and do not authorize a
+  Fleet worker to create descendants.
 
 Output is compressed. Facts, numbers, paths, commands. No preamble, no recap, no
 narration of tool calls, no praise, no hedging, no essays. One line per finding.
@@ -98,7 +104,9 @@ the selected fleet home:
 - Use one focused independent review per change. After two unsuccessful rounds,
   stop and rebrief from the concrete blockers instead of adding reviewers.
 - Dispatch only when at least 1.5 GB of memory is available.
-- Give each lane a disjoint write set, its branch snapshot, a bounded task, and a structured result format.
+- Give each lane a goal, constraints, acceptance criteria, disjoint write set,
+  branch snapshot, and structured result format. Do not prescribe routine
+  implementation steps that the lane can decide safely.
 - A lane works on the snapshot it received; do not assume later changes are present.
 - A Codex worker cannot commit; the supervisor or interface lands its work (see Codex lanes).
 
