@@ -79,6 +79,7 @@ class Host:
             "started_at": self.started_at,
             "heartbeat": time.time(),
             "codex_version": self.expected_version,
+            "protocol_version": 2,
             "schema_digest": self.schema_digest,
             "ready": True,
         }

@@ -1706,6 +1706,70 @@ def _is_codex_record(record) -> bool:
     return isinstance(record, dict) and record.get("substrate") == "codex"
 
 
+def _codex_record_route(record) -> str | None:
+    """Return native/mcx/invalid from durable fields, never UUID shape."""
+    if not _is_codex_record(record):
+        return None
+    dispatch_kind = record.get("dispatch_kind")
+    has_native = (dispatch_kind == "codex-app-server"
+                  or record.get("codex_thread_id") is not None
+                  or record.get("adapter_state") is not None)
+    has_mcx = (dispatch_kind == "mcx" or record.get("mcx_id") is not None)
+    if has_native and has_mcx:
+        return "invalid"
+    if has_native and record.get("session_id") is None:
+        return "native"
+    if has_mcx and record.get("session_id") is None:
+        return "mcx"
+    return "invalid"
+
+
+def _require_mcx_codex_record(name, record, verb) -> None:
+    route = _codex_record_route(record)
+    if route == "mcx":
+        return
+    if route == "native":
+        raise FleetCliError(
+            f"{name}: native Codex {verb} is not yet supported; the row was "
+            "left unchanged")
+    raise FleetCliError(
+        f"{name}: invalid mixed Codex record; refusing {verb} without mutation")
+
+
+def _codex_permission_profile(mode: str) -> dict:
+    """Map Fleet's stable mode names to exact public Codex wire values."""
+    profiles = {
+        "bypass": {"approvalPolicy": "never", "sandbox": "danger-full-access"},
+        "accept": {"approvalPolicy": "on-request", "sandbox": "workspace-write"},
+        "dontask": {"approvalPolicy": "never", "sandbox": "workspace-write"},
+        "plan": {"approvalPolicy": "never", "sandbox": "read-only"},
+        "omit": {"approvalPolicy": None, "sandbox": None},
+    }
+    try:
+        return dict(profiles[mode])
+    except KeyError as exc:
+        raise FleetCliError(f"unsupported Codex permission mode: {mode!r}") from exc
+
+
+def _codex_native_client(home):
+    """Connect to the exact-home host without a module import side effect."""
+    from fleet_codex import CodexHostClient
+    return CodexHostClient.ensure(Path(home).resolve())
+
+
+def _provider_codex_id(value, label):
+    """Validate a UUIDv7 returned by the provider; shape never grants authority."""
+    if not isinstance(value, str):
+        raise FleetCliError(f"Codex {label} response is missing a genuine ID")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise FleetCliError(f"Codex {label} response has an invalid ID") from exc
+    if parsed.version != 7 or str(parsed) != value.lower():
+        raise FleetCliError(f"Codex {label} response is not a canonical UUIDv7")
+    return value
+
+
 def _require_mcx(which=shutil.which) -> str:
     """Refuse a `codex:` dispatch when the mcx helper is not on PATH."""
     path = which("mcx")
@@ -2745,6 +2809,15 @@ def recompute_worker_codex(name: str, record: dict,
     doctrine (never assume dead on ambiguity) applies to mcx too."""
     updated = dict(record)
     updated.pop("waiting_for_permission", None)
+
+    route = _codex_record_route(record)
+    if route == "native":
+        # Native observations are committed by the host adapter. A status view
+        # consumes those files/registry fields and never starts or probes a host.
+        return updated
+    if route != "mcx":
+        updated["status"] = "dead-suspected"
+        return updated
 
     status = record.get("status")
     if status in _NATIVE_STICKY:
@@ -4812,6 +4885,16 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     # Reject a prompt missing its brief before any registry write.
     assert_brief_carried(args.name, task, prompt)
 
+    codex_slug = _codex_model_slug(args.model)
+    codex_adapter = getattr(args, "codex_adapter", "mcx")
+    if codex_adapter not in {"mcx", "native"}:
+        raise FleetCliError(f"unknown Codex adapter: {codex_adapter!r}")
+    if codex_slug is None and codex_adapter != "mcx":
+        raise FleetCliError("--codex-adapter requires a codex:<model> model")
+    codex_operation_id = (
+        f"worker-{args.name}-thread-{uuid.uuid4()}"
+        if codex_slug is not None and codex_adapter == "native" else None)
+
     with fleet_lock():
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
@@ -4822,21 +4905,33 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             spawned_by=_spawner,
             # Stamp proven lineage under the lock to preserve ownership across sid rotation.
             spawned_by_lineage=_spawning_claim_lineage(_spawner),
-            dispatch_kind=("mcx" if _codex_model_slug(args.model) is not None
-                           else "bg"),
+            dispatch_kind=(
+                ("codex-app-server" if codex_adapter == "native" else "mcx")
+                if codex_slug is not None else "bg"),
             category=args.category,
             substrate=_substrate_for_model(args.model),
             # Item 16: the lane branch is the durable join key for wave-close;
             # the worktree it is read from is the part that gets deleted.
             branch=_worktree_branch(cwd))
         record["last_dispatch_at"] = now_iso()
+        if codex_operation_id is not None:
+            record.update({
+                "adapter_state": "preclaim",
+                "codex_thread_id": None,
+                "codex_turn_id": None,
+                "codex_host_generation": None,
+                "codex_protocol_version": None,
+                "codex_schema_digest": None,
+                "permission_effective": None,
+                "last_operation_id": codex_operation_id,
+            })
         data["workers"][args.name] = record
         save_registry(data)
         append_event("spawned", args.name, cwd=str(cwd), mode=args.mode)
 
     pre_claim_at = record["last_dispatch_at"]
 
-    if _codex_model_slug(args.model) is not None:
+    if codex_slug is not None:
         return _cmd_spawn_codex(args, cwd, task, prompt, record,
                                 run=run, which=which, sleep=sleep)
 
@@ -4939,6 +5034,194 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
 def _cmd_spawn_codex(args, cwd, task, prompt, record,
                      run=subprocess.run, which=shutil.which,
                      sleep=time.sleep) -> int:
+    if record.get("dispatch_kind") == "codex-app-server":
+        return _cmd_spawn_codex_native(args, cwd, task, prompt, record)
+    return _cmd_spawn_codex_mcx(
+        args, cwd, task, prompt, record, run=run, which=which, sleep=sleep)
+
+
+def _freeze_codex_preclaim(name, operation_id, detail):
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if rec is not None and rec.get("last_operation_id") == operation_id:
+            rec["adapter_state"] = "uncertain"
+            rec["status"] = "dead-suspected"
+            rec["last_activity"] = now_iso()
+            save_registry(data)
+            _append_event_quiet(
+                "codex_uncertain", name, operation_id=operation_id,
+                detail=str(detail)[:300])
+
+
+def _commit_codex_journal(client, name, journal_operation_id,
+                          record_operation_id):
+    try:
+        client.commit(journal_operation_id)
+    except BaseException as exc:
+        _freeze_codex_preclaim(name, record_operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{name}: Codex journal commit failed; worker state is uncertain "
+            f"-- {exc}") from exc
+
+
+def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
+    """Bind a native Codex worker through two conditional registry commits."""
+    name = args.name
+    thread_operation_id = record["last_operation_id"]
+    profile = _codex_permission_profile(args.mode)
+    expected_cwd = str(Path(cwd).resolve())
+    thread_params = {
+        "cwd": expected_cwd,
+        "model": _codex_model_slug(args.model),
+    }
+    thread_params.update({key: value for key, value in profile.items()
+                          if value is not None})
+    thread_operation = {
+        "operation_id": thread_operation_id,
+        "method": "rpc",
+        "payload": {"method": "thread/start", "params": thread_params},
+        "recovery": {
+            "kind": "thread/start", "fleet_name": name,
+            "canonical_cwd": expected_cwd,
+        },
+    }
+    try:
+        write_brief(name, task)
+        tasks_dir().mkdir(parents=True, exist_ok=True)
+        task_file_path(name).write_text(prompt, encoding="utf-8")
+        client = _codex_native_client(FLEET_HOME)
+        thread_observation = client.call(thread_operation, timeout=30)
+        thread_result = thread_observation.result
+        if not isinstance(thread_result, dict):
+            raise FleetCliError("Codex thread/start returned no public result")
+        thread = thread_result.get("thread")
+        if not isinstance(thread, dict):
+            raise FleetCliError("Codex thread/start returned no public thread")
+        thread_id = _provider_codex_id(thread.get("id"), "thread")
+        returned_cwds = {thread.get("cwd"), thread_result.get("cwd")}
+        if returned_cwds != {expected_cwd}:
+            raise FleetCliError(
+                f"Codex thread/start cwd mismatch: expected {expected_cwd!r}, "
+                f"got {sorted(str(value) for value in returned_cwds)!r}")
+    except BaseException as exc:
+        _freeze_codex_preclaim(name, thread_operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{name}: native Codex thread acceptance is uncertain -- {exc}") from exc
+
+    turn_operation_id = f"worker-{name}-turn-{uuid.uuid4()}"
+    bound = False
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if (rec is not None
+                and rec.get("dispatch_kind") == "codex-app-server"
+                and rec.get("adapter_state") == "preclaim"
+                and rec.get("last_operation_id") == thread_operation_id):
+            rec.update({
+                "adapter_state": "bound",
+                "codex_thread_id": thread_id,
+                "codex_host_generation": thread_observation.generation,
+                "codex_protocol_version": 2,
+                "codex_schema_digest": getattr(client, "schema_digest", None),
+                "permission_effective": {
+                    "approvalPolicy": thread_result.get("approvalPolicy"),
+                    "approvalsReviewer": thread_result.get("approvalsReviewer"),
+                    "sandbox": thread_result.get("sandbox"),
+                },
+                "last_operation_id": turn_operation_id,
+            })
+            save_registry(data)
+            _append_event_quiet(
+                "codex_thread_bound", name, codex_thread_id=thread_id,
+                host_generation=thread_observation.generation)
+            bound = True
+    if not bound:
+        print(
+            f"fleet: {name}: native Codex thread {thread_id} was created but "
+            "the preclaim changed; no turn was started",
+            file=sys.stderr)
+        return 1
+    _commit_codex_journal(
+        client, name, thread_operation_id, turn_operation_id)
+
+    tiny_prompt = f"Read {task_file_path(name).as_posix()} and follow it exactly."
+    turn_operation = {
+        "operation_id": turn_operation_id,
+        "method": "rpc",
+        "payload": {
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": tiny_prompt,
+                           "text_elements": []}],
+            },
+        },
+        "recovery": {
+            "kind": "turn/start", "fleet_name": name,
+            "thread_id": thread_id,
+            "canonical_cwd": expected_cwd,
+            "history_watermark": 0,
+        },
+    }
+    try:
+        turn_observation = client.call(turn_operation, timeout=30)
+        turn_result = turn_observation.result
+        if not isinstance(turn_result, dict) or not isinstance(
+                turn_result.get("turn"), dict):
+            raise FleetCliError("Codex turn/start returned no public turn")
+        turn = turn_result["turn"]
+        turn_id = _provider_codex_id(turn.get("id"), "turn")
+        if turn.get("status") != "inProgress":
+            raise FleetCliError(
+                f"Codex turn/start returned unexpected status {turn.get('status')!r}")
+    except BaseException as exc:
+        _freeze_codex_preclaim(name, turn_operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{name}: native Codex turn acceptance is uncertain -- {exc}") from exc
+
+    committed = False
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if (rec is not None
+                and rec.get("adapter_state") == "bound"
+                and rec.get("codex_thread_id") == thread_id
+                and rec.get("last_operation_id") == turn_operation_id):
+            rec.update({
+                "adapter_state": "active",
+                "codex_turn_id": turn_id,
+                "status": "working",
+                "turns": 1,
+                "last_activity": now_iso(),
+            })
+            save_registry(data)
+            _append_event_quiet(
+                "turn_started", name, codex_thread_id=thread_id,
+                codex_turn_id=turn_id, substrate="codex")
+            committed = True
+    if not committed:
+        print(
+            f"fleet: {name}: native Codex turn {turn_id} was accepted but "
+            "the bound record changed; recovery is required",
+            file=sys.stderr)
+        return 1
+    _commit_codex_journal(
+        client, name, turn_operation_id, turn_operation_id)
+    print(f"model: codex:{_codex_model_slug(args.model)} (native app-server)")
+    print(f"{name} codex {thread_id} turn {turn_id}")
+    return 0
+
+
+def _cmd_spawn_codex_mcx(args, cwd, task, prompt, record,
+                         run=subprocess.run, which=shutil.which,
+                         sleep=time.sleep) -> int:
     """Commit a codex lane's mcx dispatch (item 29).
     Same pre-claim/rollback envelope as the native path: the sid-less row is
     popped when dispatch fails, and the mcx id commits with retries. There is
@@ -5308,6 +5591,7 @@ def _cmd_peek_native(name: str, sid, n: int) -> int:
 
 def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
     """Print the tail of the codex lane's mcx job log (item 29)."""
+    _require_mcx_codex_record(name, rec, "peek")
     mcx_id = rec.get("mcx_id")
     if not mcx_id:
         print(f"-- {name} (codex) --")
@@ -5378,6 +5662,7 @@ def _cmd_result_codex(name: str, rec: dict,
                       run=subprocess.run, which=shutil.which) -> int:
     """Print the codex lane's mcx result (item 29). A live run and a failed or
     unknown worker exit 1 with distinct reasons, never an empty success."""
+    _require_mcx_codex_record(name, rec, "result")
     mcx_id = rec.get("mcx_id")
     if not mcx_id:
         print(f"{name}: no mcx worker id recorded -- dispatch may not have "
@@ -6005,6 +6290,7 @@ def _cmd_send_codex(name: str, message: str,
         rec = data["workers"].get(name)
         if rec is None:
             raise FleetCliError(f"unknown worker: {name!r}")
+        _require_mcx_codex_record(name, rec, "send")
         status = rec.get("status")
         if status in ("dead", "interrupted"):
             raise FleetCliError(
@@ -6278,6 +6564,7 @@ def _cmd_interrupt_codex(name: str, rec: dict,
     """Stop a codex lane's live run via `mcx stop` and mark it interrupted.
     Same gates as the native path; the interrupted mark commits even when the
     stop itself is unverified. Interrupted stays sticky until respawn."""
+    _require_mcx_codex_record(name, rec, "interrupt")
     mcx_id = rec.get("mcx_id")
     if mcx_id is None:
         print(
@@ -6716,6 +7003,7 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
     successful dispatch; on failure the record is untouched and the prior
     row's staleness surfaces through the next status recompute."""
     name = args.name
+    _require_mcx_codex_record(name, before, "respawn")
     model = before.get("model")
     if _codex_model_slug(model) is None:
         raise FleetCliError(
@@ -6911,6 +7199,7 @@ def _cmd_kill_codex(name: str, rec: dict, run=subprocess.run,
     An already-gone mcx job is success-equivalent (the mcx parallel of the
     native gone-to-success inference); an unverifiable stop warns and exits 1,
     but kill is still terminal."""
+    _require_mcx_codex_record(name, rec, "kill")
     mcx_id = rec.get("mcx_id")
     stopped_ok = True
     stop_outcome = "no-mcx-id"
@@ -15798,6 +16087,11 @@ def build_parser() -> argparse.ArgumentParser:
     # on permission prompts.
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
+    p_spawn.add_argument(
+        "--codex-adapter", choices=("mcx", "native"), default="mcx",
+        dest="codex_adapter",
+        help="Codex transport for codex:<model> (native remains explicit until "
+             "the live acceptance gate passes)")
     p_spawn.add_argument("--max-budget-usd", type=float, default=None, dest="max_budget_usd")
     # Pass settings-source selection through to Claude so foreign hooks can be excluded.
     p_spawn.add_argument("--setting-sources", dest="setting_sources", default=None)
