@@ -6,8 +6,10 @@ work and survives interface and supervisor handoff.
 
 ## Admission and routing
 
-- Run at most two implementation or research workers plus one focused reviewer
-  under the supervisor. The interface and supervisor are separate roles.
+- Run at most four implementation or research workers under the supervisor:
+  no more than two Sol/Astra workers plus up to two additional Luna workers.
+  One focused reviewer is separate. The interface and supervisor are separate
+  roles.
 - A worker may not spawn descendants without the supervisor approving a bounded,
   independent task. Do not create recursive reviewer chains.
 - Use Luna for routine inventory, documentation, and glue; Sol for substantive

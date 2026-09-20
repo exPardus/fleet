@@ -97,8 +97,9 @@ the selected fleet home:
 - Pass `--setting-sources project,local` to worker and supervisor dispatches unless the operator specifies another supported source list.
 - Pass `--fleet-home <path>` on every command that selects a home; never rely on an ambiguous default between the two homes.
 - Select a permission mode from `bypass`, `accept`, `dontask`, `plan`, or `omit`; use the narrowest mode that lets the task complete.
-- Keep at most two implementation or research workers plus one focused reviewer
-  under a supervisor, counting Claude and Codex workers together.
+- Keep at most four implementation or research workers under a supervisor:
+  no more than two Sol/Astra workers plus up to two additional Luna workers.
+  One focused reviewer is separate. Count Claude and Codex workers together.
 - A worker may not spawn descendants without explicit supervisor approval of a
   bounded independent task. Do not create recursive reviewer chains.
 - Use one focused independent review per change. After two unsuccessful rounds,

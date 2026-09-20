@@ -93,9 +93,10 @@ of park-and-resume (standing goal 2 is the safety net, not the plan):
 
 The current Codex admission, model-routing, message, and measurement limits are
 binding in [`docs/operator/codex-quota-policy.md`](../docs/operator/codex-quota-policy.md):
-at most two implementation/research workers plus one focused reviewer, no
-unapproved descendants or recursive review chains, 120-word messages, and
-200-word receipts with full evidence kept in linked artifacts.
+at most four implementation/research workers (no more than two Sol/Astra plus
+up to two additional Luna) and one focused reviewer, no unapproved descendants
+or recursive review chains, 120-word messages, and 200-word receipts with full
+evidence kept in linked artifacts.
 
 - **Model choice follows the tier policy above** — per-role, per-task within
   the worker tiers; never per-habit. (Supersedes the earlier
