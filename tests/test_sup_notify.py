@@ -181,14 +181,51 @@ class TestTheSanitiserWouldCatchAnUnsanitisedImplementation:
 
 
 class TestTypeInterfaceLine:
-    def test_it_types_the_sanitised_line_then_submits(self):
+    def test_it_types_the_sanitised_line_then_submits_after_settle(self):
         t = Tmux()
+        waits = []
         assert fleet.type_interface_line(t, "work:fleet", HOSTILE,
                                          prefix=fleet.SUPERVISOR_LINE_PREFIX,
-                                         out=_Sink()) is True
+                                         out=_Sink(), settle_seconds=0.5,
+                                         sleep_fn=waits.append) is True
         assert t.typed() == [fleet.interface_line(
             HOSTILE, fleet.SUPERVISOR_LINE_PREFIX)]
         assert len(t.submits()) == 1
+        assert waits == [0.5]
+
+    def test_immediate_enter_is_consumed_but_settled_enter_submits(self):
+        """Model Codex's paste quiet-period contract: Enter inside the
+        quiet-period is buffered as pasted input; after settling it submits."""
+        class Composer:
+            def __init__(self):
+                self.now = 0.0
+                self.last_literal = None
+                self.submitted = False
+
+            def run(self, argv, **kwargs):
+                if argv[-1] == "Enter":
+                    if self.last_literal is not None and self.now - self.last_literal < 0.5:
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    self.submitted = True
+                elif "-l" in argv:
+                    self.last_literal = self.now
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        immediate = Composer()
+        assert fleet.type_interface_line(immediate.run, "work:fleet", "hello",
+                                         prefix=fleet.SUPERVISOR_LINE_PREFIX,
+                                         out=_Sink(), settle_seconds=0,
+                                         sleep_fn=immediate.sleep)
+        assert immediate.submitted is False
+        settled = Composer()
+        assert fleet.type_interface_line(settled.run, "work:fleet", "hello",
+                                         prefix=fleet.SUPERVISOR_LINE_PREFIX,
+                                         out=_Sink(), settle_seconds=0.5,
+                                         sleep_fn=settled.sleep)
+        assert settled.submitted is True
 
     def test_enter_is_not_sent_when_the_literal_send_failed(self):
         """C3, inherited from the keeper: `Enter` alone would submit whatever
@@ -198,6 +235,20 @@ class TestTypeInterfaceLine:
                                          prefix=fleet.SUPERVISOR_LINE_PREFIX,
                                          out=_Sink()) is False
         assert t.submits() == []
+
+    def test_enter_failure_returns_false_after_settle(self):
+        class EnterFails(Tmux):
+            def __call__(self, argv, **kwargs):
+                self.calls.append(list(argv))
+                rc = 1 if argv[-1] == "Enter" else 0
+                return subprocess.CompletedProcess(argv, rc, "", "")
+
+        t = EnterFails()
+        waits = []
+        assert fleet.type_interface_line(t, "work:fleet", "hello",
+                                         prefix=fleet.SUPERVISOR_LINE_PREFIX,
+                                         out=_Sink(), sleep_fn=waits.append) is False
+        assert waits == [fleet.INTERFACE_PASTE_SETTLE_SECONDS]
 
     def test_a_missing_tmux_binary_is_a_False_not_a_traceback(self):
         t = Tmux(missing=True)

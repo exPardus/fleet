@@ -1,0 +1,51 @@
+{
+  "lane": "w101-codex-notify",
+  "base": "f8852278a55d7b2d5f54728558fa3ce8e61f195a",
+  "files_changed": [
+    "bin/fleet.py",
+    "tests/test_sup_notify.py",
+    "docs/SPEC.md",
+    "docs/PLAN-PROGRESS.md",
+    "docs/lanes/w101-codex-notify.md",
+    "docs/lanes/w101-codex-notify.json"
+  ],
+  "tests": [
+    {
+      "command": "python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py",
+      "rc": 0,
+      "passed": 42,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "command": "uv run --no-project --python 3.10 --with pytest python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py",
+      "rc": 2,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": "uv could not fetch pytest: DNS/network unavailable"
+    },
+    {
+      "command": "uv run --no-project --python 3.12 --with pytest python -m pytest -q tests/test_sup_notify.py tests/test_interface_state.py",
+      "rc": 2,
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "blocked": "uv could not fetch pytest: DNS/network unavailable"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "A fake Codex composer consumes Enter inside the paste quiet period and submits after the bounded 0.5s settle.",
+      "command": "python -m pytest -q tests/test_sup_notify.py::TestTypeInterfaceLine::test_immediate_enter_is_consumed_but_settled_enter_submits"
+    },
+    {
+      "claim": "Both literal-send failure and Enter failure preserve the sender contract.",
+      "command": "python -m pytest -q tests/test_sup_notify.py::TestTypeInterfaceLine"
+    }
+  ],
+  "blockers": [
+    "Prescribed uv 3.10/3.12 checks blocked by unavailable DNS/package fetch; system Python 3.12 targeted suite passed.",
+    "Live scratch-Codex proof is pending interface execution."
+  ]
+}
