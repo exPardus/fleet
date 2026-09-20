@@ -80,6 +80,7 @@ class AppServerClient:
         self._stderr_lock = threading.Lock()
         self._stderr = bytearray()
         self._next_id = 1
+        self.initialize_result: Any = None
         self._fatal_error: BaseException | None = None
         self._closing = False
         self._stdout_thread = threading.Thread(
@@ -124,7 +125,7 @@ class AppServerClient:
             "clientInfo": {"name": "fleet", "version": "1"},
         })
         try:
-            client.request("initialize", params, timeout=timeout)
+            client.initialize_result = client.request("initialize", params, timeout=timeout)
             client._write({"method": "initialized"})
         except BaseException:
             client.close()

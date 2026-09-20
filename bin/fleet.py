@@ -172,6 +172,11 @@ def state_dir() -> Path:
     return FLEET_HOME / "state"
 
 
+def codex_state_dir(home=None) -> Path:
+    """Fleet-owned public Codex host state for one explicit home."""
+    return Path(FLEET_HOME if home is None else home) / "state" / "codex"
+
+
 def interface_dir(home=None) -> Path:
     """The interface role's durable, per-home state directory."""
     root = FLEET_HOME if home is None else Path(home)
