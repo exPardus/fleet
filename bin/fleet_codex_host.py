@@ -18,12 +18,18 @@ from typing import Any, Mapping
 from fleet_codex import (
     IPC_PROTOCOL_VERSION,
     MAX_IPC_BYTES,
+    HostRejected,
+    OperationJournal,
     _atomic_json,
     _canonical_home,
     _digest,
+    _public_evidence,
+    _public_method,
     _read_key,
+    reconcile_home,
 )
 from fleet_codex_protocol import AppServerClient
+from fleet_errors import FleetCliError
 
 
 def _response(request: Mapping[str, Any] | None, *, ok: bool,
@@ -60,6 +66,7 @@ class Host:
         self.expected_version = manifest["codex_version"]
         self.client: AppServerClient | None = None
         self.listener: multiprocessing.connection.Listener | None = None
+        self.journal = OperationJournal(self.home, self.generation)
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -90,6 +97,10 @@ class Host:
             raise RuntimeError(
                 f"Codex app-server version {version!r} does not match reviewed "
                 f"{self.expected_version!r}")
+        # Classify every old durable intent before this generation can publish
+        # ready or accept a fresh mutation. Until the public observer is wired,
+        # accepted operations conservatively become uncertain and page-worthy.
+        reconcile_home(self.home)
         self.listener = multiprocessing.connection.Listener(
             self.endpoint, family=self.transport, authkey=self.authkey)
         if self.transport == "AF_UNIX":
@@ -134,7 +145,8 @@ class Host:
                 self._wake_shutdown("metadata-write-failed")
                 return
             if (self.idle_timeout > 0
-                    and time.monotonic() - self.last_activity > self.idle_timeout):
+                    and time.monotonic() - self.last_activity > self.idle_timeout
+                    and not self.journal.has_unresolved()):
                 self._wake_shutdown("idle-timeout")
                 return
 
@@ -189,16 +201,59 @@ class Host:
                     if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
                         raise ValueError("rpc payload is malformed")
                     assert self.client is not None
-                    result = self.client.request(
-                        payload["method"], payload.get("params", {}),
-                        timeout=float(payload.get("timeout", 30)))
+                    public_method = _public_method("rpc", payload)
+                    if public_method is None:
+                        result = self.client.request(
+                            payload["method"], payload.get("params", {}),
+                            timeout=float(payload.get("timeout", 30)))
+                    else:
+                        operation_id = request["operation_id"]
+                        record = self.journal.load(operation_id)
+                        if record.get("generation") != self.generation:
+                            raise ValueError("operation belongs to another host generation")
+                        if record.get("payload_digest") != request.get("payload_digest"):
+                            raise ValueError("operation payload digest conflicts with journal")
+                        if record.get("recovery") != _public_evidence(request.get("recovery", {})):
+                            raise ValueError("operation recovery metadata conflicts with journal")
+                        state = record.get("state")
+                        if state in {"observed", "committed"}:
+                            result = record.get("result")
+                        elif state in {"accepted", "uncertain"}:
+                            raise ValueError("operation acceptance is uncertain; reconcile before retry")
+                        elif state == "failed":
+                            raise ValueError("operation is terminally failed")
+                        elif state == "prepared":
+                            predecessor = self.journal.unresolved_predecessor(
+                                operation_id)
+                            if predecessor is not None:
+                                self.journal.fail(
+                                    operation_id,
+                                    "blocked by unresolved predecessor operation")
+                                raise HostRejected(
+                                    "unresolved predecessor operation "
+                                    f"{predecessor.get('operation_id')} blocks mutation")
+                            self.journal.accept(operation_id)
+                            try:
+                                result = self.client.request(
+                                    payload["method"], payload.get("params", {}),
+                                    timeout=float(payload.get("timeout", 30)))
+                            except Exception as exc:
+                                self.journal.uncertain(
+                                    operation_id,
+                                    f"public mutation outcome unknown: {type(exc).__name__}")
+                                raise ValueError(
+                                    "public mutation outcome is uncertain") from exc
+                            self.journal.observe(operation_id, result)
+                        else:
+                            raise ValueError("operation journal has unknown state")
                 elif method == "host/shutdown":
                     result = {"stopping": True}
                     should_stop = True
                 else:
                     raise ValueError("unknown host method")
                 response = _response(request, ok=True, result=result)
-        except (UnicodeError, json.JSONDecodeError, ValueError, OSError) as exc:
+        except (UnicodeError, json.JSONDecodeError, ValueError, OSError,
+                FleetCliError) as exc:
             response = _response(request, ok=False, error=str(exc)[:300])
         try:
             encoded = json.dumps(response, separators=(",", ":"),

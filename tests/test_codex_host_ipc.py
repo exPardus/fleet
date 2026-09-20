@@ -42,8 +42,16 @@ if initialized != {{"method": "initialized"}}:
     raise SystemExit(31)
 for line in sys.stdin:
     message = json.loads(line)
+    with open(log, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps({{"event": "request", "method": message.get("method")}}) + "\n")
     if message.get("method") == "test/echo":
         send({{"id": message["id"], "result": message.get("params")}})
+    elif message.get("method") == "thread/start":
+        send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
+              "cwd": message.get("params", {{}}).get("cwd")}}}})
+    elif message.get("method") in ("turn/start", "turn/steer", "turn/interrupt"):
+        send({{"id": message["id"], "result": {{"turn": {{"id": "turn-1",
+              "status": "inProgress"}}}}}})
 '''
 
 
