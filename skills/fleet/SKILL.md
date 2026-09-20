@@ -18,9 +18,13 @@ home.
 
 Output is compressed. Facts, numbers, paths, commands. No preamble, no recap, no
 narration of tool calls, no praise, no hedging, no essays. One line per finding.
-A journal checkpoint is at most three model-written lines plus computed state. A
-lane report is the structured result plus at most 40 lines. Quote errors exact,
-shortest decisive line only.
+A journal checkpoint is at most three model-written lines plus computed state.
+Inter-agent messages default to at most 120 words. Final worker receipts are at
+most 200 words with verdict, head, tests, blockers, next action, and artifact
+paths. Put full evidence in artifacts; never paste reports, JSON, test logs, or
+full roster dumps between agents. Quote only the shortest decisive error. The
+current admission, routing, and measurement policy is
+[`docs/operator/codex-quota-policy.md`](../../docs/operator/codex-quota-policy.md).
 
 ## You are the interface
 
@@ -85,7 +89,12 @@ the selected fleet home:
 - Pass `--setting-sources project,local` to worker and supervisor dispatches unless the operator specifies another supported source list.
 - Pass `--fleet-home <path>` on every command that selects a home; never rely on an ambiguous default between the two homes.
 - Select a permission mode from `bypass`, `accept`, `dontask`, `plan`, or `omit`; use the narrowest mode that lets the task complete.
-- Keep at most 3 live workers host-wide, counting Claude and Codex workers together.
+- Keep at most two implementation or research workers plus one focused reviewer
+  under a supervisor, counting Claude and Codex workers together.
+- A worker may not spawn descendants without explicit supervisor approval of a
+  bounded independent task. Do not create recursive reviewer chains.
+- Use one focused independent review per change. After two unsuccessful rounds,
+  stop and rebrief from the concrete blockers instead of adding reviewers.
 - Dispatch only when at least 1.5 GB of memory is available.
 - Give each lane a disjoint write set, its branch snapshot, a bounded task, and a structured result format.
 - A lane works on the snapshot it received; do not assume later changes are present.
