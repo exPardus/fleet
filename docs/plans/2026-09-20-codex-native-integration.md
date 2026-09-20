@@ -76,7 +76,10 @@
 - Produces: `CodexHostClient.ensure(home: Path)`; `call(operation, timeout) -> CodexObservation`; host entrypoint with exact home/generation.
 
 - [ ] Write failing tests: two concurrent starters yield one host/child; wrong home/generation/auth/digest refuse; symlink, wrong owner/mode/type, hostile JSON, and oversized frames refuse without replacement.
-- [ ] Implement owner-only AF_UNIX on POSIX and owner-scoped named pipe on Windows, bounded UTF-8 JSON bytes only, owner-only secret, fixed-path `lstat` checks, and exact-home authentication.
+- [ ] Implement owner-only AF_UNIX on POSIX, bounded UTF-8 JSON bytes only,
+  owner-only secret, descriptor-relative fixed-path checks, and exact-home
+  authentication. Refuse Windows until owner-only named-pipe DACL creation and
+  a negative cross-user test prove the platform seam.
 - [ ] Implement `host.json`, heartbeat, bounded ready wait, `codex-host.lock` replacement, initialize/schema gate, and graceful idle shutdown.
 - [ ] Assert `fleet.lock` and host lock are never nested and PID is only a liveness hint.
 - [ ] Run tests on 3.10/3.12; commit as `feat(codex): add per-home app-server host`.
@@ -171,7 +174,15 @@
 - [ ] Create/bind empty successor while predecessor holds; conditionally transfer claim to successor `state=activating` before starting work.
 - [ ] Start successor boot after transfer; promote held only on matching `turn/started`. Proved no-start may restore predecessor; unknown acceptance stays activating/PAGE.
 - [ ] After promotion, interrupt/retire predecessor only with supported terminal proof.
-- [ ] Resolve home before public thread read; label explicit-ID registration as membership proof if supported automatic caller identity is unavailable.
+- [ ] Resolve an explicitly named home before public thread read. Permit the
+  Interface cwd to remain the Fleet repo while it explicitly drives Fleet,
+  PM, or tap; keep worker/supervisor cwd binding strict and allow no fallback.
+- [ ] Require supported genuine caller/source authorization in addition to
+  public thread membership. A supplied UUID plus `thread/read` never grants
+  mutation; if caller/source proof is unavailable, refuse without a write.
+- [ ] Keep external bridge registration/read observational: it never resumes
+  or owns that Interface thread, starts a turn, or creates a second writer.
+- [ ] Prove a stale predecessor cannot mutate after claim handoff.
 - [ ] Run tests on both interpreters; commit as `feat(codex): add handoff and interface registration`.
 
 ### Task 9: Preserve mcx and stage migration

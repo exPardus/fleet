@@ -1,6 +1,6 @@
 # Native Codex fleet integration design
 
-**Status:** proposed; design and implementation plan only. No runtime behavior changes in this commit.  
+**Status:** Option A approved; implementation is staged behind acceptance gates.
 **Evidence baseline:** fleet `6fa06c9`; installed `codex-cli 0.155.1`; v2 JSON Schema generated locally with `codex app-server generate-json-schema`.  
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -167,7 +167,10 @@ supported cross-process interrupt surface for a managed supervisor. Rejected.
 | Portability | Filesystem locking/permissions differ | Small platform seam chooses owner-only local transport |
 
 The authenticated endpoint is chosen. POSIX uses an owner-only AF_UNIX socket
-under `state/codex/`; Windows uses an owner-scoped named pipe. Peers exchange
+under `state/codex/`. The initial native adapter refuses on Windows: enabling a
+named-pipe implementation requires explicit owner-only DACL creation and a
+negative cross-user connection test. Inherited default ACLs are not evidence of
+confinement. Peers exchange
 length-bounded UTF-8 JSON bytes, never pickle. A random host secret is stored
 owner-only through the platform adapter. It authenticates local Fleet IPC; it
 is not a Codex ID, supervisor nonce, or model-visible authority token.
@@ -414,12 +417,24 @@ never creates a second supervisor body.
 
 ## 11. Explicit home and interface registration
 
-`interface-register` gains a Codex route. It resolves exactly one initialized
-home before identity. Registration accepts only a genuine public
-`thread/read` whose ID is the calling thread and canonical cwd belongs to the
-chosen home. If the live gate cannot prove caller identity through a supported
-surface, explicit `--codex-thread` plus public read is membership proof, not
-authentication, and is labeled that way.
+`interface-register` gains a Codex route. It resolves exactly one explicitly
+named initialized home before identity. One Interface whose cwd remains the
+Fleet repository may explicitly register against and drive the Fleet, PM, and
+tap homes. There is no cwd or ambient-home fallback for this route. Worker and
+supervisor canonical cwd binding remains strict.
+
+Registration requires a genuine public thread plus supported caller/source
+authorization tying the invoking Interface to that thread and target home.
+`thread/read`, a caller-supplied UUID, source shape, or cwd coincidence proves
+membership only; none authenticates the caller or grants mutation authority.
+If the installed public protocol cannot provide genuine caller/source proof,
+registration refuses without writing state.
+
+An external Interface bridge may register or read an authorized Interface
+thread, but remains observational: it never resumes or owns that same thread,
+starts a turn on it, or creates a second writer. A bridge that needs active
+control must use a separately authorized provider thread and the normal
+single-owner lifecycle.
 
 Wrong cwd, ambiguous homes, unknown thread, Claude SID in the Codex field,
 Codex ID in `session_id`, malformed input, host mismatch, or unverified UUID

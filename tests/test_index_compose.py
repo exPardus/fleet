@@ -57,6 +57,7 @@ import ast
 import json
 import os
 import re
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -65,6 +66,22 @@ import pytest
 
 import fleet
 from fleet_sources import fleet_implementation_source
+
+
+def test_codex_protocol_imports_only_stdlib_and_fleet_errors():
+    path = Path(__file__).resolve().parents[1] / "bin" / "fleet_codex_protocol.py"
+    if not path.exists():
+        pytest.fail("bin/fleet_codex_protocol.py is not implemented")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    roots = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.extend(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            assert node.level == 0, "relative imports break standalone CLI use"
+            if node.module != "__future__":
+                roots.append(node.module.split(".", 1)[0])
+    assert set(roots) <= sys.stdlib_module_names | {"fleet_errors"}
 
 
 # ---------------------------------------------------------------------------
@@ -652,19 +669,21 @@ def test_the_dispatch_census_reflects_five_paths():
         f"SECOND call inside a function already on this list is a new dispatch "
         f"path that set-equality cannot see.")
 
-    # Item 29: the SEVENTH dispatch path. `dispatch_codex` launches an mcx
+    # Item 29: the SEVENTH dispatch path. `dispatch_codex` launches a legacy mcx
     # worker, not a `claude --bg` session, so the dispatch_bg census above can
     # never see it; it renders its own prompt the way the supervisor paths do
     # -- a one-line pointer at the task file it writes itself, because a Codex
     # worker gets no use from compose_prompt's Claude-Code teach lines. That
-    # is a recorded scope boundary, not an oversight: pin the path here.
+    # is a recorded scope boundary, not an oversight: pin the path here. The
+    # explicit native app-server path is operation based and is pinned in
+    # `tests/test_codex_native_worker.py`, so it cannot appear in this census.
     codex_dispatchers = call_counts("dispatch_codex")
-    assert codex_dispatchers == {"_cmd_spawn_codex": 1,
+    assert codex_dispatchers == {"_cmd_spawn_codex_mcx": 1,
                                  "_cmd_respawn_codex": 1}, (
         f"the dispatch_codex call census changed: "
-        f"{sorted(codex_dispatchers.items())}. A codex lane never composes "
-        f"via compose_prompt; a NEW codex dispatch path must render its own "
-        f"prompt and be pinned here.")
+        f"{sorted(codex_dispatchers.items())}. A new legacy mcx dispatch path "
+        f"must write its prompt and be pinned here; native app-server dispatch "
+        f"belongs to the public-operation assertions instead.")
 
 
 def test_the_supervisor_body_does_not_compose_through_compose_prompt():
