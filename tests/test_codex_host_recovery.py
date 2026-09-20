@@ -103,7 +103,8 @@ def _exact_observation(_record):
 
 
 @pytest.mark.parametrize("public_method", [
-    "thread/start", "turn/start", "turn/steer", "turn/interrupt"])
+    "thread/start", "thread/resume", "turn/start", "turn/steer",
+    "turn/interrupt"])
 @pytest.mark.parametrize("stage", [
     "before-send", "after-send", "after-response", "before-fleet-commit"])
 def test_crash_boundaries_never_blindly_retry_mutations(

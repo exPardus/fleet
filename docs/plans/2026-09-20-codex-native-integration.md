@@ -145,8 +145,14 @@ durable per-claim operation reservation prevents a
 second mutation; ambiguous recovery queues no second turn and never resumes or
 creates a thread. A stale predecessor or supplied UUID cannot authorize a
 call. The default supervisor route remains unchanged. Checkpoint/release,
-handoff, host-restart resumption, paged result hydration, permissions, and
-native Interface ownership remain unsupported; these slices do not enable
+handoff, and explicit `sup-reconcile` now extend that same binding: checkpoint
+requires complete current evidence; release enters a mutation-disarmed
+`releasing` state until terminal public proof; handoff binds an empty successor,
+transfers to `activating`, and only then starts its first turn; host restart uses
+`thread/resume` plus a complete exact-ID read and never starts a thread or turn.
+Lost activation/restart responses freeze without retry. Paged result hydration,
+permissions, predecessor interruption/retirement, activating-state restart
+adoption, and native Interface ownership remain unsupported; these slices do not enable
 native dispatch by default or complete this task.
 
 - [ ] Write failing tests for genuine thread holder with no Claude SID/nonce, cross-home/fake refusal, first-turn pending/held states, guard table, busy steer, idle wake, host restart, and unchanged Claude claims.

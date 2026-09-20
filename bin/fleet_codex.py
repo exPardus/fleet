@@ -68,7 +68,7 @@ class ReconcileReport:
 
 
 _MUTATING_PUBLIC_METHODS = frozenset({
-    "thread/start", "turn/start", "turn/steer", "turn/interrupt",
+    "thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt",
 })
 _SENSITIVE_KEYS = frozenset({
     "content", "input", "instructions", "message", "prompt", "reasoning",
