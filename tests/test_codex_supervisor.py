@@ -15,6 +15,8 @@ SUCCESSOR_THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9"
 WAKE_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
 ITEM_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106bb"
 NEWER_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106bc"
+SUCCESSOR_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106bd"
+SUCCESSOR_HANDOFF_THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106be"
 
 
 @pytest.fixture
@@ -103,14 +105,16 @@ class FakeLifecycleClient:
     def __init__(self, home, *, thread_status="active",
                  turn_status="inProgress", active_flags=None,
                  result_text="campaign complete", items_view="full",
-                 newer_turn=None):
+                 newer_turn=None, generation=None, fail_method=None):
         self.home = Path(home).resolve()
+        self.generation = generation or type(self).generation
         self.thread_status = thread_status
         self.turn_status = turn_status
         self.active_flags = list(active_flags or [])
         self.result_text = result_text
         self.items_view = items_view
         self.newer_turn = newer_turn
+        self.fail_method = fail_method
         self.turn_id = TURN_ID
         self.operations = []
         self.commits = []
@@ -118,6 +122,8 @@ class FakeLifecycleClient:
     def call(self, operation, timeout):
         self.operations.append(operation)
         method = operation["payload"]["method"]
+        if method == self.fail_method:
+            raise TimeoutError(f"lost {method} response")
         if method == "thread/read":
             items = []
             if self.turn_status == "completed" and self.result_text is not None:
@@ -138,13 +144,37 @@ class FakeLifecycleClient:
                                "activeFlags": self.active_flags},
                     "turns": turns,
                 }})
+        if method == "thread/resume":
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="f" * 64,
+                result={
+                    "thread": {"id": THREAD_ID, "cwd": str(self.home)},
+                    "cwd": str(self.home), "model": "gpt-5.6-luna",
+                    "approvalPolicy": "never", "approvalsReviewer": "user",
+                    "sandbox": {"type": "dangerFullAccess"},
+                })
+        if method == "thread/start":
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="1" * 64,
+                result={
+                    "thread": {"id": SUCCESSOR_HANDOFF_THREAD_ID,
+                               "cwd": str(self.home)},
+                    "cwd": str(self.home), "model": "gpt-5.6-luna",
+                    "approvalPolicy": "never", "approvalsReviewer": "user",
+                    "sandbox": {"type": "dangerFullAccess"},
+                })
         if method == "turn/steer":
             return SimpleNamespace(
                 operation_id=operation["operation_id"],
                 generation=self.generation, payload_digest="d" * 64,
                 result={"turnId": self.turn_id})
         if method == "turn/start":
-            self.turn_id = WAKE_TURN_ID
+            target = operation["payload"]["params"]["threadId"]
+            self.turn_id = (SUCCESSOR_TURN_ID
+                            if target == SUCCESSOR_HANDOFF_THREAD_ID
+                            else WAKE_TURN_ID)
             self.thread_status = "active"
             self.turn_status = "inProgress"
             return SimpleNamespace(
@@ -580,3 +610,193 @@ def test_sup_spawn_native_is_explicit_and_legacy_default_is_unchanged(
     assert parser.parse_args(common).codex_adapter is None
     assert parser.parse_args(common + [
         "--codex-adapter", "native"]).codex_adapter == "native"
+
+
+def test_native_checkpoint_commits_only_against_exact_observed_holder(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    before = fleet.read_incarnation()["heartbeat_at"]
+
+    assert fleet.cmd_sup_checkpoint(SimpleNamespace(
+        body="durable native checkpoint", kind="CHECKPOINT",
+        sid=None, nonce=None,
+        expect_inc="inc-20260921T000000Z-abcd")) == 0
+
+    claim = fleet.read_incarnation()
+    assert claim["holder"] == {"provider": "codex", "thread_id": THREAD_ID}
+    assert claim["current_turn_id"] == TURN_ID
+    assert claim["heartbeat_at"] >= before
+    assert "durable native checkpoint" in fleet.supervisor_journal_path().read_text()
+    assert [op["payload"]["method"] for op in client.operations] == ["thread/read"]
+
+
+def test_native_release_is_durable_and_stale_holder_loses_mutation(
+        supervisor_home, monkeypatch):
+    name, incarnation_id = _seed_native_supervisor(supervisor_home)
+    data = fleet.load_registry()
+    data["workers"][name].update({
+        "status": "limited", "limit_reset_at": "2099-01-01T00:00:00Z",
+        "usage": {"input_tokens": 17}, "result_text": "keep result",
+    })
+    fleet.save_registry(data)
+    old_binding = fleet._codex_supervisor_binding()
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_sup_release(SimpleNamespace(
+        reason="planned stop", sid=None, nonce=None,
+        expect_inc=incarnation_id)) == 0
+
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "releasing"
+    assert claim["incarnation_id"] == incarnation_id
+    assert claim["holder"] == {"provider": "codex", "thread_id": THREAD_ID}
+    record = fleet.load_registry()["workers"][name]
+    assert record["adapter_state"] == "releasing"
+    assert record["status"] == "limited"
+    assert record["limit_reset_at"] == "2099-01-01T00:00:00Z"
+    assert record["usage"] == {"input_tokens": 17}
+    assert record["result_text"] == "keep result"
+    with pytest.raises(fleet.FleetCliError, match="no longer holds"):
+        fleet._call_codex_supervisor_claimed(
+            client, old_binding.incarnation_id, old_binding.authority,
+            {"operation_id": "stale-after-release", "method": "rpc",
+             "payload": {"method": "turn/steer", "params": {}}}, timeout=1)
+
+
+def test_native_handoff_transfers_before_start_and_stales_predecessor(
+        supervisor_home, monkeypatch):
+    old_name, _old_inc = _seed_native_supervisor(supervisor_home)
+    old_binding = fleet._codex_supervisor_binding()
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_sup_handoff_begin(SimpleNamespace(
+        model="codex:gpt-5.6-luna", permission_mode="bypass",
+        sid=None, nonce=None,
+        expect_inc=old_binding.incarnation_id)) == 0
+
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "held"
+    assert claim["holder"] == {
+        "provider": "codex", "thread_id": SUCCESSOR_HANDOFF_THREAD_ID}
+    assert claim["current_turn_id"] == SUCCESSOR_TURN_ID
+    assert claim["predecessor"]["thread_id"] == THREAD_ID
+    workers = fleet.load_registry()["workers"]
+    successor = [r for n, r in workers.items() if n != old_name][0]
+    assert successor["codex_thread_id"] == SUCCESSOR_HANDOFF_THREAD_ID
+    assert successor["codex_turn_id"] == SUCCESSOR_TURN_ID
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "turn/start"]
+    with pytest.raises(fleet.FleetCliError, match="no longer holds"):
+        fleet._call_codex_supervisor_claimed(
+            client, old_binding.incarnation_id, old_binding.authority,
+            {"operation_id": "stale-handoff", "method": "rpc",
+             "payload": {"method": "turn/steer", "params": {}}}, timeout=1)
+
+
+def test_native_host_restart_reconciles_same_ids_without_new_body_or_turn(
+        supervisor_home, monkeypatch):
+    name, _inc = _seed_native_supervisor(supervisor_home)
+    data = fleet.load_registry()
+    data["workers"][name].update({
+        "status": "limited", "limit_reset_at": "2099-01-01T00:00:00Z",
+        "usage": {"input_tokens": 31}, "result_text": "preserve me",
+    })
+    fleet.save_registry(data)
+    fleet.append_mailbox(THREAD_ID, "queued across restart")
+    client = FakeLifecycleClient(supervisor_home, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+
+    claim = fleet.read_incarnation()
+    record = fleet.load_registry()["workers"][name]
+    assert claim["holder"] == {"provider": "codex", "thread_id": THREAD_ID}
+    assert claim["current_turn_id"] == TURN_ID
+    assert claim["host_generation"] == "host-generation-2"
+    assert record["codex_host_generation"] == "host-generation-2"
+    assert record["status"] == "limited"
+    assert record["limit_reset_at"] == "2099-01-01T00:00:00Z"
+    assert record["usage"] == {"input_tokens": 31}
+    assert record["result_text"] == "preserve me"
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "queued across restart"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read"]
+
+
+def test_native_handoff_lost_activation_never_retries_or_restores_blindly(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    client = FakeLifecycleClient(supervisor_home, fail_method="turn/start")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="activation is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None,
+            expect_inc="inc-20260921T000000Z-abcd"))
+
+    assert fleet.read_incarnation()["state"] == "activating"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "turn/start"]
+    with pytest.raises(fleet.FleetCliError, match="no current held claim"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None,
+            expect_inc="inc-20260921T000000Z-abcd"))
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "turn/start"]
+
+
+def test_native_restart_ambiguous_history_freezes_without_replay(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    fleet.append_mailbox(THREAD_ID, "retain ambiguous restart mail")
+    newer = {"id": NEWER_TURN_ID, "status": "completed",
+             "itemsView": "full", "items": []}
+    client = FakeLifecycleClient(
+        supervisor_home, generation="host-generation-2", newer_turn=newer)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="uncertain"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read"]
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "retain ambiguous restart mail"
+    assert all(op["payload"]["method"] not in {"thread/start", "turn/start"}
+               for op in client.operations)
+
+
+def test_native_reconcile_finalizes_release_only_after_terminal_public_proof(
+        supervisor_home, monkeypatch, capsys):
+    name, _inc = _seed_native_supervisor(supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    assert fleet.cmd_sup_release(SimpleNamespace(
+        reason="done", sid=None, nonce=None,
+        expect_inc="inc-20260921T000000Z-abcd")) == 0
+    client.thread_status = "idle"
+    client.turn_status = "completed"
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "released"
+    assert claim["released_holder"] == {
+        "provider": "codex", "thread_id": THREAD_ID,
+        "turn_id": TURN_ID, "host_generation": client.generation}
+    assert fleet.load_registry()["workers"][name]["adapter_state"] == "released"
+    client.operations.clear()
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True)) == 0
+    output = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert output["verdict"] == "DISPATCH"
+    assert output["sent"] is False
+    assert client.operations == []
