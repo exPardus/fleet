@@ -12342,7 +12342,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     :8725, :8736, :8830, :9305, :12289, :15269, :15270, :15331, :16525`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :6995, :7447, :10750,
-    :17233. This makes union identity safe; the age boundary distinguishes respawn.
+    :17249. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -12994,7 +12994,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:6995, :7447, :10750,
-    # :17233) -- so union identity cannot make one body answer for another.
+    # :17249) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -16575,6 +16575,25 @@ def _rollback_codex_handoff_activation(successor_inc, operation_id):
         return True
 
 
+def _freeze_codex_handoff_activation(
+        successor_name, successor_inc, operation_id, detail):
+    """Keep an ambiguous accepted activation owned by its successor claim."""
+    with fleet_lock():
+        claim = read_incarnation()
+        data = load_registry()
+        row = data["workers"].get(successor_name)
+        if (isinstance(claim, dict)
+                and claim.get("state") == "activating"
+                and claim.get("incarnation_id") == successor_inc
+                and claim.get("last_operation_id") == operation_id):
+            claim["uncertainty"] = str(detail)[:300]
+            write_incarnation(claim)
+        if (isinstance(row, dict)
+                and row.get("last_operation_id") == operation_id):
+            row["adapter_state"] = "uncertain"
+            save_registry(data)
+
+
 def _codex_handoff_thread_read(
         client, thread_id, generation, *, expected_turn_id=None):
     """Prove an empty successor, or its exact single first turn, publicly."""
@@ -16819,6 +16838,19 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
         turn_observation = _call_codex_supervisor_claimed(
             client, successor_inc, successor_authority,
             turn_operation, timeout=30, allowed_states={"activating"})
+    except BaseException as exc:
+        from fleet_codex import HostRejected
+        if isinstance(exc, HostRejected):
+            _rollback_codex_handoff_activation(successor_inc, turn_operation_id)
+        else:
+            _freeze_codex_handoff_activation(
+                successor_name, successor_inc, turn_operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "native Codex successor activation is uncertain; no retry was made") from exc
+
+    try:
         result = turn_observation.result
         turn = result.get("turn") if isinstance(result, dict) else None
         if not isinstance(turn, dict):
@@ -16831,24 +16863,8 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
             client, thread_id, turn_observation.generation,
             expected_turn_id=turn_id)
     except BaseException as exc:
-        from fleet_codex import HostRejected
-        if isinstance(exc, HostRejected):
-            _rollback_codex_handoff_activation(successor_inc, turn_operation_id)
-        else:
-            with fleet_lock():
-                claim = read_incarnation()
-                data = load_registry()
-                row = data["workers"].get(successor_name)
-                if (isinstance(claim, dict)
-                        and claim.get("state") == "activating"
-                        and claim.get("incarnation_id") == successor_inc
-                        and claim.get("last_operation_id") == turn_operation_id):
-                    claim["uncertainty"] = str(exc)[:300]
-                    write_incarnation(claim)
-                if (isinstance(row, dict)
-                        and row.get("last_operation_id") == turn_operation_id):
-                    row["adapter_state"] = "uncertain"
-                    save_registry(data)
+        _freeze_codex_handoff_activation(
+            successor_name, successor_inc, turn_operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise FleetCliError(
