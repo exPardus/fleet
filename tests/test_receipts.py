@@ -126,6 +126,9 @@ UNENFORCED = {
     "phase1-hardening-kernels.md",
     "portability.md",
     "providers.md",
+    # Proposed native Codex architecture; implementation and receipt-bearing
+    # behavior are gated by its companion plan and have not started.
+    "codex-native-integration.md",
 }
 
 
