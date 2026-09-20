@@ -132,6 +132,16 @@
 **Interfaces:**
 - Produces: `ProviderIdentity(provider, value)`; provider-tagged holder; Codex sup-spawn/boot/status/guard/wake/checkpoint/release.
 
+**Bounded landing (2026-09-21):** explicit `sup-spawn --codex-adapter
+native --model codex:<model>` now implements only the preclaim, genuine public
+thread binding, first-turn boot, and held-claim promotion slice. Provider
+mutation is guarded by the exact provider-tagged incarnation and holder, so a
+stale predecessor or a supplied UUID cannot authorize a call. The default
+supervisor route remains unchanged. Guard, mail/wake, checkpoint/release,
+handoff, host-restart recovery, and native Interface ownership remain
+unsupported; this does not enable native dispatch by default or complete this
+task.
+
 - [ ] Write failing tests for genuine thread holder with no Claude SID/nonce, cross-home/fake refusal, first-turn pending/held states, guard table, busy steer, idle wake, host restart, and unchanged Claude claims.
 - [ ] Decode legacy Claude claims unchanged; write Codex `holder={provider:codex,thread_id:<real>}`; never infer provider from UUID shape.
 - [ ] Boot with preclaim then unlock, create/bind real thread, write pending holder conditionally, unlock, start boot turn, promote only on matching `turn/started`.
