@@ -52,13 +52,14 @@ class FakeClient:
     generation = "host-generation-1"
 
     def __init__(self, home, lane, *, mutate_on_thread=None, fail_thread=None,
-                 thread_cwd=None, fail_commit_number=None):
+                 thread_cwd=None, fail_commit_number=None, thread_fields=None):
         self.home = home
         self.lane = lane
         self.mutate_on_thread = mutate_on_thread
         self.fail_thread = fail_thread
         self.thread_cwd = str(thread_cwd or lane)
         self.fail_commit_number = fail_commit_number
+        self.thread_fields = thread_fields or {}
         self.operations = []
         self.commits = []
         self.lock_depth = lambda: 0
@@ -83,6 +84,7 @@ class FakeClient:
                 "approvalsReviewer": "user",
                 "sandbox": {"type": "workspaceWrite"},
             }
+            result.update(self.thread_fields)
         elif method == "turn/start":
             assert record["adapter_state"] == "bound"
             assert record["codex_thread_id"] == THREAD_ID
@@ -208,6 +210,44 @@ def test_wrong_provider_cwd_freezes_without_starting_a_turn(
         "thread/start"]
 
 
+@pytest.mark.parametrize("field,value,error", [
+    ("model", "different-model", "model"),
+    ("approvalPolicy", "never", "approval"),
+    ("approvalsReviewer", "client", "reviewer"),
+    ("sandbox", {"type": "dangerFullAccess"}, "sandbox"),
+])
+def test_mismatched_effective_configuration_freezes_before_body_start(
+        native_home, monkeypatch, field, value, error):
+    home, lane = native_home
+    client = FakeClient(home, lane, thread_fields={field: value})
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client,
+                        raising=False)
+
+    with pytest.raises(fleet.FleetCliError, match=error):
+        fleet.cmd_spawn(_args(lane))
+
+    record = fleet.load_registry()["workers"]["cx-native"]
+    assert record["adapter_state"] == "uncertain"
+    assert record["codex_thread_id"] is None
+    assert [op["payload"]["method"] for op in client.operations] == ["thread/start"]
+
+
+def test_known_local_failure_before_provider_acceptance_rolls_back_preclaim_and_files(
+        native_home, monkeypatch):
+    home, lane = native_home
+    monkeypatch.setattr(
+        fleet, "_codex_native_client",
+        lambda _home: (_ for _ in ()).throw(OSError("host start failed")),
+        raising=False)
+
+    with pytest.raises(fleet.FleetCliError, match="before provider acceptance"):
+        fleet.cmd_spawn(_args(lane))
+
+    assert "cx-native" not in fleet.load_registry()["workers"]
+    assert not fleet.brief_file_path("cx-native").exists()
+    assert not fleet.task_file_path("cx-native").exists()
+
+
 def test_concurrent_preclaim_change_never_binds_or_starts_the_body(
         native_home, monkeypatch):
     home, lane = native_home
@@ -292,3 +332,46 @@ def test_unimplemented_native_verbs_never_fall_through_to_mcx(
         invoke(rec)
 
     assert fleet.load_registry()["workers"]["cx-native"] == rec
+
+
+def test_resume_limited_refuses_native_row_before_mutation_or_dispatch(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    rec = {
+        "substrate": "codex", "dispatch_kind": "codex-app-server",
+        "session_id": None, "mcx_id": None, "cwd": str(lane),
+        "codex_thread_id": THREAD_ID, "adapter_state": "active",
+        "status": "limited", "last_activity": "2026-09-20T00:00:00Z",
+    }
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        data["workers"]["cx-native"] = rec
+        fleet.save_registry(data)
+    monkeypatch.setattr(
+        fleet, "_resume_one_limited_native",
+        lambda *_args, **_kwargs: pytest.fail("native row reached Claude dispatch"))
+
+    with pytest.raises(fleet.FleetCliError, match="not yet supported"):
+        fleet._resume_one_limited("cx-native", lambda *_: None, lambda *_: None)
+
+    assert fleet.load_registry()["workers"]["cx-native"] == rec
+
+
+def test_wave_close_mixed_codex_row_never_reaches_mcx(tmp_path, monkeypatch):
+    row = {
+        "substrate": "codex", "dispatch_kind": "codex-app-server",
+        "session_id": None, "mcx_id": "real-looking-mcx-id",
+        "codex_thread_id": THREAD_ID, "adapter_state": "active",
+    }
+    monkeypatch.setattr(
+        fleet, "_read_registry_readonly",
+        lambda: (True, None, {"workers": {"mixed": row}}))
+    monkeypatch.setattr(
+        fleet, "_mcx_run",
+        lambda *_args, **_kwargs: pytest.fail("mixed row reached mcx stop"))
+
+    stopped, errors = fleet._wave_stop_landed_sessions(["mixed"])
+
+    assert stopped == []
+    assert errors == [
+        "mixed: invalid mixed Codex record; refusing wave-close stop"]
