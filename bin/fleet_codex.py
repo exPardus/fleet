@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import socket
@@ -29,6 +30,7 @@ MAX_METADATA_BYTES = 64 * 1024
 HOST_LOCK_STALE_SECONDS = 30.0
 HOST_HEARTBEAT_STALE_SECONDS = 3.0
 IPC_AUTH_CHALLENGE_BYTES = 32
+MAX_OPERATION_TIMEOUT_SECONDS = 120.0
 SCHEMA_MANIFEST = (
     Path(__file__).resolve().parents[1]
     / "tests" / "fixtures" / "codex_app_server" / "0.155.1" / "manifest.json"
@@ -728,8 +730,10 @@ class CodexHostClient:
             return False
 
     def call(self, operation: Mapping[str, Any], timeout: float) -> CodexObservation:
-        if timeout <= 0:
-            raise ValueError("timeout must be positive")
+        if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+                or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("timeout must be a positive finite number")
+        operation_timeout = min(float(timeout), MAX_OPERATION_TIMEOUT_SECONDS)
         operation_id = operation.get("operation_id")
         method = operation.get("method")
         payload = operation.get("payload", {})
@@ -754,13 +758,13 @@ class CodexHostClient:
             "payload_digest": digest,
             "recovery": operation.get("recovery", {}),
             "secret": self._encoded_key,
-            "operation_timeout": min(timeout, 120.0),
+            "operation_timeout": operation_timeout,
         }
         encoded = json.dumps(envelope, separators=(",", ":"),
                              sort_keys=True, ensure_ascii=False).encode("utf-8")
         if len(encoded) > MAX_IPC_BYTES:
             raise ValueError(f"Codex host request exceeds {MAX_IPC_BYTES} bytes")
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + operation_timeout
         try:
             connection = _connect_authenticated(
                 self._endpoint, self._authkey, deadline)

@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -246,6 +247,82 @@ def test_known_local_failure_before_provider_acceptance_rolls_back_preclaim_and_
     assert "cx-native" not in fleet.load_registry()["workers"]
     assert not fleet.brief_file_path("cx-native").exists()
     assert not fleet.task_file_path("cx-native").exists()
+
+
+def test_preprovider_rollback_cannot_clobber_a_concurrent_same_name_claimant(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    restore_entered = threading.Event()
+    successor_done = threading.Event()
+    original_restore = fleet.restore_brief
+
+    def delayed_restore(name, snapshot):
+        restore_entered.set()
+        successor_done.wait(0.25)
+        original_restore(name, snapshot)
+
+    def successor():
+        assert restore_entered.wait(2)
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            assert "cx-native" not in data["workers"]
+            data["workers"]["cx-native"] = {
+                "last_operation_id": "successor-generation",
+                "adapter_state": "preclaim", "status": "working",
+            }
+            fleet.save_registry(data)
+            fleet.briefs_dir().mkdir(parents=True, exist_ok=True)
+            fleet.tasks_dir().mkdir(parents=True, exist_ok=True)
+            fleet.brief_file_path("cx-native").write_text(
+                "successor brief", encoding="utf-8")
+            fleet.task_file_path("cx-native").write_text(
+                "successor prompt", encoding="utf-8")
+        successor_done.set()
+
+    monkeypatch.setattr(fleet, "restore_brief", delayed_restore)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client",
+        lambda _home: (_ for _ in ()).throw(OSError("host start failed")),
+        raising=False)
+    claimant = threading.Thread(target=successor)
+    claimant.start()
+    with pytest.raises(fleet.FleetCliError, match="before provider acceptance"):
+        fleet.cmd_spawn(_args(lane))
+    claimant.join(timeout=2)
+
+    assert successor_done.is_set()
+    assert fleet.load_registry()["workers"]["cx-native"][
+        "last_operation_id"] == "successor-generation"
+    assert fleet.brief_file_path("cx-native").read_text() == "successor brief"
+    assert fleet.task_file_path("cx-native").read_text() == "successor prompt"
+
+
+def test_preprovider_rollback_requires_the_original_claim_ownership(
+        native_home, monkeypatch):
+    _home, lane = native_home
+
+    def replace_claim(_home):
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            replacement = data["workers"]["cx-native"]
+            replacement["spawned_by"] = "successor-caller"
+            replacement["spawned_by_lineage"] = ["successor-caller"]
+            fleet.save_registry(data)
+            fleet.brief_file_path("cx-native").write_text(
+                "successor brief", encoding="utf-8")
+            fleet.task_file_path("cx-native").write_text(
+                "successor prompt", encoding="utf-8")
+        raise OSError("host start failed")
+
+    monkeypatch.setattr(fleet, "_codex_native_client", replace_claim,
+                        raising=False)
+    with pytest.raises(fleet.FleetCliError, match="before provider acceptance"):
+        fleet.cmd_spawn(_args(lane))
+
+    record = fleet.load_registry()["workers"]["cx-native"]
+    assert record["spawned_by"] == "successor-caller"
+    assert fleet.brief_file_path("cx-native").read_text() == "successor brief"
+    assert fleet.task_file_path("cx-native").read_text() == "successor prompt"
 
 
 def test_concurrent_preclaim_change_never_binds_or_starts_the_body(
