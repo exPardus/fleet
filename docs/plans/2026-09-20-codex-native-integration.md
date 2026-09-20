@@ -154,9 +154,14 @@ transfers to `activating`, and only then starts its first turn. Promotion to
 newest turn. Host restart uses
 `thread/resume` plus a complete exact-ID read and never starts a thread or turn.
 Lost activation/restart responses freeze without retry. Paged result hydration,
-permissions, predecessor interruption/retirement, activating-state restart
-adoption, and native Interface ownership remain unsupported; these slices do not enable
-native dispatch by default or complete this task.
+permissions, and native Interface ownership remain unsupported; these slices do
+not enable native dispatch by default or complete this task. Explicit
+`sup-reconcile` now adopts an activating successor after restart only from one
+complete exact-home thread with one genuine newest turn, without starting a
+thread or turn. Once the successor is held, reconciliation reads the exact
+recorded predecessor, issues at most one supported `turn/interrupt`, and marks
+it retired only after terminal public proof. An ambiguous accepted interrupt
+stays durably reserved and later reconciliation observes it without replay.
 
 - [ ] Write failing tests for genuine thread holder with no Claude SID/nonce, cross-home/fake refusal, first-turn pending/held states, guard table, busy steer, idle wake, host restart, and unchanged Claude claims.
 - [ ] Decode legacy Claude claims unchanged; write Codex `holder={provider:codex,thread_id:<real>}`; never infer provider from UUID shape.
