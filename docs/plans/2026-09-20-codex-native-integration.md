@@ -158,7 +158,11 @@ permissions, and native Interface ownership remain unsupported; these slices do
 not enable native dispatch by default or complete this task. Explicit
 `sup-reconcile` now adopts an activating successor after restart only from one
 complete exact-home thread with one genuine newest turn, without starting a
-thread or turn. Once the successor is held, reconciliation reads the exact
+thread or turn. That proof first reconciles and commits the original durable
+handoff `turn/start` intent, including an uncertain accepted intent whose
+empty-history identity matches, before a replacement host may resume it or a
+same-generation host may retire its predecessor. Once the successor is held,
+reconciliation reads the exact
 recorded predecessor, issues at most one supported `turn/interrupt`, and marks
 it retired only after terminal public proof. An ambiguous accepted interrupt
 stays durably reserved and later reconciliation observes it without replay.

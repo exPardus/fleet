@@ -132,6 +132,7 @@ class FakeLifecycleClient:
         self.successor_started = False
         self.operations = []
         self.commits = []
+        self.handoff_commits = []
 
     def call(self, operation, timeout):
         self.operations.append(operation)
@@ -251,6 +252,57 @@ class FakeLifecycleClient:
 
     def commit(self, operation_id):
         self.commits.append(operation_id)
+
+    def commit_handoff_turn_start(self, operation_id, **evidence):
+        self.handoff_commits.append((operation_id, evidence))
+
+
+class JournalLifecycleClient(FakeLifecycleClient):
+    """Lifecycle fake with the production OperationJournal mutation gate."""
+
+    def __init__(self, home, **kwargs):
+        super().__init__(home, **kwargs)
+        from fleet_codex import OperationJournal
+        self.journal = OperationJournal(self.home, self.generation)
+
+    def call(self, operation, timeout):
+        from fleet_codex import HostRejected
+        method = operation["payload"]["method"]
+        if method not in {
+                "thread/start", "thread/resume", "turn/start", "turn/steer",
+                "turn/interrupt"}:
+            return super().call(operation, timeout)
+        operation_id = operation["operation_id"]
+        record = self.journal.prepare(operation)
+        state = record["state"]
+        if state in {"observed", "committed"}:
+            return SimpleNamespace(
+                operation_id=operation_id, generation=self.generation,
+                payload_digest=record["payload_digest"],
+                result=record["result"])
+        if state != "prepared":
+            raise HostRejected("operation acceptance is uncertain")
+        predecessor = self.journal.unresolved_predecessor(operation_id)
+        if predecessor is not None:
+            self.journal.fail(operation_id, "blocked by unresolved predecessor")
+            raise HostRejected(
+                f"unresolved predecessor operation {predecessor['operation_id']}")
+        self.journal.accept(operation_id)
+        try:
+            observation = super().call(operation, timeout)
+        except BaseException as exc:
+            self.journal.uncertain(operation_id, str(exc))
+            raise
+        self.journal.observe(operation_id, observation.result)
+        return observation
+
+    def commit(self, operation_id):
+        self.journal.commit(operation_id)
+        super().commit(operation_id)
+
+    def commit_handoff_turn_start(self, operation_id, **evidence):
+        self.journal.commit_handoff_turn_start(operation_id, **evidence)
+        super().commit_handoff_turn_start(operation_id, **evidence)
 
 
 def _seed_native_supervisor(home, *, stale=False, cwd=None):
@@ -841,7 +893,8 @@ def test_native_restart_adopts_exact_activating_turn_without_replay(
             f"{SUCCESSOR_HANDOFF_THREAD_ID}.md").read_text(
                 encoding="utf-8").strip() == "queued on activation"
     assert [op["payload"]["method"] for op in restarted.operations] == [
-        "thread/resume", "thread/read"]
+        "thread/read", "thread/resume", "thread/read"]
+    assert restarted.handoff_commits[0][1]["turn_id"] == SUCCESSOR_TURN_ID
     assert all(op["payload"]["method"] not in {"thread/start", "turn/start"}
                for op in restarted.operations)
 
@@ -886,6 +939,63 @@ def test_native_restart_refuses_ambiguous_activating_history_without_replay(
     assert claim["pending_operation"]["kind"] == "handoff-turn/start"
     assert all(op["payload"]["method"] not in {"thread/start", "turn/start"}
                for op in restarted.operations)
+
+
+def test_native_restart_commits_original_journal_before_new_generation_resume(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    original = JournalLifecycleClient(
+        supervisor_home, reject_successor_read_after_start=True)
+    monkeypatch.setattr(
+        fleet, "_codex_existing_client", lambda _home: original)
+    with pytest.raises(fleet.FleetCliError, match="activation is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None,
+            expect_inc="inc-20260921T000000Z-abcd"))
+    operation_id = fleet.read_incarnation()["pending_operation"]["operation_id"]
+    assert original.journal.load(operation_id)["state"] == "observed"
+
+    restarted = JournalLifecycleClient(
+        supervisor_home, generation="host-generation-2")
+    restarted.successor_created = True
+    restarted.successor_started = True
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: restarted)
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+
+    assert restarted.journal.load(operation_id)["state"] == "committed"
+    assert restarted.journal.unresolved_predecessor("later-operation") is None
+    assert [op["payload"]["method"] for op in restarted.operations] == [
+        "thread/read", "thread/resume", "thread/read"]
+
+
+def test_native_same_generation_adoption_unblocks_one_predecessor_interrupt(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    client = JournalLifecycleClient(
+        supervisor_home, reject_successor_read_after_start=True)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    with pytest.raises(fleet.FleetCliError, match="activation is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None,
+            expect_inc="inc-20260921T000000Z-abcd"))
+    operation_id = fleet.read_incarnation()["pending_operation"]["operation_id"]
+    client.reject_successor_read_after_start = False
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert client.journal.load(operation_id)["state"] == "committed"
+
+    client.operations.clear()
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert client.interrupt_calls == 1
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "turn/interrupt", "thread/read"]
+    client.operations.clear()
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert client.interrupt_calls == 1
 
 
 def test_native_reconcile_interrupts_and_retires_exact_handoff_predecessor(
