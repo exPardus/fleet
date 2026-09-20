@@ -116,6 +116,11 @@ class FakeLifecycleClient:
         self.newer_turn = newer_turn
         self.fail_method = fail_method
         self.turn_id = TURN_ID
+        self.successor_thread_id = SUCCESSOR_HANDOFF_THREAD_ID
+        self.successor_initial_turns = []
+        self.successor_after_turns = None
+        self.successor_created = False
+        self.successor_started = False
         self.operations = []
         self.commits = []
 
@@ -125,6 +130,26 @@ class FakeLifecycleClient:
         if method == self.fail_method:
             raise TimeoutError(f"lost {method} response")
         if method == "thread/read":
+            requested_thread = operation["payload"]["params"]["threadId"]
+            if requested_thread == self.successor_thread_id and self.successor_created:
+                turns = (self.successor_after_turns
+                         if self.successor_started
+                         and self.successor_after_turns is not None else
+                         ([{"id": SUCCESSOR_TURN_ID, "status": "inProgress",
+                            "itemsView": "full", "items": []}]
+                          if self.successor_started else
+                          list(self.successor_initial_turns)))
+                return SimpleNamespace(
+                    operation_id=operation["operation_id"],
+                    generation=self.generation, payload_digest="2" * 64,
+                    result={"thread": {
+                        "id": self.successor_thread_id,
+                        "cwd": str(self.home),
+                        "status": {"type": ("active" if self.successor_started
+                                              else "idle"),
+                                   "activeFlags": []},
+                        "turns": turns,
+                    }})
             items = []
             if self.turn_status == "completed" and self.result_text is not None:
                 items = [{"id": ITEM_ID, "type": "agentMessage",
@@ -155,11 +180,12 @@ class FakeLifecycleClient:
                     "sandbox": {"type": "dangerFullAccess"},
                 })
         if method == "thread/start":
+            self.successor_created = True
             return SimpleNamespace(
                 operation_id=operation["operation_id"],
                 generation=self.generation, payload_digest="1" * 64,
                 result={
-                    "thread": {"id": SUCCESSOR_HANDOFF_THREAD_ID,
+                    "thread": {"id": self.successor_thread_id,
                                "cwd": str(self.home)},
                     "cwd": str(self.home), "model": "gpt-5.6-luna",
                     "approvalPolicy": "never", "approvalsReviewer": "user",
@@ -173,8 +199,10 @@ class FakeLifecycleClient:
         if method == "turn/start":
             target = operation["payload"]["params"]["threadId"]
             self.turn_id = (SUCCESSOR_TURN_ID
-                            if target == SUCCESSOR_HANDOFF_THREAD_ID
+                            if target == self.successor_thread_id
                             else WAKE_TURN_ID)
+            if target == self.successor_thread_id:
+                self.successor_started = True
             self.thread_status = "active"
             self.turn_status = "inProgress"
             return SimpleNamespace(
@@ -689,7 +717,8 @@ def test_native_handoff_transfers_before_start_and_stales_predecessor(
     assert successor["codex_thread_id"] == SUCCESSOR_HANDOFF_THREAD_ID
     assert successor["codex_turn_id"] == SUCCESSOR_TURN_ID
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "thread/start", "turn/start"]
+        "thread/read", "thread/start", "thread/read", "turn/start",
+        "thread/read"]
     with pytest.raises(fleet.FleetCliError, match="no longer holds"):
         fleet._call_codex_supervisor_claimed(
             client, old_binding.incarnation_id, old_binding.authority,
@@ -742,14 +771,105 @@ def test_native_handoff_lost_activation_never_retries_or_restores_blindly(
 
     assert fleet.read_incarnation()["state"] == "activating"
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "thread/start", "turn/start"]
+        "thread/read", "thread/start", "thread/read", "turn/start"]
+    with pytest.raises(fleet.FleetCliError, match="no current held claim"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None))
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "thread/read", "turn/start"]
+
+
+@pytest.mark.parametrize("reuse", ["predecessor", "registered-row"])
+def test_native_handoff_rejects_reused_successor_thread_before_transfer(
+        supervisor_home, monkeypatch, reuse):
+    old_name, _inc = _seed_native_supervisor(supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    if reuse == "predecessor":
+        client.successor_thread_id = THREAD_ID
+    else:
+        data = fleet.load_registry()
+        row = fleet.new_worker_record(
+            None, supervisor_home, "existing", "bypass",
+            model="codex:gpt-5.6-luna", dispatch_kind="codex-app-server",
+            substrate="codex")
+        row.update({"codex_thread_id": SUCCESSOR_HANDOFF_THREAD_ID,
+                    "codex_turn_id": NEWER_TURN_ID,
+                    "codex_host_generation": client.generation})
+        data["workers"]["existing-native-row"] = row
+        fleet.save_registry(data)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="thread acceptance is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None))
+
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "uncertain"
+    assert claim["holder"] == {"provider": "codex", "thread_id": THREAD_ID}
+    assert all(op["payload"]["method"] != "turn/start"
+               for op in client.operations)
+    assert old_name in fleet.load_registry()["workers"]
+
+
+def test_native_handoff_rejects_nonempty_successor_before_claim_transfer(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    client.successor_initial_turns = [{
+        "id": NEWER_TURN_ID, "status": "completed", "itemsView": "full",
+        "items": [{"id": ITEM_ID, "type": "agentMessage", "text": "old"}],
+    }]
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="thread acceptance is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None))
+
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "thread/read"]
+    assert len(fleet.load_registry()["workers"]) == 1
+
+
+@pytest.mark.parametrize("after_turns", [
+    [{"id": NEWER_TURN_ID, "status": "inProgress",
+      "itemsView": "full", "items": []}],
+    [{"id": SUCCESSOR_TURN_ID, "status": "inProgress",
+      "itemsView": "full", "items": []},
+     {"id": NEWER_TURN_ID, "status": "completed",
+      "itemsView": "full", "items": []}],
+])
+def test_native_handoff_requires_exact_single_turn_proof_before_held(
+        supervisor_home, monkeypatch, after_turns):
+    _seed_native_supervisor(supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    client.successor_after_turns = after_turns
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="activation is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None))
+
+    assert fleet.read_incarnation()["state"] == "activating"
+    successor = [r for r in fleet.load_registry()["workers"].values()
+                 if r.get("codex_thread_id") == SUCCESSOR_HANDOFF_THREAD_ID][0]
+    assert successor["adapter_state"] == "uncertain"
+    assert successor["codex_turn_id"] is None
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "thread/read", "turn/start",
+        "thread/read"]
     with pytest.raises(fleet.FleetCliError, match="no current held claim"):
         fleet.cmd_sup_handoff_begin(SimpleNamespace(
             model="codex:gpt-5.6-luna", permission_mode="bypass",
             sid=None, nonce=None,
             expect_inc="inc-20260921T000000Z-abcd"))
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "thread/start", "turn/start"]
+        "thread/read", "thread/start", "thread/read", "turn/start",
+        "thread/read"]
 
 
 def test_native_restart_ambiguous_history_freezes_without_replay(
