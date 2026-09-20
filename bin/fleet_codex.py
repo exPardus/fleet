@@ -510,6 +510,69 @@ class OperationJournal:
     def commit(self, operation_id: str) -> dict[str, Any]:
         return self._transition(operation_id, {"observed"}, "committed")
 
+    def commit_handoff_turn_start(
+            self, operation_id: str, *, fleet_name: str,
+            incarnation_id: str, thread_id: str, turn_id: str,
+            canonical_cwd: str, history_watermark: int) -> dict[str, Any]:
+        """Settle one accepted supervisor turn from exact public evidence.
+
+        A lost response can leave the original handoff ``turn/start`` uncertain
+        even though its sole first turn is publicly visible. This transition is
+        intentionally specific: immutable recovery identity, empty-history
+        watermark, thread, and returned/observed turn must all agree. It never
+        prepares or retries a provider mutation.
+        """
+        record = self.load(operation_id)
+        recovery = record.get("recovery")
+        expected = {
+            "kind": "supervisor/handoff-turn-start",
+            "fleet_name": fleet_name,
+            "incarnation_id": incarnation_id,
+            "thread_id": thread_id,
+            "canonical_cwd": canonical_cwd,
+            "history_watermark": history_watermark,
+        }
+        if (record.get("method") != "rpc"
+                or record.get("public_method") != "turn/start"
+                or not isinstance(recovery, dict)
+                or any(recovery.get(key) != value
+                       for key, value in expected.items())
+                or history_watermark != 0):
+            raise HostRejected(
+                f"operation {operation_id} is not the exact handoff turn intent")
+        state = record.get("state")
+        result = record.get("result")
+        if state in {"observed", "committed"}:
+            returned_thread = result.get("threadId") \
+                if isinstance(result, dict) else None
+            returned_turn = result.get("turnId") \
+                if isinstance(result, dict) else None
+            if returned_turn is None and isinstance(result, dict):
+                turn = result.get("turn")
+                returned_turn = turn.get("id") if isinstance(turn, dict) else None
+            if ((returned_thread is not None and returned_thread != thread_id)
+                    or returned_turn != turn_id):
+                raise HostRejected(
+                    f"operation {operation_id} turn evidence does not match")
+        elif state not in {"accepted", "uncertain"}:
+            raise HostRejected(
+                f"operation {operation_id} cannot be adopted from {state}")
+        evidence = {
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "canonicalCwd": canonical_cwd,
+            "historyWatermark": history_watermark,
+            "adoptedFromPublicRead": True,
+        }
+        if state in {"accepted", "uncertain"}:
+            self._transition(
+                operation_id, {"accepted", "uncertain"}, "observed",
+                result=evidence)
+        if state != "committed":
+            return self._transition(
+                operation_id, {"observed"}, "committed", result=evidence)
+        return record
+
     def uncertain(self, operation_id: str, reason: str) -> dict[str, Any]:
         return self._transition(
             operation_id, {"accepted", "prepared"}, "uncertain",
@@ -809,6 +872,10 @@ class CodexHostClient:
 
     def commit(self, operation_id: str) -> None:
         OperationJournal(self.home, self.generation).commit(operation_id)
+
+    def commit_handoff_turn_start(self, operation_id: str, **evidence: Any) -> None:
+        OperationJournal(self.home, self.generation).commit_handoff_turn_start(
+            operation_id, **evidence)
 
     def wait_for_exit(self, timeout: float) -> bool:
         """Wait for a host this process launched, reaping its process handle."""

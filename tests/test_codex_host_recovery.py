@@ -62,6 +62,79 @@ def test_same_operation_replays_observed_result_without_second_mutation(tmp_path
         _shutdown(client)
 
 
+@pytest.mark.parametrize("state", ["observed", "uncertain"])
+def test_exact_handoff_turn_evidence_commits_original_operation(tmp_path, state):
+    module = _module()
+    home = tmp_path / state
+    (home / "state").mkdir(parents=True)
+    journal = module.OperationJournal(home.resolve(), "generation-1")
+    operation = {
+        "operation_id": "handoff-turn",
+        "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": "thread-1", "input": [{"text": "boot"}],
+        }},
+        "recovery": {
+            "kind": "supervisor/handoff-turn-start",
+            "fleet_name": "sup|inc-next|successor",
+            "incarnation_id": "inc-next", "thread_id": "thread-1",
+            "canonical_cwd": str(home.resolve()), "history_watermark": 0,
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(operation["operation_id"])
+    if state == "observed":
+        journal.observe(operation["operation_id"], {
+            "turn": {"id": "turn-1", "status": "inProgress"}})
+    else:
+        journal.uncertain(operation["operation_id"], "response lost")
+
+    record = journal.commit_handoff_turn_start(
+        operation["operation_id"], fleet_name="sup|inc-next|successor",
+        incarnation_id="inc-next", thread_id="thread-1",
+        turn_id="turn-1", canonical_cwd=str(home.resolve()),
+        history_watermark=0)
+
+    assert record["state"] == "committed"
+    assert record["result"]["threadId"] == "thread-1"
+    assert record["result"]["turnId"] == "turn-1"
+    assert journal.unresolved_predecessor("next-operation") is None
+
+
+def test_handoff_turn_evidence_mismatch_keeps_operation_unresolved(tmp_path):
+    module = _module()
+    home = tmp_path / "mismatch"
+    (home / "state").mkdir(parents=True)
+    journal = module.OperationJournal(home.resolve(), "generation-1")
+    operation = {
+        "operation_id": "handoff-turn",
+        "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": "thread-1", "input": [{"text": "boot"}],
+        }},
+        "recovery": {
+            "kind": "supervisor/handoff-turn-start",
+            "fleet_name": "sup|inc-next|successor",
+            "incarnation_id": "inc-next", "thread_id": "thread-1",
+            "canonical_cwd": str(home.resolve()), "history_watermark": 0,
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(operation["operation_id"])
+    journal.observe(operation["operation_id"], {
+        "turn": {"id": "turn-other", "status": "inProgress"}})
+
+    with pytest.raises(module.HostRejected, match="turn evidence"):
+        journal.commit_handoff_turn_start(
+            operation["operation_id"],
+            fleet_name="sup|inc-next|successor",
+            incarnation_id="inc-next", thread_id="thread-1",
+            turn_id="turn-1", canonical_cwd=str(home.resolve()),
+            history_watermark=0)
+
+    assert journal.load(operation["operation_id"])["state"] == "observed"
+
+
 def test_reused_operation_id_with_changed_payload_is_refused_before_rpc(tmp_path):
     module, client, log = _ensure(tmp_path)
     try:

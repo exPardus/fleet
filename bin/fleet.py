@@ -12339,10 +12339,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2587, :2622,
     :2652, :2691, :2728, :2790, :2870, :3834, :7962, :8124, :8321, :8441, :8477, :8644, :8645, :8715,
-    :8725, :8736, :8830, :9305, :12289, :15789, :15790, :15851, :17045`).
+    :8725, :8736, :8830, :9305, :12289, :15802, :15803, :15864, :17058`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :6995, :7447, :10750,
-    :17769. This makes union identity safe; the age boundary distinguishes respawn.
+    :17782. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -12994,7 +12994,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:6995, :7447, :10750,
-    # :17769) -- so union identity cannot make one body answer for another.
+    # :17782) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -14959,6 +14959,15 @@ def _reconcile_codex_activating() -> int:
     resumed = client.generation != binding.host_generation
     resume_operation_id = f"supervisor-activation-resume-{uuid.uuid4()}"
     try:
+        observed = _codex_activation_observe(client, binding)
+        client.commit_handoff_turn_start(
+            binding.operation_id,
+            fleet_name=binding.name,
+            incarnation_id=binding.incarnation_id,
+            thread_id=binding.authority.value,
+            turn_id=observed["turn_id"],
+            canonical_cwd=str(FLEET_HOME.resolve()),
+            history_watermark=0)
         if resumed:
             bare_model = _codex_model_slug(binding.record.get("model"))
             if bare_model is None:
@@ -14995,7 +15004,11 @@ def _reconcile_codex_activating() -> int:
                 raise FleetCliError(
                     "native Codex activating resume returned the wrong thread")
             _validate_codex_thread_effective(result, bare_model, profile)
-        observed = _codex_activation_observe(client, binding)
+            resumed_observed = _codex_activation_observe(client, binding)
+            if resumed_observed["turn_id"] != observed["turn_id"]:
+                raise FleetCliError(
+                    "native Codex activating turn changed during resume")
+            observed = resumed_observed
     except BaseException as exc:
         _freeze_codex_handoff_activation(
             binding.name, binding.incarnation_id,
