@@ -14,6 +14,7 @@ TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
 SUCCESSOR_THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9"
 WAKE_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
 ITEM_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106bb"
+NEWER_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106bc"
 
 
 @pytest.fixture
@@ -101,12 +102,15 @@ class FakeLifecycleClient:
 
     def __init__(self, home, *, thread_status="active",
                  turn_status="inProgress", active_flags=None,
-                 result_text="campaign complete"):
+                 result_text="campaign complete", items_view="full",
+                 newer_turn=None):
         self.home = Path(home).resolve()
         self.thread_status = thread_status
         self.turn_status = turn_status
         self.active_flags = list(active_flags or [])
         self.result_text = result_text
+        self.items_view = items_view
+        self.newer_turn = newer_turn
         self.turn_id = TURN_ID
         self.operations = []
         self.commits = []
@@ -119,6 +123,12 @@ class FakeLifecycleClient:
             if self.turn_status == "completed" and self.result_text is not None:
                 items = [{"id": ITEM_ID, "type": "agentMessage",
                           "text": self.result_text}]
+            turns = [{"id": self.turn_id,
+                      "status": self.turn_status,
+                      "itemsView": self.items_view,
+                      "items": items}]
+            if self.newer_turn is not None:
+                turns.append(self.newer_turn)
             return SimpleNamespace(
                 operation_id=operation["operation_id"],
                 generation=self.generation, payload_digest="c" * 64,
@@ -126,10 +136,7 @@ class FakeLifecycleClient:
                     "id": THREAD_ID, "cwd": str(self.home),
                     "status": {"type": self.thread_status,
                                "activeFlags": self.active_flags},
-                    "turns": [{"id": self.turn_id,
-                               "status": self.turn_status,
-                               "itemsView": "full",
-                               "items": items}],
+                    "turns": turns,
                 }})
         if method == "turn/steer":
             return SimpleNamespace(
@@ -417,6 +424,88 @@ def test_ambiguous_native_recovery_queues_mail_without_resume_or_duplicate_turn(
     record = next(iter(fleet.load_registry()["workers"].values()))
     assert record["adapter_state"] == "active"
     assert record["last_operation_id"] == "boot-turn"
+
+
+@pytest.mark.parametrize("items_view", ["notLoaded", "summary"])
+def test_native_send_refuses_incomplete_items_and_preserves_queued_mail(
+        supervisor_home, monkeypatch, items_view):
+    _seed_native_supervisor(supervisor_home, stale=True)
+    client = FakeLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed",
+        items_view=items_view)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="item history is incomplete"):
+        fleet.cmd_send(_send_args(message="keep incomplete evidence"))
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+    assert client.commits == []
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "keep incomplete evidence"
+    assert fleet.read_incarnation()["current_turn_id"] == TURN_ID
+    assert "pending_operation" not in fleet.read_incarnation()
+
+
+@pytest.mark.parametrize("items_view", ["notLoaded", "summary"])
+def test_native_guard_pages_on_incomplete_items_without_waking(
+        supervisor_home, monkeypatch, capsys, items_view):
+    _seed_native_supervisor(supervisor_home, stale=True)
+    client = FakeLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed",
+        items_view=items_view)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True)) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["verdict"].startswith("PAGE ")
+    assert "item history is incomplete" in output["reason"]
+    assert output["sent"] is False
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+def test_native_send_refuses_newer_turn_and_preserves_claim_and_mail(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home, stale=True)
+    newer = {"id": NEWER_TURN_ID, "status": "completed",
+             "itemsView": "full", "items": []}
+    client = FakeLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed",
+        newer_turn=newer)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="newer turn"):
+        fleet.cmd_send(_send_args(message="keep stale turn mail"))
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+    assert client.commits == []
+    assert fleet.read_incarnation()["current_turn_id"] == TURN_ID
+    assert "pending_operation" not in fleet.read_incarnation()
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "keep stale turn mail"
+
+
+def test_native_guard_pages_when_bound_turn_is_not_newest(
+        supervisor_home, monkeypatch, capsys):
+    _seed_native_supervisor(supervisor_home, stale=True)
+    newer = {"id": NEWER_TURN_ID, "status": "completed",
+             "itemsView": "full", "items": []}
+    client = FakeLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed",
+        newer_turn=newer)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True)) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["verdict"].startswith("PAGE ")
+    assert "newer turn" in output["reason"]
+    assert output["sent"] is False
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
 
 
 def test_pending_native_operation_pages_without_read_or_second_writer(

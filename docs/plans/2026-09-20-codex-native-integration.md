@@ -139,7 +139,9 @@ claim-bound `sup-status`, `sup-guard`, active `turn/steer`, stale-idle
 `turn/start`, and public active/completed/failed result distinction. Status
 remains a file-only view; guard and send use `thread/read(includeTurns=true)`
 and refuse incomplete, waiting, not-loaded, system-error, generation-mismatched,
-or conflicting evidence. A durable per-claim operation reservation prevents a
+or conflicting evidence. Guard and send require a `full` item view and the
+bound turn to be the unique newest returned turn before they may mutate. A
+durable per-claim operation reservation prevents a
 second mutation; ambiguous recovery queues no second turn and never resumes or
 creates a thread. A stale predecessor or supplied UUID cannot authorize a
 call. The default supervisor route remains unchanged. Checkpoint/release,
