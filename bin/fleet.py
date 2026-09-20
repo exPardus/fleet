@@ -3954,6 +3954,10 @@ SUPERVISOR_LINE_PREFIX = "SUPERVISOR: "
 # Maximum delivered interface-line length, including its prefix.
 INTERFACE_LINE_LIMIT = 200
 
+# Codex's composer treats a rapid literal+Enter burst as pasted input and can
+# consume the Enter as part of that burst.  Let the composer settle first.
+INTERFACE_PASTE_SETTLE_SECONDS = 0.5
+
 # Only the CSI form is matched here; a bare ESC left by any other escape shape
 # is dropped by the C0 filter in `one_line` a line later.
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;:<=>?]*[ -/]*[@-~]")
@@ -4030,7 +4034,9 @@ def _tmux_window_name(run, pane):
 
 
 def type_interface_line(run, target, text, *, prefix, out=sys.stdout,
-                        limit=INTERFACE_LINE_LIMIT, label="fleet"):
+                        limit=INTERFACE_LINE_LIMIT, label="fleet",
+                        settle_seconds=INTERFACE_PASTE_SETTLE_SECONDS,
+                        sleep_fn=time.sleep):
     """Submit one sanitised tmux line; return whether delivery succeeded.
     Send Enter only after the literal send succeeds, to avoid submitting an
     unrelated half-typed prompt. Callers may record delivery only on True."""
@@ -4038,6 +4044,7 @@ def type_interface_line(run, target, text, *, prefix, out=sys.stdout,
     if not tmux_command(run, out, "send-keys", "-t", target, "-l", line,
                         label=label):
         return False
+    sleep_fn(settle_seconds)
     return tmux_command(run, out, "send-keys", "-t", target, "Enter",
                         label=label)
 

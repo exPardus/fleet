@@ -371,6 +371,13 @@ registration.
 - **The claim gate (claim-nonce §7, option (b)):** while a claim is held with a **fresh** heartbeat, the mutating lifecycle verbs (`spawn`/`send`/`respawn`/`kill`/`clean`/`interrupt`/`archive`/`resume-limited`/`release`/`init`) require a session-bearing caller to present the current generation (`--nonce`) or be refused (`SupervisorClaimGateError`, exit 4). It validates without minting. A **knowingly-bypassable speed-bump against a divergent second body, not authorization** — bypassable by a caller with no session id, armed only while the heartbeat is fresh, `autoclean` exempt. **The `autoclean` exemption is NOT transitive and is not "structural"** (corrected 2026-07-28): `cmd_autoclean` does not call the gate, but its tier-1 delegate `cmd_archive` does, so the exemption is carried explicitly as `cmd_archive(..., as_autoclean_tier=True)`. Between 2026-07-27 and 2026-07-28 it was not carried at all and every beat-driven sweep lost its archive pass — see `docs/specs/autoclean.md`. The `archive` verb itself stays gated.
 - **Nag predicate is file-only** (views never probe): GOALS active AND (no claim OR heartbeat older than S) — `supervisor_goals_active`/`supervisor_status_line` @7037/@7049, surfaced by `_doctor_check_supervisor_claim`/`_doctor_check_supervisor_handoff` @7079/@7088. The keeper can wake an existing idle supervisor through the guard; spawning a supervisor remains the interface's action.
 
+The shared tmux notification sender used by both the keeper and `sup-notify`
+waits `INTERFACE_PASTE_SETTLE_SECONDS` (0.5 seconds) after a successful literal
+send before sending its single Enter. This bounded settle is required by
+Codex's paste-burst composer behavior; a failed literal never sends Enter, and
+an Enter failure is reported as a failed delivery. Unit tests inject the clock
+sleep, so they do not incur the wall delay.
+
 Heartbeat primitive: in-session `ScheduleWakeup` self-rearm, confirmed real (G7); `claude stop` permanently kills a scheduled wake — a stopped supervisor never self-resumes.
 
 ## 13. Doctor roster — as it is today
