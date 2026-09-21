@@ -441,9 +441,14 @@ registration refuses without writing state.
 
 The reviewed protocol exposes thread ID, session ID, and source as readable
 membership metadata, but no credential authenticating the process invoking
-Fleet. Codex thread/session environment values are not documented as
-credentials and are replayable. The staged `--codex-thread` route therefore
-requires an explicit home and then refuses without reading or writing state.
+Fleet. On Linux, Fleet therefore combines an exact public `thread/read` with
+kernel-owned Unix-socket peer credentials and `/proc` ancestry. Registration
+binds the exact `CODEX_THREAD_ID`, nearest Codex ancestor PID and start identity,
+and explicit home in an owner-only rotating claim. The host rechecks the peer's
+thread and ancestry for every app-server mutation. A different UUID, unrelated
+same-user process, reused PID, nearer forked Codex process, or stale predecessor
+fails closed. Other platforms remain unsupported until they have equivalent
+peer-process and PID-reuse acceptance proof.
 
 An external Interface bridge may register or read an authorized Interface
 thread, but remains observational: it never resumes or owns that same thread,

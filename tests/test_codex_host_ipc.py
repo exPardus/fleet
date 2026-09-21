@@ -5,6 +5,7 @@ import multiprocessing.connection
 import os
 import socket
 import stat
+import struct
 import sys
 import threading
 import time
@@ -319,6 +320,97 @@ def test_rpc_runs_through_the_single_owned_app_server(tmp_path):
         assert observation.generation == client.generation
     finally:
         _shutdown(client)
+
+
+def test_interface_claim_authorizes_current_peer_and_refuses_stale_sources(
+        tmp_path, monkeypatch):
+    import fleet_codex_host as host_module
+
+    host = host_module.Host.__new__(host_module.Host)
+    host.home = _home(tmp_path)
+    claim = {"schema": 1, "home": str(host.home), "thread_id": "thread-current",
+             "claim_id": "c1705ad1-8530-4e90-a8fc-869a7450d77b",
+             "ancestor_pid": 41, "ancestor_start_identity": "100", "uid": 1000}
+    monkeypatch.setattr(host_module, "read_interface_claim", lambda _home: claim)
+    monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
+    source = {"thread_id": "thread-current", "ancestor_pid": 41,
+              "ancestor_start_identity": "100", "ancestor_cwd": str(host.home),
+              "uid": 1000}
+    monkeypatch.setattr(host_module, "codex_process_source",
+                        lambda _pid: dict(source))
+
+    class Peer:
+        def getsockopt(self, *_args):
+            return struct.pack("3i", 99, 1000, 1000)
+
+    host._authorize_public_mutation(
+        Peer(), "turn/start", {"params": {"threadId": "worker-thread"}})
+
+    for changed in (
+            {"thread_id": "thread-wrong"},
+            {"ancestor_pid": 42},
+            {"ancestor_start_identity": "101"}):
+        original = dict(source)
+        source.update(changed)
+        with pytest.raises(host_module.HostRejected, match="current Interface"):
+            host._authorize_public_mutation(
+                Peer(), "turn/start", {"params": {"threadId": "worker-thread"}})
+        source.clear()
+        source.update(original)
+
+
+def test_external_interface_thread_is_observe_only(tmp_path, monkeypatch):
+    import fleet_codex_host as host_module
+
+    host = host_module.Host.__new__(host_module.Host)
+    host.home = _home(tmp_path)
+    claim = {"thread_id": "external", "ancestor_pid": 41,
+             "ancestor_start_identity": "100", "uid": 1000}
+    source = {"thread_id": "external", "ancestor_pid": 41,
+              "ancestor_start_identity": "100", "uid": 1000}
+    monkeypatch.setattr(host_module, "read_interface_claim", lambda _home: claim)
+    monkeypatch.setattr(host_module, "codex_process_source", lambda _pid: source)
+    monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
+
+    class Peer:
+        def getsockopt(self, *_args):
+            return struct.pack("3i", 99, 1000, 1000)
+
+    with pytest.raises(host_module.HostRejected, match="observe-only"):
+        host._authorize_public_mutation(
+            Peer(), "turn/steer", {"params": {"threadId": "external"}})
+
+
+def test_current_supervisor_source_requires_exact_home_cwd(tmp_path, monkeypatch):
+    import fleet_codex_host as host_module
+
+    host = host_module.Host.__new__(host_module.Host)
+    host.home = _home(tmp_path)
+    (host.home / "supervisor").mkdir()
+    (host.home / "supervisor/INCARNATION").write_text(json.dumps({
+        "state": "held", "provider": "codex",
+        "holder": {"provider": "codex", "thread_id": "supervisor-thread"},
+    }))
+    interface_claim = {"thread_id": "interface-thread", "ancestor_pid": 41,
+                       "ancestor_start_identity": "100", "uid": 1000}
+    source = {"thread_id": "supervisor-thread", "ancestor_pid": 55,
+              "ancestor_start_identity": "200", "ancestor_cwd": str(host.home),
+              "uid": 1000}
+    monkeypatch.setattr(host_module, "read_interface_claim",
+                        lambda _home: interface_claim)
+    monkeypatch.setattr(host_module, "codex_process_source", lambda _pid: source)
+    monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
+
+    class Peer:
+        def getsockopt(self, *_args):
+            return struct.pack("3i", 99, 1000, 1000)
+
+    host._authorize_public_mutation(
+        Peer(), "turn/steer", {"params": {"threadId": "worker-thread"}})
+    source["ancestor_cwd"] = str(tmp_path / "foreign")
+    with pytest.raises(host_module.HostRejected, match="exact-home supervisor"):
+        host._authorize_public_mutation(
+            Peer(), "turn/steer", {"params": {"threadId": "worker-thread"}})
 
 
 def test_public_turn_evidence_survives_store_and_host_restart(tmp_path):

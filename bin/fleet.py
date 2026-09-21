@@ -16498,7 +16498,7 @@ def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
 
 
 def _cmd_interface_register_codex(args, root: Path) -> int:
-    """Fail closed until the public protocol authenticates the invoking caller."""
+    """Bind one external Interface to Linux process and public thread evidence."""
     if not (getattr(args, "_fleet_home_explicit", False)
             or getattr(args, "_explicit_home", False)):
         raise FleetCliError(
@@ -16511,11 +16511,58 @@ def _cmd_interface_register_codex(args, root: Path) -> int:
             "match the explicitly resolved Fleet home")
     requested_thread = _provider_codex_id(
         getattr(args, "codex_thread", None), "Interface thread")
-    raise FleetCliError(
-        "interface-register: the reviewed public Codex protocol can read "
-        f"thread membership for {requested_thread} but does not authenticate "
-        "the invoking caller; environment IDs and thread/read membership are "
-        "replayable and cannot grant Interface mutation authority")
+    from fleet_codex import (
+        INTERFACE_CLAIM_SCHEMA, HostRejected, _atomic_json,
+        codex_process_source, read_interface_claim,
+    )
+    try:
+        source = codex_process_source(os.getpid(), requested_thread)
+    except HostRejected as exc:
+        raise FleetCliError(f"interface-register: {exc}") from exc
+    try:
+        client = _codex_existing_client(root)
+        observation = client.call({
+            "operation_id": f"interface-read-{uuid.uuid4()}", "method": "rpc",
+            "payload": {"method": "thread/read", "params": {
+                "threadId": requested_thread, "includeTurns": False,
+            }},
+        }, timeout=10)
+    except Exception as exc:
+        raise FleetCliError(
+            "interface-register: exact public thread/read failed; registration "
+            "was not written") from exc
+    result = observation.result
+    thread = result.get("thread") if isinstance(result, dict) else None
+    if (not isinstance(thread, dict)
+            or _provider_codex_id(thread.get("id"), "Interface observed thread")
+            != requested_thread):
+        raise FleetCliError(
+            "interface-register: public thread/read did not return the exact caller thread")
+    path = root / "state" / "interface-codex.json"
+    with fleet_lock():
+        prior = read_interface_claim(root)
+        unchanged = (isinstance(prior, dict)
+                     and prior.get("thread_id") == requested_thread
+                     and prior.get("ancestor_pid") == source["ancestor_pid"]
+                     and prior.get("ancestor_start_identity")
+                     == source["ancestor_start_identity"])
+        if unchanged:
+            print(f"Codex interface already registered: {requested_thread}")
+            return 0
+        claim = {
+            "schema": INTERFACE_CLAIM_SCHEMA, "home": str(root),
+            "thread_id": requested_thread, "claim_id": str(uuid.uuid4()),
+            "ancestor_pid": source["ancestor_pid"],
+            "ancestor_start_identity": source["ancestor_start_identity"],
+            "uid": source["uid"], "registered_at": now_iso(),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_json(path, claim)
+    print(f"Codex interface registered: {requested_thread}")
+    append_interface_log(
+        "REGISTER", f"codex_thread={requested_thread} claim={claim['claim_id']}",
+        home=root)
+    return 0
 
 
 def cmd_sup_decision(args) -> int:

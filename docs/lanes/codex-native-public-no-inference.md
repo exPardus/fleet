@@ -1,5 +1,7 @@
 # Native Codex 0.155.1 public acceptance receipt
 
+DONE means: public no-inference lifecycle acceptance evidence is recorded.
+
 Run: `FLEET_CODEX_PUBLIC_ACCEPTANCE=1 python3 tools/codex_native_acceptance.py --public-no-inference`
 
 The sealed JSON receipt is `codex-native-public-no-inference.json`; canonical

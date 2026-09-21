@@ -28,8 +28,12 @@ NO_INFERENCE_FIXTURE = (
 
 FAKE_CASES = {
     "interface_registration": [
-        "tests/test_interface_register.py::test_codex_interface_refuses_all_three_explicit_homes_without_authenticator",
+        "tests/test_interface_register.py::test_codex_interface_registers_same_genuine_source_in_three_explicit_homes",
+        "tests/test_interface_register.py::test_codex_interface_wrong_uuid_refuses_before_membership_read",
+        "tests/test_interface_register.py::test_codex_interface_reregister_rotates_claim_and_disarms_predecessor",
         "tests/test_interface_register.py::test_codex_interface_refuses_implicit_home_before_membership_read",
+        "tests/test_codex_interface_auth.py::test_forked_codex_after_claim_and_reused_pid_do_not_match",
+        "tests/test_codex_host_ipc.py::test_external_interface_thread_is_observe_only",
     ],
     "supervisor_boot_claim": [
         "tests/test_codex_supervisor.py::test_explicit_native_sup_spawn_binds_genuine_holder_and_boot_turn",
@@ -64,11 +68,7 @@ FAKE_CASES = {
     ],
 }
 
-BLOCKED_CASES = {
-    "interface_registration": (
-        "The reviewed public protocol exposes thread membership, sessionId, and "
-        "source, but no credential authenticating the invoking Codex caller."),
-}
+BLOCKED_CASES = {}
 
 
 def _manifest() -> dict:

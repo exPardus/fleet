@@ -1,7 +1,7 @@
 # Native Codex acceptance gate
 DONE means: the bounded fake matrix and at most one authorized real lifecycle are recorded with unsupported rows left blocked.
 
-## Verdict
+## Original run verdict
 
 - **MEASURED — BLOCKED, no full-native claim.** The deterministic fake gate ran
   12 exact lifecycle probes: supervisor boot/claim, idle wake, active steer,
@@ -56,13 +56,13 @@ process. Cleanup classification: `host=not_started`, `thread=not_created`.
 
 ## Supported lifecycle and remaining gaps
 
-The committed fake evidence supports the explicit native supervisor lifecycle
+The original fake evidence supported the explicit native supervisor lifecycle
 through claim-bound boot, wake/steer/result state, checkpoint, handoff,
 successor adoption, one supported predecessor interrupt, and stale-holder
-denial. It does not support native Interface ownership, per-turn usage
-accounting, or a successful real-protocol lifecycle on this machine. Native
-dispatch remains opt-in; Claude and legacy mcx behavior remain the compatibility
-baseline.
+denial. Later bounded slices added fake acceptance for process-bound Interface
+authority and per-turn usage accounting. A successful inference lifecycle on
+the real protocol remains unproved on this machine. Native dispatch remains
+opt-in; Claude and legacy mcx behavior remain the compatibility baseline.
 
 ## WHERE THIS BRIEF WAS WRONG
 
@@ -70,3 +70,11 @@ The requested real run was conditional on auth/quota, but those checks were not
 the first live blocker. Public auth and reachability were healthy; the reviewed
 per-home host itself exited before ready. Retrying would have weakened the
 no-duplicate-run constraint, so the gate stopped and recorded no IDs or usage.
+
+## Later bounded closure
+
+The Linux process-bound Interface slice closes the fake I1 blocker without a
+second real run. The fake gate now includes three-home registration, wrong-ID
+refusal, claim handoff, fork/PID-reuse refusal, and external-thread write
+refusal. The earlier real-run result and the prohibition on a full-native claim
+remain unchanged.

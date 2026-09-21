@@ -1,6 +1,7 @@
 """The interface pane registration verb."""
 
 import subprocess
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,7 @@ def _args():
 
 
 CODEX_THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1"
+OTHER_THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106c2"
 
 
 def _codex_args(thread_id=CODEX_THREAD, explicit=True):
@@ -89,29 +91,87 @@ def test_register_refuses_when_tmux_pane_lookup_fails(tmp_path, monkeypatch):
     assert not (tmp_path / "state/interface-pane").exists()
 
 
-def test_codex_interface_refuses_all_three_explicit_homes_without_authenticator(
+class CodexReadClient:
+    def __init__(self, thread_id=CODEX_THREAD):
+        self.thread_id = thread_id
+        self.operations = []
+
+    def call(self, operation, timeout):
+        self.operations.append(operation)
+        return SimpleNamespace(result={"thread": {"id": self.thread_id}})
+
+
+def _source(thread_id=CODEX_THREAD, *, pid=500, start="17"):
+    return {"thread_id": thread_id, "ancestor_pid": pid,
+            "ancestor_start_identity": start, "ancestor_cwd": "/fleet",
+            "uid": 1000}
+
+
+def test_codex_interface_registers_same_genuine_source_in_three_explicit_homes(
         tmp_path, monkeypatch):
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
-    monkeypatch.setenv("CODEX_SESSION_ID", CODEX_THREAD)
-    monkeypatch.setattr(
-        fleet, "_codex_existing_client",
-        lambda _home: pytest.fail("membership read cannot authenticate caller"))
+    import fleet_codex
+    monkeypatch.setattr(fleet_codex, "codex_process_source",
+                        lambda _pid, thread: _source(thread))
+    clients = {}
+
+    def client(home):
+        return clients.setdefault(str(home), CodexReadClient())
+
+    monkeypatch.setattr(fleet, "_codex_existing_client", client)
 
     for name in ("fleet", "pm", "tap"):
         home = tmp_path / name
         state = home / "state"
         state.mkdir(parents=True)
-        sentinel = state / "interface-codex.json"
-        sentinel.write_text('{"existing":true}\n', encoding="utf-8")
-        before = sentinel.read_bytes()
         monkeypatch.setattr(fleet, "FLEET_HOME", home)
 
-        with pytest.raises(fleet.FleetCliError, match="does not authenticate"):
-            fleet.cmd_interface_register(_codex_args())
+        assert fleet.cmd_interface_register(_codex_args()) == 0
 
-        assert sentinel.read_bytes() == before
+        claim = json.loads((state / "interface-codex.json").read_text())
+        assert claim["home"] == str(home.resolve())
+        assert claim["thread_id"] == CODEX_THREAD
+        assert claim["ancestor_pid"] == 500
+        assert [op["payload"]["method"] for op in clients[str(home.resolve())].operations] \
+            == ["thread/read"]
+
+
+def test_codex_interface_wrong_uuid_refuses_before_membership_read(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    import fleet_codex
+    monkeypatch.setattr(
+        fleet_codex, "codex_process_source",
+        lambda _pid, thread: (_ for _ in ()).throw(
+            fleet_codex.HostRejected("Codex caller thread does not match process evidence")))
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: pytest.fail("must fail before public read"))
+
+    with pytest.raises(fleet.FleetCliError, match="does not match process evidence"):
+        fleet.cmd_interface_register(_codex_args(OTHER_THREAD))
+    assert not (tmp_path / "state/interface-codex.json").exists()
+
+
+def test_codex_interface_reregister_rotates_claim_and_disarms_predecessor(
+        tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir()
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: CodexReadClient())
+    import fleet_codex
+    source = _source()
+    monkeypatch.setattr(fleet_codex, "codex_process_source",
+                        lambda _pid, _thread: dict(source))
+    assert fleet.cmd_interface_register(_codex_args()) == 0
+    first = json.loads((tmp_path / "state/interface-codex.json").read_text())
+    source.update(ancestor_pid=700, ancestor_start_identity="29")
+    assert fleet.cmd_interface_register(_codex_args()) == 0
+    second = json.loads((tmp_path / "state/interface-codex.json").read_text())
+    assert second["claim_id"] != first["claim_id"]
+    assert second["ancestor_pid"] == 700
 
 
 def test_codex_interface_refuses_implicit_home_before_membership_read(

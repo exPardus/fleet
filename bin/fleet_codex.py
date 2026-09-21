@@ -75,6 +75,158 @@ _SENSITIVE_KEYS = frozenset({
     "secret", "text", "transcript",
 })
 
+INTERFACE_CLAIM_SCHEMA = 1
+
+
+def _linux_stat_identity(raw: str) -> tuple[int, str] | None:
+    end = raw.rfind(")")
+    if end < 1:
+        return None
+    fields = raw[end + 2:].split()
+    try:
+        # fields[0] is stat field 3 (state), [1] is PPID, [19] is starttime.
+        return int(fields[1]), fields[19]
+    except (IndexError, ValueError):
+        return None
+
+
+def _linux_process_record(pid: int) -> dict[str, Any] | None:
+    """Read one PID-reuse-resistant process record from Linux procfs.
+
+    ``stat`` is parsed after the final ``)`` because the command name may
+    contain spaces and parentheses.  Callers treat every missing field as an
+    authentication failure; there is no kill(0) or same-uid fallback.
+    """
+    if not sys.platform.startswith("linux") or not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        stat_path = Path(f"/proc/{pid}/stat")
+        before = _linux_stat_identity(stat_path.read_text(encoding="ascii"))
+        if before is None:
+            return None
+        ppid, start = before
+        status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+        uid_line = next(line for line in status.splitlines()
+                        if line.startswith("Uid:"))
+        uid = int(uid_line.split()[1])
+        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+        cwd = str(Path(f"/proc/{pid}/cwd").resolve(strict=True))
+        if _linux_stat_identity(stat_path.read_text(encoding="ascii")) != before:
+            return None
+    except (OSError, StopIteration, IndexError, UnicodeError, ValueError):
+        return None
+    return {"pid": pid, "ppid": ppid, "start_identity": start,
+            "uid": uid, "comm": comm, "cwd": cwd}
+
+
+def _linux_process_environment(pid: int) -> dict[str, str] | None:
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+        result: dict[str, str] = {}
+        for entry in raw.split(b"\0"):
+            if b"=" not in entry:
+                continue
+            key, value = entry.split(b"=", 1)
+            result[key.decode("utf-8")] = value.decode("utf-8")
+        return result
+    except (OSError, UnicodeError):
+        return None
+
+
+def codex_process_source(pid: int, thread_id: str | None = None) -> dict[str, Any]:
+    """Bind a caller thread to its actual Linux Codex ancestor.
+
+    The thread value is read from the socket peer's process environment (or
+    checked against it by registration), while the durable process identity
+    comes from the nearest executable Codex ancestor.  Both are needed:
+    readable thread membership and a UUID-shaped environment value alone are
+    replayable.
+    """
+    if not sys.platform.startswith("linux"):
+        raise HostRejected("Codex caller process authentication is unsupported on this platform")
+    peer_before = _linux_process_record(pid)
+    if peer_before is None:
+        raise HostRejected("Codex caller process identity is unavailable")
+    environment = _linux_process_environment(pid)
+    peer_after = _linux_process_record(pid)
+    if (peer_after is None
+            or peer_after["start_identity"] != peer_before["start_identity"]):
+        raise HostRejected("Codex caller process identity changed during authentication")
+    actual_thread = environment.get("CODEX_THREAD_ID") if environment else None
+    if (not isinstance(actual_thread, str) or not actual_thread
+            or (thread_id is not None and actual_thread != thread_id)):
+        raise HostRejected("Codex caller thread does not match process evidence")
+    seen: set[int] = set()
+    current = pid
+    for _ in range(64):
+        if current in seen:
+            break
+        seen.add(current)
+        record = peer_after if current == pid else _linux_process_record(current)
+        if record is None:
+            break
+        if record["comm"] == "codex":
+            confirmed = _linux_process_record(current)
+            if (confirmed is None
+                    or confirmed["start_identity"] != record["start_identity"]):
+                raise HostRejected(
+                    "Codex ancestor process identity changed during authentication")
+            return {"thread_id": actual_thread,
+                    "ancestor_pid": record["pid"],
+                    "ancestor_start_identity": record["start_identity"],
+                    "ancestor_cwd": record["cwd"], "uid": record["uid"]}
+        current = record["ppid"]
+        if current <= 1:
+            break
+    raise HostRejected("Codex caller has no verifiable Codex process ancestor")
+
+
+def read_interface_claim(home: Path) -> dict[str, Any] | None:
+    """Read the exact-home external Interface claim, failing closed on drift."""
+    path = _canonical_home(home) / "state" / "interface-codex.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    value = _read_json(path)
+    required = ("thread_id", "ancestor_pid", "ancestor_start_identity",
+                "claim_id", "home", "uid")
+    if (not isinstance(value, dict)
+            or value.get("schema") != INTERFACE_CLAIM_SCHEMA
+            or value.get("home") != str(_canonical_home(home))
+            or any(not value.get(key) for key in required)):
+        raise UnsafeHostState("native Codex Interface claim is malformed")
+    try:
+        _public_uuid7(value["thread_id"], "Interface claim thread id")
+    except ValueError as exc:
+        raise UnsafeHostState("native Codex Interface thread id is malformed") from exc
+    if (not isinstance(value["ancestor_pid"], int)
+            or isinstance(value["ancestor_pid"], bool)
+            or value["ancestor_pid"] <= 1
+            or not isinstance(value["ancestor_start_identity"], str)
+            or not value["ancestor_start_identity"]
+            or not isinstance(value["uid"], int)
+            or isinstance(value["uid"], bool)
+            or value["uid"] < 0):
+        raise UnsafeHostState("native Codex Interface process identity is malformed")
+    try:
+        claim_id = uuid.UUID(value["claim_id"])
+    except (ValueError, AttributeError) as exc:
+        raise UnsafeHostState("native Codex Interface claim id is invalid") from exc
+    if claim_id.version != 4 or str(claim_id) != value["claim_id"]:
+        raise UnsafeHostState("native Codex Interface claim id is not canonical UUIDv4")
+    return value
+
+
+def interface_source_matches(claim: Mapping[str, Any], source: Mapping[str, Any]) -> bool:
+    """Compare every reusable process/thread component of an Interface claim."""
+    return (claim.get("thread_id") == source.get("thread_id")
+            and claim.get("ancestor_pid") == source.get("ancestor_pid")
+            and hmac.compare_digest(
+                str(claim.get("ancestor_start_identity", "")),
+                str(source.get("ancestor_start_identity", "")))
+            and claim.get("uid") == source.get("uid"))
+
 
 def _canonical_home(home: Path) -> Path:
     lexical = Path(os.path.abspath(os.fspath(home)))
