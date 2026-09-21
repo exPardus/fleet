@@ -91,6 +91,7 @@ class Host:
         self.evidence = CodexPublicEvidenceStore(self.home)
 
     def metadata(self) -> dict[str, Any]:
+        app_server_pid = self.client.process_id if self.client is not None else None
         return {
             "schema": 1,
             "home": str(self.home),
@@ -100,6 +101,11 @@ class Host:
             "pid": os.getpid(),
             "process_identity": _process_identity(os.getpid()),
             "started_at": self.started_at,
+            "app_server_pid": app_server_pid,
+            "app_server_process_identity": (
+                _process_identity(app_server_pid)
+                if isinstance(app_server_pid, int) else None),
+            "app_server_started_at": self.app_server_started_at,
             "heartbeat": time.time(),
             "codex_version": self.expected_version,
             "ipc_protocol_version": IPC_PROTOCOL_VERSION,
@@ -112,6 +118,7 @@ class Host:
         self._verify_installed_schema()
         self.client = AppServerClient.start(
             self.app_server_command, cwd=self.home, env=os.environ, timeout=10)
+        self.app_server_started_at = time.time()
         initialized = self.client.initialize_result
         if not self._reviewed_initialize(initialized):
             self.client.close()
@@ -174,11 +181,21 @@ class Host:
                     and server_info.get("version") == self.expected_version)
         user_agent = initialized.get("userAgent")
         codex_home = initialized.get("codexHome")
+        configured_home = os.environ.get("CODEX_HOME")
+        expected_home = (Path(configured_home).expanduser()
+                         if configured_home else Path.home() / ".codex")
+        try:
+            expected_home = expected_home.resolve(strict=True)
+            initialized_home = Path(codex_home).resolve(strict=True) \
+                if isinstance(codex_home, str) else None
+        except OSError:
+            return False
         return (
             isinstance(user_agent, str)
             and user_agent.startswith(f"fleet/{self.expected_version} ")
             and isinstance(codex_home, str)
             and Path(codex_home).is_absolute()
+            and initialized_home == expected_home
             and isinstance(initialized.get("platformFamily"), str)
             and bool(initialized["platformFamily"])
             and isinstance(initialized.get("platformOs"), str)

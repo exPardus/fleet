@@ -1,0 +1,206 @@
+{
+  "api_key_used": false,
+  "cleanup": {
+    "active_tree": {
+      "exists_checks_after": [
+        false,
+        false
+      ],
+      "lock_checks_after": [
+        false,
+        false
+      ],
+      "lock_files_before": 2,
+      "path": "/tmp/fleet-codex-public-k1bkr8fk",
+      "reference_pid_samples": [
+        [
+          3437362,
+          3437367,
+          3437379
+        ],
+        [
+          3437362,
+          3437367,
+          3437379
+        ],
+        [
+          3437362,
+          3437367,
+          3437379
+        ],
+        [
+          3437362,
+          3437367,
+          3437379
+        ],
+        [
+          3437362,
+          3437367,
+          3437379
+        ],
+        []
+      ],
+      "reference_pids_after": [],
+      "reference_pids_before_cleanup": [],
+      "removed": true
+    },
+    "disposable_home": "removed",
+    "first_host": "shutdown",
+    "second_host": "shutdown"
+  },
+  "cleanup_ledger_sha256": "9ed52c29c074663ccf36db7e57427d6db81d81059273234762f6e76a57e67e27",
+  "codex_version": "0.155.1",
+  "evidence_hashes": {
+    "input_fixture_sha256": "18fd9c3caafb2d2b94141727fb8c6cc8ae9c3ea5f65a38ac1a2fcfdb901419a4",
+    "output_hash_scope": "canonical JSON excluding evidence_hashes.output_payload_sha256",
+    "output_payload_sha256": "ccc752c3b50f3f0f5d994593315069ac7ab42b9c9e2b1e11752fb320822f5db1"
+  },
+  "host": {
+    "exact_home": true,
+    "first_generation": "cedb0482-41b6-475e-a330-b02c7231513b",
+    "foreign_home_refused": true,
+    "generation_changed": true,
+    "processes": {
+      "first": {
+        "app_server": {
+          "pid": 3437151,
+          "start_identity": "103116637",
+          "started_at": 1789964422.0752172
+        },
+        "host": {
+          "pid": 3437132,
+          "start_identity": "103116605",
+          "started_at": 1789964422.0774775
+        }
+      },
+      "second": {
+        "app_server": {
+          "pid": 3437325,
+          "start_identity": "103117036",
+          "started_at": 1789964425.6845198
+        },
+        "host": {
+          "pid": 3437311,
+          "start_identity": "103117006",
+          "started_at": 1789964425.6864724
+        }
+      }
+    },
+    "second_generation": "dd3397dd-a111-40b0-ba64-f5d6114be85c"
+  },
+  "inference": {
+    "model_calls": 0,
+    "turn_methods": []
+  },
+  "journal": {
+    "generations": [
+      "cedb0482-41b6-475e-a330-b02c7231513b",
+      "dd3397dd-a111-40b0-ba64-f5d6114be85c"
+    ],
+    "input_sha256": [
+      "b3b202a39212d11b30439dfda65323268af001e50d5f871a967e2e6ce89fc522",
+      "ab884f64f04608975bf97247dd0e913a13b7960ac69eba4fc8efa353543e667a"
+    ],
+    "methods": [
+      "thread/start",
+      "thread/resume"
+    ],
+    "operation_ids": [
+      "accept-thread-start-b1c89ddb-6876-458e-90fa-93ae27664902",
+      "accept-thread-resume-60214a49-0479-4a29-a7b1-63e98dd78245"
+    ],
+    "output_sha256": [
+      "256466aec81ce18096f47c31bfbc1f95df574ec0069f6749b4ad3a1eee151c5f",
+      "3f7974d13addcfab8e21b26e4af0cd106da295d928aefc532462f240386265cd"
+    ],
+    "states": [
+      "committed",
+      "committed"
+    ]
+  },
+  "mode": "public-no-inference",
+  "overall": "BLOCKED",
+  "process_exit_checks": [
+    {
+      "alive": [],
+      "label": "first-host-post-exit-1",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "first-host-post-exit-2",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "second-host-post-exit-1",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "second-host-post-exit-2",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "first-post-tree-cleanup-1",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "first-post-tree-cleanup-2",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "second-post-tree-cleanup-1",
+      "passed": true
+    },
+    {
+      "alive": [],
+      "label": "second-post-tree-cleanup-2",
+      "passed": true
+    }
+  ],
+  "reason": "Codex 0.155.1 thread/list omits the genuine zero-turn thread; read and resume recover the same ID after Fleet-host restart",
+  "schema": {
+    "configured_codex_home": "/tmp/fleet-codex-public-k1bkr8fk/codex-home",
+    "initialize_codex_home_canonical_match": true,
+    "initialized_server_version": "0.155.1",
+    "protocol_version": 2,
+    "sha256": "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3"
+  },
+  "stale_tree_cleanup": [
+    {
+      "exists_checks_after": [
+        false,
+        false
+      ],
+      "lock_files_before": 1,
+      "path": "/tmp/fleet-codex-public-e0lz9_38",
+      "reference_pids": [],
+      "removed": true
+    },
+    {
+      "exists_checks_after": [
+        false,
+        false
+      ],
+      "lock_files_before": 1,
+      "path": "/tmp/fleet-codex-public-v4iztji7",
+      "reference_pids": [],
+      "removed": true
+    }
+  ],
+  "thread": {
+    "count": 0,
+    "cwd_matches": true,
+    "id": "01a0c231-8c0e-7053-894b-7d71dab838be",
+    "identity_matches": true,
+    "list_status": "BLOCKED_ZERO_TURN",
+    "read_after_restart": true,
+    "resume_same_id": true,
+    "session_id": "01a0c231-8c0e-7053-894b-7d71dab838be",
+    "turn_count": 0
+  }
+}
