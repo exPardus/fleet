@@ -36,8 +36,16 @@ def send(value):
     sys.stdout.flush()
 
 first = json.loads(sys.stdin.readline())
-send({{"id": first["id"], "result": {{"serverInfo": {{
-    "name": "fake-codex", "version": "0.155.1"}}}}}})
+if os.environ.get("FAKE_INITIALIZE_PUBLIC_SHAPE") == "1":
+    initialize_result = {{
+        "userAgent": "fleet/0.155.1 (test)",
+        "codexHome": os.environ.get("CODEX_HOME", "/tmp/fake-codex-home"),
+        "platformFamily": "unix", "platformOs": "linux",
+    }}
+else:
+    initialize_result = {{"serverInfo": {{
+        "name": "fake-codex", "version": "0.155.1"}}}}
+send({{"id": first["id"], "result": initialize_result}})
 initialized = json.loads(sys.stdin.readline())
 if initialized != {{"method": "initialized"}}:
     raise SystemExit(31)
@@ -622,6 +630,23 @@ def test_unreviewed_app_server_version_never_publishes_ready(tmp_path):
         if client is not None:
             _shutdown(client)
     assert not (home / "state" / "codex" / "host.json").exists()
+
+
+def test_reviewed_public_initialize_shape_publishes_ready(tmp_path):
+    module = _modules()
+    home = _home(tmp_path)
+    log = tmp_path / "app-server.jsonl"
+    client = module.CodexHostClient.ensure(
+        home, app_server_command=[str(_fake_app_server(tmp_path))],
+        env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log),
+                 FAKE_INITIALIZE_PUBLIC_SHAPE="1"),
+        ready_timeout=5, idle_timeout=30)
+    try:
+        assert client.call(_operation("public-init"), timeout=1).result[
+            "schema_digest"] == json.loads(
+                module.SCHEMA_MANIFEST.read_text())["schema_sha256"]
+    finally:
+        _shutdown(client)
 
 
 def test_installed_schema_digest_mismatch_never_publishes_ready(
