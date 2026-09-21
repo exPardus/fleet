@@ -1,0 +1,24 @@
+{
+  "codex_version": "0.155.1",
+  "expected_thread_count": 1,
+  "maximum_pre_restart_thread_count": 1,
+  "expected_turn_count": 0,
+  "thread_read_include_turns": false,
+  "thread_list_cwd_filter": false,
+  "thread_list_state_db_only": false,
+  "forbidden_methods": [
+    "turn/start",
+    "turn/steer",
+    "turn/interrupt"
+  ],
+  "rpc_sequence": [
+    "thread/start",
+    "thread/inject_items",
+    "thread/read",
+    "thread/list",
+    "thread/read",
+    "thread/resume",
+    "thread/read",
+    "thread/list"
+  ]
+}

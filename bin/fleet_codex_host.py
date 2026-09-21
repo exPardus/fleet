@@ -113,16 +113,11 @@ class Host:
         self.client = AppServerClient.start(
             self.app_server_command, cwd=self.home, env=os.environ, timeout=10)
         initialized = self.client.initialize_result
-        version = None
-        if isinstance(initialized, dict):
-            server_info = initialized.get("serverInfo")
-            if isinstance(server_info, dict):
-                version = server_info.get("version")
-        if version != self.expected_version:
+        if not self._reviewed_initialize(initialized):
             self.client.close()
             raise RuntimeError(
-                f"Codex app-server version {version!r} does not match reviewed "
-                f"{self.expected_version!r}")
+                "Codex app-server initialize result does not match reviewed "
+                f"{self.expected_version!r} contract")
         # Classify every old durable intent before this generation can publish
         # ready or accept a fresh mutation. Until the public observer is wired,
         # accepted operations conservatively become uncertain and page-worthy.
@@ -169,6 +164,26 @@ class Host:
                     pass
             heartbeat.join(timeout=1)
         return 0
+
+    def _reviewed_initialize(self, initialized: Any) -> bool:
+        if not isinstance(initialized, dict):
+            return False
+        server_info = initialized.get("serverInfo")
+        if server_info is not None:
+            return (isinstance(server_info, dict)
+                    and server_info.get("version") == self.expected_version)
+        user_agent = initialized.get("userAgent")
+        codex_home = initialized.get("codexHome")
+        return (
+            isinstance(user_agent, str)
+            and user_agent.startswith(f"fleet/{self.expected_version} ")
+            and isinstance(codex_home, str)
+            and Path(codex_home).is_absolute()
+            and isinstance(initialized.get("platformFamily"), str)
+            and bool(initialized["platformFamily"])
+            and isinstance(initialized.get("platformOs"), str)
+            and bool(initialized["platformOs"])
+        )
 
     def _drain_notifications(self) -> None:
         if self.client is None:
