@@ -401,6 +401,152 @@ def _public_method(method: str, payload: Any) -> str | None:
     return candidate if candidate in _MUTATING_PUBLIC_METHODS else None
 
 
+_USAGE_FIELDS = {
+    "cacheWriteInputTokens": "cache_write_input_tokens",
+    "cachedInputTokens": "cached_input_tokens",
+    "inputTokens": "input_tokens",
+    "outputTokens": "output_tokens",
+    "reasoningOutputTokens": "reasoning_output_tokens",
+    "totalTokens": "total_tokens",
+}
+_TERMINAL_TURN_STATES = frozenset({"completed", "failed", "interrupted"})
+
+
+def _public_uuid7(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} is missing")
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"{label} is invalid") from exc
+    if parsed.version != 7 or str(parsed) != value.lower():
+        raise ValueError(f"{label} is not a canonical UUIDv7")
+    return value
+
+
+def _public_error_code(value: Any) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, dict) and len(value) == 1:
+        key = next(iter(value))
+        return key if isinstance(key, str) and key else None
+    return None
+
+
+class CodexPublicEvidenceStore:
+    """Durable bounded result/usage evidence from public app-server events."""
+
+    def __init__(self, home: Path) -> None:
+        self.home = _canonical_home(home)
+        self.state_dir = self.home / "state" / "codex"
+        _require_directory(self.state_dir, create=True)
+        self.directory = self.state_dir / "public-evidence"
+        _require_directory(self.directory, create=True)
+
+    def path(self, thread_id: object, turn_id: object) -> Path:
+        thread = _public_uuid7(thread_id, "public thread id")
+        turn = _public_uuid7(turn_id, "public turn id")
+        return self.directory / f"{thread}.{turn}.json"
+
+    def read(self, thread_id: object, turn_id: object) -> dict[str, Any] | None:
+        path = self.path(thread_id, turn_id)
+        value = _read_json(path)
+        if value is None:
+            return None
+        if (value.get("schema") != 1
+                or value.get("thread_id") != thread_id
+                or value.get("turn_id") != turn_id):
+            raise UnsafeHostState(f"public evidence identity mismatch: {path}")
+        return value
+
+    @staticmethod
+    def _usage(value: Any) -> dict[str, int]:
+        if not isinstance(value, dict):
+            raise ValueError("public token usage is malformed")
+        result: dict[str, int] = {}
+        for public, stored in _USAGE_FIELDS.items():
+            number = value.get(public, 0 if public == "cacheWriteInputTokens" else None)
+            if (not isinstance(number, int) or isinstance(number, bool)
+                    or number < 0):
+                raise ValueError("public token usage contains an invalid count")
+            result[stored] = number
+        return result
+
+    @staticmethod
+    def _agent_result(item: Any) -> tuple[str, str, bool] | None:
+        if not isinstance(item, dict) or item.get("type") != "agentMessage":
+            return None
+        item_id = item.get("id")
+        text = item.get("text")
+        if (not isinstance(item_id, str) or not item_id or len(item_id) > 160
+                or not isinstance(text, str)):
+            raise ValueError("public agent result is malformed")
+        encoded = text.encode("utf-8")
+        if len(encoded) > 32 * 1024:
+            return item_id, encoded[:32 * 1024].decode("utf-8", "ignore"), True
+        return item_id, text, False
+
+    def record(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
+        method = message.get("method")
+        if method not in {
+                "thread/tokenUsage/updated", "item/completed", "turn/completed"}:
+            return None
+        params = message.get("params")
+        if not isinstance(params, dict):
+            raise ValueError(f"{method} params are malformed")
+        thread_id = _public_uuid7(params.get("threadId"), "event thread id")
+        if method == "turn/completed":
+            turn = params.get("turn")
+            if not isinstance(turn, dict):
+                raise ValueError("turn/completed turn is malformed")
+            turn_id = _public_uuid7(turn.get("id"), "event turn id")
+        else:
+            turn_id = _public_uuid7(params.get("turnId"), "event turn id")
+            turn = None
+        current = self.read(thread_id, turn_id) or {
+            "schema": 1, "thread_id": thread_id, "turn_id": turn_id,
+        }
+        if method == "thread/tokenUsage/updated":
+            token_usage = params.get("tokenUsage")
+            last = token_usage.get("last") if isinstance(token_usage, dict) else None
+            current["usage"] = self._usage(last)
+        elif method == "item/completed":
+            result = self._agent_result(params.get("item"))
+            if result is not None:
+                item_id, text, truncated = result
+                current.update({
+                    "result_item_id": item_id, "result_text": text,
+                    "result_truncated": truncated,
+                })
+        else:
+            assert turn is not None
+            status = turn.get("status")
+            if status not in _TERMINAL_TURN_STATES:
+                raise ValueError("turn/completed status is not terminal")
+            current["turn_status"] = status
+            error = turn.get("error")
+            if error is not None:
+                if not isinstance(error, dict):
+                    raise ValueError("turn/completed error is malformed")
+                code = _public_error_code(error.get("codexErrorInfo"))
+                if code is not None:
+                    current["error_code"] = code
+            items = turn.get("items", [])
+            if not isinstance(items, list):
+                raise ValueError("turn/completed items are malformed")
+            for item in items:
+                result = self._agent_result(item)
+                if result is not None:
+                    item_id, text, truncated = result
+                    current.update({
+                        "result_item_id": item_id, "result_text": text,
+                        "result_truncated": truncated,
+                    })
+        current["observed_at"] = time.time()
+        _atomic_json(self.path(thread_id, turn_id), current)
+        return current
+
+
 class OperationJournal:
     """Owner-only durable intent and public observation for Codex mutations."""
 

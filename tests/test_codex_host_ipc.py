@@ -47,6 +47,33 @@ for line in sys.stdin:
         stream.write(json.dumps({{"event": "request", "method": message.get("method")}}) + "\n")
     if message.get("method") == "test/echo":
         send({{"id": message["id"], "result": message.get("params")}})
+    elif message.get("method") == "test/emit-lifecycle":
+        params = message.get("params", {{}})
+        thread_id = params["threadId"]
+        turn_id = params["turnId"]
+        item_id = params["itemId"]
+        send({{"method": "item/completed", "params": {{
+            "completedAtMs": 1, "threadId": thread_id, "turnId": turn_id,
+            "item": {{"id": item_id, "type": "agentMessage",
+                     "text": "durable result"}},
+        }}}})
+        send({{"method": "thread/tokenUsage/updated", "params": {{
+            "threadId": thread_id, "turnId": turn_id,
+            "tokenUsage": {{"last": {{
+                "cachedInputTokens": 3, "inputTokens": 11,
+                "outputTokens": 7, "reasoningOutputTokens": 2,
+                "totalTokens": 18, "cacheWriteInputTokens": 0}},
+                "total": {{"cachedInputTokens": 3, "inputTokens": 11,
+                "outputTokens": 7, "reasoningOutputTokens": 2,
+                "totalTokens": 18, "cacheWriteInputTokens": 0}}}},
+        }}}})
+        send({{"method": "turn/completed", "params": {{
+            "threadId": thread_id,
+            "turn": {{"id": turn_id, "status": "completed", "items": [
+                {{"id": item_id, "type": "agentMessage",
+                 "text": "durable result"}}]}},
+        }}}})
+        send({{"id": message["id"], "result": {{"emitted": True}}}})
     elif message.get("method") == "thread/start":
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
@@ -283,6 +310,81 @@ def test_rpc_runs_through_the_single_owned_app_server(tmp_path):
         assert observation.generation == client.generation
     finally:
         _shutdown(client)
+
+
+def test_public_turn_evidence_survives_store_and_host_restart(tmp_path):
+    module, client, _ = _ensure(tmp_path)
+    thread_id = "018f22d3-9b4a-7cc3-8a0e-36d4f59106d1"
+    turn_id = "018f22d3-9b4a-7cc3-8a0e-36d4f59106d2"
+    item_id = "item-final-1"
+    try:
+        emitted = client.call(_operation(
+            "emit-lifecycle", "rpc", {
+                "method": "test/emit-lifecycle",
+                "params": {"threadId": thread_id, "turnId": turn_id,
+                           "itemId": item_id},
+            }), timeout=2)
+        assert emitted.result == {"emitted": True}
+
+        evidence = None
+        for _ in range(40):
+            evidence = client.call(_operation(
+                "read-evidence", "public-evidence/read",
+                {"thread_id": thread_id, "turn_id": turn_id}), timeout=1).result
+            if evidence and evidence.get("usage"):
+                break
+            time.sleep(0.025)
+        assert evidence["turn_status"] == "completed"
+        assert evidence["result_text"] == "durable result"
+        assert evidence["result_item_id"] == item_id
+        assert evidence["usage"] == {
+            "cache_write_input_tokens": 0,
+            "cached_input_tokens": 3,
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "reasoning_output_tokens": 2,
+            "total_tokens": 18,
+        }
+    finally:
+        _shutdown(client)
+
+    restarted = module.CodexPublicEvidenceStore(client.home)
+    assert restarted.read(thread_id, turn_id) == evidence
+
+
+def test_public_turn_evidence_store_survives_process_restart_without_provider(
+        tmp_path):
+    module = _modules()
+    home = _home(tmp_path)
+    thread_id = "018f22d3-9b4a-7cc3-8a0e-36d4f59106d3"
+    turn_id = "018f22d3-9b4a-7cc3-8a0e-36d4f59106d4"
+    item_id = "item-final-2"
+    store = module.CodexPublicEvidenceStore(home)
+    store.record({"method": "item/completed", "params": {
+        "completedAtMs": 1, "threadId": thread_id, "turnId": turn_id,
+        "item": {"id": item_id, "type": "agentMessage",
+                 "text": "restart-safe result"},
+    }})
+    store.record({"method": "thread/tokenUsage/updated", "params": {
+        "threadId": thread_id, "turnId": turn_id,
+        "tokenUsage": {"last": {
+            "cachedInputTokens": 2, "inputTokens": 13,
+            "outputTokens": 5, "reasoningOutputTokens": 1,
+            "totalTokens": 18, "cacheWriteInputTokens": 0},
+            "total": {}},
+    }})
+    store.record({"method": "turn/completed", "params": {
+        "threadId": thread_id,
+        "turn": {"id": turn_id, "status": "completed", "items": [
+            {"id": item_id, "type": "agentMessage",
+             "text": "restart-safe result"}]},
+    }})
+
+    evidence = module.CodexPublicEvidenceStore(home).read(thread_id, turn_id)
+    assert evidence["turn_status"] == "completed"
+    assert evidence["result_text"] == "restart-safe result"
+    assert evidence["usage"]["input_tokens"] == 13
+    assert evidence["usage"]["output_tokens"] == 5
 
 
 def _unsafe_state(tmp_path, kind):

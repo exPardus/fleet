@@ -305,6 +305,38 @@ class JournalLifecycleClient(FakeLifecycleClient):
         super().commit_handoff_turn_start(operation_id, **evidence)
 
 
+class EvidenceLifecycleClient(FakeLifecycleClient):
+    def __init__(self, home, *, usage=None, error_code=None, **kwargs):
+        super().__init__(home, **kwargs)
+        self.usage = usage
+        self.error_code = error_code
+
+    def call(self, operation, timeout):
+        if operation.get("method") == "public-evidence/read":
+            self.operations.append(operation)
+            payload = operation["payload"]
+            assert payload == {"thread_id": THREAD_ID, "turn_id": TURN_ID}
+            evidence = {
+                "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+                "turn_status": self.turn_status,
+            }
+            if self.usage is not None:
+                evidence["usage"] = dict(self.usage)
+            if self.result_text is not None:
+                evidence.update({
+                    "result_text": self.result_text,
+                    "result_item_id": ITEM_ID,
+                    "result_truncated": False,
+                })
+            if self.error_code is not None:
+                evidence["error_code"] = self.error_code
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="8" * 64,
+                result=evidence)
+        return super().call(operation, timeout)
+
+
 def _seed_native_supervisor(home, *, stale=False, cwd=None):
     incarnation_id = "inc-20260921T000000Z-abcd"
     name = f"sup|{incarnation_id}|boot"
@@ -689,17 +721,79 @@ def test_native_result_distinguishes_active_completed_and_failed(
         supervisor_home, monkeypatch, capsys, thread_status, turn_status,
         result_text, expected_rc, expected):
     _seed_native_supervisor(supervisor_home)
-    client = FakeLifecycleClient(
+    usage = ({"input_tokens": 11, "output_tokens": 7,
+              "cached_input_tokens": 3, "reasoning_output_tokens": 2,
+              "cache_write_input_tokens": 0, "total_tokens": 18}
+             if turn_status == "completed" else None)
+    client = EvidenceLifecycleClient(
         supervisor_home, thread_status=thread_status,
-        turn_status=turn_status, result_text=result_text)
+        turn_status=turn_status, result_text=result_text, usage=usage)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
 
     assert fleet.cmd_result(SimpleNamespace(name="supervisor")) == expected_rc
 
     captured = capsys.readouterr()
     assert expected in captured.out + captured.err
-    assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+    assert [(op.get("method"), op["payload"].get("method"))
+            for op in client.operations] == (
+        [("rpc", "thread/read"), ("public-evidence/read", None)]
+        if turn_status != "inProgress" else [("rpc", "thread/read")])
+
+
+def test_native_completed_result_persists_public_usage_and_result(
+        supervisor_home, monkeypatch, capsys):
+    name, _ = _seed_native_supervisor(supervisor_home)
+    usage = {
+        "input_tokens": 101, "output_tokens": 23,
+        "cached_input_tokens": 17, "reasoning_output_tokens": 5,
+        "cache_write_input_tokens": 0, "total_tokens": 124,
+    }
+    client = EvidenceLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed",
+        result_text="campaign complete", usage=usage)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_result(SimpleNamespace(name="supervisor")) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "campaign complete"
+    assert "tokens in=101 out=23" in captured.err
+    record = fleet.load_registry()["workers"][name]
+    assert record["status"] == "idle"
+    assert record["adapter_state"] == "idle"
+    assert record["usage"] == usage
+    assert record["result_text"] == "campaign complete"
+    assert record["result_item_id"] == ITEM_ID
+    assert record["result_turn_id"] == TURN_ID
+
+
+@pytest.mark.parametrize(
+    "thread_status,turn_status,error_code,expected_status,expected_adapter",
+    [
+        ("active", "inProgress", None, "working", "active"),
+        ("idle", "failed", "usageLimitExceeded", "limited", "idle"),
+        ("idle", "failed", "internalServerError", "dead", "idle"),
+        ("idle", "interrupted", None, "interrupted", "idle"),
+        ("notLoaded", "failed", None, "dead-suspected", "uncertain"),
+        ("systemError", "failed", None, "dead-suspected", "uncertain"),
+    ],
+)
+def test_native_result_persists_busy_idle_limit_and_dead_distinctions(
+        supervisor_home, monkeypatch, thread_status, turn_status, error_code,
+        expected_status, expected_adapter):
+    name, _ = _seed_native_supervisor(supervisor_home)
+    client = EvidenceLifecycleClient(
+        supervisor_home, thread_status=thread_status, turn_status=turn_status,
+        result_text=None, error_code=error_code)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_result(SimpleNamespace(name="supervisor")) == 1
+
+    record = fleet.load_registry()["workers"][name]
+    assert record["status"] == expected_status
+    assert record["adapter_state"] == expected_adapter
+    if error_code == "usageLimitExceeded":
+        assert record["limit_kind"] == "usageLimitExceeded"
 
 
 def test_wrong_home_native_binding_pages_without_provider_call(

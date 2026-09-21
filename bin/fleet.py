@@ -1915,6 +1915,7 @@ def _codex_supervisor_observe(binding, client=None, *, require_full=False):
         raise FleetCliError(
             "native Codex supervisor item history is incomplete")
     result_text = None
+    result_item_id = None
     items = turn.get("items", [])
     if not isinstance(items, list):
         raise FleetCliError("native Codex supervisor turn items are malformed")
@@ -1929,11 +1930,25 @@ def _codex_supervisor_observe(binding, client=None, *, require_full=False):
             if not isinstance(text, str):
                 raise FleetCliError("native Codex supervisor result text is malformed")
             result_text = text
+            result_item_id = item_id
+    turn_error = turn.get("error")
+    error_code = None
+    if turn_error is not None:
+        if not isinstance(turn_error, dict):
+            raise FleetCliError("native Codex supervisor turn error is malformed")
+        error_info = turn_error.get("codexErrorInfo")
+        if isinstance(error_info, str) and error_info:
+            error_code = error_info
+        elif isinstance(error_info, dict) and len(error_info) == 1:
+            candidate = next(iter(error_info))
+            if isinstance(candidate, str) and candidate:
+                error_code = candidate
     return {
         "binding": binding, "client": client,
         "provider_status": status_type, "active_flags": list(flags),
         "turn_id": turn_id, "turn_status": turn_status,
         "items_view": items_view, "result_text": result_text,
+        "result_item_id": result_item_id, "error_code": error_code,
     }
 
 
@@ -6106,6 +6121,112 @@ def _cmd_result_native(name: str, sid) -> int:
     return 0
 
 
+_CODEX_LIMIT_ERRORS = frozenset({
+    "usageLimitExceeded", "rateLimitExceeded", "sessionBudgetExceeded",
+})
+_CODEX_USAGE_FIELDS = frozenset({
+    "cache_write_input_tokens", "cached_input_tokens", "input_tokens",
+    "output_tokens", "reasoning_output_tokens", "total_tokens",
+})
+
+
+def _codex_result_evidence(observed: dict) -> dict | None:
+    binding = observed["binding"]
+    client = observed["client"]
+    operation = {
+        "operation_id": f"result-evidence-{uuid.uuid4()}",
+        "method": "public-evidence/read",
+        "payload": {"thread_id": binding.authority.value,
+                    "turn_id": observed["turn_id"]},
+    }
+    evidence_observation = client.call(operation, timeout=10)
+    if evidence_observation.generation != binding.host_generation:
+        raise FleetCliError(
+            "native Codex supervisor evidence host generation changed")
+    evidence = evidence_observation.result
+    if evidence is None:
+        return None
+    if (not isinstance(evidence, dict)
+            or evidence.get("thread_id") != binding.authority.value
+            or evidence.get("turn_id") != observed["turn_id"]
+            or evidence.get("turn_status") != observed["turn_status"]):
+        raise FleetCliError(
+            "native Codex supervisor public result evidence is ambiguous")
+    usage = evidence.get("usage")
+    if usage is not None:
+        if (not isinstance(usage, dict)
+                or not _CODEX_USAGE_FIELDS.issubset(usage)
+                or any(not isinstance(usage.get(key), int)
+                       or isinstance(usage.get(key), bool)
+                       or usage[key] < 0 for key in _CODEX_USAGE_FIELDS)):
+            raise FleetCliError(
+                "native Codex supervisor public usage is malformed")
+    for key in ("result_text", "result_item_id"):
+        public_value = observed.get(key)
+        event_value = evidence.get(key)
+        if (public_value is not None and event_value is not None
+                and public_value != event_value):
+            raise FleetCliError(
+                "native Codex supervisor public result sources disagree")
+    return evidence
+
+
+def _persist_codex_result_observation(binding, observed: dict,
+                                      evidence: dict | None) -> None:
+    provider_status = observed["provider_status"]
+    turn_status = observed["turn_status"]
+    error_code = (evidence or {}).get("error_code") or observed.get("error_code")
+    if provider_status == "active":
+        fleet_status = "working"
+        adapter_state = "waiting" if observed["active_flags"] else "active"
+    elif provider_status == "idle":
+        adapter_state = "idle"
+        if turn_status == "completed":
+            fleet_status = "idle"
+        elif turn_status == "interrupted":
+            fleet_status = "interrupted"
+        elif error_code in _CODEX_LIMIT_ERRORS:
+            fleet_status = "limited"
+        else:
+            fleet_status = "dead"
+    else:
+        fleet_status = "dead-suspected"
+        adapter_state = "uncertain"
+
+    with fleet_lock():
+        claim = read_incarnation()
+        data = load_registry()
+        current = _codex_supervisor_binding(
+            claim, data, expected_name=binding.name)
+        if (current.incarnation_id != binding.incarnation_id
+                or current.authority != binding.authority
+                or current.current_turn_id != binding.current_turn_id
+                or current.host_generation != binding.host_generation):
+            raise FleetCliError(
+                "native Codex supervisor claim changed before result persistence")
+        record = data["workers"][binding.name]
+        record["provider_status"] = provider_status
+        record["adapter_state"] = adapter_state
+        record["status"] = fleet_status
+        record["last_activity"] = now_iso()
+        if error_code is not None:
+            record["codex_error_code"] = error_code
+        if fleet_status == "limited":
+            record["limit_kind"] = error_code
+        if evidence is not None:
+            record["result_turn_id"] = observed["turn_id"]
+            record["result_status"] = turn_status
+            usage = evidence.get("usage")
+            if isinstance(usage, dict):
+                record["usage"] = dict(usage)
+            text = observed.get("result_text")
+            item_id = observed.get("result_item_id")
+            if isinstance(text, str) and isinstance(item_id, str):
+                record["result_text"] = text
+                record["result_item_id"] = item_id
+        save_registry(data)
+
+
 def _cmd_result_codex(name: str, rec: dict,
                       run=subprocess.run, which=shutil.which) -> int:
     """Print the codex lane's mcx result (item 29). A live run and a failed or
@@ -6119,6 +6240,9 @@ def _cmd_result_codex(name: str, rec: dict,
         observed = _codex_supervisor_observe(binding)
         provider_status = observed["provider_status"]
         turn_status = observed["turn_status"]
+        evidence = (_codex_result_evidence(observed)
+                    if turn_status != "inProgress" else None)
+        _persist_codex_result_observation(binding, observed, evidence)
         if provider_status == "active":
             print(f"{name}: native Codex supervisor turn still running",
                   file=sys.stderr)
@@ -6141,7 +6265,16 @@ def _cmd_result_codex(name: str, rec: dict,
             print(f"{name}: completed native Codex supervisor turn has no "
                   "public agent result", file=sys.stderr)
             return 1
+        usage = evidence.get("usage") if isinstance(evidence, dict) else None
+        if (not isinstance(usage, dict)
+                or evidence.get("result_truncated") is True):
+            print(f"{name}: completed native Codex supervisor public usage "
+                  "or result evidence is incomplete", file=sys.stderr)
+            return 1
         print(text)
+        print(f"-- tokens in={usage['input_tokens']} "
+              f"out={usage['output_tokens']} model={rec.get('model')}",
+              file=sys.stderr)
         return 0
     _require_mcx_codex_record(name, rec, "result")
     mcx_id = rec.get("mcx_id")
@@ -16289,6 +16422,9 @@ def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
     is the interface identity; this path does not weaken the pane refusal.
     """
     root = FLEET_HOME if home is None else Path(home)
+    codex_thread = getattr(args, "codex_thread", None)
+    if codex_thread is not None:
+        return _cmd_interface_register_codex(args, root)
     ensure_interface_state(root)
     pane = os.environ.get("TMUX_PANE")
     if pane is not None:
@@ -16340,6 +16476,27 @@ def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
     else:
         print(f"interface session already registered: {sid}")
     return 0
+
+
+def _cmd_interface_register_codex(args, root: Path) -> int:
+    """Fail closed until the public protocol authenticates the invoking caller."""
+    if not (getattr(args, "_fleet_home_explicit", False)
+            or getattr(args, "_explicit_home", False)):
+        raise FleetCliError(
+            "interface-register: native Codex registration requires an "
+            "explicit --fleet-home; ambient home fallback is not authorized")
+    root = root.resolve()
+    if root != FLEET_HOME.resolve():
+        raise FleetCliError(
+            "interface-register: native Codex registration target does not "
+            "match the explicitly resolved Fleet home")
+    requested_thread = _provider_codex_id(
+        getattr(args, "codex_thread", None), "Interface thread")
+    raise FleetCliError(
+        "interface-register: the reviewed public Codex protocol can read "
+        f"thread membership for {requested_thread} but does not authenticate "
+        "the invoking caller; environment IDs and thread/read membership are "
+        "replayable and cannot grant Interface mutation authority")
 
 
 def cmd_sup_decision(args) -> int:
@@ -18570,6 +18727,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_interface.add_argument(
         "--session-id", dest="session_id", default=None,
         help="session id for registration when outside tmux (default: environment)")
+    p_interface.add_argument(
+        "--codex-thread", dest="codex_thread", default=None,
+        help="provider-minted current Codex thread; requires explicit "
+             "--fleet-home and matching public caller/session/source evidence")
 
     p_wave = sub.add_parser(
         "wave-close",
@@ -18774,6 +18935,10 @@ def main(argv=None) -> int:
         print(f"fleet: {exc}", file=sys.stderr)
         return 1
     args = parser.parse_args(_absorb_minted_flag_values(stripped))
+    # Native Interface registration must distinguish an explicit target from
+    # the legacy/environment resolver.  Keep that provenance after the global
+    # selector itself has been stripped before argparse.
+    args._fleet_home_explicit = home_flag is not None
     try:
         # Land is a repository operation owned by its leaf module. It must not
         # resolve or read fleet-home state before it can prepare a lane.
