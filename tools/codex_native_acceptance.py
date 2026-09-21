@@ -36,6 +36,7 @@ FAKE_CASES = {
     ],
     "result": [
         "tests/test_codex_supervisor.py::test_native_result_distinguishes_active_completed_and_failed",
+        "tests/test_codex_supervisor.py::test_native_completed_result_requires_complete_durable_item_evidence",
     ],
     "usage": [
         "tests/test_codex_supervisor.py::test_native_completed_result_persists_public_usage_and_result",
