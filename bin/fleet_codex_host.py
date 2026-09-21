@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fleet_codex import (
+    CodexPublicEvidenceStore,
     IPC_PROTOCOL_VERSION,
     MAX_OPERATION_TIMEOUT_SECONDS,
     MAX_IPC_BYTES,
@@ -87,6 +88,7 @@ class Host:
         self.client: AppServerClient | None = None
         self.listener: socket.socket | None = None
         self.journal = OperationJournal(self.home, self.generation)
+        self.evidence = CodexPublicEvidenceStore(self.home)
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -138,6 +140,7 @@ class Host:
         heartbeat.start()
         try:
             while not self.stop.is_set():
+                self._drain_notifications()
                 try:
                     connection, _ = self.listener.accept()
                 except socket.timeout:
@@ -152,6 +155,7 @@ class Host:
                     self.stop.set()
         finally:
             self.stop.set()
+            self._drain_notifications()
             if self.listener is not None:
                 self.listener.close()
             if self.client is not None:
@@ -165,6 +169,12 @@ class Host:
                     pass
             heartbeat.join(timeout=1)
         return 0
+
+    def _drain_notifications(self) -> None:
+        if self.client is None:
+            return
+        for message in self.client.notifications():
+            self.evidence.record(message)
 
     def _verify_installed_schema(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fleet-codex-schema-") as directory:
@@ -279,6 +289,7 @@ class Host:
                         result = self.client.request(
                             payload["method"], payload.get("params", {}),
                             timeout=rpc_timeout)
+                        self._drain_notifications()
                     else:
                         operation_id = request["operation_id"]
                         record = self.journal.load(operation_id)
@@ -319,6 +330,12 @@ class Host:
                             self.journal.observe(operation_id, result)
                         else:
                             raise ValueError("operation journal has unknown state")
+                elif method == "public-evidence/read":
+                    if not isinstance(payload, dict):
+                        raise ValueError("public evidence payload is malformed")
+                    self._drain_notifications()
+                    result = self.evidence.read(
+                        payload.get("thread_id"), payload.get("turn_id"))
                 elif method == "host/shutdown":
                     result = {"stopping": True}
                     should_stop = True

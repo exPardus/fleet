@@ -21,6 +21,10 @@ SCHEMA_MANIFEST = (
     / "manifest.json")
 
 FAKE_CASES = {
+    "interface_registration": [
+        "tests/test_interface_register.py::test_codex_interface_refuses_all_three_explicit_homes_without_authenticator",
+        "tests/test_interface_register.py::test_codex_interface_refuses_implicit_home_before_membership_read",
+    ],
     "supervisor_boot_claim": [
         "tests/test_codex_supervisor.py::test_explicit_native_sup_spawn_binds_genuine_holder_and_boot_turn",
     ],
@@ -32,6 +36,10 @@ FAKE_CASES = {
     ],
     "result": [
         "tests/test_codex_supervisor.py::test_native_result_distinguishes_active_completed_and_failed",
+    ],
+    "usage": [
+        "tests/test_codex_supervisor.py::test_native_completed_result_persists_public_usage_and_result",
+        "tests/test_codex_host_ipc.py::test_public_turn_evidence_store_survives_process_restart_without_provider",
     ],
     "interrupt": [
         "tests/test_codex_supervisor.py::test_native_reconcile_interrupts_and_retires_exact_handoff_predecessor",
@@ -51,11 +59,8 @@ FAKE_CASES = {
 
 BLOCKED_CASES = {
     "interface_registration": (
-        "No native interface-register route can bind genuine Codex caller/source "
-        "authorization; UUID membership alone is intentionally insufficient."),
-    "usage": (
-        "Native supervisor result observation does not yet persist public per-turn "
-        "token totals."),
+        "The reviewed public protocol exposes thread membership, sessionId, and "
+        "source, but no credential authenticating the invoking Codex caller."),
 }
 
 
@@ -107,7 +112,8 @@ def run_fake(python: str) -> dict:
     })
     return {
         "mode": "fake",
-        "overall": "BLOCKED" if passed else "FAIL",
+        "overall": ("FAIL" if not passed else
+                    "BLOCKED" if BLOCKED_CASES else "PASS"),
         "provider_processes_started": provider_called,
         "protocol": {
             "codex_version": manifest["codex_version"],

@@ -344,6 +344,12 @@ Use `thread/tokenUsage/updated` and `account/usage/read`; use public error
 and account snapshot for limits. `ordinaryUsageAllowed`, when supplied,
 outranks inferred percentages/timestamps. Never manufacture USD from tokens.
 
+The bounded supervisor slice durably merges `item/completed`,
+`turn/completed`, and the per-turn `last` breakdown from
+`thread/tokenUsage/updated`. `result` reconciles that store with an exact
+full public read before conditionally persisting the claimed turn's result,
+usage, and lifecycle state. The owner-only evidence survives host replacement.
+
 ## 9. Permissions and blocking requests
 
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
@@ -429,6 +435,12 @@ authorization tying the invoking Interface to that thread and target home.
 membership only; none authenticates the caller or grants mutation authority.
 If the installed public protocol cannot provide genuine caller/source proof,
 registration refuses without writing state.
+
+The reviewed protocol exposes thread ID, session ID, and source as readable
+membership metadata, but no credential authenticating the process invoking
+Fleet. Codex thread/session environment values are not documented as
+credentials and are replayable. The staged `--codex-thread` route therefore
+requires an explicit home and then refuses without reading or writing state.
 
 An external Interface bridge may register or read an authorized Interface
 thread, but remains observational: it never resumes or owns that same thread,

@@ -18,7 +18,8 @@ def test_fake_acceptance_manifest_names_existing_exact_probes():
     exec(compile(HARNESS.read_text(encoding="utf-8"), str(HARNESS), "exec"), scope)
     cases = scope["FAKE_CASES"]
     assert set(cases) == {
-        "supervisor_boot_claim", "idle_wake", "active_steer", "result",
+        "interface_registration", "supervisor_boot_claim", "idle_wake",
+        "active_steer", "result", "usage",
         "interrupt", "checkpoint_handoff", "restart_adoption",
         "stale_predecessor_denial",
     }
@@ -27,8 +28,7 @@ def test_fake_acceptance_manifest_names_existing_exact_probes():
             relative, test_name = node.split("::", 1)
             source = (REPO / relative).read_text(encoding="utf-8")
             assert f"def {test_name}(" in source
-    assert set(scope["BLOCKED_CASES"]) == {
-        "interface_registration", "usage"}
+    assert set(scope["BLOCKED_CASES"]) == {"interface_registration"}
 
 
 def test_live_gate_disabled_starts_no_codex_process(tmp_path):
