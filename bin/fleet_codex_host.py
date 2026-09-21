@@ -12,7 +12,9 @@ import os
 import signal
 import socket
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -33,6 +35,9 @@ from fleet_codex import (
     _public_evidence,
     _public_method,
     _process_identity,
+    codex_process_source,
+    interface_source_matches,
+    read_interface_claim,
     _read_key,
     _remaining,
     _send_frame,
@@ -323,6 +328,8 @@ class Host:
                             timeout=rpc_timeout)
                         self._drain_notifications()
                     else:
+                        self._authorize_public_mutation(
+                            connection, public_method, payload)
                         operation_id = request["operation_id"]
                         record = self.journal.load(operation_id)
                         if record.get("generation") != self.generation:
@@ -387,6 +394,67 @@ class Host:
         finally:
             connection.close()
         return should_stop
+
+    def _authorize_public_mutation(self, connection: socket.socket,
+                                   public_method: str,
+                                   payload: Mapping[str, Any]) -> None:
+        """Authorize each provider mutation from kernel peer evidence.
+
+        A home without an external Interface claim retains the already reviewed
+        supervisor/worker behavior.  Once an Interface is registered, the host
+        requires the current process-bound claim for Interface calls.  The
+        exact external Interface thread is always an observation target only.
+        """
+        claim = read_interface_claim(self.home)
+        if claim is None:
+            return
+        if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
+            raise HostRejected("Interface mutation authentication is unsupported on this platform")
+        try:
+            raw = connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            peer_pid, peer_uid, _peer_gid = struct.unpack("3i", raw)
+        except (OSError, struct.error) as exc:
+            raise HostRejected("could not authenticate Codex IPC peer") from exc
+        source = codex_process_source(peer_pid)
+        if peer_uid != os.getuid() or source.get("uid") != peer_uid:
+            raise HostRejected("Codex IPC peer uid does not match the host owner")
+        if not interface_source_matches(claim, source):
+            if not self._exact_home_supervisor_source(source):
+                raise HostRejected(
+                    "Codex IPC peer does not hold the current Interface or "
+                    "exact-home supervisor claim")
+        params = payload.get("params", {})
+        target = params.get("threadId") if isinstance(params, dict) else None
+        if target == claim.get("thread_id"):
+            raise HostRejected(
+                f"external Interface thread is observe-only; refusing {public_method}")
+
+    def _exact_home_supervisor_source(self, source: Mapping[str, Any]) -> bool:
+        """Allow the genuine current supervisor without weakening cwd binding."""
+        path = self.home / "supervisor" / "INCARNATION"
+        try:
+            info = path.lstat()
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid() or info.st_size > 64 * 1024):
+                return False
+            claim = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(claim, dict):
+            return False
+        holder = claim.get("holder")
+        if (claim.get("provider") != "codex"
+                or claim.get("state") not in {"pending", "held", "activating"}
+                or not isinstance(holder, dict)
+                or holder.get("provider") != "codex"):
+            return False
+        try:
+            source_cwd = Path(source.get("ancestor_cwd", "")).resolve(strict=True)
+        except OSError:
+            return False
+        return (holder.get("thread_id") == source.get("thread_id")
+                and source_cwd == self.home)
 
     def _validate(self, request: Mapping[str, Any]) -> str | None:
         if request.get("protocol_version") != IPC_PROTOCOL_VERSION:
