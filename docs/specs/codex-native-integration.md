@@ -347,8 +347,11 @@ outranks inferred percentages/timestamps. Never manufacture USD from tokens.
 The bounded supervisor slice durably merges `item/completed`,
 `turn/completed`, and the per-turn `last` breakdown from
 `thread/tokenUsage/updated`. `result` reconciles that store with an exact
-full public read before conditionally persisting the claimed turn's result,
-usage, and lifecycle state. The owner-only evidence survives host replacement.
+full public read before conditionally persisting the claimed turn's usage and
+lifecycle state. It exposes and persists result text only when durable evidence
+contains the matching item ID and text plus an explicit untruncated marker.
+Completed turn status and usage alone cannot authorize a result. The owner-only
+evidence survives host replacement.
 
 ## 9. Permissions and blocking requests
 

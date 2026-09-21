@@ -306,10 +306,13 @@ class JournalLifecycleClient(FakeLifecycleClient):
 
 
 class EvidenceLifecycleClient(FakeLifecycleClient):
-    def __init__(self, home, *, usage=None, error_code=None, **kwargs):
+    def __init__(self, home, *, usage=None, error_code=None,
+                 durable_result=True, include_result_truncated=True, **kwargs):
         super().__init__(home, **kwargs)
         self.usage = usage
         self.error_code = error_code
+        self.durable_result = durable_result
+        self.include_result_truncated = include_result_truncated
 
     def call(self, operation, timeout):
         if operation.get("method") == "public-evidence/read":
@@ -322,12 +325,13 @@ class EvidenceLifecycleClient(FakeLifecycleClient):
             }
             if self.usage is not None:
                 evidence["usage"] = dict(self.usage)
-            if self.result_text is not None:
+            if self.result_text is not None and self.durable_result:
                 evidence.update({
                     "result_text": self.result_text,
                     "result_item_id": ITEM_ID,
-                    "result_truncated": False,
                 })
+                if self.include_result_truncated:
+                    evidence["result_truncated"] = False
             if self.error_code is not None:
                 evidence["error_code"] = self.error_code
             return SimpleNamespace(
@@ -765,6 +769,39 @@ def test_native_completed_result_persists_public_usage_and_result(
     assert record["result_text"] == "campaign complete"
     assert record["result_item_id"] == ITEM_ID
     assert record["result_turn_id"] == TURN_ID
+
+
+@pytest.mark.parametrize(
+    "client_options",
+    [
+        {"durable_result": False},
+        {"include_result_truncated": False},
+    ],
+    ids=["no-durable-item", "missing-truncation-marker"],
+)
+def test_native_completed_result_requires_complete_durable_item_evidence(
+        supervisor_home, monkeypatch, capsys, client_options):
+    name, _ = _seed_native_supervisor(supervisor_home)
+    usage = {
+        "input_tokens": 101, "output_tokens": 23,
+        "cached_input_tokens": 17, "reasoning_output_tokens": 5,
+        "cache_write_input_tokens": 0, "total_tokens": 124,
+    }
+    client = EvidenceLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed",
+        result_text="live-only result", usage=usage, **client_options)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_result(SimpleNamespace(name="supervisor")) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "durable item or usage evidence is incomplete" in captured.err
+    record = fleet.load_registry()["workers"][name]
+    assert record["status"] == "idle"
+    assert record["usage"] == usage
+    assert "result_text" not in record
+    assert "result_item_id" not in record
 
 
 @pytest.mark.parametrize(

@@ -6161,13 +6161,28 @@ def _codex_result_evidence(observed: dict) -> dict | None:
                        or usage[key] < 0 for key in _CODEX_USAGE_FIELDS)):
             raise FleetCliError(
                 "native Codex supervisor public usage is malformed")
-    for key in ("result_text", "result_item_id"):
-        public_value = observed.get(key)
-        event_value = evidence.get(key)
-        if (public_value is not None and event_value is not None
-                and public_value != event_value):
-            raise FleetCliError(
-                "native Codex supervisor public result sources disagree")
+    event_text = evidence.get("result_text")
+    event_item_id = evidence.get("result_item_id")
+    if ((event_text is None) != (event_item_id is None)
+            or (event_text is not None and not isinstance(event_text, str))
+            or (event_item_id is not None
+                and (not isinstance(event_item_id, str) or not event_item_id))):
+        raise FleetCliError(
+            "native Codex supervisor durable item evidence is malformed")
+    truncated = evidence.get("result_truncated")
+    if truncated is not None and not isinstance(truncated, bool):
+        raise FleetCliError(
+            "native Codex supervisor durable item evidence is malformed")
+    if event_text is not None:
+        for key in ("result_text", "result_item_id"):
+            public_value = observed.get(key)
+            event_value = evidence[key]
+            if public_value != event_value:
+                raise FleetCliError(
+                    "native Codex supervisor public result sources disagree")
+    elif truncated is not None:
+        raise FleetCliError(
+            "native Codex supervisor durable item evidence is malformed")
     return evidence
 
 
@@ -6216,12 +6231,16 @@ def _persist_codex_result_observation(binding, observed: dict,
         if evidence is not None:
             record["result_turn_id"] = observed["turn_id"]
             record["result_status"] = turn_status
+            record.pop("result_text", None)
+            record.pop("result_item_id", None)
             usage = evidence.get("usage")
             if isinstance(usage, dict):
                 record["usage"] = dict(usage)
-            text = observed.get("result_text")
-            item_id = observed.get("result_item_id")
-            if isinstance(text, str) and isinstance(item_id, str):
+            text = evidence.get("result_text")
+            item_id = evidence.get("result_item_id")
+            if (evidence.get("result_truncated") is False
+                    and isinstance(text, str)
+                    and isinstance(item_id, str)):
                 record["result_text"] = text
                 record["result_item_id"] = item_id
         save_registry(data)
@@ -6260,16 +6279,16 @@ def _cmd_result_codex(name: str, rec: dict,
                   "incomplete; page public item history before reading it",
                   file=sys.stderr)
             return 1
-        text = observed.get("result_text")
-        if not isinstance(text, str):
-            print(f"{name}: completed native Codex supervisor turn has no "
-                  "public agent result", file=sys.stderr)
-            return 1
         usage = evidence.get("usage") if isinstance(evidence, dict) else None
+        text = evidence.get("result_text") if isinstance(evidence, dict) else None
+        item_id = (evidence.get("result_item_id")
+                   if isinstance(evidence, dict) else None)
         if (not isinstance(usage, dict)
-                or evidence.get("result_truncated") is True):
-            print(f"{name}: completed native Codex supervisor public usage "
-                  "or result evidence is incomplete", file=sys.stderr)
+                or not isinstance(text, str)
+                or not isinstance(item_id, str)
+                or evidence.get("result_truncated") is not False):
+            print(f"{name}: completed native Codex supervisor durable item "
+                  "or usage evidence is incomplete", file=sys.stderr)
             return 1
         print(text)
         print(f"-- tokens in={usage['input_tokens']} "

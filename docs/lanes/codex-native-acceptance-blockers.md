@@ -12,11 +12,12 @@ without provider access or state change. No resume, turn, or second writer occur
 
 The per-home host now durably records bounded `item/completed`,
 `turn/completed`, and `thread/tokenUsage/updated` evidence. Supervisor result
-reconciliation binds that evidence to the exact claimed thread/turn and persists
-result text, item ID, token counts, and working/idle/limited/interrupted/dead or
-ambiguous state. A fresh store instance recovers the same evidence after restart.
+reconciliation binds it to the exact claimed thread/turn. Result text persists
+only from matching durable item text/ID with an explicit untruncated marker;
+completed status, usage, or live history alone stays incomplete. A fresh store
+instance recovers the same evidence after restart.
 
-Fake harness: 16 probes passed with no provider process; Interface remains
+Fake harness: 18 probes passed with no provider process; Interface remains
 BLOCKED. No real
 provider lifecycle was retried. Native remains opt-in; worker paging, permissions,
 bridge control, and default cutover remain out of scope.
