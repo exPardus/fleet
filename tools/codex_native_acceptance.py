@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+from contextlib import nullcontext, redirect_stdout
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from types import SimpleNamespace
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -133,6 +135,128 @@ def run_fake(python: str) -> dict:
         },
         "rows": rows,
     }
+
+
+def run_interface_live() -> dict:
+    """Register this genuine Interface in three disposable Fleet homes.
+
+    The app-server is used only for exact ``thread/read`` membership.  No
+    thread mutation is issued, and every host is stopped before its disposable
+    tree is removed.
+    """
+    if os.environ.get("FLEET_CODEX_INTERFACE_ACCEPTANCE") != "1":
+        return {"mode": "interface-live", "overall": "SKIP",
+                "reason": "set FLEET_CODEX_INTERFACE_ACCEPTANCE=1 for read-only registration"}
+    thread_id = os.environ.get("CODEX_THREAD_ID")
+    input_bytes = json.dumps({
+        "homes": ["fleet", "pm", "tap"],
+        "operation": "thread/read-only Interface registration",
+        "thread_id_sha256": hashlib.sha256(
+            (thread_id or "").encode("utf-8")).hexdigest(),
+    }, sort_keys=True).encode("utf-8")
+    clients = []
+    roots: list[Path] = []
+    process_exit_checks = []
+    rows = []
+    temporary = None
+    original_fleet_home = None
+    try:
+        parsed = uuid.UUID(thread_id) if isinstance(thread_id, str) else None
+        if parsed is None or parsed.version != 7 or str(parsed) != thread_id:
+            raise RuntimeError("current CODEX_THREAD_ID is not a canonical UUIDv7")
+        sys.path.insert(0, str(BIN))
+        import fleet  # pylint: disable=import-outside-toplevel
+        from fleet_codex import (  # pylint: disable=import-outside-toplevel
+            CodexHostClient, codex_process_source, read_interface_claim,
+        )
+        source = codex_process_source(os.getpid(), thread_id)
+        original_fleet_home = fleet.FLEET_HOME
+        temporary = tempfile.TemporaryDirectory(prefix="fleet-codex-interface-")
+        root = Path(temporary.name).resolve()
+        roots.append(root)
+        for label in ("fleet", "pm", "tap"):
+            home = root / label
+            (home / "state").mkdir(parents=True)
+            client = CodexHostClient.ensure(
+                home, ready_timeout=20, idle_timeout=120)
+            clients.append((label, client, _process_record(client)))
+            fleet.FLEET_HOME = home
+            with redirect_stdout(io.StringIO()):
+                fleet.cmd_interface_register(SimpleNamespace(
+                    codex_thread=thread_id, session_id=None,
+                    _fleet_home_explicit=True))
+            claim = read_interface_claim(home)
+            if (claim is None or claim.get("thread_id") != thread_id
+                    or claim.get("ancestor_pid") != source["ancestor_pid"]
+                    or claim.get("ancestor_start_identity")
+                    != source["ancestor_start_identity"]
+                    or claim.get("home") != str(home)):
+                raise AssertionError(f"{label} Interface claim mismatched process evidence")
+            operations = home / "state" / "codex" / "operations"
+            if operations.exists() and any(operations.glob("*.json")):
+                raise AssertionError(f"{label} registration wrote a provider mutation journal")
+            rows.append({
+                "label": label, "home": str(home),
+                "claim_id": claim["claim_id"],
+                "thread_id": thread_id,
+                "host_generation": client.generation,
+                "host_pid": client.host_pid,
+                "host_start_identity": client.host_process_identity,
+                "app_server_pid": client.app_server_pid,
+                "app_server_start_identity": client.app_server_process_identity,
+                "provider_mutation_count": 0,
+            })
+            client.call({
+                "operation_id": f"interface-shutdown-{uuid.uuid4()}",
+                "method": "host/shutdown", "payload": {},
+            }, timeout=5)
+            if not client.wait_for_exit(5):
+                raise RuntimeError(f"{label} Interface host did not stop")
+            _stopped_label, _stopped_client, stopped_processes = clients.pop()
+            process_exit_checks.append(_process_exit_check(
+                f"{label}-post-exit", stopped_processes))
+            if not process_exit_checks[-1]["passed"]:
+                raise RuntimeError(f"{label} host or app-server remained alive")
+        report = {
+            "mode": "interface-live", "overall": "PASS",
+            "thread_id": thread_id,
+            "source": source,
+            "homes": rows,
+            "public_methods": ["thread/read"] * 3,
+            "provider_mutation_count": 0,
+        }
+    except Exception as exc:
+        report = {"mode": "interface-live", "overall": "BLOCKED",
+                  "reason": f"{type(exc).__name__}: {str(exc)[:260]}",
+                  "thread_id": thread_id, "homes": rows}
+    finally:
+        if original_fleet_home is not None:
+            fleet.FLEET_HOME = original_fleet_home
+        for label, client, processes in reversed(clients):
+            try:
+                client.call({
+                    "operation_id": f"interface-cleanup-{uuid.uuid4()}",
+                    "method": "host/shutdown", "payload": {},
+                }, timeout=3)
+                client.wait_for_exit(3)
+            except Exception:
+                pass
+            process_exit_checks.append(_process_exit_check(
+                f"{label}-cleanup", processes))
+        if temporary is not None:
+            root = roots[0]
+            references = _process_references(root)
+            if references:
+                report["overall"] = "BLOCKED"
+                report["reason"] = f"disposable Interface tree still referenced by {references}"
+            else:
+                temporary.cleanup()
+            report["cleanup"] = {
+                "reference_pids": references,
+                "tree_removed": not root.exists(),
+                "process_exit_checks": process_exit_checks,
+            }
+    return _seal_report(report, input_bytes)
 
 
 def _rpc(client, operation_id: str, method: str, params: dict,
@@ -710,10 +834,118 @@ def _agent_text(thread: dict, turn_id: str) -> str | None:
     return None
 
 
+def _live_turn_request(thread_id: str, label: str) -> dict:
+    """One fixed, schema-bounded inference request with no tool work."""
+    return {
+        "threadId": thread_id,
+        "input": [{"type": "text",
+                   "text": f'Return only JSON {{"ok":"{label}"}}. Do not use tools.',
+                   "text_elements": []}],
+        "effort": "low",
+        "approvalPolicy": "never",
+        "outputSchema": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"ok": {"type": "string", "const": label}},
+            "required": ["ok"], "maxProperties": 1,
+        },
+    }
+
+
+def _live_turn(client, thread_id: str, label: str, *, timeout: float = 45.0) -> dict:
+    """Start exactly one turn, observe it once, and never retry its body."""
+    operation_id = f"accept-{label.lower()}-{uuid.uuid4()}"
+    started = _rpc(client, operation_id, "turn/start",
+                   _live_turn_request(thread_id, label),
+                   mutation=True, timeout=min(timeout, 45.0))
+    turn = started.get("turn") if isinstance(started, dict) else None
+    turn_id = turn.get("id") if isinstance(turn, dict) else None
+    if not isinstance(turn_id, str) or not turn_id:
+        raise RuntimeError(f"{label} turn/start returned no public turn ID")
+    deadline = time.monotonic() + min(timeout, 45.0)
+    terminal = None
+    observed_thread = None
+    while time.monotonic() < deadline:
+        read = _rpc(client, f"accept-{label.lower()}-read-{uuid.uuid4()}",
+                    "thread/read", {"threadId": thread_id,
+                                    "includeTurns": True}, timeout=10)
+        observed_thread = read.get("thread") if isinstance(read, dict) else None
+        turns = observed_thread.get("turns") \
+            if isinstance(observed_thread, dict) else None
+        matches = [item for item in turns or [] if isinstance(item, dict)
+                   and item.get("id") == turn_id]
+        if len(matches) != 1 or matches[0] is not (turns or [])[-1]:
+            raise RuntimeError(f"{label} turn identity is absent, duplicated, or not newest")
+        terminal = matches[0].get("status")
+        if terminal in {"completed", "failed", "interrupted"}:
+            break
+        time.sleep(0.25)
+    if terminal not in {"completed", "failed", "interrupted"}:
+        _rpc(client, f"accept-{label.lower()}-interrupt-{uuid.uuid4()}",
+             "turn/interrupt", {"threadId": thread_id, "turnId": turn_id},
+             mutation=True, timeout=10)
+        raise RuntimeError(f"{label} turn exceeded the 45-second hard deadline")
+    evidence = None
+    evidence_deadline = time.monotonic() + 3
+    while time.monotonic() < evidence_deadline:
+        evidence = client.call({
+            "operation_id": f"accept-{label.lower()}-evidence-{uuid.uuid4()}",
+            "method": "public-evidence/read",
+            "payload": {"thread_id": thread_id, "turn_id": turn_id},
+        }, timeout=5).result
+        if (isinstance(evidence, dict) and evidence.get("turn_status") == terminal
+                and isinstance(evidence.get("usage"), dict)
+                and isinstance(evidence.get("result_text"), str)):
+            break
+        time.sleep(0.1)
+    if terminal != "completed":
+        raise RuntimeError(f"{label} turn ended as {terminal}")
+    if not isinstance(evidence, dict):
+        raise RuntimeError(f"{label} durable public evidence is absent")
+    result_text = evidence.get("result_text")
+    usage = evidence.get("usage")
+    if (not isinstance(result_text, str)
+            or len(result_text.encode("utf-8")) > 64):
+        raise RuntimeError(f"{label} result exceeds the 64-byte hard output bound")
+    try:
+        parsed = json.loads(result_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} result is not bounded JSON") from exc
+    if parsed != {"ok": label}:
+        raise RuntimeError(f"{label} result did not match the fixed output schema")
+    if (not isinstance(usage, dict) or not usage
+            or any(not isinstance(value, int) or value < 0
+                   for value in usage.values())):
+        raise RuntimeError(f"{label} durable token usage is absent or malformed")
+    turns = observed_thread.get("turns")
+    return {
+        "operation_id": operation_id, "turn_id": turn_id,
+        "terminal_status": terminal, "result": parsed,
+        "result_bytes": len(result_text.encode("utf-8")),
+        "result_sha256": hashlib.sha256(result_text.encode("utf-8")).hexdigest(),
+        "usage": usage, "observed_turn_count": len(turns),
+    }
+
+
+def _wait_stale_host(home: Path, timeout: float = 5.0) -> None:
+    metadata_path = home / "state" / "codex" / "host.json"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            time.sleep(0.05)
+            continue
+        if time.time() - metadata.get("heartbeat", time.time()) > 3.0:
+            return
+        time.sleep(0.05)
+    raise RuntimeError("stopped host metadata did not become stale")
+
+
 def run_live() -> dict:
+    """One two-turn boot/wake lifecycle; no accepted body is ever retried."""
     if os.environ.get("FLEET_CODEX_LIVE") != "1":
         return {"mode": "live", "overall": "SKIP",
-                "reason": "set FLEET_CODEX_LIVE=1 to authorize a real turn"}
+                "reason": "set FLEET_CODEX_LIVE=1 to authorize one bounded lifecycle"}
     login = subprocess.run(
         ["codex", "login", "status"], cwd=REPO, stdin=subprocess.DEVNULL,
         text=True, capture_output=True, timeout=15, check=False)
@@ -723,116 +955,212 @@ def run_live() -> dict:
                 "reason": "public login status is not ChatGPT auth"}
 
     sys.path.insert(0, str(BIN))
-    from fleet_codex import CodexHostClient  # pylint: disable=import-outside-toplevel
+    import fleet  # pylint: disable=import-outside-toplevel
+    from fleet_codex import (  # pylint: disable=import-outside-toplevel
+        CodexHostClient, codex_process_source, read_interface_claim,
+    )
 
     manifest = _manifest()
-    thread_id = turn_id = None
+    thread_id = os.environ.get("CODEX_THREAD_ID")
+    provider_thread_id = None
     client = None
-    terminal = None
-    usage = {}
-    result_text = None
-    cleanup = {"host": "not_started", "thread": "not_created"}
+    launched_processes = []
+    process_exit_checks = []
+    turns = []
+    cleanup = {"registration_host": "not_started",
+               "first_lifecycle_host": "not_started",
+               "second_lifecycle_host": "not_started",
+               "disposable_tree": "pending"}
+    original_fleet_home = fleet.FLEET_HOME
+    temporary = tempfile.TemporaryDirectory(prefix="fleet-codex-live-")
+    root = Path(temporary.name).resolve()
+    home = root / "fleet-home"
+    codex_home = root / "codex-home"
+    user_home = root / "user-home"
+    for path in (home / "state", codex_home, user_home):
+        path.mkdir(parents=True)
+    codex_home.chmod(0o700)
+    user_home.chmod(0o700)
+    live_env = dict(os.environ)
+    for name in ("OPENAI_API_KEY", "AZURE_OPENAI_API_KEY",
+                 "OPENAI_ORG_ID", "OPENAI_PROJECT_ID"):
+        live_env.pop(name, None)
+    live_env.update({
+        "CODEX_HOME": str(codex_home), "HOME": str(user_home),
+        "XDG_CACHE_HOME": str(root / "cache"),
+        "XDG_CONFIG_HOME": str(root / "config"),
+        "XDG_DATA_HOME": str(root / "data"),
+    })
+    report: dict
     try:
-        with tempfile.TemporaryDirectory(prefix="fleet-codex-live-") as raw:
-            home = Path(raw).resolve()
-            (home / "state").mkdir()
-            client = CodexHostClient.ensure(
-                home, ready_timeout=15, idle_timeout=120)
-            rate_limits = _rpc(
-                client, f"accept-rate-{uuid.uuid4()}",
-                "account/rateLimits/read", {}, timeout=15)
-            if _quota_blocked(rate_limits):
-                raise RuntimeError(
-                    "public rate-limit evidence reports no capacity")
-            started = _rpc(
-                client, f"accept-thread-{uuid.uuid4()}", "thread/start", {
-                    "cwd": str(home), "model": "gpt-5.6-luna",
-                    "approvalPolicy": "never", "sandbox": "read-only",
-                }, mutation=True)
-            thread = started.get("thread") if isinstance(started, dict) else None
-            thread_id = thread.get("id") if isinstance(thread, dict) else None
-            if not isinstance(thread_id, str):
-                raise RuntimeError("thread/start returned no public thread ID")
-            started_turn = _rpc(
-                client, f"accept-turn-{uuid.uuid4()}", "turn/start", {
-                    "threadId": thread_id,
-                    "input": [{"type": "text",
-                               "text": "Reply exactly FLEET_NATIVE_OK. Do not use tools.",
-                               "text_elements": []}],
-                }, mutation=True, timeout=45)
-            turn = started_turn.get("turn") \
-                if isinstance(started_turn, dict) else None
-            turn_id = turn.get("id") if isinstance(turn, dict) else None
-            if not isinstance(turn_id, str):
-                raise RuntimeError("turn/start returned no public turn ID")
-            deadline = time.monotonic() + 90
-            last_thread = None
-            while time.monotonic() < deadline:
-                read = _rpc(
-                    client, f"accept-read-{uuid.uuid4()}", "thread/read",
-                    {"threadId": thread_id, "includeTurns": True}, timeout=15)
-                last_thread = read.get("thread") if isinstance(read, dict) else None
-                turns = last_thread.get("turns") \
-                    if isinstance(last_thread, dict) else None
-                match = next((item for item in turns or []
-                              if isinstance(item, dict)
-                              and item.get("id") == turn_id), None)
-                terminal = match.get("status") if isinstance(match, dict) else None
-                if terminal in {"completed", "failed", "interrupted"}:
-                    usage = _token_usage(match)
-                    result_text = _agent_text(last_thread, turn_id)
-                    break
-                time.sleep(0.25)
-            if terminal not in {"completed", "failed", "interrupted"}:
-                _rpc(client, f"accept-interrupt-{uuid.uuid4()}",
-                     "turn/interrupt", {"threadId": thread_id,
-                                        "turnId": turn_id},
-                     mutation=True, timeout=15)
-                raise RuntimeError("minimal turn did not become terminal in 90 seconds")
-    except Exception as exc:
-        report = {
-            "mode": "live", "overall": "BLOCKED",
-            "reason": f"{type(exc).__name__}: {str(exc)[:240]}",
-            "thread_id": thread_id, "turn_id": turn_id,
-            "terminal_status": terminal,
-        }
-    else:
+        current = uuid.UUID(thread_id) if isinstance(thread_id, str) else None
+        if current is None or current.version != 7 or str(current) != thread_id:
+            raise RuntimeError("current CODEX_THREAD_ID is not a canonical UUIDv7")
+        source = codex_process_source(os.getpid(), thread_id)
+
+        # Read-only registration uses the current public Codex home so the
+        # external Interface thread can be observed. It is stopped before the
+        # same Fleet home starts the isolated lifecycle app-server.
+        client = CodexHostClient.ensure(home, ready_timeout=20, idle_timeout=120)
+        cleanup["registration_host"] = "running"
+        registration_processes = _process_record(client)
+        launched_processes.append(("registration", registration_processes))
+        fleet.FLEET_HOME = home
+        with redirect_stdout(io.StringIO()):
+            fleet.cmd_interface_register(SimpleNamespace(
+                codex_thread=thread_id, session_id=None,
+                _fleet_home_explicit=True))
+        interface_claim = read_interface_claim(home)
+        if (interface_claim is None
+                or interface_claim.get("thread_id") != thread_id
+                or interface_claim.get("ancestor_pid") != source["ancestor_pid"]):
+            raise RuntimeError("live home Interface claim did not bind current process")
+        client.call({"operation_id": f"live-registration-stop-{uuid.uuid4()}",
+                     "method": "host/shutdown", "payload": {}}, timeout=5)
+        if not client.wait_for_exit(5):
+            raise RuntimeError("registration host did not stop")
+        cleanup["registration_host"] = "shutdown"
+        process_exit_checks.append(_process_exit_check(
+            "registration-post-exit", registration_processes))
+        client = None
+        _wait_stale_host(home)
+
+        client = CodexHostClient.ensure(
+            home, env=live_env, ready_timeout=20, idle_timeout=120)
+        cleanup["first_lifecycle_host"] = "running"
+        first_processes = _process_record(client)
+        launched_processes.append(("first-lifecycle", first_processes))
+        first_generation = client.generation
+        rate_limits = _rpc(client, f"live-rate-{uuid.uuid4()}",
+                           "account/rateLimits/read", {}, timeout=15)
+        if _quota_blocked(rate_limits):
+            raise RuntimeError("public rate-limit evidence reports no capacity")
+        started = _rpc(client, f"live-thread-{uuid.uuid4()}", "thread/start", {
+            "cwd": str(home), "model": "gpt-5.6-luna",
+            "approvalPolicy": "never", "sandbox": "read-only",
+            "ephemeral": False,
+            "baseInstructions": (
+                "Return only JSON matching the supplied output schema. "
+                "Never call tools."),
+        }, mutation=True, timeout=20)
+        provider_thread = started.get("thread") if isinstance(started, dict) else None
+        provider_thread_id = provider_thread.get("id") \
+            if isinstance(provider_thread, dict) else None
+        if not isinstance(provider_thread_id, str) or provider_thread_id == thread_id:
+            raise RuntimeError("thread/start did not return a distinct provider thread")
+        turns.append(_live_turn(client, provider_thread_id, "BOOT"))
+        if turns[-1]["observed_turn_count"] != 1:
+            raise RuntimeError("boot created a duplicate turn")
+
+        client.call({"operation_id": f"live-first-stop-{uuid.uuid4()}",
+                     "method": "host/shutdown", "payload": {}}, timeout=5)
+        if not client.wait_for_exit(5):
+            raise RuntimeError("first lifecycle host did not stop")
+        cleanup["first_lifecycle_host"] = "shutdown"
+        process_exit_checks.append(_process_exit_check(
+            "first-lifecycle-post-exit", first_processes))
+        client = None
+        _wait_stale_host(home)
+
+        client = CodexHostClient.ensure(
+            home, env=live_env, ready_timeout=20, idle_timeout=120)
+        cleanup["second_lifecycle_host"] = "running"
+        second_processes = _process_record(client)
+        launched_processes.append(("second-lifecycle", second_processes))
+        second_generation = client.generation
+        if second_generation == first_generation:
+            raise RuntimeError("lifecycle host restart retained its generation")
+        recovered = _result_thread(_rpc(
+            client, f"live-restart-read-{uuid.uuid4()}", "thread/read",
+            {"threadId": provider_thread_id, "includeTurns": True}, timeout=15),
+            "restart thread/read")
+        recovered_turns = recovered.get("turns")
+        if (recovered.get("id") != provider_thread_id
+                or not isinstance(recovered_turns, list)
+                or [item.get("id") for item in recovered_turns]
+                != [turns[0]["turn_id"]]):
+            raise RuntimeError("restart did not recover exactly the boot turn")
+        turns.append(_live_turn(client, provider_thread_id, "WAKE"))
+        if turns[-1]["observed_turn_count"] != 2:
+            raise RuntimeError("idle wake did not produce exactly one successor turn")
+
         report = {
             "mode": "live", "overall": "PASS",
-            "protocol": {
-                "codex_version": manifest["codex_version"],
-                "schema_sha256": manifest["schema_sha256"],
-            },
+            "protocol": {"codex_version": manifest["codex_version"],
+                         "schema_sha256": manifest["schema_sha256"]},
             "auth": "chatgpt", "api_key_used": False,
-            "thread_id": thread_id, "turn_id": turn_id,
-            "terminal_status": terminal,
-            "result": result_text, "usage": usage or "UNMEASURED",
+            "interface": {"thread_id": thread_id,
+                          "claim_id": interface_claim["claim_id"],
+                          "ancestor_pid": source["ancestor_pid"],
+                          "external_thread_written": False},
+            "lifecycle": {
+                "thread_id": provider_thread_id,
+                "model": "gpt-5.6-luna", "approval_policy": "never",
+                "sandbox": "read-only", "turn_limit": 2,
+                "per_turn_deadline_seconds": 45, "output_limit_bytes": 64,
+                "first_generation": first_generation,
+                "second_generation": second_generation,
+                "restart_recovered_exact_boot_turn": True,
+                "turns": turns,
+            },
+            "rate_limits_sha256": _canonical_sha256(rate_limits),
+            "duplicate_body_count": 0, "retry_count": 0,
         }
+    except Exception as exc:
+        report = {"mode": "live", "overall": "BLOCKED",
+                  "reason": f"{type(exc).__name__}: {str(exc)[:300]}",
+                  "interface_thread_id": thread_id,
+                  "provider_thread_id": provider_thread_id,
+                  "accepted_turns": turns, "retry_count": 0}
     finally:
+        fleet.FLEET_HOME = original_fleet_home
         if client is not None:
             try:
-                client.call({"operation_id": f"accept-shutdown-{uuid.uuid4()}",
+                client.call({"operation_id": f"live-cleanup-{uuid.uuid4()}",
                              "method": "host/shutdown", "payload": {}}, timeout=3)
-                cleanup["host"] = "shutdown"
                 client.wait_for_exit(3)
+                for key in ("second_lifecycle_host", "first_lifecycle_host",
+                            "registration_host"):
+                    if cleanup[key] == "running":
+                        cleanup[key] = "shutdown"
+                        break
             except Exception:
                 pass
-        if thread_id is not None:
-            deleted = subprocess.run(
-                ["codex", "delete", "--force", thread_id], cwd=REPO,
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=15, check=False)
-            cleanup["thread"] = (
-                "deleted" if deleted.returncode == 0 else "delete_failed")
-    report["cleanup"] = cleanup
-    return report
-
+        reference_samples = []
+        deadline = time.monotonic() + 3
+        while root.exists():
+            references = _process_references(root)
+            reference_samples.append(references)
+            if not references or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        references = reference_samples[-1] if reference_samples else []
+        if references:
+            cleanup["disposable_tree"] = "referenced_cleanup_refused"
+            report["overall"] = "BLOCKED"
+            report["reason"] = f"disposable live tree still referenced by {references}"
+        else:
+            temporary.cleanup()
+            cleanup["disposable_tree"] = "removed" if not root.exists() else "cleanup_failed"
+        for label, processes in launched_processes:
+            process_exit_checks.append(_process_exit_check(
+                f"{label}-post-cleanup", processes))
+        cleanup["reference_pid_samples"] = reference_samples
+        cleanup["process_exit_checks"] = process_exit_checks
+        cleanup["tree_removed"] = not root.exists()
+        report["cleanup"] = cleanup
+    input_bytes = json.dumps({
+        "model": "gpt-5.6-luna", "turns": ["BOOT", "WAKE"],
+        "turn_limit": 2, "deadline_seconds": 45, "output_limit_bytes": 64,
+    }, sort_keys=True).encode("utf-8")
+    return _seal_report(report, input_bytes)
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--fake", action="store_true")
     group.add_argument("--live", action="store_true")
+    group.add_argument("--interface-live", action="store_true")
     group.add_argument("--public-no-inference", action="store_true")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--output", type=Path)
@@ -840,6 +1168,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.fake:
         report = run_fake(args.python)
+    elif args.interface_live:
+        report = run_interface_live()
     elif args.live:
         report = run_live()
     else:

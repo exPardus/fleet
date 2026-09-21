@@ -1,0 +1,86 @@
+{
+  "accepted_turns": [],
+  "cleanup": {
+    "disposable_tree": "removed",
+    "first_lifecycle_host": "shutdown",
+    "process_exit_checks": [
+      {
+        "alive": [],
+        "label": "registration-post-exit",
+        "passed": true
+      },
+      {
+        "alive": [],
+        "label": "registration-post-cleanup",
+        "passed": true
+      },
+      {
+        "alive": [],
+        "label": "first-lifecycle-post-cleanup",
+        "passed": true
+      }
+    ],
+    "reference_pid_samples": [
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      [
+        3466848,
+        3466851,
+        3466856
+      ],
+      []
+    ],
+    "registration_host": "shutdown",
+    "second_lifecycle_host": "not_started",
+    "tree_removed": true
+  },
+  "evidence_hashes": {
+    "input_fixture_sha256": "09e565dcd71f4d3b32188b1182ebfc1af23662a30ec1761fcd9b5089adb36981",
+    "output_hash_scope": "canonical JSON excluding evidence_hashes.output_payload_sha256",
+    "output_payload_sha256": "8ed4e6bdf7bae2c463adfe36950d11a8b5335cb0313d71a75e242e9f179b01d4"
+  },
+  "interface_thread_id": "01a0bf53-3f27-7080-933a-ad650f42baec",
+  "mode": "live",
+  "overall": "BLOCKED",
+  "provider_thread_id": null,
+  "reason": "HostRejected: app-server request failed (-32600): codex account authentication required to read rate limits",
+  "retry_count": 0
+}
