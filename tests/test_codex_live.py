@@ -14,6 +14,8 @@ HARNESS = REPO / "tools" / "codex_native_acceptance.py"
 NO_INFERENCE_FIXTURE = (
     REPO / "tests" / "fixtures" / "codex_app_server" / "0.155.1"
     / "no-inference-acceptance.json")
+NO_INFERENCE_RECEIPT = (
+    REPO / "docs" / "lanes" / "codex-native-public-no-inference.json")
 
 
 def test_fake_acceptance_manifest_names_existing_exact_probes():
@@ -92,6 +94,31 @@ def test_public_no_inference_gate_disabled_starts_no_codex_process(tmp_path):
     assert report["mode"] == "public-no-inference"
     assert report["overall"] == "SKIP"
     assert not marker.exists()
+
+
+def test_public_no_inference_report_hash_has_explicit_scope():
+    scope = {"__name__": "acceptance_hash", "__file__": str(HARNESS)}
+    exec(compile(HARNESS.read_text(encoding="utf-8"), str(HARNESS), "exec"), scope)
+    report = scope["_seal_report"]({"overall": "BLOCKED"}, b"fixture")
+    output_hash = report["evidence_hashes"].pop("output_payload_sha256")
+
+    assert output_hash == scope["_canonical_sha256"](report)
+    assert report["evidence_hashes"]["input_fixture_sha256"] == (
+        "f16d05ec6b29248d2c61adb1e9263f78e4f7bace1b955014a2d17872cfe4064d")
+
+
+def test_checked_public_no_inference_receipt_is_sealed_and_clean():
+    scope = {"__name__": "acceptance_receipt", "__file__": str(HARNESS)}
+    exec(compile(HARNESS.read_text(encoding="utf-8"), str(HARNESS), "exec"), scope)
+    report = json.loads(NO_INFERENCE_RECEIPT.read_text(encoding="utf-8"))
+    claimed = report["evidence_hashes"].pop("output_payload_sha256")
+
+    assert claimed == scope["_canonical_sha256"](report)
+    assert report["schema"]["initialize_codex_home_canonical_match"] is True
+    assert report["cleanup"]["active_tree"]["reference_pids_before_cleanup"] == []
+    assert report["cleanup"]["active_tree"]["lock_checks_after"] == [False, False]
+    assert all(row["passed"] for row in report["process_exit_checks"])
+    assert all(row["removed"] for row in report["stale_tree_cleanup"])
 
 
 @pytest.mark.skipif(

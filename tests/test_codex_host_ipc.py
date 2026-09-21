@@ -39,7 +39,8 @@ first = json.loads(sys.stdin.readline())
 if os.environ.get("FAKE_INITIALIZE_PUBLIC_SHAPE") == "1":
     initialize_result = {{
         "userAgent": "fleet/0.155.1 (test)",
-        "codexHome": os.environ.get("CODEX_HOME", "/tmp/fake-codex-home"),
+        "codexHome": os.environ.get(
+            "FAKE_INITIALIZE_CODEX_HOME", os.environ["CODEX_HOME"]),
         "platformFamily": "unix", "platformOs": "linux",
     }}
 else:
@@ -635,18 +636,50 @@ def test_unreviewed_app_server_version_never_publishes_ready(tmp_path):
 def test_reviewed_public_initialize_shape_publishes_ready(tmp_path):
     module = _modules()
     home = _home(tmp_path)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
     log = tmp_path / "app-server.jsonl"
     client = module.CodexHostClient.ensure(
         home, app_server_command=[str(_fake_app_server(tmp_path))],
         env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log),
-                 FAKE_INITIALIZE_PUBLIC_SHAPE="1"),
+                 FAKE_INITIALIZE_PUBLIC_SHAPE="1",
+                 CODEX_HOME=str(codex_home)),
         ready_timeout=5, idle_timeout=30)
     try:
         assert client.call(_operation("public-init"), timeout=1).result[
             "schema_digest"] == json.loads(
                 module.SCHEMA_MANIFEST.read_text())["schema_sha256"]
+        metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
+        assert metadata["pid"] == client.host_pid
+        assert metadata["process_identity"] == client.host_process_identity
+        assert metadata["app_server_pid"] == client.app_server_pid
+        assert (metadata["app_server_process_identity"]
+                == client.app_server_process_identity)
+        assert metadata["started_at"] == client.started_at
+        assert metadata["app_server_started_at"] == client.app_server_started_at
     finally:
         _shutdown(client)
+
+
+def test_public_initialize_wrong_codex_home_never_publishes_ready(tmp_path):
+    module = _modules()
+    home = _home(tmp_path)
+    codex_home = tmp_path / "codex-home"
+    wrong_home = tmp_path / "wrong-codex-home"
+    codex_home.mkdir()
+    wrong_home.mkdir()
+    log = tmp_path / "app-server.jsonl"
+
+    with pytest.raises(module.HostUnavailable):
+        module.CodexHostClient.ensure(
+            home, app_server_command=[str(_fake_app_server(tmp_path))],
+            env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log),
+                     FAKE_INITIALIZE_PUBLIC_SHAPE="1",
+                     FAKE_INITIALIZE_CODEX_HOME=str(wrong_home),
+                     CODEX_HOME=str(codex_home)),
+            ready_timeout=1, idle_timeout=30)
+
+    assert not (home / "state" / "codex" / "host.json").exists()
 
 
 def test_installed_schema_digest_mismatch_never_publishes_ready(

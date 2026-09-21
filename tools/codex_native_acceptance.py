@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -167,7 +169,130 @@ def _same_thread(thread: dict, thread_id: str, session_id: str,
         raise AssertionError(f"{source} observed a turn in zero-inference acceptance")
 
 
-def run_public_no_inference() -> dict:
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value, separators=(",", ":"), sort_keys=True,
+        ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _linux_process_identity(pid: int) -> str | None:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()[21]
+    except (OSError, IndexError, UnicodeError):
+        return None
+
+
+def _process_record(client) -> dict:
+    return {
+        "host": {
+            "pid": client.host_pid,
+            "start_identity": client.host_process_identity,
+            "started_at": client.started_at,
+        },
+        "app_server": {
+            "pid": client.app_server_pid,
+            "start_identity": client.app_server_process_identity,
+            "started_at": client.app_server_started_at,
+        },
+    }
+
+
+def _process_exit_check(label: str, processes: dict) -> dict:
+    alive = []
+    for role in ("host", "app_server"):
+        record = processes[role]
+        if _linux_process_identity(record["pid"]) == record["start_identity"]:
+            alive.append(role)
+    return {"label": label, "alive": alive, "passed": not alive}
+
+
+def _under(path: str, root: Path) -> bool:
+    clean = path.removesuffix(" (deleted)")
+    try:
+        Path(clean).relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _process_references(root: Path) -> list[int]:
+    references = set()
+    encoded_root = os.fsencode(str(root))
+    for process in Path("/proc").iterdir():
+        if not process.name.isdigit():
+            continue
+        try:
+            if encoded_root in (process / "cmdline").read_bytes():
+                references.add(int(process.name))
+                continue
+        except OSError:
+            continue
+        for name in ("cwd", "root"):
+            try:
+                if _under(os.readlink(process / name), root):
+                    references.add(int(process.name))
+                    break
+            except OSError:
+                pass
+        if int(process.name) in references:
+            continue
+        try:
+            descriptors = list((process / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                if _under(os.readlink(descriptor), root):
+                    references.add(int(process.name))
+                    break
+            except OSError:
+                pass
+    return sorted(references)
+
+
+def _cleanup_stale_public_trees() -> list[dict]:
+    records = []
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    for candidate in sorted(temp_root.glob("fleet-codex-public-*")):
+        if (candidate.is_symlink() or not candidate.is_dir()
+                or candidate.stat().st_uid != os.getuid()):
+            raise RuntimeError(f"unsafe stale acceptance tree: {candidate}")
+        references = _process_references(candidate)
+        locks = sum(1 for path in candidate.rglob("*.lock") if path.is_file())
+        if references:
+            raise RuntimeError(
+                f"stale acceptance tree still referenced by PIDs {references}")
+        record = {
+            "path": str(candidate), "reference_pids": references,
+            "lock_files_before": locks,
+        }
+        shutil.rmtree(candidate)
+        record["exists_checks_after"] = [candidate.exists(), candidate.exists()]
+        record["lock_checks_after"] = [
+            any(candidate.rglob("*.lock")) if candidate.exists() else False,
+            any(candidate.rglob("*.lock")) if candidate.exists() else False,
+        ]
+        record["removed"] = not any(record["exists_checks_after"])
+        if not record["removed"]:
+            raise RuntimeError(f"stale acceptance tree was not removed: {candidate}")
+        records.append(record)
+    return records
+
+
+def _seal_report(report: dict, fixture_bytes: bytes) -> dict:
+    report["evidence_hashes"] = {
+        "input_fixture_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+        "output_hash_scope": (
+            "canonical JSON excluding evidence_hashes.output_payload_sha256"),
+    }
+    report["evidence_hashes"]["output_payload_sha256"] = \
+        _canonical_sha256(report)
+    return report
+
+
+def run_public_no_inference(*, cleanup_ledger: dict | None = None,
+                            cleanup_ledger_sha256: str | None = None) -> dict:
     """Exercise genuine stable thread identity without ever starting a turn."""
     if os.environ.get("FLEET_CODEX_PUBLIC_ACCEPTANCE") != "1":
         return {
@@ -176,15 +301,21 @@ def run_public_no_inference() -> dict:
         }
 
     manifest = _manifest()
-    fixture = json.loads(NO_INFERENCE_FIXTURE.read_text(encoding="utf-8"))
+    fixture_bytes = NO_INFERENCE_FIXTURE.read_bytes()
+    fixture = json.loads(fixture_bytes)
     methods: list[str] = []
     cleanup = {"first_host": "not_started", "second_host": "not_started",
                "disposable_home": "pending"}
+    process_exit_checks: list[dict] = []
+    owned_processes: list[tuple[str, dict]] = []
+    stale_tree_cleanup: list[dict] = list(
+        (cleanup_ledger or {}).get("stale_tree_cleanup", []))
     client = None
     root = None
     temporary = None
     report: dict
     try:
+        stale_tree_cleanup.extend(_cleanup_stale_public_trees())
         temporary = tempfile.TemporaryDirectory(prefix="fleet-codex-public-")
         with nullcontext(temporary.name) as raw:
             root = Path(raw).resolve()
@@ -227,6 +358,8 @@ def run_public_no_inference() -> dict:
             client = CodexHostClient.ensure(
                 home, env=env, ready_timeout=20, idle_timeout=120)
             cleanup["first_host"] = "running"
+            first_processes = _process_record(client)
+            owned_processes.append(("first", first_processes))
             first_generation = client.generation
             ping = client.call({
                 "operation_id": f"accept-ping-{uuid.uuid4()}",
@@ -306,6 +439,13 @@ def run_public_no_inference() -> dict:
             if not client.wait_for_exit(5):
                 raise RuntimeError("first Fleet host did not stop")
             cleanup["first_host"] = "shutdown"
+            for sequence in (1, 2):
+                check = _process_exit_check(
+                    f"first-host-post-exit-{sequence}", first_processes)
+                process_exit_checks.append(check)
+                if not check["passed"]:
+                    raise RuntimeError("first host or app-server remained alive")
+                time.sleep(0.05)
             client = None
             deadline = time.monotonic() + 5
             metadata_path = home / "state" / "codex" / "host.json"
@@ -320,6 +460,8 @@ def run_public_no_inference() -> dict:
             client = CodexHostClient.ensure(
                 home, env=env, ready_timeout=20, idle_timeout=120)
             cleanup["second_host"] = "running"
+            second_processes = _process_record(client)
+            owned_processes.append(("second", second_processes))
             second_generation = client.generation
             if second_generation == first_generation:
                 raise AssertionError("Fleet host restart retained its old generation")
@@ -387,12 +529,18 @@ def run_public_no_inference() -> dict:
                     "protocol_version": manifest["protocol_version"],
                     "sha256": manifest["schema_sha256"],
                     "initialized_server_version": fixture["codex_version"],
+                    "configured_codex_home": str(codex_home),
+                    "initialize_codex_home_canonical_match": True,
                 },
                 "host": {
                     "first_generation": first_generation,
                     "second_generation": second_generation,
                     "generation_changed": True,
                     "exact_home": True, "foreign_home_refused": True,
+                    "processes": {
+                        "first": first_processes,
+                        "second": second_processes,
+                    },
                 },
                 "thread": {
                     "id": thread_id, "session_id": session_id,
@@ -406,6 +554,11 @@ def run_public_no_inference() -> dict:
                     "methods": [row["public_method"] for row in journal_rows],
                     "states": [row["state"] for row in journal_rows],
                     "generations": [row["generation"] for row in journal_rows],
+                    "input_sha256": [
+                        row["payload_digest"] for row in journal_rows],
+                    "output_sha256": [
+                        _canonical_sha256(row["result"])
+                        for row in journal_rows],
                 },
                 "inference": {"turn_methods": forbidden, "model_calls": 0},
                 "api_key_used": False,
@@ -421,6 +574,13 @@ def run_public_no_inference() -> dict:
             if not client.wait_for_exit(5):
                 raise RuntimeError("second Fleet host did not stop")
             cleanup["second_host"] = "shutdown"
+            for sequence in (1, 2):
+                check = _process_exit_check(
+                    f"second-host-post-exit-{sequence}", second_processes)
+                process_exit_checks.append(check)
+                if not check["passed"]:
+                    raise RuntimeError("second host or app-server remained alive")
+                time.sleep(0.05)
             client = None
     except AssertionError as exc:
         report = {"mode": "public-no-inference", "overall": "FAIL",
@@ -441,12 +601,57 @@ def run_public_no_inference() -> dict:
             except Exception:
                 pass
         if temporary is not None:
-            temporary.cleanup()
-            cleanup["disposable_home"] = (
-                "removed" if root is not None and not root.exists()
-                else "cleanup_failed")
+            reference_samples = []
+            reference_deadline = time.monotonic() + 3
+            while root is not None and root.exists():
+                references = _process_references(root)
+                reference_samples.append(references)
+                if not references:
+                    break
+                if time.monotonic() >= reference_deadline:
+                    break
+                time.sleep(0.05)
+            active_tree = {
+                "path": str(root),
+                "reference_pid_samples": reference_samples,
+                "reference_pids_before_cleanup": (
+                    reference_samples[-1] if reference_samples else []),
+                "lock_files_before": (
+                    sum(1 for path in root.rglob("*.lock") if path.is_file())
+                    if root is not None and root.exists() else 0),
+            }
+            if active_tree["reference_pids_before_cleanup"]:
+                cleanup["disposable_home"] = "referenced_cleanup_refused"
+                report["overall"] = "BLOCKED"
+                report["reason"] = (
+                    "task-owned disposable tree retained live process references")
+            else:
+                temporary.cleanup()
+                cleanup["disposable_home"] = (
+                    "removed" if root is not None and not root.exists()
+                    else "cleanup_failed")
+            active_tree["exists_checks_after"] = (
+                [root.exists(), root.exists()] if root is not None else [True, True])
+            active_tree["lock_checks_after"] = (
+                [any(root.rglob("*.lock")), any(root.rglob("*.lock"))]
+                if root is not None and root.exists() else [False, False])
+            active_tree["reference_pids_after"] = (
+                _process_references(root) if root is not None and root.exists()
+                else [])
+            active_tree["removed"] = (
+                not any(active_tree["exists_checks_after"])
+                and not active_tree["reference_pids_after"])
+            cleanup["active_tree"] = active_tree
+            for owner, processes in owned_processes:
+                for sequence in (1, 2):
+                    process_exit_checks.append(_process_exit_check(
+                        f"{owner}-post-tree-cleanup-{sequence}", processes))
     report["cleanup"] = cleanup
-    return report
+    report["process_exit_checks"] = process_exit_checks
+    report["stale_tree_cleanup"] = stale_tree_cleanup
+    if cleanup_ledger_sha256 is not None:
+        report["cleanup_ledger_sha256"] = cleanup_ledger_sha256
+    return _seal_report(report, fixture_bytes)
 
 
 def _quota_blocked(value) -> bool:
@@ -631,13 +836,32 @@ def main() -> int:
     group.add_argument("--public-no-inference", action="store_true")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--cleanup-ledger", type=Path)
     args = parser.parse_args()
     if args.fake:
         report = run_fake(args.python)
     elif args.live:
         report = run_live()
     else:
-        report = run_public_no_inference()
+        ledger = None
+        ledger_sha256 = None
+        if args.cleanup_ledger is not None:
+            ledger_bytes = args.cleanup_ledger.read_bytes()
+            if len(ledger_bytes) > 64 * 1024:
+                raise SystemExit("cleanup ledger exceeds 65536 bytes")
+            ledger = json.loads(ledger_bytes)
+            claimed = ledger.get("evidence_hashes", {}).get(
+                "output_payload_sha256") if isinstance(ledger, dict) else None
+            if not isinstance(ledger, dict) or not isinstance(claimed, str):
+                raise SystemExit("cleanup ledger is not a sealed report")
+            unsealed = json.loads(json.dumps(ledger))
+            unsealed["evidence_hashes"].pop("output_payload_sha256")
+            if _canonical_sha256(unsealed) != claimed:
+                raise SystemExit("cleanup ledger hash does not match")
+            ledger_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
+        report = run_public_no_inference(
+            cleanup_ledger=ledger,
+            cleanup_ledger_sha256=ledger_sha256)
     return _emit(report, args.output)
 
 

@@ -90,6 +90,11 @@ class AppServerClient:
         self._stdout_thread.start()
         self._stderr_thread.start()
 
+    @property
+    def process_id(self) -> int:
+        """Return the owned app-server PID for exact lifecycle evidence."""
+        return self._process.pid
+
     @classmethod
     def start(
         cls,

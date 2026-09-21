@@ -769,6 +769,13 @@ class CodexHostClient:
         self._authkey = authkey
         self._pid = metadata["pid"]
         self._process_identity = metadata["process_identity"]
+        self.host_pid = self._pid
+        self.host_process_identity = self._process_identity
+        self.started_at = metadata["started_at"]
+        self.app_server_pid = metadata["app_server_pid"]
+        self.app_server_process_identity = metadata[
+            "app_server_process_identity"]
+        self.app_server_started_at = metadata["app_server_started_at"]
         self._launched_process: subprocess.Popen[Any] | None = None
 
     @classmethod
@@ -882,7 +889,9 @@ class CodexHostClient:
             "schema", "home", "generation", "endpoint", "transport", "ready",
             "ipc_protocol_version", "codex_protocol_version", "codex_version",
             "schema_digest", "heartbeat",
-            "pid", "process_identity",
+            "pid", "process_identity", "started_at",
+            "app_server_pid", "app_server_process_identity",
+            "app_server_started_at",
         }
         if not required.issubset(metadata) or metadata.get("home") != str(home):
             raise UnsafeHostState("Codex host metadata has wrong home or missing fields")
@@ -908,7 +917,15 @@ class CodexHostClient:
         if (not isinstance(metadata.get("pid"), int)
                 or metadata["pid"] <= 0
                 or not isinstance(metadata.get("process_identity"), str)
-                or not metadata["process_identity"]):
+                or not metadata["process_identity"]
+                or not isinstance(metadata.get("started_at"), (int, float))
+                or not isinstance(metadata.get("app_server_pid"), int)
+                or metadata["app_server_pid"] <= 0
+                or not isinstance(
+                    metadata.get("app_server_process_identity"), str)
+                or not metadata["app_server_process_identity"]
+                or not isinstance(
+                    metadata.get("app_server_started_at"), (int, float))):
             raise UnsafeHostState("Codex host metadata has invalid process identity")
         if metadata.get("ready") is not True:
             return None
