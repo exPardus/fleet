@@ -5818,7 +5818,6 @@ def cmd_status(args) -> int:
             after[n] = recompute_worker(n, before[n], roster_entries)
 
     display = {}
-    completed_codex = []
     with fleet_lock():
         data = load_registry()
         changed = False
@@ -5840,10 +5839,6 @@ def cmd_status(args) -> int:
                 if persisted_after.get("status") != current.get("status"):
                     append_event("status_changed", n, old=current.get("status"),
                                  new=persisted_after.get("status"))
-                    if (_is_codex_record(current) and current.get("status") == "working"
-                            and persisted_after.get("status") == "idle"):
-                        completed_codex.append((n, current.get("session_id") or
-                                                current.get("codex_thread_id")))
                     # Emit limited/dead-suspected events only on transitions, never on every rerun.
                     if persisted_after.get("status") == "limited":
                         append_event("limited_suspected", n,
@@ -5855,7 +5850,12 @@ def cmd_status(args) -> int:
         if changed:
             save_registry(data)
 
-    for n, sid in completed_codex:
+    for n in names:
+        rec = display.get(n)
+        if (not _is_codex_record(rec) or rec.get("status") != "idle"
+                or rec.get("archived_at")):
+            continue
+        sid = rec.get("session_id") or rec.get("codex_thread_id")
         try:
             notify_lane_done(n, "idle", expected_sid=sid)
         except Exception:
@@ -6447,16 +6447,15 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                 changed = True
                 if persisted["status"] != rec["status"]:
                     append_event("status_changed", n, old=rec["status"], new=persisted["status"])
-                    if (_is_codex_record(rec) and rec.get("status") == "working"
-                            and persisted["status"] == "idle"):
-                        completed_codex.append((n, rec.get("session_id") or
-                                                rec.get("codex_thread_id")))
                     if persisted["status"] == "limited":
                         append_event("limited_suspected", n,
                                     limit_reset_at=persisted.get("limit_reset_at"),
                                     limit_kind=persisted.get("limit_kind"))
                     elif persisted["status"] == "dead-suspected":
                         append_event("dead_suspected", n)
+                if _is_codex_record(rec) and persisted["status"] == "idle":
+                    completed_codex.append((n, rec.get("session_id") or
+                                            rec.get("codex_thread_id")))
             # Save only actual changes; waiting on archived records must preserve file bytes.
             if changed:
                 save_registry(data)
@@ -19155,6 +19154,10 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
     """
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
+    # A successor may have been spawned by the current holder. Its Stop must
+    # never send LANE-DONE back to that holder (or wake itself in a loop).
+    if _is_supervisor_shaped(name):
+        return False
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
         return False
     with fleet_lock():
@@ -19192,10 +19195,10 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         if data["workers"][parent_name].get("status") in {
                 "dead", "interrupted", "dead-suspected", "limited", "over_ceiling"}:
             return False
-        turn_key = (rec.get("mcx_id") or sid, rec.get("last_dispatch_at"))
-        if rec.get("lane_done_notified") == list(turn_key):
+        turn_key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
+        if rec.get("lane_done_notified") == turn_key:
             return False
-        rec["lane_done_notified"] = list(turn_key)
+        rec["lane_done_notified"] = turn_key
         save_registry(data)
 
     head = "none"
@@ -19210,12 +19213,28 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         except (OSError, subprocess.SubprocessError):
             pass
     message = f"LANE-DONE {name} {status} {head}"
-    if claim.get("provider") == "codex":
+    try:
         with redirect_stdout(io.StringIO()):
-            _cmd_send_codex_supervisor(parent_name, message)
-    else:
-        with redirect_stdout(io.StringIO()):
-            _cmd_send_native(parent_name, message)
+            if claim.get("provider") == "codex":
+                rc = _cmd_send_codex_supervisor(parent_name, message)
+            else:
+                rc = _cmd_send_native(parent_name, message)
+        if rc != 0:
+            raise FleetCliError(f"{name}: completion mail send failed ({rc})")
+    except Exception:
+        # A failed delivery must remain retryable at the next Stop or Codex
+        # observation. Clear only this turn's marker; a concurrent respawn or
+        # newer delivery wins over this failed attempt.
+        with fleet_lock():
+            data = read_registry_no_repair()
+            current = data["workers"].get(name)
+            if (isinstance(current, dict)
+                    and current.get("lane_done_notified") == turn_key
+                    and (current.get("session_id") or
+                         current.get("codex_thread_id")) == sid):
+                current.pop("lane_done_notified", None)
+                save_registry(data)
+        raise
     return True
 
 
