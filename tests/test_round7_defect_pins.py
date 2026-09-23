@@ -539,7 +539,11 @@ RATIFIED_BUT_UNBUILT = ()
 # `brief` is a repository-only renderer: it reads a task and product.md but
 # neither dispatches nor mutates fleet state. Its tier remains operator-owned;
 # this explicit entry prevents the new leaf from guessing a §5 classification.
-UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief")
+# `lane-done` is an internal Stop bridge with a mailbox append and possible
+# supervisor wake. The ratified table predates it; keep the fail-safe unknown
+# tier until the operator assigns its cross-home effect class.
+UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
+                                     "lane-done")
 
 
 def _classified_verbs():

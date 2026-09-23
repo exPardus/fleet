@@ -5818,6 +5818,7 @@ def cmd_status(args) -> int:
             after[n] = recompute_worker(n, before[n], roster_entries)
 
     display = {}
+    completed_codex = []
     with fleet_lock():
         data = load_registry()
         changed = False
@@ -5839,6 +5840,10 @@ def cmd_status(args) -> int:
                 if persisted_after.get("status") != current.get("status"):
                     append_event("status_changed", n, old=current.get("status"),
                                  new=persisted_after.get("status"))
+                    if (_is_codex_record(current) and current.get("status") == "working"
+                            and persisted_after.get("status") == "idle"):
+                        completed_codex.append((n, current.get("session_id") or
+                                                current.get("codex_thread_id")))
                     # Emit limited/dead-suspected events only on transitions, never on every rerun.
                     if persisted_after.get("status") == "limited":
                         append_event("limited_suspected", n,
@@ -5849,6 +5854,12 @@ def cmd_status(args) -> int:
             display[n] = after[n]
         if changed:
             save_registry(data)
+
+    for n, sid in completed_codex:
+        try:
+            notify_lane_done(n, "idle", expected_sid=sid)
+        except Exception:
+            pass  # A status observation must remain usable if delivery fails.
 
     if epoch_frozen:
         print("EPOCH: roster suspicious -- verdicts frozen (G9); rows show last-committed state")
@@ -6415,6 +6426,7 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
             epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, snap_workers)
 
         changed = False
+        completed_codex = []
         with fleet_lock():
             data = load_registry()
             for n in finished:
@@ -6435,6 +6447,10 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                 changed = True
                 if persisted["status"] != rec["status"]:
                     append_event("status_changed", n, old=rec["status"], new=persisted["status"])
+                    if (_is_codex_record(rec) and rec.get("status") == "working"
+                            and persisted["status"] == "idle"):
+                        completed_codex.append((n, rec.get("session_id") or
+                                                rec.get("codex_thread_id")))
                     if persisted["status"] == "limited":
                         append_event("limited_suspected", n,
                                     limit_reset_at=persisted.get("limit_reset_at"),
@@ -6444,6 +6460,11 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
             # Save only actual changes; waiting on archived records must preserve file bytes.
             if changed:
                 save_registry(data)
+        for n, sid in completed_codex:
+            try:
+                notify_lane_done(n, "idle", expected_sid=sid)
+            except Exception:
+                pass
 
     # Use the current sid result outcome, or the explicit no-result placeholder.
     summary_workers = load_registry()["workers"]
@@ -18608,6 +18629,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--force-band", action="store_true",
                         help="override the supervisor soft context-band refusal; never the hard ceiling")
 
+    p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
+    p_lane_done.add_argument("--sid", required=True)
+
     p_interrupt = sub.add_parser("interrupt", help="kill a worker's running turn")
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
@@ -19043,6 +19067,8 @@ def main(argv=None) -> int:
             return cmd_wait(args)
         if args.command == "send":
             return cmd_send(args)
+        if args.command == "lane-done":
+            return cmd_lane_done(args)
         if args.command == "interrupt":
             return cmd_interrupt(args)
         if args.command == "attach":
@@ -19118,6 +19144,90 @@ def main(argv=None) -> int:
             UnsupportedPlatformError) as exc:
         print(f"fleet: {exc}", file=sys.stderr)
         return 1
+
+
+def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
+                     run=subprocess.run) -> bool:
+    """Deliver one completion line to the lane's current, live claim holder.
+
+    The registry marker is per turn so repeated Stop calls and repeated Codex
+    observations cannot send a second wake. No claim credential is inspected.
+    """
+    if status not in {"idle", "dead", "limited", "over_ceiling"}:
+        return False
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+        return False
+    with fleet_lock():
+        data = read_registry_no_repair()
+        rec = data["workers"].get(name)
+        if not isinstance(rec, dict) or rec.get("archived_at"):
+            return False
+        sid = rec.get("session_id") or rec.get("codex_thread_id")
+        if expected_sid is not None and sid != expected_sid:
+            return False
+        parent_sid = rec.get("spawned_by")
+        if not isinstance(parent_sid, str) or not parent_sid:
+            return False
+        claim = read_incarnation()
+        if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+            return False
+        codex_holder = claim.get("holder")
+        holder = (codex_holder.get("thread_id") if isinstance(codex_holder, dict)
+                  else None) if claim.get("provider") == "codex" else claim.get("session_id")
+        if holder != parent_sid:
+            return False
+        try:
+            age = (datetime.now(timezone.utc) - _parse_iso(claim["heartbeat_at"])).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            return False
+        if age > SUPERVISOR_CLAIM_STALE_SECONDS:
+            return False
+        parent_name = next((n for n, r in data["workers"].items()
+                            if isinstance(r, dict) and _is_supervisor_shaped(n)
+                            and not r.get("archived_at")
+                            and (parent_sid in _record_sids(r)
+                                 or r.get("codex_thread_id") == parent_sid)), None)
+        if parent_name is None:
+            return False
+        if data["workers"][parent_name].get("status") in {
+                "dead", "interrupted", "dead-suspected", "limited", "over_ceiling"}:
+            return False
+        turn_key = (rec.get("mcx_id") or sid, rec.get("last_dispatch_at"))
+        if rec.get("lane_done_notified") == list(turn_key):
+            return False
+        rec["lane_done_notified"] = list(turn_key)
+        save_registry(data)
+
+    head = "none"
+    cwd = rec.get("cwd")
+    if isinstance(cwd, str) and cwd:
+        try:
+            proc = run(["git", "-C", cwd, "rev-parse", "--short", "HEAD"],
+                       capture_output=True, text=True, timeout=5)
+            candidate = proc.stdout.strip() if proc.returncode == 0 else ""
+            if re.fullmatch(r"[0-9a-fA-F]{4,40}", candidate):
+                head = candidate
+        except (OSError, subprocess.SubprocessError):
+            pass
+    message = f"LANE-DONE {name} {status} {head}"
+    if claim.get("provider") == "codex":
+        with redirect_stdout(io.StringIO()):
+            _cmd_send_codex_supervisor(parent_name, message)
+    else:
+        with redirect_stdout(io.StringIO()):
+            _cmd_send_native(parent_name, message)
+    return True
+
+
+def cmd_lane_done(args) -> int:
+    """Stop-hook bridge; an unknown or retired sid has no delivery target."""
+    data = read_registry_no_repair()
+    for name, rec in data["workers"].items():
+        if isinstance(rec, dict) and rec.get("session_id") == args.sid:
+            notify_lane_done(name, "idle", expected_sid=args.sid)
+            break
+    return 0
+
 
 
 if __name__ == "__main__":
