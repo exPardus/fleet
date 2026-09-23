@@ -15,6 +15,7 @@ requires fresh manager mail, so there is nothing left for us to guard).
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -262,18 +263,32 @@ def main(state=None):
     if ceiling is not None:
         current = _current_tokens(data.get("transcript_path"))
         if current is not None and current >= ceiling:
+            _notify_lane_done(session_id)
             return
 
     mailbox_file = _mailbox_path(session_id)
     claimed_file = _claim(mailbox_file)
     if claimed_file is None:
+        _notify_lane_done(session_id)
         return
 
     contents = _read_and_discard(claimed_file)
     if not contents.strip():
+        _notify_lane_done(session_id)
         return
 
     print(json.dumps({"decision": "block", "reason": contents}))
+
+
+def _notify_lane_done(session_id):
+    """Delegate the claim check and wake to fleet after this Stop is allowed."""
+    home = _fleet_home()
+    script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fleet.py")
+    proc = subprocess.run(
+        [sys.executable, script, "lane-done", "--sid", session_id,
+         "--fleet-home", home], capture_output=True, text=True, timeout=90)
+    if proc.returncode:
+        raise RuntimeError(f"lane-done exited {proc.returncode}: {proc.stderr[:300]}")
 
 
 if __name__ == "__main__":

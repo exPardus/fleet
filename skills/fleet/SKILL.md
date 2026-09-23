@@ -177,7 +177,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 Read `supervisor.md` before taking the Supervisor role. Persist each child's
 canonical ID, worktree, brief, and writer/reviewer role; after compaction query
 the full canonical roster, refuse active-writer worktree collisions, and
-reconcile every required nested review before accepting the parent. For Codex
+reconcile every required nested review before accepting the parent. An allowed worker Stop or observed Codex completion mails `LANE-DONE` to its current claim-holding supervisor and wakes that body when idle. For Codex
 collaboration, `send_message` only queues delivery; use `followup_task` to wake
 an idle or completed agent. This differs from `fleet send supervisor`.
 
