@@ -283,12 +283,55 @@ def main(state=None):
 def _notify_lane_done(session_id):
     """Delegate the claim check and wake to fleet after this Stop is allowed."""
     home = _fleet_home()
+    if not _lane_done_candidate(session_id, home):
+        return
     script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fleet.py")
     proc = subprocess.run(
         [sys.executable, script, "lane-done", "--sid", session_id,
          "--fleet-home", home], capture_output=True, text=True, timeout=90)
     if proc.returncode:
         raise RuntimeError(f"lane-done exited {proc.returncode}: {proc.stderr[:300]}")
+
+
+def _lane_done_candidate(session_id, home):
+    """Cheap read-only filter; fleet repeats the authoritative claim check.
+
+    Most Stops have no spawning supervisor. Avoid starting a CLI process for
+    them, especially one that could consume the hook's 90-second allowance.
+    """
+    try:
+        with open(os.path.join(home, "state", "fleet.json"),
+                  "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return False
+    workers = data.get("workers") if isinstance(data, dict) else None
+    if not isinstance(workers, dict):
+        return False
+    for name, rec in workers.items():
+        if (not isinstance(rec, dict) or rec.get("session_id") != session_id
+                or not isinstance(name, str)):
+            continue
+        if name.startswith("sup|"):
+            return False
+        parent_sid = rec.get("spawned_by")
+        if not isinstance(parent_sid, str) or not parent_sid:
+            return False
+        try:
+            with open(os.path.join(home, "supervisor", "INCARNATION"),
+                      "r", encoding="utf-8") as f:
+                claim = json.load(f)
+        except FileNotFoundError:
+            return False
+        if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+            return False
+        if claim.get("provider") == "codex":
+            holder = claim.get("holder")
+            holder_sid = holder.get("thread_id") if isinstance(holder, dict) else None
+        else:
+            holder_sid = claim.get("session_id")
+        return holder_sid == parent_sid
+    return False
 
 
 if __name__ == "__main__":
