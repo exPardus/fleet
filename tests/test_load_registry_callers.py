@@ -184,6 +184,8 @@ ALLOWED = {
     # call in them sits inside `with fleet_lock():`, same as the native halves.
     "_cmd_spawn_codex", "_cmd_send_codex", "_cmd_interrupt_codex",
     "_cmd_kill_codex", "_cmd_respawn_codex",
+    # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
+    "_cmd_kill_codex_native",
     "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",
     "_sweep_husks", "_expire_tombstones",
