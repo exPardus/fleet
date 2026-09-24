@@ -382,7 +382,8 @@ def test_spawn_parser_keeps_mcx_default_and_allows_explicit_native():
     lambda rec: fleet._cmd_interrupt_codex("cx-native", rec),
     lambda rec: fleet._cmd_respawn_codex(
         SimpleNamespace(name="cx-native", task=None, force=False), rec),
-    lambda rec: fleet._cmd_kill_codex("cx-native", rec),
+    # kill left this list in w103: it stops native rows through the host
+    # (tests/test_w103_registry_hygiene.py::TestNativeCodexKill).
 ])
 def test_unimplemented_native_verbs_never_fall_through_to_mcx(
         native_home, monkeypatch, invoke):

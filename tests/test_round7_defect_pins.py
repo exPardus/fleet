@@ -542,8 +542,14 @@ RATIFIED_BUT_UNBUILT = ()
 # `lane-done` is an internal Stop bridge with a mailbox append and possible
 # supervisor wake. The ratified table predates it; keep the fail-safe unknown
 # tier until the operator assigns its cross-home effect class.
+# `sup-reconcile` (w103) resumes a native Codex supervisor thread after a host
+# restart. Its effects are not one obvious class: it writes the home's
+# supervisor claim (the `sup-heartbeat` shape, DISRUPTIVE), may start the
+# home's Codex host through `CodexHostClient.ensure`, and may finalize a
+# releasing claim to `released`, which is terminal. The tier is operator-owned,
+# so it waits here under the fail-safe unknown-verb default (`destructive`).
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
-                                     "lane-done")
+                                     "lane-done", "sup-reconcile")
 
 
 def _classified_verbs():
