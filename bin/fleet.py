@@ -7986,12 +7986,83 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     return 0
 
 
+def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
+    """Stop a native Codex lane through its exact-home host and mark it dead.
+    The host owns the app-server child, so a host that is gone (no metadata,
+    dead pid) or that is now a different generation cannot be running this
+    row's turn: the row is marked dead with that reason. A live host of the
+    row's generation receives a public `turn/interrupt` for a working row
+    first. An unverifiable stop warns and exits 1, but kill is still terminal."""
+    from fleet_codex import HostUnavailable
+    connect = connect or _codex_existing_client
+    thread_id = rec.get("codex_thread_id")
+    turn_id = rec.get("codex_turn_id")
+    row_generation = rec.get("codex_host_generation")
+    reason = None
+    stop_error = None
+    try:
+        client = connect(FLEET_HOME)
+    except HostUnavailable as exc:
+        client, reason = None, f"codex host gone ({exc})"
+    except (FleetCliError, OSError, ValueError) as exc:
+        client, stop_error = None, f"codex host unreadable ({exc})"
+    if client is not None:
+        owner_live = getattr(client, "_owner_live", None)
+        if callable(owner_live) and not owner_live():
+            reason = f"codex host pid {getattr(client, 'host_pid', '?')} gone"
+        elif client.generation != row_generation:
+            reason = (f"codex host generation {row_generation} gone "
+                      f"(current host is {client.generation})")
+        elif (rec.get("status") == "working" and isinstance(thread_id, str)
+              and isinstance(turn_id, str)):
+            operation_id = f"worker-kill-{uuid.uuid4()}"
+            operation = {
+                "operation_id": operation_id, "method": "rpc",
+                "payload": {"method": "turn/interrupt", "params": {
+                    "threadId": thread_id, "turnId": turn_id,
+                }},
+                "recovery": {
+                    "kind": "worker/turn-interrupt", "fleet_name": name,
+                    "thread_id": thread_id, "turn_id": turn_id,
+                    "canonical_cwd": rec.get("cwd"),
+                },
+            }
+            try:
+                client.call(operation, timeout=30)
+                client.commit(operation_id)
+                reason = f"turn {turn_id} interrupted through the codex host"
+            except (FleetCliError, OSError, ValueError) as exc:
+                stop_error = f"turn/interrupt unverified ({exc})"
+        else:
+            reason = f"no running turn (status {rec.get('status')!r})"
+    reason = reason or stop_error
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if r is not None:
+            r["status"] = "dead"
+            r["dead_reason"] = reason
+            r["last_activity"] = now_iso()
+            save_registry(data)
+        append_event("killed", name, codex_thread_id=thread_id,
+                     interrupt_outcome=stop_error is None, reason=reason)
+    if stop_error is not None:
+        print(f"fleet: {name}: native Codex stop could not be verified "
+              f"({stop_error}) -- marked dead anyway (kill is a terminal "
+              "action); investigate the thread manually", file=sys.stderr)
+        return 1
+    print(f"{name}: killed ({reason})")
+    return 0
+
+
 def _cmd_kill_codex(name: str, rec: dict, run=subprocess.run,
                     which=shutil.which) -> int:
     """Stop the mcx worker and mark the codex lane dead (item 29).
     An already-gone mcx job is success-equivalent (the mcx parallel of the
     native gone-to-success inference); an unverifiable stop warns and exits 1,
-    but kill is still terminal."""
+    but kill is still terminal. Native app-server rows stop through the host."""
+    if _codex_record_route(rec) == "native":
+        return _cmd_kill_codex_native(name, rec)
     _require_mcx_codex_record(name, rec, "kill")
     mcx_id = rec.get("mcx_id")
     stopped_ok = True
@@ -8053,7 +8124,13 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which,
         rec = data["workers"][args.name]
         refuse_if_archived(args.name, rec, "kill")
         if _is_codex_record(rec):
-            if rec.get("mcx_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+            # A native row has no mcx id; its launch is in flight while preclaimed
+            # or bound (spawn's turn/start commit requires "bound" and would
+            # overwrite a kill landed in that window).
+            in_flight = (rec.get("adapter_state") in ("preclaim", "bound")
+                         if _codex_record_route(rec) == "native"
+                         else rec.get("mcx_id") is None)
+            if in_flight and not _launch_claim_expired(rec.get("last_activity")):
                 raise FleetCliError(
                     f"launch in flight for {args.name}; retry in a few seconds"
                 )
@@ -8543,24 +8620,30 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
     are harmless; only clean deletes the archived evidence tree."""
     removed = []
     stem = name_fs_stem(name)
+    # A row may carry a null or malformed sid (native Codex rows have none, and
+    # hand-edited rows exist): sid-keyed paths are skipped, never built from None.
+    sid = sid if isinstance(sid, str) and sid else None
+    retired_sids = [s for s in (retired_sids if isinstance(retired_sids, (list, tuple)) else ())
+                    if isinstance(s, str) and s]
     candidates = [
         logs_dir() / f"{stem}.jsonl", logs_dir() / f"{stem}.jsonl.1",
         logs_dir() / f"{stem}.err", logs_dir() / f"{stem}.err.1",
-        mailbox_dir() / f"{sid}.md",
         journal_file_path(name),
-        # Sweep sid-keyed ceiling state with the other artifacts.
-        ceiling_file_path(sid),
         outcome_path(name),
-        outcome_path(sid),
         task_file_path(name),
         # Remove the brief so a later worker reusing this name cannot inherit stale scope.
         brief_file_path(name),
         # Remove abandoned boot bundles, which retain the minted nonce plaintext.
         boot_bundle_path(name),
     ]
+    if sid is not None:
+        # Sweep sid-keyed mailbox, ceiling and outcome state with the other artifacts.
+        candidates += [mailbox_dir() / f"{sid}.md", ceiling_file_path(sid),
+                       outcome_path(sid)]
+        if mailbox_dir().exists():
+            candidates += list(mailbox_dir().glob(f"{sid}.md.claimed.*"))
     candidates += [outcome_path(s) for s in retired_sids]
     candidates += [ceiling_file_path(s) for s in retired_sids]
-    candidates += list(mailbox_dir().glob(f"{sid}.md.claimed.*")) if mailbox_dir().exists() else []
     for path in candidates:
         try:
             path.unlink()
@@ -8756,7 +8839,11 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
 
     for n, sid, retired in removed:
         _remove_worker_files(n, sid, retired_sids=retired)
-        print(f"removed {n} (session {sid})")
+        if isinstance(sid, str) and sid:
+            print(f"removed {n} (session {sid})")
+        else:
+            print(f"removed {n} (no session id recorded: {sid!r}; "
+                  f"sid-keyed files skipped)")
 
     if not removed and not spared:
         print("nothing to clean -- no dead workers")
@@ -8973,6 +9060,8 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
     if holder is True or (holder is None and
                           (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))):
         return (False, "supervisor claim-holder -- protected while live (§7.2)")
+    if _is_codex_record(record):
+        return _archive_eligible_codex(record, now, ttl_hours)
     if not is_native(record):
         return (False, "not-native")
     if record.get("archived_at") is not None:
@@ -9012,6 +9101,40 @@ def _archive_eligible(name: str, record: dict, roster_entries: list, now,
         return (False, "last-activity-unparseable")
     age_hours = (now - last_activity).total_seconds() / 3600.0
     if age_hours < ttl_hours:
+        return (False, "ttl-not-elapsed")
+    return (True, "eligible")
+
+
+def _archive_evidence_sid(record: dict):
+    """The id a row's sid-keyed evidence (mailbox, outcomes) is filed under.
+    Claude rows use their session id; native Codex rows have none and key
+    their mailbox by thread id; mcx rows have neither."""
+    if _codex_record_route(record) == "native":
+        thread_id = record.get("codex_thread_id")
+        return thread_id if isinstance(thread_id, str) and thread_id else None
+    sid = record.get("session_id")
+    return sid if isinstance(sid, str) and sid else None
+
+
+def _archive_eligible_codex(record: dict, now, ttl_hours: float) -> tuple:
+    """TTL eligibility for Codex rows (native app-server and mcx).
+    The Claude roster knows nothing of these rows, so no roster, outcome or
+    reap gate applies. A row must be unarchived, not running, have no unread
+    mail on its thread, and be older than the TTL. The claim-holder gate in
+    `_archive_eligible` has already run."""
+    if record.get("archived_at") is not None:
+        return (False, "already-archived")
+    status = record.get("status")
+    if status not in ("idle", "dead", "interrupted"):
+        return (False, f"status:{status}")
+    key = _archive_evidence_sid(record)
+    if key is not None and _reap_mail_pending(key):
+        return (False, "unread-mail")
+    try:
+        last_activity = _parse_iso(record.get("last_activity", ""))
+    except (ValueError, TypeError):
+        return (False, "last-activity-unparseable")
+    if (now - last_activity).total_seconds() / 3600.0 < ttl_hours:
         return (False, "ttl-not-elapsed")
     return (True, "eligible")
 
@@ -9057,17 +9180,18 @@ def _archive_resume_pending(name: str, record: dict) -> bool:
     A rerun resumes relocation into the same directory after interrupted moves."""
     if record.get("archived_at") is None:
         return False
-    sid = record.get("session_id")
+    sid = _archive_evidence_sid(record)
     retired = list(record.get("retired_sids", []) or [])
     return any(src.exists() for src, _dest in _archive_file_pairs(name, sid, retired))
 
 
 def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
                          roster_entries: list, run, which, reap: bool = False,
-                         reap_caller_sid=None) -> None:
+                         reap_caller_sid=None, remove_sessions: bool = True) -> None:
     """Move evidence, then best-effort remove current and retired native sessions.
     Use the eligibility roster snapshot to skip every live sid, including retired
-    forks; current-sid eligibility alone cannot establish their safety."""
+    forks; current-sid eligibility alone cannot establish their safety. Codex
+    rows pass remove_sessions=False: they have no Claude session to remove."""
     if reap:
         # The same protection applies to crash-resumes, and BEFORE moving mail
         # out of its inbox. A post-commit arrival leaves the archive resumable.
@@ -9082,6 +9206,8 @@ def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
             continue
         _archive_move(src, dest_dir / dest_name, n)
 
+    if not remove_sessions:
+        return
     if reap and _reap_protection(n, record, roster_entries, read_incarnation(), reap_caller_sid):
         return  # a delivery during file moves protects the entire sid union
     for s in ([sid] if sid else []) + retired:
@@ -9277,13 +9403,14 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
     # Fully moved tombstones need no roster probe. Pending resumes do: their
     # removal phase must still establish which sids are safe to remove.
     resume_names = [n for n in names
-                    if is_native(before[n]) and _archive_resume_pending(n, before[n])]
+                    if (is_native(before[n]) or _is_codex_record(before[n]))
+                    and _archive_resume_pending(n, before[n])]
     native_names = [n for n in names
                     if is_native(before[n]) and before[n].get("archived_at") is None]
 
     roster_entries = []
     epoch_frozen = False
-    if native_names or resume_names:
+    if native_names or any(is_native(before[n]) for n in resume_names):
         roster_ok, payload = _fetch_agents_roster(which=which, run=run)
         roster_entries = payload if roster_ok else []
         epoch_frozen = native_epoch_suspicious(roster_ok, roster_entries, all_workers)
@@ -9311,7 +9438,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
     archived_count = 0
     for n in eligible_names:
         rec = before[n]
-        sid = rec.get("session_id")
+        sid = _archive_evidence_sid(rec)
         retired = list(rec.get("retired_sids", []) or [])
 
         # Commit only an unchanged eligibility snapshot so a concurrent new turn cannot be archived.
@@ -9337,18 +9464,20 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
 
         _archive_move_and_rm(n, sid, retired, _archive_dest_dir(n),
                              roster_entries, run, which, reap=reap,
-                             reap_caller_sid=reap_caller_sid)
+                             reap_caller_sid=reap_caller_sid,
+                             remove_sessions=is_native(rec))
 
     # Resumes finish prior work; do not count or emit a second archived transition.
     for n in resume_names:
         rec = before[n]
-        sid = rec.get("session_id")
+        sid = _archive_evidence_sid(rec)
         retired = list(rec.get("retired_sids", []) or [])
         print(f"fleet: {n}: resuming archive -- completing pending file moves",
               file=sys.stderr)
         _archive_move_and_rm(n, sid, retired, archive_root() / name_fs_stem(n),
                              roster_entries, run, which, reap=reap,
-                             reap_caller_sid=reap_caller_sid)
+                             reap_caller_sid=reap_caller_sid,
+                             remove_sessions=is_native(rec))
 
     skipped_count = len(names) - archived_count
     stats = getattr(args, "reap_stats", None)
@@ -12733,11 +12862,43 @@ def _supervisor_git_board(repo=None, run=subprocess.run) -> dict:
             "dirty": len(dirty.stdout.splitlines()), "unpushed": unpushed_count}
 
 
+# Statuses whose session is busy: a turn is running, or an operator holds it.
+SUPERVISOR_BUSY_LANE_STATUSES = frozenset({"working", "attached"})
+# Idle lane rows the boot bundle lists one per line before collapsing the rest.
+SUPERVISOR_IDLE_ROWS_LISTED = 12
+
+
+def _supervisor_lane_partition(snap: dict) -> tuple[list, list]:
+    """Split non-supervisor, non-terminal snapshot rows into (live, idle).
+
+    A lane is live only while its session is busy (a turn is running or it is
+    attached) or it has unread mail waiting to start a turn. Every other
+    non-terminal row -- idle, interrupted, limited, dead-suspected -- runs no
+    process and holds no dispatch slot, so it is counted apart. Idle rows are
+    ordered most recently active first. Consumes snapshot fields only.
+    """
+    live, idle = [], []
+    for row in snap.get("workers", []):
+        if row.get("tier") == "supervisor" or row.get("status") in {"dead", "archived"}:
+            continue
+        if row.get("archived_at"):
+            continue
+        if row.get("status") in SUPERVISOR_BUSY_LANE_STATUSES or row.get("mail"):
+            live.append(row)
+        else:
+            idle.append(row)
+    idle.sort(key=lambda r: (r.get("stale_seconds") is None,
+                             r.get("stale_seconds") or 0, r.get("name", "")))
+    return live, idle
+
+
 def _supervisor_live_lanes(snap: dict, run=subprocess.run) -> list[str]:
     """Join live registry lanes to this repo's durable git worktree table.
 
     Reads the worktree table of the resolved fleet home for the same reason
-    `_supervisor_git_board` does: the process cwd is not the subject.
+    `_supervisor_git_board` does: the process cwd is not the subject. Only
+    live lanes (`_supervisor_lane_partition`) are joined; idle rows are one
+    count line, since they hold no dispatch slot.
     """
     if not snap.get("ok", True):
         return [f"UNREADABLE (registry: {snap.get('reason', 'unknown')})"]
@@ -12761,10 +12922,9 @@ def _supervisor_live_lanes(snap: dict, run=subprocess.run) -> list[str]:
         elif not line:
             path = None
     rows = []
-    for row in snap.get("workers", []):
+    live, idle = _supervisor_lane_partition(snap)
+    for row in live:
         name = row.get("name", "")
-        if row.get("tier") == "supervisor" or row.get("status") in {"dead", "archived"}:
-            continue
         branch = row.get("branch") or name
         path = worktrees.get(branch)
         if path is None and row.get("cwd"):
@@ -12772,7 +12932,10 @@ def _supervisor_live_lanes(snap: dict, run=subprocess.run) -> list[str]:
             branch = paths_to_branches.get(path)
         if path:
             rows.append(f"{name}: {branch} -> {path}")
-    return rows or ["none (sources: registry and git worktree list)"]
+    rows = rows or ["none (sources: registry and git worktree list)"]
+    if idle:
+        rows.append(f"(+{len(idle)} idle, not live: no running turn, no unread mail)")
+    return rows
 
 
 def _supervisor_dispatch_gates(snap: dict, caller_sid=None, run=subprocess.run) -> list[str]:
@@ -12785,11 +12948,10 @@ def _supervisor_dispatch_gates(snap: dict, caller_sid=None, run=subprocess.run) 
     except (OSError, subprocess.SubprocessError):
         memory = None
     mem = f"available_memory_mb={memory}" if memory is not None else "available_memory_mb=UNREADABLE (free -m)"
-    lanes = sum(1 for w in snap.get("workers", [])
-                if w.get("tier") != "supervisor" and w.get("status") not in {"dead", "archived"})
+    live, idle = _supervisor_lane_partition(snap)
     occupancy = _transcript_occupancy(find_transcript_path(None, caller_sid)) if caller_sid else None
     occ = f"caller_occupancy={occupancy}" if occupancy is not None else "caller_occupancy=UNREADABLE (transcript)"
-    return [mem, f"live_lane_count={lanes}", occ]
+    return [mem, f"live_lane_count={len(live)}", f"idle_lane_count={len(idle)}", occ]
 
 
 def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> list[str]:
@@ -12882,9 +13044,17 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
     if snap.get("ok"):
         t = snap["totals"]
         out.append(f"{t['workers']} worker(s), ${t['cost_usd']:.2f} lifetime, {t['mail']} pending mail")
+        # Idle lane rows are listed only up to a bound; the rest are one count,
+        # so a pile of finished rows cannot push the bundle past its cap.
+        _live, idle = _supervisor_lane_partition(snap)
+        unlisted = {w["name"] for w in idle[SUPERVISOR_IDLE_ROWS_LISTED:]}
         for w in snap["workers"]:
+            if w["name"] in unlisted:
+                continue
             mail = f", {w['mail']} mail" if w["mail"] else ""
             out.append(f"  {w['name']}: {w['status']}, {w['turns']} turns, ${w['cost_usd']:.2f}{mail}")
+        if unlisted:
+            out.append(f"  +{len(unlisted)} idle (not listed; `fleet status` shows every row)")
     else:
         out.append(f"(registry unreadable: {snap.get('reason')})")
     out.extend(_render_computed_board(snap, caller_sid=caller_sid, run=run))
@@ -13649,7 +13819,6 @@ def cmd_sup_checkpoint(args) -> int:
         git_txt = (f"branch={git['branch']} HEAD={git['head']} dirty={git['dirty']} "
                    f"unpushed={git['unpushed']}")
     snap = status_snapshot()
-    live_lanes = _supervisor_live_lanes(snap)
     blockers = [w["name"] for w in snap.get("workers", [])
                 if w.get("status") in {"blocked", "stalled", "error"}]
     blockers += [f"{w['name']}: {b}" for w in snap.get("workers", [])
@@ -13657,7 +13826,12 @@ def cmd_sup_checkpoint(args) -> int:
     blocker_txt = ",".join(blockers) if blockers else "none"
     print(f"checkpointed ({args.kind}) as {claim['incarnation_id']}; "
           f"occupancy={occ_txt}; verdict={verdict['verdict']}; heartbeat refreshed")
-    print(f"git: {git_txt}; live lanes: {len(live_lanes) if live_lanes != ['none (sources: registry and git worktree list)'] else 0}; blockers: {blocker_txt}")
+    if snap.get("ok", True):
+        live, idle = _supervisor_lane_partition(snap)
+        lanes_txt = f"{len(live)} (+{len(idle)} idle)"
+    else:
+        lanes_txt = f"UNREADABLE (registry: {snap.get('reason', 'unknown')})"
+    print(f"git: {git_txt}; live lanes: {lanes_txt}; blockers: {blocker_txt}")
     if roll["rolled"]:
         print(f"journal board rolled: {roll['moved_bytes']} bytes to "
               f"{supervisor_journal_history_path()}")
