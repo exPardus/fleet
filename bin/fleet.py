@@ -13920,7 +13920,13 @@ def _wave_changelog_gaps(repo, base, extra="", run=subprocess.run):
         text = ""
     text += "\n" + (extra or "")
     gaps = []
-    for commit in _wave_merge_commits(repo, base, run=run):
+    commits = _wave_merge_commits(repo, base, run=run)
+    # A lane-internal base-sync merge rides in with its lane's landing and
+    # is covered by that landing's line; it needs no line of its own.
+    sync = _wave_sync_merges(repo, base, run=run) if commits else set()
+    for commit in commits:
+        if commit in sync:
+            continue
         short = commit[:7]
         if not any(re.search(rf"(?<![0-9a-f]){re.escape(token)}"
                             rf"(?![0-9a-f])", text, re.IGNORECASE)
@@ -14280,6 +14286,45 @@ def _wave_record_substrate(repo, worktree, record=None):
     return "unknown"
 
 
+def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
+    """Return full SHAs of lane-internal base-sync merges in ``base..HEAD``.
+
+    A lane that merges the base branch into itself (`merge: sync master`,
+    git's own `Merge branch 'master' into <lane>`) lands that merge commit
+    inside the wave range alongside its real `merge(<lane>):` landing. It
+    is identified structurally, not by subject: it is off the first-parent
+    mainline, and every non-first parent is an ancestor of the first parent
+    of the mainline merge that brought it in -- i.e. it only merged in
+    what the base branch already had. A merge of anything else (another
+    unlanded branch, a mainline merge with a foreign subject) is not one.
+    """
+    listing = _wave_git(repo, "rev-list", "--first-parent", "--parents",
+                        f"{base}..HEAD", run=run, check=False)
+    if listing.returncode != 0:
+        return set()
+    mainline = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 3:
+            mainline[fields[0]] = fields[1:]
+    sync = set()
+    for landing, parents in mainline.items():
+        before = parents[0]
+        inner = _wave_git(repo, "rev-list", "--merges", "--parents",
+                          f"{before}..{landing}", run=run, check=False)
+        if inner.returncode != 0:
+            continue
+        for line in inner.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 3 or fields[0] in mainline:
+                continue
+            if all(_wave_git(repo, "merge-base", "--is-ancestor", parent,
+                             before, run=run, check=False).returncode == 0
+                   for parent in fields[2:]):
+                sync.add(fields[0])
+    return sync
+
+
 def _wave_merge_audit(repo, base, run=subprocess.run):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
 
@@ -14288,12 +14333,15 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
     short SHAs of merges that did not -- e.g. git's own default
     ``Merge <branch> into <branch>`` subject -- and a caller must never fold
     those into a lane count it then reports as MEASURED: they are a range it
-    could not attribute, not lanes that landed nothing.
+    could not attribute, not lanes that landed nothing. A lane-internal
+    base-sync merge (`_wave_sync_merges`) is neither: it is part of the lane
+    its `merge(<lane>):` landing already attributes, so it is skipped.
     """
     result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
                        f"{base}..HEAD", run=run)
     lanes = []
     unparsed = []
+    sync = None
     workers = _wave_registry_workers(repo)
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -14301,7 +14349,10 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
         commit, _, subject = line.partition("\t")
         match = re.search(r"^merge\(([^)]+)\):", subject, re.IGNORECASE)
         if not match:
-            unparsed.append(commit[:7])
+            if sync is None:
+                sync = _wave_sync_merges(repo, base, run=run)
+            if commit.strip() not in sync:
+                unparsed.append(commit[:7])
             continue
         lane = match.group(1)
         # The subject token is a BRANCH: join it to the lane's record first,
