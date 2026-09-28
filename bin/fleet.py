@@ -821,18 +821,18 @@ def _quarantine_artifacts() -> list:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
       * `_sweep_husks` (:9586) -- hidden records can still own roster sessions.
       * `_doctor_check_autoclean` (:10481) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:13784) -- legacy upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:13771) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2798) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:13658) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:13645) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:3452) -- expose that distinction to views.
       * `_doctor_check_registry` (:10731) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5891) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15181) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15168) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2780,7 +2780,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13784`), because legacy upgrades also require a complete registry.
+    (`:13771`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:899`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -11610,9 +11610,7 @@ SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS = 4 * SUPERVISOR_LATEST_ENTRY_MAX_CHARS
 # roster without leaving the cap effectively unbounded; the untested 40,000
 # predecessor was never exercised by a test and left slack nobody had measured.
 SUPERVISOR_BUNDLE_MAX_CHARS = 20_000
-#: GOALS.md is inlined up to this many chars, then a pointer to the file, the
-#: way inlined journal bodies are capped. An uncapped GOALS alone could push the
-#: bundle past its backstop after sup-boot has already rotated the generation.
+#: GOALS.md inline cap (then a pointer), so GOALS alone cannot trip the bundle backstop.
 SUPERVISOR_BOOT_GOALS_MAX_CHARS = 8_000
 
 _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
@@ -12385,13 +12383,7 @@ def _adopted_lineages(claim) -> list:
 
 
 def _seize_adopted_lineages(predecessor) -> list:
-    """Lineages a seize or limit-transfer successor adopts for lane-done only.
-
-    The seized claim's own lineage plus everything it had adopted, so a chain
-    of seizes keeps delivering. Adoption is LANE-DONE ownership, never
-    worker-mutation ownership: the successor's lineage stays freshly minted
-    (see `mint_lineage_id`) and `_worker_is_foreign` never reads this list.
-    """
+    """Seized lineage + its adopted chain; LANE-DONE only, never `_worker_is_foreign`."""
     if not isinstance(predecessor, dict):
         return []
     chain = []
@@ -12689,10 +12681,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2602, :2637,
     :2667, :2706, :2743, :2805, :2885, :3849, :8217, :8379, :8576, :8702, :8738, :8909, :8910, :8980,
-    :8990, :9001, :9097, :9612, :12639, :16276, :16277, :16338, :17624, :19519`).
+    :8990, :9001, :9097, :9612, :12631, :16263, :16264, :16325, :17610, :19496`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7173, :7625, :11057,
-    :18352. This makes union identity safe; the age boundary distinguishes respawn.
+    :18338. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13057,8 +13049,7 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
     except OSError:
         goals = "(supervisor/GOALS.md missing)"
     except ValueError:
-        # Not UTF-8. The claim and nonce are already committed; the bundle must
-        # still render so sup-boot prints the NONCE (§12).
+        # Not UTF-8: still render, so sup-boot prints the committed NONCE.
         goals = "(supervisor/GOALS.md unreadable: not UTF-8)"
     if len(goals) > SUPERVISOR_BOOT_GOALS_MAX_CHARS:
         cut = len(goals) - SUPERVISOR_BOOT_GOALS_MAX_CHARS
@@ -13239,8 +13230,6 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     pass
                 # Recovery literal writer: mint a new lineage for seize and limit-transfer.
                 # A parked predecessor can return; it has not vouched for transfer of worker ownership.
-                # Its running lanes still need someone to hear them finish (Y1): adopt its
-                # lineage chain for LANE-DONE delivery only.
                 taken = {"incarnation_id": inc, "session_id": caller_sid,
                          "claimed_at": now_iso(), "heartbeat_at": now_iso(),
                          "claimed_via": verdict if verdict != "seize" else "seize",
@@ -13266,9 +13255,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                                      supervisor_journal_entries(),
                                      caller_sid=caller_sid)
     except FleetCliError:
-        # The claim decision above is already committed. A refused bundle
-        # must not also swallow the generation it minted: print the verdict
-        # and the plaintext once, then surface the refusal.
+        # The claim is committed: print the minted generation, then refuse.
         lines = [f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]
         if inc_line:
             lines.append(f"INCARNATION: {inc_line}")
@@ -13413,7 +13400,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7173, :7625, :11057,
-    # :18352) -- so union identity cannot make one body answer for another.
+    # :18338) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -13421,7 +13408,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:899`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:12613`).
+        # names this gate as its reason (`:12605`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16653,8 +16640,7 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
     """
     claim = read_incarnation()
     do = getattr(args, "do", False)
-    # Backstop for the Stop-hook bridge: an owned lane's finished turn that was
-    # never delivered wakes (or mails) the holder here, before the verdict.
+    # Lane-done backstop (SPEC §8) runs before the verdict.
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
     if isinstance(claim, dict) and claim.get("provider") == "codex":
         return _cmd_codex_sup_guard(args, lane_done=lane_done)
@@ -19472,23 +19458,14 @@ def main(argv=None) -> int:
         return 1
 
 
-#: One pause before the single retry of a transient send refusal (G9 roster
-#: epoch, a peer's in-flight dispatch). Stop hooks allow the bridge 90 seconds.
+#: Pause before the one retry of a transient (G9) send refusal; Stop allows 90 s.
 LANE_DONE_RETRY_SECONDS = 5.0
-#: A send claimed under the lock but never confirmed (the keeper's 180 s timeout
-#: killed `sup-guard --do` mid-send) is retryable once it is this old.
+#: Age at which an unconfirmed pending send (killed mid-send) is retryable.
 LANE_DONE_PENDING_SECONDS = 300
 
 
 def _lane_owned_by_claim(rec: dict, claim: dict, registry: dict) -> bool:
-    """Whether the current claim owns the lane, across supervisor sid rotation.
-
-    Every `fleet send` wake gives the supervisor a new sid in the same
-    incarnation, so `spawned_by` is often a retired sid of the holder's row.
-    Ownership is the claim lineage stamped at spawn, a predecessor lineage the
-    claim adopted by seize or limit-transfer (`adopted_lineages`), or
-    `spawned_by` inside the holder row's sid union (current + retired sids).
-    """
+    """Claim lineage, an adopted lineage, or spawner in the holder sid union (SPEC §8)."""
     lineage = claim.get("lineage_id")
     spawned_lineage = rec.get("spawned_by_lineage")
     if isinstance(spawned_lineage, str) and spawned_lineage and (
@@ -19538,13 +19515,7 @@ def _last_assistant_uuid(name: str, sid) -> str | None:
 
 
 def _lane_done_turn_key(name: str, rec: dict) -> list:
-    """One key per finished turn, not per dispatch.
-
-    A lane can Stop, then continue in the same dispatch (a background task
-    completes, or Stop-hook mail blocks the stop); its next Stop is a new
-    finish. The newest assistant entry separates them. Without a readable
-    transcript (Codex, or none found) the key is the per-dispatch pair.
-    """
+    """One key per finished turn: dispatch pair plus newest assistant uuid (SPEC §8)."""
     sid = rec.get("session_id") or rec.get("codex_thread_id")
     key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
     tail = None if _is_codex_record(rec) else _last_assistant_uuid(name, sid)
@@ -19553,13 +19524,7 @@ def _lane_done_turn_key(name: str, rec: dict) -> list:
 
 def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                      run=subprocess.run, sleep=time.sleep) -> bool:
-    """Deliver one completion line to the claim holder that owns the lane.
-
-    The registry marker is per finished turn so repeated Stop calls, Codex
-    observations and guard sweeps cannot send a second wake. No claim
-    credential is inspected. An idle holder is not heartbeating, so claim age
-    is not a delivery condition; a dead or parked holder row is.
-    """
+    """Deliver one LANE-DONE per finished turn to the owning holder (SPEC §8)."""
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
     # A successor may have been spawned by the current holder. Its Stop must
@@ -19590,8 +19555,7 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         turn_key = _lane_done_turn_key(name, rec)
         if rec.get("lane_done_notified") == turn_key:
             return False
-        # Claim the send as pending; it becomes delivered only after the send
-        # returns, so a process killed mid-send leaves a retryable finish (N2).
+        # Pending until the send returns: a killed send stays retryable.
         pending = rec.get("lane_done_pending")
         if isinstance(pending, dict) and pending.get("key") == turn_key:
             try:
@@ -19633,9 +19597,7 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         if rc != 0:
             raise FleetCliError(f"{name}: completion mail send failed ({rc})")
     except Exception:
-        # A failed delivery must remain retryable at the next Stop, Codex
-        # observation or guard sweep. Clear only this turn's pending claim; a
-        # concurrent respawn or newer delivery wins over this failed attempt.
+        # Failed: clear only this turn's pending claim so it stays retryable.
         _settle_lane_done(name, sid, turn_key, delivered=False)
         raise
     _settle_lane_done(name, sid, turn_key, delivered=True)
@@ -19662,14 +19624,7 @@ def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
 
 def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
                     sleep=time.sleep) -> list:
-    """Backstop: deliver every owned lane's finished, undelivered turn.
-
-    The Stop hook is the primary path; this catches a hook that failed, a
-    transient refusal that outlived its retry, or a hook that never ran.
-    Native status is recomputed from one roster fetch (read only); a
-    suspicious roster (G9) defers the whole sweep to the next call.
-    Returns the names delivered.
-    """
+    """Backstop: deliver owned idle lanes' undelivered finishes; names sent (SPEC §8)."""
     roster_fn = roster_fn or _fetch_agents_roster
     claim = read_incarnation()
     if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
