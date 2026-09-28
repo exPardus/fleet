@@ -39,6 +39,7 @@ from fleet_codex import (
     interface_source_matches,
     read_interface_claim,
     _read_key,
+    _platform,
     _remaining,
     _send_frame,
     reconcile_home,
@@ -408,7 +409,7 @@ class Host:
         claim = read_interface_claim(self.home)
         if claim is None:
             return
-        if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
+        if not _platform().is_linux or not hasattr(socket, "SO_PEERCRED"):
             raise HostRejected("Interface mutation authentication is unsupported on this platform")
         try:
             raw = connection.getsockopt(

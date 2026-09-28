@@ -1,8 +1,10 @@
 """Linux process evidence for claim-bound native Codex Interface authority."""
 
 import pytest
+from types import SimpleNamespace
 
 import fleet_codex
+import fleet_platform
 
 
 THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1"
@@ -19,7 +21,7 @@ def test_source_binds_thread_to_nearest_codex_ancestor(monkeypatch):
         20: _record(20, 10, comm="codex", start="boot-20"),
         10: _record(10, 1, comm="codex", start="boot-10"),
     }
-    monkeypatch.setattr(fleet_codex.sys, "platform", "linux")
+    monkeypatch.setattr(fleet_platform, "PLATFORM", SimpleNamespace(is_linux=True))
     monkeypatch.setattr(fleet_codex, "_linux_process_environment",
                         lambda pid: {"CODEX_THREAD_ID": THREAD})
     monkeypatch.setattr(fleet_codex, "_linux_process_record", records.get)
@@ -32,7 +34,7 @@ def test_source_binds_thread_to_nearest_codex_ancestor(monkeypatch):
 
 
 def test_wrong_thread_and_same_user_unrelated_process_refuse(monkeypatch):
-    monkeypatch.setattr(fleet_codex.sys, "platform", "linux")
+    monkeypatch.setattr(fleet_platform, "PLATFORM", SimpleNamespace(is_linux=True))
     monkeypatch.setattr(fleet_codex, "_linux_process_environment",
                         lambda pid: {"CODEX_THREAD_ID": THREAD})
     monkeypatch.setattr(fleet_codex, "_linux_process_record",
@@ -49,7 +51,7 @@ def test_forked_codex_after_claim_and_reused_pid_do_not_match(monkeypatch):
         31: _record(31, 20, comm="codex", start="fork-after-claim"),
         20: _record(20, 1, comm="codex", start="original"),
     }
-    monkeypatch.setattr(fleet_codex.sys, "platform", "linux")
+    monkeypatch.setattr(fleet_platform, "PLATFORM", SimpleNamespace(is_linux=True))
     monkeypatch.setattr(fleet_codex, "_linux_process_environment",
                         lambda pid: {"CODEX_THREAD_ID": THREAD})
     monkeypatch.setattr(fleet_codex, "_linux_process_record", records.get)
@@ -64,6 +66,6 @@ def test_forked_codex_after_claim_and_reused_pid_do_not_match(monkeypatch):
 
 
 def test_unsupported_platform_fails_closed(monkeypatch):
-    monkeypatch.setattr(fleet_codex.sys, "platform", "win32")
+    monkeypatch.setattr(fleet_platform, "PLATFORM", SimpleNamespace(is_linux=False))
     with pytest.raises(fleet_codex.HostRejected, match="unsupported"):
         fleet_codex.codex_process_source(30, THREAD)

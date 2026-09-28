@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -512,6 +513,34 @@ def _unsafe_state(tmp_path, kind):
         host.write_text("{" + "x" * 70_000, encoding="utf-8")
         host.chmod(0o600)
     return home
+
+
+def test_host_key_is_not_visible_until_fully_written(tmp_path, monkeypatch):
+    module = _modules()
+    path = tmp_path / "host.key"
+    original_write = module.os.write
+    observed = []
+
+    def write(fd, data):
+        observed.append((path.exists(), stat.S_IMODE(os.fstat(fd).st_mode)))
+        return original_write(fd, data)
+
+    monkeypatch.setattr(module.os, "write", write)
+    encoded, decoded = module._create_key(path)
+    assert observed == [(False, 0o600)]
+    assert module._read_key(path) == (encoded, decoded)
+    assert not list(tmp_path.glob(".host.key.*.tmp"))
+
+
+def test_codex_host_platform_decisions_use_fleet_adapter(tmp_path, monkeypatch):
+    module = _modules()
+    import fleet_platform
+
+    monkeypatch.setattr(fleet_platform, "PLATFORM",
+                        SimpleNamespace(is_windows=True, is_linux=False))
+    assert module._linux_process_record(os.getpid()) is None
+    with pytest.raises(module.HostUnavailable, match="Windows"):
+        module._endpoint_for(tmp_path, tmp_path)
 
 
 @pytest.mark.parametrize("kind", ["symlink", "mode", "type", "hostile-json", "oversized"])

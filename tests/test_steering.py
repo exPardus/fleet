@@ -321,7 +321,16 @@ class TestPlatformAdapterBoundary:
     def _scanned_files(cls):
         root = cls._repo_root()
         paths = sorted(set(root.glob("bin/**/*.py")) | set(root.glob("tools/**/*.py")))
-        return [p for p in paths if p != (root / "bin" / "fleet.py")]
+        return [p for p in paths if p not in {
+            root / "bin" / "fleet.py", root / "bin" / "fleet_platform.py"}]
+
+    def test_shared_adapter_contains_the_os_selector(self):
+        source = (self._repo_root() / "bin" / "fleet_platform.py").read_text(
+            encoding="utf-8")
+        start = source.index("# === PLATFORM ADAPTER START")
+        end = source.index("# === PLATFORM ADAPTER END")
+        assert "os.name" in source[start:end]
+        assert "os.name" not in source[:start] + source[end:]
 
     def test_lint_actually_covers_the_hook_and_tool_directories(self):
         """A lint that silently scans nothing passes. Pin the file set, so

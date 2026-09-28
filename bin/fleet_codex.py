@@ -78,6 +78,12 @@ _SENSITIVE_KEYS = frozenset({
 INTERFACE_CLAIM_SCHEMA = 1
 
 
+def _platform():
+    """Use Fleet's single OS-selection adapter without importing it at module load."""
+    from fleet_platform import PLATFORM
+    return PLATFORM
+
+
 def _linux_stat_identity(raw: str) -> tuple[int, str] | None:
     end = raw.rfind(")")
     if end < 1:
@@ -97,7 +103,7 @@ def _linux_process_record(pid: int) -> dict[str, Any] | None:
     contain spaces and parentheses.  Callers treat every missing field as an
     authentication failure; there is no kill(0) or same-uid fallback.
     """
-    if not sys.platform.startswith("linux") or not isinstance(pid, int) or pid <= 0:
+    if not _platform().is_linux or not isinstance(pid, int) or pid <= 0:
         return None
     try:
         stat_path = Path(f"/proc/{pid}/stat")
@@ -120,7 +126,7 @@ def _linux_process_record(pid: int) -> dict[str, Any] | None:
 
 
 def _linux_process_environment(pid: int) -> dict[str, str] | None:
-    if not sys.platform.startswith("linux"):
+    if not _platform().is_linux:
         return None
     try:
         raw = Path(f"/proc/{pid}/environ").read_bytes()
@@ -144,7 +150,7 @@ def codex_process_source(pid: int, thread_id: str | None = None) -> dict[str, An
     readable thread membership and a UUID-shaped environment value alone are
     replayable.
     """
-    if not sys.platform.startswith("linux"):
+    if not _platform().is_linux:
         raise HostRejected("Codex caller process authentication is unsupported on this platform")
     peer_before = _linux_process_record(pid)
     if peer_before is None:
@@ -261,7 +267,7 @@ def _require_owner(path: Path) -> os.stat_result:
         raise UnsafeHostState(f"cannot inspect Codex host path {path}: {exc}") from exc
     if stat.S_ISLNK(info.st_mode):
         raise UnsafeHostState(f"Codex host path is a symlink: {path}")
-    if os.name != "nt" and info.st_uid != os.getuid():
+    if not _platform().is_windows and info.st_uid != os.getuid():
         raise UnsafeHostState(f"Codex host path has the wrong owner: {path}")
     return info
 
@@ -277,12 +283,12 @@ def _require_directory(path: Path, *, create: bool = False) -> None:
         except FileExistsError:
             pass
         else:
-            if os.name != "nt":
+            if not _platform().is_windows:
                 path.chmod(0o700)
     info = _require_owner(path)
     if not stat.S_ISDIR(info.st_mode):
         raise UnsafeHostState(f"Codex host path is not a directory: {path}")
-    if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o700:
+    if not _platform().is_windows and stat.S_IMODE(info.st_mode) != 0o700:
         raise UnsafeHostState(f"Codex host directory mode is not 0700: {path}")
 
 
@@ -290,7 +296,7 @@ def _require_regular(path: Path, *, mode: int = 0o600) -> os.stat_result:
     info = _require_owner(path)
     if not stat.S_ISREG(info.st_mode):
         raise UnsafeHostState(f"Codex host path is not a regular file: {path}")
-    if os.name != "nt" and stat.S_IMODE(info.st_mode) != mode:
+    if not _platform().is_windows and stat.S_IMODE(info.st_mode) != mode:
         raise UnsafeHostState(
             f"Codex host file mode is not {mode:04o}: {path}")
     return info
@@ -327,14 +333,22 @@ def _read_key(path: Path) -> tuple[str, bytes]:
 
 def _create_key(path: Path) -> tuple[str, bytes]:
     encoded = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    fd = os.open(str(path), flags, 0o600)
     try:
-        os.write(fd, encoded.encode("ascii"))
+        fd = os.open(str(temporary), flags, 0o600)
+        try:
+            data = encoded.encode("ascii")
+            if os.write(fd, data) != len(data):
+                raise OSError("short Codex host key write")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if not _platform().is_windows:
+            temporary.chmod(0o600)
+        os.replace(temporary, path)
     finally:
-        os.close(fd)
-    if os.name != "nt":
-        path.chmod(0o600)
+        temporary.unlink(missing_ok=True)
     return _read_key(path)
 
 
@@ -349,10 +363,10 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-    if os.name != "nt":
+    if not _platform().is_windows:
         temporary.chmod(0o600)
     os.replace(temporary, path)
-    if os.name != "nt":
+    if not _platform().is_windows:
         directory_fd = os.open(str(path.parent), os.O_RDONLY)
         try:
             os.fsync(directory_fd)
@@ -361,7 +375,7 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
 
 
 def _validate_fixed_paths(state_dir: Path) -> None:
-    if os.name == "nt":
+    if _platform().is_windows:
         raise HostUnavailable(
             "native Codex hosting is unsupported on Windows until owner-only "
             "named-pipe DACLs have cross-user acceptance proof")
@@ -399,9 +413,9 @@ def _validate_fixed_paths(state_dir: Path) -> None:
     endpoint = state_dir / "ipc.sock"
     if endpoint.exists() or endpoint.is_symlink():
         info = _require_owner(endpoint)
-        if os.name != "nt" and not stat.S_ISSOCK(info.st_mode):
+        if not _platform().is_windows and not stat.S_ISSOCK(info.st_mode):
             raise UnsafeHostState(f"Codex host endpoint has unsafe type: {endpoint}")
-        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+        if not _platform().is_windows and stat.S_IMODE(info.st_mode) != 0o600:
             raise UnsafeHostState(f"Codex host endpoint mode is not 0600: {endpoint}")
 
 
@@ -416,7 +430,7 @@ def _host_lock(path: Path, timeout: float) -> Iterator[None]:
             fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             os.write(fd, token)
             os.close(fd)
-            if os.name != "nt":
+            if not _platform().is_windows:
                 path.chmod(0o600)
             break
         except FileExistsError:
@@ -443,7 +457,7 @@ def _host_lock(path: Path, timeout: float) -> Iterator[None]:
 
 def _process_identity(pid: int) -> str | None:
     """Return a PID-reuse-resistant Linux identity when public procfs exposes one."""
-    if os.name == "nt":
+    if _platform().is_windows:
         return None
     try:
         fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
@@ -774,7 +788,7 @@ class OperationJournal:
             os.fsync(fd)
         finally:
             os.close(fd)
-        if os.name != "nt":
+        if not _platform().is_windows:
             path.chmod(0o600)
             directory_fd = os.open(str(self.directory), os.O_RDONLY)
             try:
@@ -1006,7 +1020,7 @@ class CodexHostClient:
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
             }
-            if os.name == "nt":
+            if _platform().is_windows:
                 popen_args["creationflags"] = (
                     getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                     | getattr(subprocess, "DETACHED_PROCESS", 0))
@@ -1204,7 +1218,7 @@ class CodexHostClient:
 
 
 def _endpoint_for(home: Path, state_dir: Path) -> tuple[str, str]:
-    if os.name == "nt":
+    if _platform().is_windows:
         raise HostUnavailable(
             "native Codex hosting is unsupported on Windows until owner-only "
             "named-pipe DACLs have cross-user acceptance proof")

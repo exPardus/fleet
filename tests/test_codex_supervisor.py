@@ -1281,6 +1281,26 @@ def test_native_handoff_definitive_turn_rejection_restores_predecessor(
         "thread/read", "thread/start", "thread/read", "turn/start"]
 
 
+def test_native_handoff_rollback_preserves_adopted_lineages(
+        supervisor_home, monkeypatch):
+    old_name, incarnation_id = _seed_native_supervisor(supervisor_home)
+    claim = fleet.read_incarnation()
+    claim["adopted_lineages"] = ["lin-old", "lin-older"]
+    fleet.write_incarnation(claim)
+    client = FakeLifecycleClient(supervisor_home, reject_turn_start=True)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="activation is uncertain"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model="codex:gpt-5.6-luna", permission_mode="bypass",
+            sid=None, nonce=None, expect_inc=incarnation_id))
+
+    restored = fleet.read_incarnation()
+    assert restored["state"] == "held"
+    assert restored["adopted_lineages"] == ["lin-old", "lin-older"]
+    assert list(fleet.load_registry()["workers"]) == [old_name]
+
+
 def test_native_handoff_post_acceptance_rejection_keeps_predecessor_disarmed(
         supervisor_home, monkeypatch):
     old_name, _inc = _seed_native_supervisor(supervisor_home)
