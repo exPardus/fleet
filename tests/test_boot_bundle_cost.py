@@ -177,11 +177,21 @@ class TestBundleByteBudget:
         bundle = _bundle()
         assert len(bundle) < fleet.SUPERVISOR_BUNDLE_MAX_CHARS
 
-    def test_an_oversized_bundle_is_refused(self, sup_home):
-        (sup_home / "supervisor" / "GOALS.md").write_text(
-            "X" * (fleet.SUPERVISOR_BUNDLE_MAX_CHARS + 1000), encoding="utf-8")
+    def test_an_oversized_bundle_is_refused(self, sup_home, monkeypatch):
+        monkeypatch.setattr(fleet, "SUPERVISOR_BUNDLE_MAX_CHARS", 500)
+        (sup_home / "supervisor" / "GOALS.md").write_text("X" * 400, encoding="utf-8")
         with pytest.raises(fleet.FleetCliError, match="exceeds"):
             _bundle()
+
+    def test_oversized_goals_are_capped_with_a_pointer(self, sup_home):
+        # w104: PX GOALS.md reached 15,234 chars and sup-boot refused the
+        # bundle after rotating the generation. GOALS is capped like a
+        # journal body, with a pointer to the full file.
+        (sup_home / "supervisor" / "GOALS.md").write_text(
+            "X" * (fleet.SUPERVISOR_BUNDLE_MAX_CHARS + 1000), encoding="utf-8")
+        bundle = _bundle()
+        assert len(bundle) < fleet.SUPERVISOR_BUNDLE_MAX_CHARS
+        assert "full text: supervisor/GOALS.md" in bundle
 
     def test_the_cap_was_lowered_from_the_untested_predecessor(self):
         # w90: 40,000 chars was never exercised by any test (grep confirmed

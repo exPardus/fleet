@@ -919,6 +919,10 @@ def _run_one(argv=None, *, run=subprocess.run, now_fn=time.time,
         print(f"[dry-run] {obs['supervisor_guard']['verdict']}", file=out)
     elif obs["supervisor_guard"].get("sent"):
         print(f"[{tag}] keeper: supervisor wake sent", file=out)
+    lane_done = obs["supervisor_guard"].get("lane_done_sent")
+    if isinstance(lane_done, list) and lane_done:
+        print(f"[{tag}] keeper: lane-done delivered for "
+              f"{', '.join(map(str, lane_done))}", file=out)
     pages = evaluate(obs, now)
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     interface_notice = None
