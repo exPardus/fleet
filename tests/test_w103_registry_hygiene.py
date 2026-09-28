@@ -26,7 +26,6 @@ import fleet
 THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
 TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
 GENERATION = "3f0e8a52-5d1c-4a51-9f4e-4c1b9a0d7e21"
-NOW = datetime.now(timezone.utc)
 
 
 def _iso(dt):
@@ -61,7 +60,10 @@ def _native_codex_row(status="working", age_hours=0.0, **extra):
         "codex_thread_id": THREAD_ID, "codex_turn_id": TURN_ID,
         "codex_host_generation": GENERATION, "adapter_state": "active",
         "status": status, "model": "codex:gpt-5.6-luna", "turns": 1,
-        "last_activity": _iso(NOW - timedelta(hours=age_hours)),
+        # Clock read per row, not at import: a full-suite run reaches these
+        # tests ~40 minutes after collection, which aged an import-time
+        # "fresh" row past the launch-claim window (w105).
+        "last_activity": _iso(datetime.now(timezone.utc) - timedelta(hours=age_hours)),
         "archived_at": None,
     }
     rec.update(extra)

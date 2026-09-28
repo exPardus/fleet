@@ -819,20 +819,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:9279) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:10174) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:13365) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:9582) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:10477) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:13709) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2783) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2798) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:13239) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:3437) -- expose that distinction to views.
-      * `_doctor_check_registry` (:10424) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:13583) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:3452) -- expose that distinction to views.
+      * `_doctor_check_registry` (:10727) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:5865) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:14707) -- render the release explanation.
+      * `_print_snapshot_table` (:5891) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:15106) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2780,7 +2780,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13365`), because legacy upgrades also require a complete registry.
+    (`:13709`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:899`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -6221,7 +6221,9 @@ def _persist_codex_result_observation(binding, observed: dict,
 
     with fleet_lock():
         claim = read_incarnation()
-        data = load_registry()
+        # `fleet result` is the /fleet:result view's verb: it may refuse on a
+        # corrupt registry but never quarantine it (views doctrine).
+        data = read_registry_no_repair()
         current = _codex_supervisor_binding(
             claim, data, expected_name=binding.name)
         if (current.incarnation_id != binding.incarnation_id
@@ -8193,7 +8195,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:7865` / `cmd_respawn:7573`, before
+    # resolution that runs from `cmd_kill:8110` / `cmd_respawn:7747`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -8224,9 +8226,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:7865` / `cmd_respawn:7573`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8110` / `cmd_respawn:7747`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:7594-7601` spells out that design -- resolve under the lock.
+    # `cmd_respawn:7768-7775` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12567,7 +12569,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:899`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:3425`) applies here too. An unreadable registry
+    rule for the view path (`:3440`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -12638,12 +12640,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:2587, :2622,
-    :2652, :2691, :2728, :2790, :2870, :3834, :7962, :8124, :8321, :8441, :8477, :8644, :8645, :8715,
-    :8725, :8736, :8830, :9305, :12289, :15802, :15803, :15864, :17058`).
+    sites that already key on the union (`:2602, :2637,
+    :2667, :2706, :2743, :2805, :2885, :3849, :8213, :8375, :8572, :8698, :8734, :8905, :8906, :8976,
+    :8986, :8997, :9093, :9608, :12592, :16201, :16202, :16263, :17528, :19418`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :6995, :7447, :10750,
-    :17782. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :7169, :7621, :11053,
+    :18252. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13335,8 +13337,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:6995, :7447, :10750,
-    # :17782) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:7169, :7621, :11053,
+    # :18252) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -13344,7 +13346,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:899`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:12263`).
+        # names this gate as its reason (`:12566`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -13700,7 +13702,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:9276`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:9579`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -13920,7 +13922,13 @@ def _wave_changelog_gaps(repo, base, extra="", run=subprocess.run):
         text = ""
     text += "\n" + (extra or "")
     gaps = []
-    for commit in _wave_merge_commits(repo, base, run=run):
+    commits = _wave_merge_commits(repo, base, run=run)
+    # A lane-internal base-sync merge rides in with its lane's landing and
+    # is covered by that landing's line; it needs no line of its own.
+    sync = _wave_sync_merges(repo, base, run=run) if commits else set()
+    for commit in commits:
+        if commit in sync:
+            continue
         short = commit[:7]
         if not any(re.search(rf"(?<![0-9a-f]){re.escape(token)}"
                             rf"(?![0-9a-f])", text, re.IGNORECASE)
@@ -14280,6 +14288,45 @@ def _wave_record_substrate(repo, worktree, record=None):
     return "unknown"
 
 
+def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
+    """Return full SHAs of lane-internal base-sync merges in ``base..HEAD``.
+
+    A lane that merges the base branch into itself (`merge: sync master`,
+    git's own `Merge branch 'master' into <lane>`) lands that merge commit
+    inside the wave range alongside its real `merge(<lane>):` landing. It
+    is identified structurally, not by subject: it is off the first-parent
+    mainline, and every non-first parent is an ancestor of the first parent
+    of the mainline merge that brought it in -- i.e. it only merged in
+    what the base branch already had. A merge of anything else (another
+    unlanded branch, a mainline merge with a foreign subject) is not one.
+    """
+    listing = _wave_git(repo, "rev-list", "--first-parent", "--parents",
+                        f"{base}..HEAD", run=run, check=False)
+    if listing.returncode != 0:
+        return set()
+    mainline = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) >= 3:
+            mainline[fields[0]] = fields[1:]
+    sync = set()
+    for landing, parents in mainline.items():
+        before = parents[0]
+        inner = _wave_git(repo, "rev-list", "--merges", "--parents",
+                          f"{before}..{landing}", run=run, check=False)
+        if inner.returncode != 0:
+            continue
+        for line in inner.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 3 or fields[0] in mainline:
+                continue
+            if all(_wave_git(repo, "merge-base", "--is-ancestor", parent,
+                             before, run=run, check=False).returncode == 0
+                   for parent in fields[2:]):
+                sync.add(fields[0])
+    return sync
+
+
 def _wave_merge_audit(repo, base, run=subprocess.run):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
 
@@ -14288,12 +14335,15 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
     short SHAs of merges that did not -- e.g. git's own default
     ``Merge <branch> into <branch>`` subject -- and a caller must never fold
     those into a lane count it then reports as MEASURED: they are a range it
-    could not attribute, not lanes that landed nothing.
+    could not attribute, not lanes that landed nothing. A lane-internal
+    base-sync merge (`_wave_sync_merges`) is neither: it is part of the lane
+    its `merge(<lane>):` landing already attributes, so it is skipped.
     """
     result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
                        f"{base}..HEAD", run=run)
     lanes = []
     unparsed = []
+    sync = None
     workers = _wave_registry_workers(repo)
     for line in result.stdout.splitlines():
         if not line.strip():
@@ -14301,7 +14351,10 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
         commit, _, subject = line.partition("\t")
         match = re.search(r"^merge\(([^)]+)\):", subject, re.IGNORECASE)
         if not match:
-            unparsed.append(commit[:7])
+            if sync is None:
+                sync = _wave_sync_merges(repo, base, run=run)
+            if commit.strip() not in sync:
+                unparsed.append(commit[:7])
             continue
         lane = match.group(1)
         # The subject token is a BRANCH: join it to the lane's record first,

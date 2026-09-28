@@ -223,6 +223,9 @@ def test_merge_audit_names_a_merge_with_gits_own_default_subject(tmp_path):
         if argv[1] == "log":
             return subprocess.CompletedProcess(
                 argv, 0, "1234567890abcd\tMerge branch 'w83/x' into main\n", "")
+        if argv[1] == "rev-list":
+            # No mainline structure: nothing here is a lane-internal sync.
+            return subprocess.CompletedProcess(argv, 0, "", "")
         raise AssertionError(argv)
 
     lanes, unparsed = fleet._wave_merge_audit(tmp_path, "base", run=run)
@@ -428,6 +431,100 @@ def test_prune_removes_only_clean_merged_lane_worktrees(tmp_path, monkeypatch):
     assert [call[1:] for call in calls if call[1] in {"worktree", "branch"}][-2:] == [
         ["worktree", "remove", str(merged)], ["branch", "-d", "w68/merged"]]
     assert all("--force" not in call for call in calls)
+
+
+def _sync_repo(tmp_path):
+    """A real repo whose lane synced the base branch into itself mid-wave.
+
+    main: base -> merge(w1/other) ... -> merge(w2/lane)
+    w2/lane: work -> `merge: sync master` (main after w1 landed)
+             -> git's own `Merge branch 'main' into w2/lane` -> more work
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                              capture_output=True, text=True,
+                              encoding="utf-8").stdout.strip()
+
+    def commit(name, message):
+        (repo / name).write_text(message + "\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", message)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.name", "wave-close tests")
+    commit("README.md", "base")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-qb", "w2/lane")
+    commit("lane.txt", "lane work")
+    git("checkout", "-q", "main")
+    git("checkout", "-qb", "w1/other")
+    commit("other.txt", "other work")
+    git("checkout", "-q", "main")
+    git("merge", "--no-ff", "-m", "merge(w1/other): other landed", "w1/other")
+    git("checkout", "-q", "w2/lane")
+    git("merge", "--no-ff", "-m", "merge: sync master", "main")
+    sync_one = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    commit("main.txt", "direct main commit")
+    git("checkout", "-q", "w2/lane")
+    git("merge", "--no-ff", "--no-edit", "main")
+    sync_two = git("rev-parse", "HEAD")
+    commit("lane2.txt", "more lane work")
+    return repo, git, base, {sync_one, sync_two}
+
+
+def test_sync_merges_are_the_lane_internal_base_merges_only(tmp_path):
+    repo, git, base, syncs = _sync_repo(tmp_path)
+    git("checkout", "-q", "main")
+    git("merge", "--no-ff", "-m", "merge(w2/lane): lane landed", "w2/lane")
+
+    assert fleet._wave_sync_merges(repo, base) == syncs
+    # Only the two `merge(<lane>):` landings count; neither sync merge is
+    # UNPARSED even though their subjects break the convention.
+    lanes, unparsed = fleet._wave_merge_audit(repo, base)
+    assert sorted(lane for lane, _sub, _sha in lanes) == ["w1/other", "w2/lane"]
+    assert unparsed == []
+    # The sync merges ride in on their lane's CHANGELOG line.
+    landings = git("log", "--merges", "--first-parent", "--format=%h",
+                   f"{base}..HEAD").split()
+    extra = "\n".join(f"- `{sha}` landed" for sha in landings)
+    assert fleet._wave_changelog_gaps(repo, base, extra=extra) == []
+
+
+def test_a_lane_merging_a_foreign_branch_is_still_unparsed(tmp_path):
+    repo, git, base, syncs = _sync_repo(tmp_path)
+    git("checkout", "-q", "main")
+    git("checkout", "-qb", "w9/unlanded")
+    commit_path = repo / "foreign.txt"
+    commit_path.write_text("foreign\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "foreign work")
+    git("checkout", "-q", "w2/lane")
+    git("merge", "--no-ff", "--no-edit", "w9/unlanded")
+    foreign = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    git("merge", "--no-ff", "-m", "merge(w2/lane): lane landed", "w2/lane")
+
+    assert fleet._wave_sync_merges(repo, base) == syncs
+    _lanes, unparsed = fleet._wave_merge_audit(repo, base)
+    assert unparsed == [foreign[:7]]
+    assert foreign[:7] in fleet._wave_changelog_gaps(repo, base)
+
+
+def test_a_mainline_merge_with_a_foreign_subject_is_never_a_sync(tmp_path):
+    """`Merge branch 'w2/lane'` straight onto main is the wave-83 defect,
+    not a sync: it is on the first-parent mainline."""
+    repo, git, base, _syncs = _sync_repo(tmp_path)
+    git("checkout", "-q", "main")
+    git("merge", "--no-ff", "--no-edit", "w2/lane")
+    landing = git("rev-parse", "HEAD")
+
+    _lanes, unparsed = fleet._wave_merge_audit(repo, base)
+    assert unparsed == [landing[:7]]
 
 
 def test_changelog_gate_names_merge_without_a_line(tmp_path):
