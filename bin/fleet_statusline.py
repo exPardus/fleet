@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """claude-fleet statusline (docs/specs/terminal-surface.md §4.3).
 
-Renders one line under the operator's input box in Claude Code. Installed
+Renders one line under the operator's input box in Claude Code -- or, for a
+registered interface session on a multi-fleet machine, one compact row per
+home it governs (w106; see "interface mode" below). Installed
 into ~/.claude/settings.json by `fleet init --statusline` -- a plugin cannot
 ship a statusLine (plugin settings.json accepts only `agent` and
 `subagentStatusLine`).
@@ -96,9 +98,10 @@ def nameplate(tag=None) -> str:
 # is the invariant.
 _RESET = "\x1b[0m"
 _BOLD = "\x1b[1m"
-# Grey is RESERVED for `dead`. Nothing else on the line may use it: the moment a
-# second field is grey, "greyed out" stops meaning "inert" and the operator has
-# to read the words to find out what is going on.
+# Grey is RESERVED for inert words -- `no live workers` and an interface bar's
+# `frozen` row (the `+N dead` tail that used to own it is gone, w106). Nothing
+# live may use it: the moment a live field is grey, "greyed out" stops meaning
+# "inert" and the operator has to read the words to find out what is going on.
 _GREY = "\x1b[90m"
 _NAME = "\x1b[1;94m"       # bold bright blue -- the fleet nameplate
 _AGE = "\x1b[33m"          # yellow: a clock, distinct from every status hue
@@ -440,19 +443,19 @@ def render_statusline(snap: dict, color: bool = True,
             chunk += paint(f" {clock}", _STATUS_COLOR["limited"])
         parts.append(chunk)
 
-    # `dead` is inert -- it cannot be steered, only respawned or cleaned. It gets
-    # a grey tail counter rather than a bucket of its own, so eleven dead workers
-    # never outshout the one that is actually running.
-    dead = len(buckets.get("dead", ()))
+    # `dead` is inert -- it cannot be steered, only respawned or cleaned -- and
+    # it is NOT RENDERED AT ALL (w106, operator 2026-09-28: "less noise"). The
+    # grey `+N dead` tail it used to carry was a count of corpses the operator
+    # could not act on from this line and that `fleet clean` exists to empty;
+    # on a live interface bar it was the longest field. `fleet status` still
+    # lists every dead row.
     if not parts:
         parts = [paint("no live workers", _STATUS_COLOR["dead"])]
     if hidden_buckets:
-        # Uncoloured on purpose: grey is reserved for `dead`
-        # (`test_grey_is_reserved_for_dead`), and a fourth hue for a counter
-        # that only appears on a malformed registry buys nothing.
+        # Uncoloured on purpose: grey is reserved for inert words
+        # (`test_grey_is_reserved_for_inert_words`), and a fourth hue for a
+        # counter that only appears on a malformed registry buys nothing.
         parts.append(paint(f"+{hidden_buckets} unknown", ""))
-    if dead:
-        parts.append(paint(f"+{dead} dead", _STATUS_COLOR["dead"]))
 
     # NO COST FIELD (removed 2026-07-27, operator's call). It was a running
     # total the operator cannot act on: under the Max-20x cap doctrine the plan
@@ -738,6 +741,234 @@ def rendered_home_tag(decision, home) -> str:
         return ""
 
 
+# --- interface mode: one compact row per home (w106, operator 2026-09-28) ----
+#
+# The ask, verbatim: "get the fleet statusbar fixed up -- SHOW ALL MY HOMES,
+# LESS NOISE". The interface is a ROLE (skills/fleet), held by one session over
+# several homes: it registers per home with `fleet interface-register
+# --fleet-home <home>`, which records `state/interface-pane` (the tmux pane id)
+# or, outside tmux, `state/interface-session` (the Claude session id). The
+# single-home row above renders only the home the session RESOLVED to -- for an
+# interface launched in the fleet repo that was a frozen fleet home, while the
+# home the operator was actually running (PX) had no row at all.
+#
+# THE SIGNAL IS EXISTING STATE, NOT A PROBE. This session is the interface of
+# home H when `$TMUX_PANE` (inherited from the Claude Code process that runs
+# this script) equals H's `state/interface-pane`, or the blob's session id
+# equals H's `state/interface-session`. Two small file reads per listed home,
+# no tmux call, no PID check, no lock, no write -- D4 unchanged. A registration
+# written under an earlier tmux server can name a pane id that is later reused;
+# the statusline cannot tell without probing, so a reused id shows that home's
+# row until the interface re-registers. That is a view showing a home's state
+# to the wrong pane, never an action; recorded rather than probed around.
+#
+# ONLY ON A MULTI-FLEET MACHINE. `population_is_multi_home` gates it, so a
+# single-home machine keeps its byte-identical row whatever files exist.
+
+INTERFACE_MAX_ROWS = 4
+#: Past this, a supervisor's freshest evidence (its body's last activity, else
+#: its claim's heartbeat) renders `stale` instead of `idle`. The keeper pages an
+#: idle supervisor hourly, so two missed pages is the line.
+SUP_STALE_AFTER_SECONDS = 2 * 3600
+#: The home's directory name inside the nameplate. Short: the tag disambiguates.
+_HOME_NAME_LIMIT = 12
+#: Worker statuses that are NOT a finished lane. Everything else a worker row
+#: can say (idle, dead, limited, a foreign word) means it stopped.
+_LANE_RUNNING = ("working", "attached")
+#: Supervisor-body statuses that count as a live body in a compact row.
+_SUP_BODY_LIVE = ("working", "idle")
+
+
+def _pane_id(value) -> str:
+    """`$TMUX_PANE` in the shape `interface-register` accepts, else `""`."""
+    if (isinstance(value, str) and value.startswith("%")
+            and value[1:].isascii() and value[1:].isdecimal()):
+        return value
+    return ""
+
+
+def _read_marker(path) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return ""
+
+
+def interface_homes(population, sid="", pane="") -> list:
+    """Homes in `population` whose interface registration names this session.
+
+    Pure file reads, never raises, `[]` when there is nothing to match on."""
+    pane, sid = _pane_id(pane), sid if isinstance(sid, str) else ""
+    if not pane and not sid:
+        return []
+    out = []
+    try:
+        for home in population["homes"]:
+            state = Path(home) / "state"
+            if ((pane and _read_marker(state / "interface-pane") == pane)
+                    or (sid and _read_marker(state / "interface-session") == sid)):
+                out.append(home)
+    except BaseException:  # noqa: BLE001 -- a view never surfaces a traceback
+        return []
+    return out
+
+
+def home_nameplate(home) -> str:
+    """`[projectx:ce5f]` -- the home's directory name, sanitised and cut, plus
+    its `fleet.home_tag`. The name is for the operator's eye; the tag is what
+    tells two `fleet` clones apart (terminal-surface §4.3, "a digest, not an
+    abbreviated name")."""
+    name = _safe(Path(str(home)).name or str(home), _HOME_NAME_LIMIT)
+    return f"{PREFIX[0]}{name}:{fleet.home_tag(home)}{PREFIX[-1]}"
+
+
+def _sup_state(snap, bodies, stale_after=SUP_STALE_AFTER_SECONDS):
+    """`(word, age_seconds, reference_seconds)` for a compact row.
+
+    `word` is working / idle / stale / none / ? / None (no supervisor doctrine
+    in this home). `reference_seconds` is how long ago the supervisor last took
+    a turn, the cut for `done N unread`; None when there is no evidence."""
+    sup = snap.get("supervisor")
+    if not isinstance(sup, dict) or not sup.get("goals_active"):
+        return None, None, None
+    if any(b.get("status") == "working" for b in bodies):
+        return "working", None, 0.0
+    ages = [b.get("stale_seconds") for b in bodies]
+    ages = [a for a in ages if isinstance(a, (int, float))]
+    state = sup.get("state")
+    if state == "unknown":
+        return "?", None, None
+    if ages:
+        age = min(ages)
+        return ("idle" if age <= stale_after else "stale"), age, age
+    if state == "held":
+        hb = sup.get("heartbeat_age_seconds")
+        hb = hb if isinstance(hb, (int, float)) else None
+        if hb is not None and hb <= stale_after:
+            return "idle", hb, hb
+        return "stale", hb, hb
+    return "none", None, None
+
+
+def render_home_row(snap, home, color=True):
+    """One compact interface row, or None when the home has nothing to say.
+
+    `[projectx:ce5f]  sup idle 12m  work 3  done 2 unread`
+
+    SUPPRESSED when there is no supervisor (claim none or released, no live
+    body) and no working lane: that home is frozen, and a frozen home on a
+    multi-home bar is the noise the operator asked to lose. A registry FAULT is
+    never suppressed -- it renders its word, because silence would read as
+    frozen."""
+    def paint(text, code):
+        return f"{code}{text}{_RESET}" if color and code else text
+
+    head = paint(home_nameplate(home), _NAME)
+    if not snap.get("ok"):
+        return f"{head}  {registry_fault_word(snap.get('reason'))}"
+    workers = snap.get("workers") or []
+    if not isinstance(workers, list):
+        workers = []
+    rows = [w for w in workers if isinstance(w, dict)]
+    bodies = [w for w in rows if w.get("tier") == "supervisor"
+              and w.get("status") in _SUP_BODY_LIVE]
+    lanes = [w for w in rows if w.get("tier") != "supervisor"]
+    working = sum(1 for w in lanes if w.get("status") == "working")
+
+    word, age, ref = _sup_state(snap, bodies)
+    if word in (None, "none") and not working:
+        return None
+
+    parts = [head]
+    if word is not None:
+        chunk = paint(f"sup {word}", _SUP)
+        if age is not None and word in ("idle", "stale"):
+            chunk += paint(f" {_fmt_age(age)}", _AGE)
+        parts.append(chunk)
+    if len(bodies) > 1:
+        parts.append(paint(f"{len(bodies)} bodies", _ALARM))
+    if working:
+        count = f"{_BOLD}{working}" if color else str(working)
+        parts.append(paint(f"work {count}", _STATUS_COLOR["working"]))
+    if ref is not None:
+        # A lane that stopped AFTER the supervisor's last turn is news the
+        # supervisor has not read. Both clocks are `stale_seconds` from the
+        # same snapshot, so "after" is simply "more recently active".
+        done = sum(1 for w in lanes
+                   if w.get("status") not in _LANE_RUNNING
+                   and isinstance(w.get("stale_seconds"), (int, float))
+                   and w["stale_seconds"] < ref)
+        if done:
+            parts.append(paint(f"done {done} unread",
+                               _STATUS_COLOR["idle+mail"]))
+    return "  ".join(parts)
+
+
+def render_frozen_row(home, color=True) -> str:
+    plate = home_nameplate(home)
+    line = f"{plate} frozen"
+    return f"{_GREY}{line}{_RESET}" if color else line
+
+
+def render_interface_rows(homes, color=True, lead=None,
+                          snapshot=None) -> list:
+    """The interface bar: at most `INTERFACE_MAX_ROWS` rows, never empty.
+
+    `homes` is ordered and deduplicated by the caller; `lead` is a row that
+    must come first (the §5 terminus word, when this session resolved to no
+    home). Each home is read by pointing `fleet.FLEET_HOME` at it and calling
+    `status_snapshot()` -- the one derivation, lock-free -- and the global is
+    restored before returning. A home whose read raises is skipped, never the
+    whole bar."""
+    snapshot = snapshot or fleet.status_snapshot
+    rows = [lead] if lead else []
+    saved = fleet.FLEET_HOME
+    try:
+        for home in homes:
+            try:
+                fleet.FLEET_HOME = Path(home)
+                row = render_home_row(snapshot(), home, color=color)
+            except BaseException:  # noqa: BLE001 -- one home never costs the bar
+                continue
+            if row:
+                rows.append(row)
+    finally:
+        fleet.FLEET_HOME = saved
+    if not rows and homes:
+        rows = [render_frozen_row(homes[0], color=color)]
+    if len(rows) > INTERFACE_MAX_ROWS:
+        hidden = len(rows) - INTERFACE_MAX_ROWS + 1
+        rows = rows[:INTERFACE_MAX_ROWS - 1] + [f"+{hidden} homes"]
+    return rows
+
+
+def interface_view_homes(decision, population, payload, pane) -> list:
+    """The ordered homes for the interface bar, or `[]` for "not interface
+    mode". The session's own resolved home leads (it is where the operator is
+    typing), then every home this session is the registered interface of, in
+    homes-list order. Never raises."""
+    try:
+        if not population_is_multi_home(population):
+            return []
+        mine = interface_homes(population, sid=blob_session_id(payload),
+                               pane=pane)
+        if not mine:
+            return []
+        ordered = []
+        if (decision or {}).get("state") in (HOME_LOOKUP, HOME_DEFAULT):
+            ordered.append(str(fleet.FLEET_HOME))
+        ordered.extend(mine)
+        out, seen = [], set()
+        for home in ordered:
+            ident = fleet.home_identity(home)
+            if ident not in seen:
+                seen.add(ident)
+                out.append(ident)
+        return out
+    except BaseException:  # noqa: BLE001
+        return []
+
+
 # --- statusline chaining ---------------------------------------------------
 #
 # Claude Code allows exactly ONE `statusLine` command. An operator who already
@@ -855,9 +1086,18 @@ def main() -> int:
 
         # §5, before any read (multi-fleet slice d). On a single-home machine
         # this is a no-op by construction.
-        decision = resolve_blob_home(payload)
+        try:
+            population = fleet.resolution_population()
+        except BaseException:  # noqa: BLE001 -- degrade to the shipped path
+            population = None
+        decision = resolve_blob_home(payload, population=population)
         if decision["home"] is not None:
             fleet.FLEET_HOME = decision["home"]
+        # Interface mode (w106): `[]` on a single-home machine, on any failure,
+        # and for every session that is not a registered interface.
+        view_homes = (interface_view_homes(decision, population, payload,
+                                           os.environ.get("TMUX_PANE"))
+                      if population is not None else [])
 
         # Delegates print above fleet's row. A delegate that fails, hangs, or
         # emits unprintable bytes is dropped -- it must never cost fleet's row.
@@ -879,6 +1119,11 @@ def main() -> int:
         # an ambiguity there is no home to read a roster from, so the word takes
         # the row's place -- one line either way, exit 0 either way.
         line = render_home_terminus(decision, color=_want_color())
+        if view_homes:
+            for row in render_interface_rows(view_homes, color=_want_color(),
+                                             lead=line):
+                print(row)
+            return 0
         if line is None:
             # `fleet.FLEET_HOME` is read TWICE here and both reads must see the
             # same value: `status_snapshot()` counts that home's workers and
