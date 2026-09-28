@@ -402,3 +402,43 @@ def test_spec_says_sup_guard_do_takes_the_lock():
     assert "`sup-guard` is the lock-free" not in spec
     assert "the lock-free interface verdict" not in spec
     assert "`--do` actions take `fleet.lock`" in spec
+
+
+# N2 -- a process killed mid-send leaves the finish retryable, not "delivered" --
+
+class _Killed(BaseException):
+    """What the keeper's 180 s timeout looks like from inside the send."""
+
+
+def test_a_send_killed_midway_is_retried_once_the_claim_ages(home, monkeypatch):
+    calls = []
+
+    def send(name, message):
+        calls.append(name)
+        if len(calls) == 1:
+            raise _Killed()
+        return 0
+
+    monkeypatch.setattr(fleet, "_cmd_send_native", send)
+    with pytest.raises(_Killed):
+        fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    rec = fleet.load_registry()["workers"]["lane"]
+    assert "lane_done_notified" not in rec           # never recorded as delivered
+    # A concurrent observer inside the window does not duplicate the send.
+    assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    data = fleet.load_registry()
+    data["workers"]["lane"]["lane_done_pending"]["at"] = _iso(
+        datetime.now(timezone.utc)
+        - timedelta(seconds=fleet.LANE_DONE_PENDING_SECONDS + 1))
+    fleet.save_registry(data)
+    assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    rec = fleet.load_registry()["workers"]["lane"]
+    assert "lane_done_pending" not in rec and rec["lane_done_notified"]
+    assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    assert calls == [PARENT, PARENT]
+
+
+def test_a_delivered_send_leaves_no_pending_claim(home, sends):
+    assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    rec = fleet.load_registry()["workers"]["lane"]
+    assert "lane_done_pending" not in rec and rec["lane_done_notified"]

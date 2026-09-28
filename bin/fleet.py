@@ -12689,7 +12689,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2602, :2637,
     :2667, :2706, :2743, :2805, :2885, :3849, :8217, :8379, :8576, :8702, :8738, :8909, :8910, :8980,
-    :8990, :9001, :9097, :9612, :12639, :16276, :16277, :16338, :17624, :19516`).
+    :8990, :9001, :9097, :9612, :12639, :16276, :16277, :16338, :17624, :19519`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7173, :7625, :11057,
     :18352. This makes union identity safe; the age boundary distinguishes respawn.
@@ -19475,6 +19475,9 @@ def main(argv=None) -> int:
 #: One pause before the single retry of a transient send refusal (G9 roster
 #: epoch, a peer's in-flight dispatch). Stop hooks allow the bridge 90 seconds.
 LANE_DONE_RETRY_SECONDS = 5.0
+#: A send claimed under the lock but never confirmed (the keeper's 180 s timeout
+#: killed `sup-guard --do` mid-send) is retryable once it is this old.
+LANE_DONE_PENDING_SECONDS = 300
 
 
 def _lane_owned_by_claim(rec: dict, claim: dict, registry: dict) -> bool:
@@ -19587,7 +19590,18 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         turn_key = _lane_done_turn_key(name, rec)
         if rec.get("lane_done_notified") == turn_key:
             return False
-        rec["lane_done_notified"] = turn_key
+        # Claim the send as pending; it becomes delivered only after the send
+        # returns, so a process killed mid-send leaves a retryable finish (N2).
+        pending = rec.get("lane_done_pending")
+        if isinstance(pending, dict) and pending.get("key") == turn_key:
+            try:
+                age = (datetime.now(timezone.utc)
+                       - _parse_iso(pending["at"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                age = None
+            if age is not None and age < LANE_DONE_PENDING_SECONDS:
+                return False
+        rec["lane_done_pending"] = {"key": turn_key, "at": now_iso()}
         save_registry(data)
 
     head = "none"
@@ -19620,19 +19634,30 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
             raise FleetCliError(f"{name}: completion mail send failed ({rc})")
     except Exception:
         # A failed delivery must remain retryable at the next Stop, Codex
-        # observation or guard sweep. Clear only this turn's marker; a
+        # observation or guard sweep. Clear only this turn's pending claim; a
         # concurrent respawn or newer delivery wins over this failed attempt.
-        with fleet_lock():
-            data = read_registry_no_repair()
-            current = data["workers"].get(name)
-            if (isinstance(current, dict)
-                    and current.get("lane_done_notified") == turn_key
-                    and (current.get("session_id") or
-                         current.get("codex_thread_id")) == sid):
-                current.pop("lane_done_notified", None)
-                save_registry(data)
+        _settle_lane_done(name, sid, turn_key, delivered=False)
         raise
+    _settle_lane_done(name, sid, turn_key, delivered=True)
     return True
+
+
+def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
+    """Resolve this turn's pending LANE-DONE claim: delivered, or retryable."""
+    with fleet_lock():
+        data = read_registry_no_repair()
+        current = data["workers"].get(name)
+        if not (isinstance(current, dict)
+                and (current.get("session_id") or current.get("codex_thread_id")) == sid):
+            return
+        pending = current.get("lane_done_pending")
+        if isinstance(pending, dict) and pending.get("key") == turn_key:
+            current.pop("lane_done_pending", None)
+        elif not delivered:
+            return
+        if delivered:
+            current["lane_done_notified"] = turn_key
+        save_registry(data)
 
 
 def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
