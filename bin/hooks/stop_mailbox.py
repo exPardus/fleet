@@ -299,7 +299,7 @@ def _lane_done_candidate(session_id, home):
     Most Stops have no spawning supervisor. Avoid starting a CLI process for
     them, especially one that could consume the hook's 90-second allowance.
     The owner is matched as fleet matches it: the claim lineage stamped at
-    spawn, or the spawner sid inside the holder row's sid union -- every
+    spawn (or one the claim adopted by seize), or the spawner sid inside the holder row's sid union -- every
     `fleet send` wake rotates the supervisor's sid within one incarnation.
     """
     try:
@@ -329,7 +329,9 @@ def _lane_done_candidate(session_id, home):
         return False
     if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
         return False
-    if lineage and claim.get("lineage_id") == lineage:
+    adopted = claim.get("adopted_lineages")
+    if lineage and (claim.get("lineage_id") == lineage or (
+            isinstance(adopted, list) and lineage in adopted)):
         return True
     if claim.get("provider") == "codex":
         holder = claim.get("holder")

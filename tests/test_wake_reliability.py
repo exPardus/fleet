@@ -263,3 +263,109 @@ def test_boot_bundle_refusal_still_delivers_the_nonce(tmp_path, monkeypatch, cap
                  if line.startswith("NONCE: "))
     assert fleet.nonce_digest(nonce) == claim["nonce_hash"]
     assert "VERDICT: claim" in out
+
+
+# Y1 -- a seize or limit-transfer successor hears the seized claim's lanes ---
+
+def _seized_lane(home, *, adopted):
+    """The PX shape at 10:21Z 09-28: gen-19 seized fc6b; the lane was spawned
+    by fc6b's body under fc6b's lineage, which no current row carries."""
+    data = fleet.load_registry()
+    data["workers"]["lane"].update({"spawned_by": "sid-of-the-seized-body",
+                                    "spawned_by_lineage": "lin-seized"})
+    fleet.save_registry(data)
+    claim = fleet.read_incarnation()
+    claim["claimed_via"] = "seize"
+    if adopted is not None:
+        claim["adopted_lineages"] = adopted
+    fleet.write_incarnation(claim)
+
+
+def test_seized_predecessor_lane_is_delivered_to_the_successor(home, sends):
+    _seized_lane(home, adopted=["lin-seized"])
+    assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    assert sends == [(PARENT, "LANE-DONE lane idle none")]
+
+
+def test_without_adoption_a_seized_lane_is_still_silent(home, sends):
+    _seized_lane(home, adopted=None)
+    assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    assert sends == []
+
+
+def test_adoption_does_not_reach_an_unrelated_lineage(home, sends):
+    _seized_lane(home, adopted=["lin-some-other-generation", 7, None])
+    assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=_no_git)
+    assert sends == []
+
+
+def test_stop_precheck_passes_for_an_adopted_lineage(home):
+    _seized_lane(home, adopted=["lin-seized"])
+    assert _load_hook()._lane_done_candidate(LANE_SID, str(home)) is True
+    _seized_lane(home, adopted=["lin-other"])
+    assert _load_hook()._lane_done_candidate(LANE_SID, str(home)) is False
+
+
+def test_sweep_delivers_an_adopted_lane(home, sends, monkeypatch):
+    monkeypatch.setattr(fleet, "has_fresh_outcome", lambda *a, **k: True)
+    _seized_lane(home, adopted=["lin-seized"])
+    assert fleet.sweep_lane_done(_roster(), run=_no_git) == ["lane"]
+    assert sends == [(PARENT, "LANE-DONE lane idle none")]
+
+
+def test_adoption_is_lane_done_only_never_mutation_ownership():
+    """§6.2: the seizing body proves its OWN new lineage; the old body's
+    workers stay foreign to kill/send-style guards."""
+    rec = {"spawned_by": "sid-of-the-seized-body", "spawned_by_lineage": "lin-seized"}
+    assert fleet._worker_is_foreign(rec, "sid-new", claim_lineage="lin-new")
+
+
+def _sup_boot(tmp_path, monkeypatch, claim):
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    (tmp_path / "supervisor").mkdir()
+    (tmp_path / "supervisor" / "GOALS.md").write_text("# Goals\n", encoding="utf-8")
+    (tmp_path / "state").mkdir()
+    fleet.write_incarnation(claim)
+    roster = json.dumps([{"sessionId": "sid-me", "status": "busy"}])
+    run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout=roster, stderr="")
+    fleet.cmd_sup_boot(SimpleNamespace(sid="sid-me", handoff_inc=None),
+                       which=lambda n: "/fake/claude", run=run)
+    return fleet.read_incarnation()
+
+
+def test_seize_adopts_the_seized_claims_lineage_chain(tmp_path, monkeypatch, capsys):
+    stale = _iso(datetime.now(timezone.utc) - timedelta(hours=3))
+    claim = _sup_boot(tmp_path, monkeypatch, {
+        "incarnation_id": "inc-seized", "session_id": "sid-dead",
+        "claimed_at": stale, "heartbeat_at": stale, "claimed_via": "seize",
+        "lineage_id": "lin-seized", "adopted_lineages": ["lin-older", "lin-seized"]})
+    assert "VERDICT: seize" in capsys.readouterr().out
+    assert claim["claimed_via"] == "seize"
+    assert claim["lineage_id"] not in ("lin-seized", "lin-older")   # re-minted (§6.2)
+    assert claim["adopted_lineages"] == ["lin-seized", "lin-older"]
+
+
+def test_seize_chain_is_bounded():
+    pred = {"lineage_id": "lin-0",
+            "adopted_lineages": [f"lin-{i}" for i in range(1, 40)]}
+    chain = fleet._seize_adopted_lineages(pred)
+    assert chain[0] == "lin-0" and len(chain) == fleet.ADOPTED_LINEAGES_MAX
+
+
+def test_a_fresh_claim_after_release_adopts_nothing(tmp_path, monkeypatch, capsys):
+    claim = _sup_boot(tmp_path, monkeypatch, {
+        "incarnation_id": "inc-released", "lineage_id": "lin-released",
+        "adopted_lineages": ["lin-older"], "state": "released",
+        "released_at": _iso(datetime.now(timezone.utc))})
+    assert "VERDICT: claim" in capsys.readouterr().out
+    assert "adopted_lineages" not in claim
+
+
+def test_handoff_carries_the_adopted_chain():
+    new = {"lineage_id": "lin-kept"}
+    fleet._carry_adopted_lineages({"lineage_id": "lin-kept",
+                                   "adopted_lineages": ["lin-seized"]}, new)
+    assert new["adopted_lineages"] == ["lin-seized"]
+    empty = {}
+    fleet._carry_adopted_lineages({"lineage_id": "lin-kept"}, empty)
+    assert empty == {}

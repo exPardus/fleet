@@ -821,18 +821,18 @@ def _quarantine_artifacts() -> list:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
       * `_sweep_husks` (:9586) -- hidden records can still own roster sessions.
       * `_doctor_check_autoclean` (:10481) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:13734) -- legacy upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:13778) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2798) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:13608) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:13652) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:3452) -- expose that distinction to views.
       * `_doctor_check_registry` (:10731) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5891) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15131) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15175) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2780,7 +2780,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13734`), because legacy upgrades also require a complete registry.
+    (`:13778`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:899`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -12370,6 +12370,45 @@ def mint_lineage_id() -> str:
     return f"lin-{stamp}-{uuid.uuid4().hex[:4]}"
 
 
+#: Claim key: predecessor lineages whose lanes this claim receives LANE-DONE for.
+ADOPTED_LINEAGES_KEY = "adopted_lineages"
+#: Bound on the seize chain one claim carries; older generations' lanes are long dead.
+ADOPTED_LINEAGES_MAX = 16
+
+
+def _adopted_lineages(claim) -> list:
+    """The claim's adopted predecessor lineages, newest first; malformed -> []."""
+    raw = claim.get(ADOPTED_LINEAGES_KEY) if isinstance(claim, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [lin for lin in raw if isinstance(lin, str) and lin]
+
+
+def _seize_adopted_lineages(predecessor) -> list:
+    """Lineages a seize or limit-transfer successor adopts for lane-done only.
+
+    The seized claim's own lineage plus everything it had adopted, so a chain
+    of seizes keeps delivering. Adoption is LANE-DONE ownership, never
+    worker-mutation ownership: the successor's lineage stays freshly minted
+    (see `mint_lineage_id`) and `_worker_is_foreign` never reads this list.
+    """
+    if not isinstance(predecessor, dict):
+        return []
+    chain = []
+    own = predecessor.get("lineage_id")
+    for lin in ([own] if isinstance(own, str) and own else []) + _adopted_lineages(predecessor):
+        if lin not in chain:
+            chain.append(lin)
+    return chain[:ADOPTED_LINEAGES_MAX]
+
+
+def _carry_adopted_lineages(old_claim, new_claim) -> None:
+    """Planned succession (handoff) keeps the adopted chain, in place."""
+    adopted = _adopted_lineages(old_claim)
+    if adopted:
+        new_claim[ADOPTED_LINEAGES_KEY] = adopted
+
+
 _SUPERVISOR_ENTRY_RE = re.compile(
     r"^## (?P<ts>\S+) (?P<kind>[A-Z][A-Z-]*) inc=(?P<inc>\S+) sid=(?P<sid>\S+)"
     # Optional item-28 substrate token; entries predating it parse with None.
@@ -12650,10 +12689,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2602, :2637,
     :2667, :2706, :2743, :2805, :2885, :3849, :8217, :8379, :8576, :8702, :8738, :8909, :8910, :8980,
-    :8990, :9001, :9097, :9612, :12600, :16226, :16227, :16288, :17574, :19459`).
+    :8990, :9001, :9097, :9612, :12639, :16270, :16271, :16332, :17618, :19510`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7173, :7625, :11057,
-    :18298. This makes union identity safe; the age boundary distinguishes respawn.
+    :18346. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13194,11 +13233,16 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                     pass
                 # Recovery literal writer: mint a new lineage for seize and limit-transfer.
                 # A parked predecessor can return; it has not vouched for transfer of worker ownership.
+                # Its running lanes still need someone to hear them finish (Y1): adopt its
+                # lineage chain for LANE-DONE delivery only.
                 taken = {"incarnation_id": inc, "session_id": caller_sid,
                          "claimed_at": now_iso(), "heartbeat_at": now_iso(),
                          "claimed_via": verdict if verdict != "seize" else "seize",
                          "nonce_hash": nonce_digest(value), "nonce_seq": 1,
                          "lineage_id": mint_lineage_id()}
+                adopted = _seize_adopted_lineages(claim)
+                if adopted:
+                    taken[ADOPTED_LINEAGES_KEY] = adopted
                 _carry_handoff_pending(claim, taken)
                 write_incarnation(taken)
                 supervisor_journal_append(kind, inc, caller_sid,
@@ -13363,7 +13407,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7173, :7625, :11057,
-    # :18298) -- so union identity cannot make one body answer for another.
+    # :18346) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -13371,7 +13415,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:899`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:12574`).
+        # names this gate as its reason (`:12613`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -17609,6 +17653,7 @@ def _rollback_codex_handoff_activation(successor_inc, operation_id):
             "claimed_at": predecessor.get("claimed_at") or now_iso(),
             "heartbeat_at": now_iso(),
         }
+        _carry_adopted_lineages(predecessor, restored)
         prior_operation = predecessor.get("last_operation_id")
         if prior_operation is not None:
             restored["last_operation_id"] = prior_operation
@@ -17846,6 +17891,8 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
                     "kind": "handoff-turn/start",
                 },
             }
+            _carry_adopted_lineages(claim, predecessor)
+            _carry_adopted_lineages(claim, activating)
             data["workers"][successor_name] = successor
             write_incarnation(activating)
             save_registry(data)
@@ -18279,6 +18326,7 @@ def cmd_sup_handoff_complete(args, run=subprocess.run, which=shutil.which) -> in
                      "claimed_at": now_iso(), "heartbeat_at": now_iso(),
                      "claimed_via": "handoff",
                      "lineage_id": claim.get("lineage_id")}
+        _carry_adopted_lineages(claim, new_claim)
         if carried:
             new_claim[HANDOFF_PENDING_KEY] = carried
         succ_nonce_hash = hs.get("nonce_hash")
@@ -19428,12 +19476,15 @@ def _lane_owned_by_claim(rec: dict, claim: dict, registry: dict) -> bool:
 
     Every `fleet send` wake gives the supervisor a new sid in the same
     incarnation, so `spawned_by` is often a retired sid of the holder's row.
-    Ownership is the claim lineage stamped at spawn, or `spawned_by` inside the
-    holder row's sid union (current + retired sids).
+    Ownership is the claim lineage stamped at spawn, a predecessor lineage the
+    claim adopted by seize or limit-transfer (`adopted_lineages`), or
+    `spawned_by` inside the holder row's sid union (current + retired sids).
     """
     lineage = claim.get("lineage_id")
-    if (isinstance(lineage, str) and lineage
-            and rec.get("spawned_by_lineage") == lineage):
+    spawned_lineage = rec.get("spawned_by_lineage")
+    if isinstance(spawned_lineage, str) and spawned_lineage and (
+            spawned_lineage == lineage
+            or spawned_lineage in _adopted_lineages(claim)):
         return True
     parent_sid = rec.get("spawned_by")
     if not isinstance(parent_sid, str) or not parent_sid:
