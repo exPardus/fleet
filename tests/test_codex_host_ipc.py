@@ -117,7 +117,9 @@ def _ensure(tmp_path, home=None):
         home,
         app_server_command=[str(_fake_app_server(tmp_path))],
         env=env,
-        ready_timeout=5,
+        # Readiness is polled, so a wide bound costs nothing when the host is
+        # quick; 5s timed out once under a loaded full-suite run (w105).
+        ready_timeout=20,
         idle_timeout=30,
     )
     return module, client, log
