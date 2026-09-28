@@ -1454,6 +1454,12 @@ def _q_outline_rels(root, raw) -> list:
         out.append(resolved.relative_to(Path(root).resolve()).as_posix())
     except (ValueError, OSError):
         pass
+    # An absolute path is never a root-relative pointer line: it names its
+    # own location, so the resolved candidate above is the whole answer. The
+    # raw fallback would flatten `/elsewhere/x.py` to `elsewhere/x.py` and
+    # report an unknown file instead of the outside-root refusal.
+    if Path(str(raw)).expanduser().is_absolute():
+        return out
     # An invalid raw spelling must not discard a valid resolved candidate: a
     # caller may use docs/../src/api.py while the canonical rel is src/api.py.
     try:

@@ -26,6 +26,17 @@ import fleet
 from fleet_sources import fleet_implementation_source
 
 
+def _drive_qualified(path):
+    """`path` spelled drive-qualified on every OS.
+
+    On Windows `as_posix()` of a tmp path already carries `C:`; on POSIX it
+    is `/tmp/...`, which the canonicaliser deliberately flattens to an
+    in-root relative (see the counterweight test). Prefixing a drive keeps
+    these pins about the drive-qualified shape on both platforms."""
+    spelled = Path(path).as_posix()
+    return spelled if PureWindowsPath(spelled).drive else "C:" + spelled
+
+
 def _write(path, text):
     """Write `text` with LF newlines on every platform, creating parents."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1491,7 +1502,7 @@ class TestPathContainment:
         outside = victim_dir / "secret.py"
         _write(outside, "def leaked_symbol():\n    pass\n")
         with pytest.raises(fleet.IndexPathError):
-            fleet.verified_shard_rows(root, outside.as_posix())
+            fleet.verified_shard_rows(root, _drive_qualified(outside))
         assert not Path(str(outside) + fleet.INDEX_SHARD_SUFFIX).exists()
         assert precious.read_bytes() == b"do not delete\n"
 
@@ -1505,7 +1516,7 @@ class TestPathContainment:
         victim_dir, precious = _victim(tmp_path)
         _write(victim_dir / "precious", "def clobber_me():\n    pass\n")
         with pytest.raises(fleet.IndexPathError):
-            fleet.verified_shard_rows(root, (victim_dir / "precious").as_posix())
+            fleet.verified_shard_rows(root, _drive_qualified(victim_dir / "precious"))
         assert precious.read_bytes() == b"do not delete\n"
 
     def test_the_update_library_surface_refuses_a_drive_qualified_rel(
@@ -1513,7 +1524,7 @@ class TestPathContainment:
         root = _indexed_tree(tmp_path, {"a.py": "X = 1\n"})
         victim_dir, precious = _victim(tmp_path)
         with pytest.raises(fleet.IndexPathError):
-            fleet.update_index(root, [(victim_dir / "precious").as_posix()])
+            fleet.update_index(root, [_drive_qualified(victim_dir / "precious")])
         assert precious.read_bytes() == b"do not delete\n"
 
     # --- the reparse-point half: ordinary segments, real link ---------------
