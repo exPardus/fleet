@@ -376,7 +376,8 @@ class TestTheCensus:
         assert len(shaped) >= 6, f"sweep found only {sorted(shaped)}"
 
     def test_the_heartbeat_census_has_no_hole(self, tree):
-        """MEASURED: 9 write sites, all inside a supervisor claim-holder verb.
+        """MEASURED: 17 write sites (9 Claude-route, 8 native Codex route),
+        all inside a supervisor claim-holder verb or its Codex counterpart.
 
         `cmd_wave_close` joined on 2026-09-11 and is named explicitly rather
         than loosening the scope rule. A close IS a supervisor turn -- a
@@ -393,9 +394,19 @@ class TestTheCensus:
         writes = _key_write_lines(tree, "heartbeat_at")
         smap = _scope_map(tree)
         scopes = sorted({smap.get(ln, "<module>") for ln in writes})
-        assert len(writes) == 9, f"heartbeat writers moved: {writes}"
+        # w105: the native Codex supervisor route joined with 8 sites. Its
+        # claim carries its own `heartbeat_at` (codex-native-integration spec
+        # §6) and these are that route's lifecycle steps -- preclaim, turn
+        # commit, rollback restore, activation reconcile, checkpoint and
+        # handoff -- named here one by one rather than widening the predicate.
+        codex_route = {
+            "_commit_codex_supervisor_operation", "_cmd_codex_sup_checkpoint",
+            "_reconcile_codex_activating", "_dispatch_codex_supervisor_body",
+            "_rollback_codex_handoff_activation", "_cmd_codex_sup_handoff_begin",
+        }
+        assert len(writes) == 17, f"heartbeat writers moved: {writes}"
         assert all(s.startswith("cmd_sup_") or s.startswith("_cmd_sup_")
-                   or s == "cmd_wave_close"
+                   or s == "cmd_wave_close" or s in codex_route
                    for s in scopes), scopes
 
         # CONTROL: reconcile against the raw text. Anything the AST did not
