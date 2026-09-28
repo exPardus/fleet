@@ -137,6 +137,35 @@ def test_stale_missing_or_dead_holder_with_working_lane_dispatches(
     assert capsys.readouterr().out == "DISPATCH\n"
 
 
+# N1c (w108 review): each case differs from the WAKE shape above in exactly
+# one condition of the idle-holder predicate, so dropping that condition from
+# _sup_guard_observe turns its DISPATCH into WAKE.
+@pytest.mark.parametrize("variant", ["foreign_lane", "idle_lane",
+                                     "supervisor_shaped_row"])
+def test_stale_idle_holder_without_an_owned_working_lane_dispatches(
+        home, monkeypatch, capsys, variant):
+    claim = fleet.read_incarnation()
+    claim["lineage_id"] = "current-lineage"
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][BODY]["status"] = "idle"
+    lane = fleet.new_worker_record("lane-sid", str(home), "work", "bypass")
+    lane.update(status="working", spawned_by_lineage="current-lineage")
+    name = "lane"
+    if variant == "foreign_lane":
+        lane.update(spawned_by_lineage="foreign-lineage",
+                    spawned_by="foreign-sid")
+    elif variant == "idle_lane":
+        lane["status"] = "idle"
+    else:
+        name = "sup|inc-guard|successor"
+        assert fleet._is_supervisor_shaped(name)
+    data["workers"][name] = lane
+    fleet.save_registry(data)
+    run_guard(monkeypatch, snapshot())
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
 def test_unreadable_registry_is_page_not_dispatch(home, monkeypatch, capsys):
     broken = {"ok": False, "reason": "quarantined", "workers": [],
               "supervisor": {"goals_active": True, "state": "held",
