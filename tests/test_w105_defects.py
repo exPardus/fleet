@@ -4,6 +4,9 @@
    hand-edited or half-written row: `cwd`, `session_id`, `task`,
    `retired_sids` all null). w103 fixed the null-sid half; this pins the
    whole-row case so a later path-keyed sweep cannot regress it.
+2. `fleet result` (the /fleet:result view's verb) on a native Codex
+   supervisor persisted its observation through `load_registry`, so a view
+   could quarantine a corrupt registry. It now refuses without renaming.
 """
 import argparse
 import json
@@ -44,3 +47,16 @@ def test_clean_dead_only_survives_a_row_with_null_path_and_sid(home, capsys):
     assert rc == 0
     assert "null-row" not in fleet.load_registry()["workers"]
     assert "removed null-row" in capsys.readouterr().out
+
+
+def test_codex_result_persistence_refuses_a_corrupt_registry_without_quarantine(home):
+    registry = fleet.registry_path()
+    registry.write_text("{not json", encoding="utf-8")
+    with pytest.raises(fleet.RegistryCorruptError):
+        fleet._persist_codex_result_observation(
+            SimpleNamespace(name="supervisor"),
+            {"provider_status": "idle", "turn_status": "completed"}, None)
+    assert registry.read_text(encoding="utf-8") == "{not json"
+    assert not [p for p in registry.parent.iterdir()
+                if p.name.startswith(registry.name + ".")
+                and "corrupt" in p.name]

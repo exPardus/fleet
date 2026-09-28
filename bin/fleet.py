@@ -6221,7 +6221,9 @@ def _persist_codex_result_observation(binding, observed: dict,
 
     with fleet_lock():
         claim = read_incarnation()
-        data = load_registry()
+        # `fleet result` is the /fleet:result view's verb: it may refuse on a
+        # corrupt registry but never quarantine it (views doctrine).
+        data = read_registry_no_repair()
         current = _codex_supervisor_binding(
             claim, data, expected_name=binding.name)
         if (current.incarnation_id != binding.incarnation_id

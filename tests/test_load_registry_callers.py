@@ -182,10 +182,33 @@ ALLOWED = {
     "cmd_respawn", "_cmd_respawn_native", "cmd_interrupt", "_cmd_interrupt_native",
     # item 29: the codex (mcx) halves of the same verbs -- every load_registry
     # call in them sits inside `with fleet_lock():`, same as the native halves.
-    "_cmd_spawn_codex", "_cmd_send_codex", "_cmd_interrupt_codex",
+    # `_cmd_spawn_codex` itself no longer calls it: it routes to the two spawn
+    # halves below, which do.
+    "_cmd_send_codex", "_cmd_interrupt_codex",
     "_cmd_kill_codex", "_cmd_respawn_codex",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
     "_cmd_kill_codex_native",
+    # w105: the native Codex worker and supervisor paths (codex-native-
+    # integration spec). Each entry was audited from the AST: every
+    # `load_registry` call in it sits LEXICALLY inside `with fleet_lock():`,
+    # and each is reached only from a mutating verb (spawn, send, kill,
+    # sup-spawn, sup-checkpoint, sup-release, sup-handoff-begin,
+    # sup-reconcile) -- never from a view. `_persist_codex_result_observation`
+    # was the one view-reached site (`fleet result`, /fleet:result) and now
+    # reads via `read_registry_no_repair` instead.
+    "_cmd_spawn_codex_native", "_cmd_spawn_codex_mcx",
+    "_freeze_codex_preclaim", "_rollback_codex_preclaim",
+    "_reserve_codex_supervisor_operation", "_clear_codex_supervisor_operation",
+    "_commit_codex_supervisor_operation",
+    "_dispatch_codex_supervisor_body", "_freeze_codex_supervisor_preclaim",
+    "_rollback_codex_supervisor_preclaim",
+    "_cmd_codex_sup_checkpoint", "_cmd_codex_sup_release",
+    "_cmd_codex_sup_handoff_begin", "_freeze_codex_handoff_activation",
+    "_rollback_codex_handoff_activation",
+    "cmd_sup_reconcile", "_reconcile_codex_activating",
+    "_call_codex_activating_recovery", "_reconcile_codex_handoff_predecessor",
+    "_freeze_codex_predecessor_retirement",
+    "_finalize_codex_predecessor_retirement",
     "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",
     "_sweep_husks", "_expire_tombstones",
