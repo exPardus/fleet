@@ -23,6 +23,21 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
+def _place_interpreter(directory: Path) -> Path:
+    """Put the running interpreter at ``directory`` under its own name.
+
+    A symlink first: a relocatable-prefix build (uv's python-build-standalone)
+    finds its stdlib relative to the real binary, so a bare COPY dies with
+    "Could not find platform independent libraries". The copy remains the
+    fallback where symlinks are not permitted (unprivileged Windows)."""
+    interpreter = directory / Path(sys.executable).name
+    try:
+        interpreter.symlink_to(Path(sys.executable).resolve())
+    except (OSError, NotImplementedError):
+        shutil.copy2(sys.executable, interpreter)
+    return interpreter
+
+
 def _write_registry(home, workers):
     (home / "state" / "fleet.json").write_text(
         json.dumps({"workers": workers}), encoding="utf-8"
@@ -1113,8 +1128,7 @@ class TestCollaboratorInstall:
         host, so this does not depend on where the host keeps its pythons."""
         spaced = tmp_path / "py thon dir"
         spaced.mkdir()
-        interpreter = spaced / Path(sys.executable).name
-        shutil.copy2(sys.executable, interpreter)
+        interpreter = _place_interpreter(spaced)
         assert " " in str(interpreter)
 
         script = tmp_path / "say.py"
@@ -1141,8 +1155,7 @@ class TestCollaboratorInstall:
         override is unambiguously multi-word and nothing else."""
         plain = tmp_path / "nospace"
         plain.mkdir()
-        interpreter = plain / Path(sys.executable).name
-        shutil.copy2(sys.executable, interpreter)
+        interpreter = _place_interpreter(plain)
         assert " " not in str(interpreter)
 
         script = tmp_path / "say.py"
