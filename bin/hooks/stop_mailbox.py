@@ -298,6 +298,9 @@ def _lane_done_candidate(session_id, home):
 
     Most Stops have no spawning supervisor. Avoid starting a CLI process for
     them, especially one that could consume the hook's 90-second allowance.
+    The owner is matched as fleet matches it: the claim lineage stamped at
+    spawn, or the spawner sid inside the holder row's sid union -- every
+    `fleet send` wake rotates the supervisor's sid within one incarnation.
     """
     try:
         with open(os.path.join(home, "state", "fleet.json"),
@@ -308,29 +311,44 @@ def _lane_done_candidate(session_id, home):
     workers = data.get("workers") if isinstance(data, dict) else None
     if not isinstance(workers, dict):
         return False
-    for name, rec in workers.items():
-        if (not isinstance(rec, dict) or rec.get("session_id") != session_id
-                or not isinstance(name, str)):
+    name, rec = next(((n, r) for n, r in workers.items()
+                      if isinstance(r, dict) and isinstance(n, str)
+                      and r.get("session_id") == session_id), (None, None))
+    if rec is None or name.startswith("sup|"):
+        return False
+    parent_sid = rec.get("spawned_by")
+    lineage = rec.get("spawned_by_lineage")
+    if not (isinstance(parent_sid, str) and parent_sid) and not (
+            isinstance(lineage, str) and lineage):
+        return False
+    try:
+        with open(os.path.join(home, "supervisor", "INCARNATION"),
+                  "r", encoding="utf-8") as f:
+            claim = json.load(f)
+    except FileNotFoundError:
+        return False
+    if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+        return False
+    if lineage and claim.get("lineage_id") == lineage:
+        return True
+    if claim.get("provider") == "codex":
+        holder = claim.get("holder")
+        holder_sid = holder.get("thread_id") if isinstance(holder, dict) else None
+        return bool(parent_sid) and holder_sid == parent_sid
+    holder_sid = claim.get("session_id")
+    if not parent_sid or not isinstance(holder_sid, str) or not holder_sid:
+        return False
+    if holder_sid == parent_sid:
+        return True
+    for row in workers.values():
+        if not isinstance(row, dict):
             continue
-        if name.startswith("sup|"):
-            return False
-        parent_sid = rec.get("spawned_by")
-        if not isinstance(parent_sid, str) or not parent_sid:
-            return False
-        try:
-            with open(os.path.join(home, "supervisor", "INCARNATION"),
-                      "r", encoding="utf-8") as f:
-                claim = json.load(f)
-        except FileNotFoundError:
-            return False
-        if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
-            return False
-        if claim.get("provider") == "codex":
-            holder = claim.get("holder")
-            holder_sid = holder.get("thread_id") if isinstance(holder, dict) else None
-        else:
-            holder_sid = claim.get("session_id")
-        return holder_sid == parent_sid
+        sids = {row.get("session_id")}
+        retired = row.get("retired_sids")
+        if isinstance(retired, list):
+            sids.update(retired)
+        if holder_sid in sids:
+            return parent_sid in sids
     return False
 
 

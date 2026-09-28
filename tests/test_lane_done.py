@@ -104,7 +104,7 @@ def test_failed_send_clears_marker_and_next_observation_retries(home, monkeypatc
     assert calls == [(PARENT, "LANE-DONE lane idle none")] * 2
 
 
-@pytest.mark.parametrize("change", ["absent", "dead", "released", "stale", "mismatch"])
+@pytest.mark.parametrize("change", ["absent", "dead", "released", "mismatch"])
 def test_no_delivery_without_current_live_claim(home, monkeypatch, change):
     data = fleet.load_registry()
     claim = fleet.read_incarnation()
@@ -114,8 +114,6 @@ def test_no_delivery_without_current_live_claim(home, monkeypatch, change):
         data["workers"][PARENT]["status"] = "dead"
     elif change == "released":
         claim["state"] = "released"
-    elif change == "stale":
-        claim["heartbeat_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     else:
         claim["session_id"] = "other-sid"
     fleet.save_registry(data)

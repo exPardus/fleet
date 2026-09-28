@@ -6496,6 +6496,10 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
 
 # CLI steering and hybrid commands (SPEC §5, §9, §14).
 
+class TransientSendRefusal(FleetCliError):
+    """A send refused on evidence that clears by itself; retrying is safe."""
+
+
 def _cmd_send_native(name: str, message: str,
                      run=subprocess.run, which=shutil.which, sleep=time.sleep) -> int:
     """Queue mail for a working worker or fork-steer an idle one.
@@ -6521,7 +6525,7 @@ def _cmd_send_native(name: str, message: str,
         # roster snapshot (fetch failure, or an empty roster while this
         # worker's own last-committed record still claims a live turn).
         if native_epoch_suspicious(roster_ok, roster_entries, {name: rec}):
-            raise FleetCliError(
+            raise TransientSendRefusal(
                 f"{name}: roster fetch unavailable/suspicious (G9) -- "
                 "refusing to send while native verdicts are frozen; retry shortly"
             )
@@ -11604,6 +11608,10 @@ SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS = 4 * SUPERVISOR_LATEST_ENTRY_MAX_CHARS
 # roster without leaving the cap effectively unbounded; the untested 40,000
 # predecessor was never exercised by a test and left slack nobody had measured.
 SUPERVISOR_BUNDLE_MAX_CHARS = 20_000
+#: GOALS.md is inlined up to this many chars, then a pointer to the file, the
+#: way inlined journal bodies are capped. An uncapped GOALS alone could push the
+#: bundle past its backstop after sup-boot has already rotated the generation.
+SUPERVISOR_BOOT_GOALS_MAX_CHARS = 8_000
 
 _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
@@ -13007,6 +13015,10 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
         goals = goals_path().read_text(encoding="utf-8").rstrip()
     except OSError:
         goals = "(supervisor/GOALS.md missing)"
+    if len(goals) > SUPERVISOR_BOOT_GOALS_MAX_CHARS:
+        cut = len(goals) - SUPERVISOR_BOOT_GOALS_MAX_CHARS
+        goals = (goals[:SUPERVISOR_BOOT_GOALS_MAX_CHARS].rstrip()
+                 + f"\n...[truncated {cut} chars -- full text: supervisor/GOALS.md]")
     out += ["", "--- supervisor/GOALS.md ---", goals]
     out += ["", f"--- supervisor/JOURNAL.md tail (last {SUPERVISOR_BOOT_JOURNAL_TAIL}; "
                  "CHECKPOINT/PROPOSAL bodies inlined newest-first, bookkeeping "
@@ -13197,8 +13209,21 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
 
     # Board probes use the local OS/git surfaces; ``run`` here is the injected
     # Claude-roster transport and many callers intentionally fake only that API.
-    bundle = _render_boot_bundle(entries, status_snapshot(), supervisor_journal_entries(),
-                                 caller_sid=caller_sid)
+    try:
+        bundle = _render_boot_bundle(entries, status_snapshot(),
+                                     supervisor_journal_entries(),
+                                     caller_sid=caller_sid)
+    except FleetCliError:
+        # The claim decision above is already committed. A refused bundle
+        # must not also swallow the generation it minted: print the verdict
+        # and the plaintext once, then surface the refusal.
+        lines = [f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]
+        if inc_line:
+            lines.append(f"INCARNATION: {inc_line}")
+        lines.append(f"VERDICT: {verdict} -- {reason}")
+        _write_text_tolerating_console_encoding("\n".join(lines) + "\n")
+        _deliver_notices(notices)
+        raise
     # Run lifecycle reaping only after successful boot; successors skip it.
     reap_line = (_supervisor_reap_line(run=run, which=which, caller_sid=caller_sid)
                  if rc == 0 and not getattr(args, "handoff_inc", None) else
@@ -16473,7 +16498,16 @@ def _codex_sup_guard_observe():
             "reason": "native supervisor state is ambiguous"}
 
 
-def _cmd_codex_sup_guard(args) -> int:
+def _sup_guard_lane_sweep(roster_fn=None) -> list:
+    """Run the lane-done backstop; its failure never changes the verdict."""
+    try:
+        return sweep_lane_done(roster_fn)
+    except Exception as exc:  # noqa: BLE001 -- the guard must still decide
+        print(f"fleet: sup-guard lane-done sweep failed: {exc}", file=sys.stderr)
+        return []
+
+
+def _cmd_codex_sup_guard(args, lane_done=()) -> int:
     do = getattr(args, "do", False)
     observation = _codex_sup_guard_observe()
     if do and observation.get("verdict") == "WAKE":
@@ -16500,7 +16534,8 @@ def _cmd_codex_sup_guard(args) -> int:
     reason = observation.get("reason", "native observation unavailable")
     line = _sup_guard_line(verdict, reason, observation.get("body_name"))
     if getattr(args, "json", False):
-        output = {**observation, "verdict": line, "sent": sent}
+        output = {**observation, "verdict": line, "sent": sent,
+                  "lane_done_sent": list(lane_done)}
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
     else:
         print(line)
@@ -16514,9 +16549,12 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
     liveness again. Plain output uses the four-verdict interface, including OK.
     """
     claim = read_incarnation()
-    if isinstance(claim, dict) and claim.get("provider") == "codex":
-        return _cmd_codex_sup_guard(args)
     do = getattr(args, "do", False)
+    # Backstop for the Stop-hook bridge: an owned lane's finished turn that was
+    # never delivered wakes (or mails) the holder here, before the verdict.
+    lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
+    if isinstance(claim, dict) and claim.get("provider") == "codex":
+        return _cmd_codex_sup_guard(args, lane_done=lane_done)
     observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
     if do:
         # Only the WAKE path retries deferred fork retirement. OK and PAGE
@@ -16528,10 +16566,17 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
     sent, rc = False, 0
     if do and verdict == "WAKE":
         try:
-            with redirect_stdout(io.StringIO()):
-                rc = cmd_send(SimpleNamespace(
-                    name=SUPERVISOR_BODY_NAME,
-                    message="@supervisor/briefs/wake.md", nonce=None))
+            for attempt in (1, 2):
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        rc = cmd_send(SimpleNamespace(
+                            name=SUPERVISOR_BODY_NAME,
+                            message="@supervisor/briefs/wake.md", nonce=None))
+                    break
+                except TransientSendRefusal:
+                    if attempt == 2:
+                        raise
+                    time.sleep(LANE_DONE_RETRY_SECONDS)
             sent = rc == 0
             if not sent:
                 verdict, reason = "PAGE", "supervisor wake send failed"
@@ -16549,7 +16594,8 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
             verdict, reason, detail, rc = next_verdict, next_reason, next_detail, 0
     line = _sup_guard_line(verdict, reason, detail.get("body_name"))
     if getattr(args, "json", False):
-        output = {"verdict": line, "reason": reason, **detail, "sent": sent}
+        output = {"verdict": line, "reason": reason, **detail, "sent": sent,
+                  "lane_done_sent": lane_done}
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
     else:
         print(line)
@@ -19319,12 +19365,87 @@ def main(argv=None) -> int:
         return 1
 
 
-def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
-                     run=subprocess.run) -> bool:
-    """Deliver one completion line to the lane's current, live claim holder.
+#: One pause before the single retry of a transient send refusal (G9 roster
+#: epoch, a peer's in-flight dispatch). Stop hooks allow the bridge 90 seconds.
+LANE_DONE_RETRY_SECONDS = 5.0
 
-    The registry marker is per turn so repeated Stop calls and repeated Codex
-    observations cannot send a second wake. No claim credential is inspected.
+
+def _lane_owned_by_claim(rec: dict, claim: dict, registry: dict) -> bool:
+    """Whether the current claim owns the lane, across supervisor sid rotation.
+
+    Every `fleet send` wake gives the supervisor a new sid in the same
+    incarnation, so `spawned_by` is often a retired sid of the holder's row.
+    Ownership is the claim lineage stamped at spawn, or `spawned_by` inside the
+    holder row's sid union (current + retired sids).
+    """
+    lineage = claim.get("lineage_id")
+    if (isinstance(lineage, str) and lineage
+            and rec.get("spawned_by_lineage") == lineage):
+        return True
+    parent_sid = rec.get("spawned_by")
+    if not isinstance(parent_sid, str) or not parent_sid:
+        return False
+    if claim.get("provider") == "codex":
+        holder = claim.get("holder")
+        return isinstance(holder, dict) and holder.get("thread_id") == parent_sid
+    return parent_sid in (supervisor_claim_sids(claim, registry) or [])
+
+
+def _claim_holder_row_name(claim: dict, registry: dict):
+    """The live supervisor-shaped row carrying the claim holder's identity."""
+    if claim.get("provider") == "codex":
+        holder = claim.get("holder")
+        holder_sid = holder.get("thread_id") if isinstance(holder, dict) else None
+    else:
+        holder_sid = claim.get("session_id")
+    if not isinstance(holder_sid, str) or not holder_sid:
+        return None
+    return next((n for n, r in registry["workers"].items()
+                 if isinstance(r, dict) and _is_supervisor_shaped(n)
+                 and not r.get("archived_at")
+                 and (holder_sid in _record_sids(r)
+                      or r.get("codex_thread_id") == holder_sid)), None)
+
+
+def _last_assistant_uuid(name: str, sid) -> str | None:
+    """The newest assistant entry's uuid in the lane's transcript, or None."""
+    transcript = find_transcript_path(name, sid) if sid else None
+    if transcript is None:
+        return None
+    newest = None
+    for line in _read_tail_lines(transcript):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(entry, dict) and entry.get("type") == "assistant"
+                and isinstance(entry.get("uuid"), str)):
+            newest = entry["uuid"]
+    return newest
+
+
+def _lane_done_turn_key(name: str, rec: dict) -> list:
+    """One key per finished turn, not per dispatch.
+
+    A lane can Stop, then continue in the same dispatch (a background task
+    completes, or Stop-hook mail blocks the stop); its next Stop is a new
+    finish. The newest assistant entry separates them. Without a readable
+    transcript (Codex, or none found) the key is the per-dispatch pair.
+    """
+    sid = rec.get("session_id") or rec.get("codex_thread_id")
+    key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
+    tail = None if _is_codex_record(rec) else _last_assistant_uuid(name, sid)
+    return key + [tail] if tail else key
+
+
+def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
+                     run=subprocess.run, sleep=time.sleep) -> bool:
+    """Deliver one completion line to the claim holder that owns the lane.
+
+    The registry marker is per finished turn so repeated Stop calls, Codex
+    observations and guard sweeps cannot send a second wake. No claim
+    credential is inspected. An idle holder is not heartbeating, so claim age
+    is not a delivery condition; a dead or parked holder row is.
     """
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
@@ -19342,34 +19463,18 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         sid = rec.get("session_id") or rec.get("codex_thread_id")
         if expected_sid is not None and sid != expected_sid:
             return False
-        parent_sid = rec.get("spawned_by")
-        if not isinstance(parent_sid, str) or not parent_sid:
-            return False
         claim = read_incarnation()
         if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
             return False
-        codex_holder = claim.get("holder")
-        holder = (codex_holder.get("thread_id") if isinstance(codex_holder, dict)
-                  else None) if claim.get("provider") == "codex" else claim.get("session_id")
-        if holder != parent_sid:
+        if not _lane_owned_by_claim(rec, claim, data):
             return False
-        try:
-            age = (datetime.now(timezone.utc) - _parse_iso(claim["heartbeat_at"])).total_seconds()
-        except (KeyError, TypeError, ValueError):
-            return False
-        if age > SUPERVISOR_CLAIM_STALE_SECONDS:
-            return False
-        parent_name = next((n for n, r in data["workers"].items()
-                            if isinstance(r, dict) and _is_supervisor_shaped(n)
-                            and not r.get("archived_at")
-                            and (parent_sid in _record_sids(r)
-                                 or r.get("codex_thread_id") == parent_sid)), None)
+        parent_name = _claim_holder_row_name(claim, data)
         if parent_name is None:
             return False
         if data["workers"][parent_name].get("status") in {
                 "dead", "interrupted", "dead-suspected", "limited", "over_ceiling"}:
             return False
-        turn_key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
+        turn_key = _lane_done_turn_key(name, rec)
         if rec.get("lane_done_notified") == turn_key:
             return False
         rec["lane_done_notified"] = turn_key
@@ -19388,17 +19493,25 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
             pass
     message = f"LANE-DONE {name} {status} {head}"
     try:
-        with redirect_stdout(io.StringIO()):
-            if claim.get("provider") == "codex":
-                rc = _cmd_send_codex_supervisor(parent_name, message)
-            else:
-                rc = _cmd_send_native(parent_name, message)
+        for attempt in (1, 2):
+            try:
+                with redirect_stdout(io.StringIO()):
+                    if claim.get("provider") == "codex":
+                        rc = _cmd_send_codex_supervisor(parent_name, message)
+                    else:
+                        rc = _cmd_send_native(parent_name, message)
+                break
+            except TransientSendRefusal:
+                # A G9 roster refusal clears on the next fetch; retry once.
+                if attempt == 2:
+                    raise
+                sleep(LANE_DONE_RETRY_SECONDS)
         if rc != 0:
             raise FleetCliError(f"{name}: completion mail send failed ({rc})")
     except Exception:
-        # A failed delivery must remain retryable at the next Stop or Codex
-        # observation. Clear only this turn's marker; a concurrent respawn or
-        # newer delivery wins over this failed attempt.
+        # A failed delivery must remain retryable at the next Stop, Codex
+        # observation or guard sweep. Clear only this turn's marker; a
+        # concurrent respawn or newer delivery wins over this failed attempt.
         with fleet_lock():
             data = read_registry_no_repair()
             current = data["workers"].get(name)
@@ -19410,6 +19523,56 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                 save_registry(data)
         raise
     return True
+
+
+def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
+                    sleep=time.sleep) -> list:
+    """Backstop: deliver every owned lane's finished, undelivered turn.
+
+    The Stop hook is the primary path; this catches a hook that failed, a
+    transient refusal that outlived its retry, or a hook that never ran.
+    Native status is recomputed from one roster fetch (read only); a
+    suspicious roster (G9) defers the whole sweep to the next call.
+    Returns the names delivered.
+    """
+    roster_fn = roster_fn or _fetch_agents_roster
+    claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+        return []
+    data = read_registry_no_repair()
+    lanes = {n: r for n, r in data["workers"].items()
+             if isinstance(r, dict) and not r.get("archived_at")
+             and not _is_supervisor_shaped(n)
+             and _lane_owned_by_claim(r, claim, data)}
+    if not lanes:
+        return []
+    native = {n: r for n, r in lanes.items() if not _is_codex_record(r)}
+    entries = []
+    if native:
+        roster_ok, payload = roster_fn()
+        entries = payload if roster_ok and isinstance(payload, list) else []
+        if native_epoch_suspicious(roster_ok and isinstance(payload, list),
+                                   entries, native):
+            native = {}
+    delivered = []
+    for n, rec in lanes.items():
+        if n in native:
+            status = recompute_worker_native(n, rec, entries).get("status")
+        elif _is_codex_record(rec):
+            status = rec.get("status")
+        else:
+            continue
+        if status != "idle":
+            continue
+        try:
+            if notify_lane_done(n, "idle",
+                                expected_sid=rec.get("session_id")
+                                or rec.get("codex_thread_id"),
+                                run=run, sleep=sleep):
+                delivered.append(n)
+        except Exception:  # noqa: BLE001 -- one lane must not stop the sweep
+            pass
+    return delivered
 
 
 def cmd_lane_done(args) -> int:
