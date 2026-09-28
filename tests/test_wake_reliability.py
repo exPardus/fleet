@@ -393,3 +393,12 @@ def test_non_utf8_boot_inputs_still_deliver_the_nonce(tmp_path, monkeypatch, cap
                  if line.startswith("NONCE: "))
     assert fleet.nonce_digest(nonce) == fleet.read_incarnation()["nonce_hash"]
     assert "unreadable: not UTF-8" in out
+
+
+# N4 -- SPEC must not call sup-guard --do lock-free --------------------------
+
+def test_spec_says_sup_guard_do_takes_the_lock():
+    spec = (Path(__file__).resolve().parents[1] / "docs" / "SPEC.md").read_text(encoding="utf-8")
+    assert "`sup-guard` is the lock-free" not in spec
+    assert "the lock-free interface verdict" not in spec
+    assert "`--do` actions take `fleet.lock`" in spec
