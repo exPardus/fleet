@@ -403,18 +403,18 @@ class TestStatuslineRender:
         assert "\x1b[2m" not in line
         assert f"{statusline._STATUS_COLOR['working']}work" in line
 
-    def test_dead_collapses_into_a_tail_counter(self, statusline):
+    def test_dead_is_not_rendered_at_all(self, statusline):
+        # w106 (operator 2026-09-28, "less noise"): the grey `+N dead` tail
+        # is gone. Eleven corpses cost the line nothing.
         snap = self._snap([self._w(name="a", status="working")]
                           + [self._w(name=f"d{i}", status="dead") for i in range(11)])
         line = statusline.render_statusline(snap, color=False)
-        assert "+11 dead" in line
-        # live first, dead last: eleven corpses never outrank the live worker
-        assert line.index("work 1") < line.index("+11 dead")
+        assert line == "[fleet]  work 1"
 
     def test_an_all_dead_fleet_says_so_instead_of_rendering_empty(self, statusline):
         snap = self._snap([self._w(name=f"d{i}", status="dead") for i in range(3)])
         line = statusline.render_statusline(snap, color=False)
-        assert "no live workers" in line and "+3 dead" in line
+        assert line == "[fleet]  no live workers"
 
     def test_bucket_order_is_fixed_not_count_sorted(self, statusline):
         # A count-sorted line reshuffles on every refresh; the operator then has
@@ -450,17 +450,20 @@ class TestStatuslineRender:
         assert len(set(codes)) == 4
         assert not set(codes) & set(statusline._STATUS_COLOR.values())
 
-    def test_grey_is_reserved_for_dead(self, statusline):
-        # "greyed out" must mean exactly one thing: inert. If any other field
-        # borrows grey, the operator has to read words to find the dead ones.
+    def test_grey_is_reserved_for_inert_words(self, statusline):
+        # "greyed out" must mean exactly one thing: inert. No live field may
+        # borrow grey; the one grey word on a single row is `no live workers`.
         snap = self._snap([self._w(name="a", status="working", stale_seconds=2400.0),
                            self._w(name="b", status="idle", mail=1),
                            self._w(name="c", status="limited",
                                    limit_reset_at="2026-07-09T14:20:00Z"),
                            self._w(name="d", status="dead")])
         line = statusline.render_statusline(snap, color=True)
-        assert line.count(statusline._GREY) == 1
-        assert statusline._GREY + "+1 dead" in line
+        assert statusline._GREY not in line
+        inert = statusline.render_statusline(
+            self._snap([self._w(name="d", status="dead")]), color=True)
+        assert inert.count(statusline._GREY) == 1
+        assert statusline._GREY + "no live workers" in inert
 
     def test_a_fleet_with_no_dead_workers_uses_no_grey_at_all(self, statusline):
         snap = self._snap([self._w(status="working", stale_seconds=2400.0)])
@@ -551,15 +554,16 @@ class TestStatuslineCommandTier:
                           supervisor=self._sup())
         assert "work 1" in statusline.render_statusline(snap, color=False)
 
-    def test_a_dead_supervisor_body_stays_in_the_grey_tail(self, statusline):
-        # A corpse is a corpse whatever tier it died in; splitting the tail
-        # would put a second grey field on the line.
+    def test_a_dead_supervisor_body_is_not_rendered(self, statusline):
+        # A corpse is a corpse whatever tier it died in: it is neither a
+        # command-tier body nor a rendered worker.
         snap = self._snap([self._w(name="a", status="working"),
                            self._w(name="sup|inc-1|boot", status="dead",
                                    tier="supervisor")],
                           supervisor=self._sup())
         line = statusline.render_statusline(snap, color=False)
-        assert "work 1" in line and "+1 dead" in line
+        assert "work 1" in line and "dead" not in line
+        assert "bodies" not in line
 
     def test_one_live_body_raises_no_alarm(self, statusline):
         snap = self._snap([self._w(name="sup|inc-1|boot", status="working",

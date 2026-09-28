@@ -299,7 +299,7 @@ class TestTwoHomesRenderTwoNameplates:
         ({"ok": False, "reason": "quarantined"}, ": registry quarantined"),
         ({"ok": True, "workers": []}, ": no workers"),
         ({"ok": True, "workers": [{"status": "dead"}]},
-         "  no live workers  +1 dead"),
+         "  no live workers"),
     ])
     def test_every_row_shape_carries_the_nameplate_it_was_given(self, snap, tail):
         """The tag is on the NAMEPLATE, so it rides every shape the row can

@@ -315,7 +315,7 @@ class TestSingleHomeShortCircuit:
         assert rc == 0
         # `no live workers` contains the substring `work`, so the negative half
         # is spelled against the BUCKET (`work 1`), not against a word fragment.
-        assert "+1 dead" in out and "work 1" not in out, out
+        assert "no live workers" in out and "work 1" not in out, out
 
     def test_a_single_home_machine_renders_byte_identically_to_today(
             self, home, at, monkeypatch, run_main):
@@ -951,7 +951,7 @@ class TestAForeignHomeCannotPaintTheOperatorsScreen:
              "limit_reset_at": None, "resume_eligible": False}], "totals": {}}
         line = sl.render_statusline(snap, color=False)
         assert "work 1" in line and "lim 1" in line and "resets 14:20" in line
-        assert "+1 dead" in line
+        assert "dead" not in line
 
     def test_the_terminus_words_carry_no_control_either(
             self, home, bare, listed, at):
