@@ -85,15 +85,17 @@ def test_leaf_has_only_plain_exception_and_shared_identity():
 
 
 @pytest.mark.parametrize("module", ["fleet", "fleet_index", "fleet_errors",
-                                    "fleet_codex"])
+                                    "fleet_codex", "fleet_platform"])
 def test_modules_use_only_stdlib_and_approved_siblings(module):
     allowed_siblings = {
         # fleet_codex is the synchronous Codex adapter fleet.py drives
         # (docs/specs/codex-native-integration.md §5); it is stdlib-only too.
-        "fleet": {"fleet_index", "fleet_errors", "fleet_codex"},
+        "fleet": {"fleet_index", "fleet_errors", "fleet_codex",
+                  "fleet_platform"},
         "fleet_index": {"fleet_errors"},
         "fleet_errors": set(),
-        "fleet_codex": {"fleet_errors"},
+        "fleet_codex": {"fleet_errors", "fleet_platform"},
+        "fleet_platform": set(),
     }
     for node in ast.walk(_tree(module)):
         if isinstance(node, ast.Import):

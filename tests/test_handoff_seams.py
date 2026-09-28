@@ -947,6 +947,24 @@ class TestAtMostOneBootableSuccessor(_HandoffBase):
         winner_inc = self._incs()[1]
         return gen, rival_inc, rival_token, winner_inc, _token_of(sup_home, winner_inc)
 
+    def test_handoff_complete_preserves_adopted_lineages(self, sup_home, capsys):
+        self._hold()
+        claim = fleet.read_incarnation()
+        claim.update(lineage_id="lin-current",
+                     adopted_lineages=["lin-old", "lin-older"])
+        fleet.write_incarnation(claim)
+        _rc, generation = self._begin(capsys)
+        successor_inc = self._incs()[0]
+        assert _boot_successor("succ0001-full", successor_inc,
+                               _token_of(sup_home, successor_inc)) == 0
+        capsys.readouterr()
+        assert fleet.cmd_sup_handoff_complete(SimpleNamespace(
+            sid="sid-old", expect_inc=successor_inc,
+            expect_sid="succ0001-full", nonce=generation)) == 0
+        successor = fleet.read_incarnation()
+        assert successor["lineage_id"] == "lin-current"
+        assert successor["adopted_lineages"] == ["lin-old", "lin-older"]
+
     def test_rb_CRIT_2_a_superseded_rival_cannot_clobber_the_winners_handshake(
             self, sup_home, capsys):
         """THE probe, with two REAL successor boots and no hand-built state.

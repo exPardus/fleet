@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import ctypes
 import fnmatch
 import functools
 import hashlib
@@ -556,79 +555,7 @@ def now_iso() -> str:
 
 
 # === PLATFORM ADAPTER START (SPEC §14 portability mandate) ===
-# Only this block branches on os.name/sys.platform or uses OS-specific primitives.
-# All other code calls PLATFORM; source-scan tests enforce that boundary.
-
-_FILE_APPEND_DATA = 0x0004
-_FILE_SHARE_READ = 0x00000001
-_FILE_SHARE_WRITE = 0x00000002
-_OPEN_ALWAYS = 4
-_FILE_ATTRIBUTE_NORMAL = 0x80
-
-
-class UnsupportedPlatformError(NotImplementedError):
-    """A platform operation with no implementation on the current OS.
-    main() renders this exception as a concise failure instead of a traceback.
-    """
-
-
-class _WindowsPlatform:
-    """Windows implementation of every OS-specific fleet operation."""
-
-    def atomic_append_bytes(self, path: Path, data: bytes) -> None:
-        """Append bytes with one FILE_APPEND_DATA-only WriteFile call.
-        Windows CRT O_APPEND performs seek and write separately, risking lost records
-        across concurrent handles. The kernel append handle avoids that race;
-        a short write raises because a torn JSONL record would otherwise be skipped.
-        """
-        kernel32 = ctypes.windll.kernel32
-        from ctypes import wintypes
-
-        create_file_w = kernel32.CreateFileW
-        create_file_w.argtypes = [
-            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
-            wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-        ]
-        create_file_w.restype = wintypes.HANDLE
-
-        handle = create_file_w(
-            str(path), _FILE_APPEND_DATA, _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-            None, _OPEN_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None,
-        )
-        if handle in (0, wintypes.HANDLE(-1).value):
-            raise OSError(f"CreateFileW failed for {path}: {ctypes.WinError()}")
-        try:
-            written = wintypes.DWORD(0)
-            ok = kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
-            # A short write tears a JSONL record; raise instead of silently losing it.
-            if not ok or written.value != len(data):
-                raise OSError(f"WriteFile failed for {path}: {ctypes.WinError()}")
-        finally:
-            kernel32.CloseHandle(handle)
-
-
-class _PosixPlatform:
-    """POSIX implementation of every OS-specific fleet operation."""
-
-    def atomic_append_bytes(self, path: Path, data: bytes) -> None:
-        """Append bytes with one O_APPEND write, atomically seeking to EOF on POSIX.
-        A short write raises because a torn JSONL record would otherwise be skipped.
-        """
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o666)
-        try:
-            written = os.write(fd, data)
-            if written != len(data):
-                raise OSError(
-                    f"short append to {path}: {written}/{len(data)} bytes")
-        finally:
-            os.close(fd)
-
-
-# The one and only os.name branch in this module: selects which adapter
-# instance PLATFORM points at. Nothing else in fleet.py may inspect
-# os.name or sys.platform (enforced by a source-scan test, test_steering.py).
-PLATFORM = _WindowsPlatform() if os.name == "nt" else _PosixPlatform()
-
+from fleet_platform import PLATFORM, _WindowsPlatform, _PosixPlatform, UnsupportedPlatformError
 # === PLATFORM ADAPTER END ===
 # ---------------------------------------------------------------------------
 
@@ -819,20 +746,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:9586) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:10481) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:13771) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:9513) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:10408) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:13698) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2798) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2725) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:13645) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:3452) -- expose that distinction to views.
-      * `_doctor_check_registry` (:10731) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:13572) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:3379) -- expose that distinction to views.
+      * `_doctor_check_registry` (:10658) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:5891) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15168) -- render the release explanation.
+      * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:15095) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2780,9 +2707,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13771`), because legacy upgrades also require a complete registry.
+    (`:13698`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:899`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:826`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -8199,7 +8126,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:8114` / `cmd_respawn:7751`, before
+    # resolution that runs from `cmd_kill:8041` / `cmd_respawn:7678`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -8230,9 +8157,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:8114` / `cmd_respawn:7751`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8041` / `cmd_respawn:7678`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:7772-7779` spells out that design -- resolve under the lock.
+    # `cmd_respawn:7699-7706` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12605,10 +12532,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:899`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:826`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:3440`) applies here too. An unreadable registry
+    rule for the view path (`:3367`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -12679,12 +12606,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:2602, :2637,
-    :2667, :2706, :2743, :2805, :2885, :3849, :8217, :8379, :8576, :8702, :8738, :8909, :8910, :8980,
-    :8990, :9001, :9097, :9612, :12631, :16263, :16264, :16325, :17610, :19496`).
+    sites that already key on the union (`:2529, :2564,
+    :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
+    :8917, :8928, :9024, :9539, :12558, :16190, :16191, :16252, :17552, :19438`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :7173, :7625, :11057,
-    :18338. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :7100, :7552, :10984,
+    :18280. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13399,16 +13326,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:7173, :7625, :11057,
-    # :18338) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:7100, :7552, :10984,
+    # :18280) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:899`), which is a write. Routing the identity read
+        # file aside (`:826`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:12605`).
+        # names this gate as its reason (`:12532`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -13764,7 +13691,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:9583`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:9510`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -16359,6 +16286,18 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     else:
         sids = None
     body_name = _sup_guard_body_name(sids)
+    registry = _registry_records_or_none() if state == "held" else None
+    body_record = ((registry.get("workers") or {}).get(body_name)
+                   if isinstance(registry, dict) and body_name else None)
+    idle_holder_with_working_lanes = bool(
+        isinstance(body_record, dict)
+        and body_record.get("status") == "idle"
+        and not body_record.get("archived_at")
+        and any(isinstance(rec, dict) and not rec.get("archived_at")
+                and rec.get("status") == "working"
+                and not _is_supervisor_shaped(name)
+                and _lane_owned_by_claim(rec, claim, registry)
+                for name, rec in registry["workers"].items()))
     # The fleet projection supplies transcript-detected parks; newer native
     # rosters may supply the same status/horizon directly, even without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
@@ -16392,6 +16331,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "handshake": handshake,
         "pending": pending,
         "body_name": body_name,
+        "idle_holder_with_working_lanes": idle_holder_with_working_lanes,
         "limited": bool(limited_rows),
         "limit_reset_at": max(horizons, default=None),
         "context_occupancy": claim.get("context_occupancy") if isinstance(claim, dict) else None,
@@ -16502,6 +16442,8 @@ def _sup_guard_decide(observation):
         return "PAGE", "fresh heartbeat but body is not roster-live", detail
     if any(row not in matching for row in obs.get("live_body_rows", [])):
         return "PAGE", "another live supervisor body is present", detail
+    if obs.get("idle_holder_with_working_lanes"):
+        return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
     return "DISPATCH", "stale claim with no live body", detail
 
 
@@ -19617,7 +19559,9 @@ def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
             current.pop("lane_done_pending", None)
         elif not delivered:
             return
-        if delivered:
+        # A later Stop can observe a newer assistant entry while this send is
+        # in flight. Do not let the older send move the delivered cursor back.
+        if delivered and _lane_done_turn_key(name, current) == turn_key:
             current["lane_done_notified"] = turn_key
         save_registry(data)
 

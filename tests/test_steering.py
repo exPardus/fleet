@@ -270,19 +270,37 @@ class TestCmdRelease:
 # Platform adapter boundary (SPEC §14)
 # ---------------------------------------------------------------------------
 
+_ADAPTER_START = "# === PLATFORM ADAPTER START"
+_ADAPTER_END = "# === PLATFORM ADAPTER END ==="
+
+
+def _strip_adapter_fences(source):
+    """Remove every START..END adapter fence; return (outside, fence_count).
+    An unterminated fence raises rather than silently scanning less."""
+    outside, count, pos = [], 0, 0
+    while True:
+        start = source.find(_ADAPTER_START, pos)
+        if start == -1:
+            outside.append(source[pos:])
+            return "".join(outside), count
+        end = source.index(_ADAPTER_END, start) + len(_ADAPTER_END)
+        outside.append(source[pos:start])
+        count += 1
+        pos = end
+
+
 class TestPlatformAdapterBoundary:
     def test_no_os_branches_outside_adapter_block(self):
         source = fleet_implementation_source()
-        start = source.index("# === PLATFORM ADAPTER START")
-        end = source.index("# === PLATFORM ADAPTER END") + len("# === PLATFORM ADAPTER END ===")
-        assert start != -1 and end != -1
-        outside = source[:start] + source[end:]
+        outside, fences = _strip_adapter_fences(source)
+        # fleet.py's re-import fence and fleet_platform.py's adapter fence.
+        assert fences == 2, fences
         # F7: broadened beyond os.name/sys.platform to also reject every
         # other OS-branching surface an adapter method could smuggle in.
         for needle in (
             "os.name", "sys.platform", "platform.system",
             "sys.getwindowsversion", "os.uname", "os.sep",
-        ):
+        ) + self._OS_FLAG_NEEDLES:
             assert needle not in outside, f"found {needle!r} outside the platform adapter block"
 
     # Invariant 8 (SPEC §16.8): OS branching lives in the platform adapter,
@@ -308,6 +326,14 @@ class TestPlatformAdapterBoundary:
     _OS_BRANCH_NEEDLES = ("os.name", "sys.platform", "platform.system",
                           "sys.getwindowsversion", "os.uname", "os.sep")
 
+    # The adapter's OS booleans are OS branches under another name: reading
+    # them outside the adapter must not become a way around the needles
+    # above. The two Codex modules predate a method for each of their
+    # decisions (/proc reads, SO_PEERCRED, POSIX modes) and are the named
+    # exemptions, file-scoped; any other file branching on them fails.
+    _OS_FLAG_NEEDLES = ("is_windows", "is_linux")
+    _OS_FLAG_EXEMPT = ("bin/fleet_codex.py", "bin/fleet_codex_host.py")
+
     # The single named exemption. Scoped to ONE function in ONE file, not to
     # the whole file, so a second branch elsewhere in stop_outcome.py still
     # fails.
@@ -321,7 +347,25 @@ class TestPlatformAdapterBoundary:
     def _scanned_files(cls):
         root = cls._repo_root()
         paths = sorted(set(root.glob("bin/**/*.py")) | set(root.glob("tools/**/*.py")))
-        return [p for p in paths if p != (root / "bin" / "fleet.py")]
+        return [p for p in paths if p not in {
+            root / "bin" / "fleet.py", root / "bin" / "fleet_platform.py"}]
+
+    def test_shared_adapter_contains_the_os_selector(self):
+        source = (self._repo_root() / "bin" / "fleet_platform.py").read_text(
+            encoding="utf-8")
+        outside, fences = _strip_adapter_fences(source)
+        assert fences == 1, fences
+        start = source.index(_ADAPTER_START)
+        assert "os.name" in source[start:source.index(_ADAPTER_END)]
+        for needle in self._OS_BRANCH_NEEDLES + self._OS_FLAG_NEEDLES:
+            assert needle not in outside, (
+                f"found {needle!r} outside the fence in bin/fleet_platform.py")
+
+    @classmethod
+    def _needles_for(cls, rel):
+        if rel in cls._OS_FLAG_EXEMPT:
+            return cls._OS_BRANCH_NEEDLES
+        return cls._OS_BRANCH_NEEDLES + cls._OS_FLAG_NEEDLES
 
     def test_lint_actually_covers_the_hook_and_tool_directories(self):
         """A lint that silently scans nothing passes. Pin the file set, so
@@ -345,12 +389,32 @@ class TestPlatformAdapterBoundary:
             source = path.read_text(encoding="utf-8")
             if rel == exempt_rel:
                 source = _blank_out_function(source, exempt_func)
-            for needle in self._OS_BRANCH_NEEDLES:
+            for needle in self._needles_for(rel):
                 assert needle not in source, (
                     f"found {needle!r} in {rel} -- OS branching belongs in "
-                    f"bin/fleet.py's PLATFORM adapter (SPEC §16.8). The only "
-                    f"sanctioned second site is {exempt_rel}::{exempt_func}, "
-                    f"which cannot import fleet.py.")
+                    f"the PLATFORM adapter in bin/fleet_platform.py (SPEC "
+                    f"§16.8). The only sanctioned second site is "
+                    f"{exempt_rel}::{exempt_func}, which cannot import "
+                    f"fleet.py; only {', '.join(self._OS_FLAG_EXEMPT)} may "
+                    f"read PLATFORM.is_windows/is_linux.")
+
+    def test_os_flag_exemptions_still_read_the_flags(self):
+        """A file-scoped flag exemption that no longer matches anything
+        should be deleted, not left to exempt a future branch."""
+        root = self._repo_root()
+        for rel in self._OS_FLAG_EXEMPT:
+            source = (root / rel).read_text(encoding="utf-8")
+            assert any(flag in source for flag in self._OS_FLAG_NEEDLES), (
+                f"{rel} no longer reads PLATFORM.is_windows/is_linux -- "
+                f"drop it from _OS_FLAG_EXEMPT")
+
+    def test_os_flag_lint_catches_a_planted_branch(self):
+        planted = "if PLATFORM.is_windows:\n    pass\n"
+        caught = [n for n in self._needles_for("bin/fleet_statusline.py")
+                  if n in planted]
+        assert caught == ["is_windows"]
+        assert not [n for n in self._needles_for("bin/fleet_codex.py")
+                    if n in planted]
 
     def test_the_exemption_is_still_a_real_function_that_still_branches(self):
         """An exemption that no longer matches anything is dead weight that

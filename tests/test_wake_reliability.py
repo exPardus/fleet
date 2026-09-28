@@ -134,6 +134,31 @@ def test_a_second_finish_in_the_same_dispatch_is_delivered(home, sends, monkeypa
     assert len(sends) == 2
 
 
+def test_older_concurrent_send_cannot_move_delivered_marker_back(
+        home, monkeypatch):
+    transcript = home / "lane.jsonl"
+    monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: transcript)
+    _transcript(transcript, ["a1"])
+    calls = []
+
+    def send(name, message):
+        calls.append((name, message))
+        if len(calls) == 1:
+            _transcript(transcript, ["a1", "a2"])
+            assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
+                                          run=_no_git)
+        return 0
+
+    monkeypatch.setattr(fleet, "_cmd_send_native", send)
+    assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
+                                  run=_no_git)
+    rec = fleet.load_registry()["workers"]["lane"]
+    assert rec["lane_done_notified"][-1] == "a2"
+    assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
+                                     run=_no_git)
+    assert len(calls) == 2
+
+
 def test_turn_key_without_a_transcript_is_the_dispatch_pair(home, monkeypatch):
     monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: None)
     rec = fleet.load_registry()["workers"]["lane"]
