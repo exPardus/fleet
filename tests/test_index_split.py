@@ -84,12 +84,16 @@ def test_leaf_has_only_plain_exception_and_shared_identity():
         assert cls.__bases__ == (fleet_errors.FleetCliError,)
 
 
-@pytest.mark.parametrize("module", ["fleet", "fleet_index", "fleet_errors"])
+@pytest.mark.parametrize("module", ["fleet", "fleet_index", "fleet_errors",
+                                    "fleet_codex"])
 def test_modules_use_only_stdlib_and_approved_siblings(module):
     allowed_siblings = {
-        "fleet": {"fleet_index", "fleet_errors"},
+        # fleet_codex is the synchronous Codex adapter fleet.py drives
+        # (docs/specs/codex-native-integration.md §5); it is stdlib-only too.
+        "fleet": {"fleet_index", "fleet_errors", "fleet_codex"},
         "fleet_index": {"fleet_errors"},
         "fleet_errors": set(),
+        "fleet_codex": {"fleet_errors"},
     }
     for node in ast.walk(_tree(module)):
         if isinstance(node, ast.Import):
