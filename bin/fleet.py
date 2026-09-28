@@ -821,18 +821,18 @@ def _quarantine_artifacts() -> list:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
       * `_sweep_husks` (:9586) -- hidden records can still own roster sessions.
       * `_doctor_check_autoclean` (:10481) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:13778) -- legacy upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:13784) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:2798) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:13652) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:13658) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:3452) -- expose that distinction to views.
       * `_doctor_check_registry` (:10731) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5891) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15175) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15181) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2780,7 +2780,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13778`), because legacy upgrades also require a complete registry.
+    (`:13784`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:899`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -12689,10 +12689,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2602, :2637,
     :2667, :2706, :2743, :2805, :2885, :3849, :8217, :8379, :8576, :8702, :8738, :8909, :8910, :8980,
-    :8990, :9001, :9097, :9612, :12639, :16270, :16271, :16332, :17618, :19510`).
+    :8990, :9001, :9097, :9612, :12639, :16276, :16277, :16338, :17624, :19516`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7173, :7625, :11057,
-    :18346. This makes union identity safe; the age boundary distinguishes respawn.
+    :18352. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13056,6 +13056,10 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
         goals = goals_path().read_text(encoding="utf-8").rstrip()
     except OSError:
         goals = "(supervisor/GOALS.md missing)"
+    except ValueError:
+        # Not UTF-8. The claim and nonce are already committed; the bundle must
+        # still render so sup-boot prints the NONCE (§12).
+        goals = "(supervisor/GOALS.md unreadable: not UTF-8)"
     if len(goals) > SUPERVISOR_BOOT_GOALS_MAX_CHARS:
         cut = len(goals) - SUPERVISOR_BOOT_GOALS_MAX_CHARS
         goals = (goals[:SUPERVISOR_BOOT_GOALS_MAX_CHARS].rstrip()
@@ -13090,6 +13094,8 @@ def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
                .read_text(encoding="utf-8").splitlines() if ln.strip()][:20]
     except OSError:
         idx = ["(missing)"]
+    except ValueError:
+        idx = ["(unreadable: not UTF-8)"]
     out += idx
     live = _roster_live_sids(roster_entries)
     out += ["", f"--- native roster: {len(roster_entries)} entries, {len(live)} live ---"]
@@ -13407,7 +13413,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7173, :7625, :11057,
-    # :18346) -- so union identity cannot make one body answer for another.
+    # :18352) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.

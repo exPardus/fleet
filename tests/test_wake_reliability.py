@@ -369,3 +369,27 @@ def test_handoff_carries_the_adopted_chain():
     empty = {}
     fleet._carry_adopted_lineages({"lineage_id": "lin-kept"}, empty)
     assert empty == {}
+
+
+# N1 -- a non-UTF-8 GOALS.md or INDEX.md must not swallow the minted nonce ----
+
+@pytest.mark.parametrize("which", ["goals", "index"])
+def test_non_utf8_boot_inputs_still_deliver_the_nonce(tmp_path, monkeypatch, capsys, which):
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    (tmp_path / "supervisor").mkdir()
+    (tmp_path / "state").mkdir()
+    (tmp_path / "knowledge").mkdir()
+    bad = b"# Goals \xff\xfe not utf-8\n"
+    goals = tmp_path / "supervisor" / "GOALS.md"
+    index = tmp_path / "knowledge" / "INDEX.md"
+    goals.write_bytes(bad if which == "goals" else b"# Goals\n")
+    index.write_bytes(bad if which == "index" else b"# Index\n- one\n")
+    roster = json.dumps([{"sessionId": "sid-me", "status": "busy"}])
+    run = lambda argv, **kw: SimpleNamespace(returncode=0, stdout=roster, stderr="")
+    fleet.cmd_sup_boot(SimpleNamespace(sid="sid-me", handoff_inc=None),
+                       which=lambda n: "/fake/claude", run=run)
+    out = capsys.readouterr().out
+    nonce = next(line.split(": ", 1)[1] for line in out.splitlines()
+                 if line.startswith("NONCE: "))
+    assert fleet.nonce_digest(nonce) == fleet.read_incarnation()["nonce_hash"]
+    assert "unreadable: not UTF-8" in out
