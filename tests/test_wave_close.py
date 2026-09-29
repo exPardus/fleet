@@ -731,7 +731,7 @@ def test_wave_close_marks_landed_lanes_under_the_lock_before_write_incarnation()
     assert marker in src
     after = src.split(marker, 1)[1]
     before_write = after.split("write_incarnation(claim)", 1)[0]
-    assert "_wave_mark_landed_lanes(repo, lanes, run=run)" in before_write, (
+    assert "_wave_mark_landed_lanes(repo, lanes, run=run, aliases=aliases)" in before_write, (
         "wave-close does not mark landed lanes before writing the claim")
 
 
@@ -770,7 +770,7 @@ def test_wave_close_stops_landed_sessions_outside_the_lock_then_reaps_again():
         f"fleet_lock() at {sorted(stop_calls & locked)} -- each stop can "
         "block up to its timeout and must run unlocked")
 
-    mark_at = src.index("_wave_mark_landed_lanes(repo, lanes, run=run)")
+    mark_at = src.index("_wave_mark_landed_lanes(repo, lanes, run=run, aliases=aliases)")
     stop_at = src.index("_wave_stop_landed_sessions(")
     reap_calls = [m.start() for m in re.finditer(r"_supervisor_reap\(", src)]
     assert len(reap_calls) >= 2, (
@@ -1124,3 +1124,135 @@ class TestPerHomeFloorConfig:
         src = inspect.getsource(fleet.cmd_wave_close)
         assert src.index("_wave_floor_config(repo)") < src.index("with fleet_lock():")
         assert "config=floor_config" in src
+
+
+class TestRenamedLaneJoins:
+    """w109 (defect logged 2026-09-29T20:20Z): a lane whose registry branch
+    differs from its `merge(<lane>)` token came out UNJOINED and blocked the
+    PX close. Measured shapes: `merge(px-w12-nores-2)` whose row kept branch
+    `px-w12-nores` (a re-dispatch into the same worktree), and
+    `merge(px-w14-q16v2)` whose row ran on `master`. A worker NAMED like the
+    token now joins; any other rename joins through `--alias LANE=WORKER`."""
+
+    @staticmethod
+    def _registry(root, workers):
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "fleet.json").write_text(
+            json.dumps({"workers": workers}), encoding="utf-8")
+
+    def test_a_worker_named_like_the_token_joins_through_its_recorded_branch(self, tmp_path):
+        tree = tmp_path / "wt-nores"
+        self._registry(tmp_path, {
+            "px-w12-nores": {"branch": "px-w12-nores", "cwd": str(tree),
+                             "substrate": "claude"},
+            "px-w12-nores-2": {"branch": "px-w12-nores", "cwd": str(tree),
+                               "substrate": "codex"},
+        })
+        run = _worktree_run(tree, "px-w12-nores")
+        worktree, name, record = fleet._wave_lane_join(tmp_path, "px-w12-nores-2", run=run)
+        assert (name, worktree) == ("px-w12-nores-2", tree)
+        assert record["substrate"] == "codex"
+        # Two rows share the branch: the one NAMED like the token wins.
+        assert fleet._wave_lane_join(tmp_path, "px-w12-nores", run=run)[1] == "px-w12-nores"
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("px-w12-nores-2", "codex", "abc")], run=run) == []
+
+    def test_an_alias_joins_a_lane_whose_token_names_neither_branch_nor_worker(self, tmp_path):
+        self._registry(tmp_path, {
+            "px-w14-q16v2": {"branch": "master", "cwd": str(tmp_path),
+                             "substrate": "claude"}})
+        run = _worktree_run(tmp_path, "master")
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("px-w14-q16", "claude", "abc")], run=run) == ["px-w14-q16"]
+        aliases = fleet._wave_aliases(tmp_path, ["px-w14-q16=px-w14-q16v2"])
+        assert aliases == {"px-w14-q16": "px-w14-q16v2"}
+        worktree, name, _record = fleet._wave_lane_join(
+            tmp_path, "px-w14-q16", run=run, aliases=aliases)
+        assert (name, worktree) == ("px-w14-q16v2", tmp_path)
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("px-w14-q16", "claude", "abc")], run=run, aliases=aliases) == []
+        assert fleet._wave_external_lines(
+            tmp_path, [("px-w14-q16", "claude", "abc")], "base", run=run,
+            aliases=aliases).startswith("0 (MEASURED")
+
+    def test_an_alias_outranks_a_branch_match(self, tmp_path):
+        self._registry(tmp_path, {"old": {"branch": "lane"}, "new": {"branch": "other"}})
+        run = _worktree_run(tmp_path / "none", "unrelated")
+        assert fleet._wave_lane_join(tmp_path, "lane", run=run)[1] == "old"
+        assert fleet._wave_lane_join(
+            tmp_path, "lane", run=run, aliases={"lane": "new"})[1] == "new"
+
+    @pytest.mark.parametrize("raw, needle", [
+        (["no-equals"], "<merge-lane>=<worker>"),
+        (["=w"], "<merge-lane>=<worker>"),
+        (["lane="], "<merge-lane>=<worker>"),
+        (["lane=ghost"], "no registry worker named ghost"),
+        (["lane=w1", "lane=w2"], "twice"),
+    ])
+    def test_a_bad_alias_refuses(self, tmp_path, raw, needle):
+        self._registry(tmp_path, {"w1": {}, "w2": {}})
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_aliases(tmp_path, raw)
+        assert needle in str(excinfo.value)
+
+    def test_no_alias_is_an_empty_map_without_reading_the_registry(self, tmp_path):
+        assert fleet._wave_aliases(tmp_path / "missing", None) == {}
+
+    def test_wave_close_joins_a_renamed_lane_only_with_its_alias(self, tmp_path, monkeypatch):
+        """End to end through the real `git`: the renamed lane refuses as
+        UNJOINED, an alias for a lane that did not land refuses, and the right
+        alias gets past attribution to the claim (which this fixture lacks)."""
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True, encoding="utf-8")
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        git("init", "-q")
+        git("config", "user.email", "wave-close-tests@example.invalid")
+        git("config", "user.name", "wave-close tests")
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+        (repo / "docs").mkdir()
+        (repo / "docs" / "CHANGELOG.md").write_text("# Operator changelog\n\n",
+                                                    encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-qb", "w99/first-try")
+        (repo / "lane.txt").write_text("work\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "lane work")
+        git("checkout", "-q", "-")
+        git("merge", "--no-ff", "-m", "merge(w99/first-try): lane work", "w99/first-try")
+        git("branch", "-D", "w99/first-try")
+        merge_sha = git("rev-parse", "HEAD").stdout.strip()
+        self._registry(repo, {"w99-redo": {"branch": "w99/redo", "cwd": str(repo / "gone"),
+                                           "substrate": "claude"}})
+        monkeypatch.chdir(repo)
+
+        def close(alias):
+            return fleet.cmd_wave_close(argparse.Namespace(
+                base=base, changelog=f"- `{merge_sha[:7]}` lane work landed",
+                alias=alias, sid=None, nonce=None))
+
+        with pytest.raises(fleet.FleetCliError, match=r"UNJOINED: 1 of 1.*--alias"):
+            close(None)
+        with pytest.raises(fleet.FleetCliError, match=r"no merge in .* landed: w99/other"):
+            close(["w99/other=w99-redo"])
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            close(["w99/first-try=w99-redo"])
+        assert "UNJOINED" not in str(excinfo.value)
+        assert "--alias" not in str(excinfo.value)
+        assert not git("status", "--porcelain").stdout.strip()
+
+    def test_the_alias_checks_precede_every_mutation_in_cmd_wave_close(self):
+        import inspect
+        src = inspect.getsource(fleet.cmd_wave_close)
+        lock_at = src.index("with fleet_lock():")
+        assert src.index("_wave_aliases(repo,") < lock_at
+        assert src.index("--alias names lane(s)") < lock_at
+
+    def test_the_parser_collects_repeated_aliases(self):
+        args = fleet.build_parser().parse_args([
+            "wave-close", "--changelog", "x", "--alias", "a=b", "--alias", "c=d"])
+        assert args.alias == ["a=b", "c=d"]

@@ -759,7 +759,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15206) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15246) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -12608,10 +12608,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2529, :2564,
     :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
-    :8917, :8928, :9024, :9539, :12558, :16301, :16302, :16363, :17663, :19549`).
+    :8917, :8928, :9024, :9539, :12558, :16341, :16342, :16403, :17703, :19593`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7100, :7552, :10984,
-    :18391. This makes union identity safe; the age boundary distinguishes respawn.
+    :18431. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13327,7 +13327,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7100, :7552, :10984,
-    # :18391) -- so union identity cannot make one body answer for another.
+    # :18431) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -14196,36 +14196,67 @@ def _wave_substrate_of_record(record):
     return None
 
 
-def _wave_lane_join(repo, lane, run=subprocess.run, workers=None):
+def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     """Join a merge-subject lane token to its registry record and worktree.
 
     The merge subject carries the lane BRANCH (``merge(w99/lane-join): ...``,
     the form `fleet land` prints), and the worker record keeps that branch
-    beside ``cwd``, so the join survives ``git worktree remove`` -- the
-    routine tidy-up step that used to delete the only join key (queue item
-    16). The worktree table stays as the fallback for records written before
-    the branch was kept and for lanes dispatched outside this home.
+    beside ``cwd``, so the join survives ``git worktree remove`` (queue item
+    16). Order: an explicit ``--alias`` (lane -> worker name), the recorded
+    branch, the worktree's ``cwd``, then a worker NAMED like the token -- a
+    renamed or re-dispatched lane merged under its worker name.
 
     Returns ``(worktree, name, record)``. All three are None when the lane
-    joins to nothing at all; a caller must then report UNJOINED rather than
-    fold the lane into a figure it did not measure (queue item 26).
+    joins to nothing at all; a caller must then report UNJOINED (item 26).
     """
     if workers is None:
         workers = _wave_registry_workers(repo)
     worktree = _wave_lane_worktree(repo, lane, run=run)
-    for name, record in workers.items():
-        if isinstance(record, dict) and record.get("branch") == lane:
-            return worktree, name, record
-    if worktree is None:
-        return None, None, None
-    for name, record in workers.items():
-        if isinstance(record, dict) and _wave_same_path(record.get("cwd"), worktree):
-            return worktree, name, record
+
+    def joined(name):
+        record = workers[name]
+        found = worktree
+        if found is None and isinstance(record.get("branch"), str):
+            found = _wave_lane_worktree(repo, record["branch"], run=run)
+        return found, name, record
+
+    target = (aliases or {}).get(lane)
+    if isinstance(workers.get(target), dict):
+        return joined(target)
+    branched = [name for name, record in workers.items()
+                if isinstance(record, dict) and record.get("branch") == lane]
+    if branched:
+        name = lane if lane in branched else branched[0]
+        return worktree, name, workers[name]
+    if worktree is not None:
+        for name, record in workers.items():
+            if isinstance(record, dict) and _wave_same_path(record.get("cwd"), worktree):
+                return worktree, name, record
+    if isinstance(workers.get(lane), dict):
+        return joined(lane)
     # A worktree with no record: the lane is this repo's, its substrate is not.
     return worktree, None, None
 
 
-def _wave_unjoined_lanes(repo, lanes, run=subprocess.run) -> list:
+def _wave_aliases(repo, raw) -> dict:
+    """Parse ``--alias LANE=WORKER`` pairs; a target not in the registry refuses."""
+    aliases = {}
+    workers = _wave_registry_workers(repo) if raw else {}
+    for item in raw or ():
+        lane, sep, name = str(item).partition("=")
+        lane, name = lane.strip(), name.strip()
+        if not sep or not lane or not name:
+            raise FleetCliError(f"wave-close: --alias must be <merge-lane>=<worker>: {item!r}")
+        if aliases.get(lane, name) != name:
+            raise FleetCliError(f"wave-close: --alias names lane {lane} twice")
+        if not isinstance(workers.get(name), dict):
+            raise FleetCliError(
+                f"wave-close: --alias {lane}={name}: no registry worker named {name}")
+        aliases[lane] = name
+    return aliases
+
+
+def _wave_unjoined_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Return the lanes that parsed from a merge subject but joined to nothing.
 
     A parsed-but-unjoined lane is exactly as unattributable as an unparsed
@@ -14240,7 +14271,7 @@ def _wave_unjoined_lanes(repo, lanes, run=subprocess.run) -> list:
     unjoined = []
     for lane, _substrate, _sha in lanes:
         worktree, name, _record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         if worktree is None and name is None:
             unjoined.append(lane)
     return unjoined
@@ -14327,7 +14358,7 @@ def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
     return sync
 
 
-def _wave_merge_audit(repo, base, run=subprocess.run):
+def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
 
     ``lanes`` holds every merge whose subject matches the `merge(<lane>):`
@@ -14361,7 +14392,7 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
         # then read the substrate from that record, so the lane stays
         # attributable after its worktree is pruned (queue items 16 and 26).
         worktree, _name, record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         substrate = _wave_record_substrate(repo, worktree, record=record)
         lanes.append((lane, substrate, commit[:7]))
     return lanes, unparsed
@@ -14372,7 +14403,7 @@ def _wave_landed_lanes(repo, base, run=subprocess.run):
     return _wave_merge_audit(repo, base, run=run)[0]
 
 
-def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
+def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Write lane_state=landed on each landed lane's registry record.
 
     A merged branch alone is not landing evidence for the reap predicate
@@ -14390,7 +14421,7 @@ def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
     marked = []
     for lane, _substrate, _sha in lanes:
         _worktree, name, record = _wave_lane_join(
-            repo, lane, run=run, workers=data["workers"])
+            repo, lane, run=run, workers=data["workers"], aliases=aliases)
         if name is None or not isinstance(record, dict):
             continue
         if record.get("lane_state") in ("landed", "abandoned"):
@@ -14485,7 +14516,7 @@ def _wave_registry_mcx_ids(repo, worktree) -> set:
     return ids
 
 
-def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
+def _wave_codex_tokens(repo, lanes=None, run=subprocess.run, aliases=None):
     """Sum Codex usage from mcx records in the landed lane worktrees.
 
     Completed mcx jobs conventionally leave a text ``result`` plus an
@@ -14506,7 +14537,7 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
             if substrate != "codex":
                 continue
             worktree = _wave_lane_join(
-                repo, lane, run=run, workers=workers)[0]
+                repo, lane, run=run, workers=workers, aliases=aliases)[0]
             if worktree is not None:
                 roots.append(Path(worktree))
             else:
@@ -14597,7 +14628,7 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
     return str(total) if measured else "UNMEASURED (mcx usage missing)"
 
 
-def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
+def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run, aliases=None):
     """Sum Claude outcome usage for the landed lanes in this wave.
 
     The roster has no usage field, so this reads ``state/outcomes``.  It is
@@ -14631,7 +14662,7 @@ def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
     sessions = []
     for lane in claude_lanes:
         _worktree, name, record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         if name is None or not isinstance(record, dict) \
                 or not record.get("session_id"):
             return "UNMEASURED (Claude lane session missing from registry)"
@@ -14673,7 +14704,7 @@ def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
     return str(total)
 
 
-def _wave_external_lines(repo, lanes, base, run=subprocess.run):
+def _wave_external_lines(repo, lanes, base, run=subprocess.run, aliases=None):
     """Count lines this wave's lanes landed in repositories other than ``repo``.
 
     Git's numstat is repository-scoped, so it can never see another repository.
@@ -14694,7 +14725,7 @@ def _wave_external_lines(repo, lanes, base, run=subprocess.run):
     unresolved = []
     for lane, _substrate, _sha in lanes:
         worktree, name, _record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         # A record joined by branch is this repo's lane even after its
         # worktree is pruned: the branch is a ref of THIS repository (that is
         # where the merge subject was read), so its lines landed here. Only a
@@ -15008,7 +15039,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # `merge(<lane>):` subject convention, so every figure this function
     # would derive from the lane list (workers, tokens, external_lines,
     # tokens_per_bin_line) is a confident zero it never measured.
-    lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run)
+    aliases = _wave_aliases(repo, getattr(args, "alias", None))
+    lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run, aliases=aliases)
     if unparsed_merges:
         total = len(lanes) + len(unparsed_merges)
         raise FleetCliError(
@@ -15027,7 +15059,12 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # 701-line wave for exactly this reason (queue items 25 and 26). Refuse
     # here, beside the unparsed refusal and before the claim, the reap and the
     # floor, rather than after paying for a close that cannot be honest.
-    unjoined = _wave_unjoined_lanes(repo, lanes, run=run)
+    stray = sorted(set(aliases) - {lane for lane, _substrate, _sha in lanes})
+    if stray:
+        raise FleetCliError(
+            f"wave-close: --alias names lane(s) no merge in {base}..HEAD landed: "
+            f"{', '.join(stray)}")
+    unjoined = _wave_unjoined_lanes(repo, lanes, run=run, aliases=aliases)
     if unjoined:
         raise FleetCliError(
             f"wave-close: UNJOINED: {len(unjoined)} of {len(lanes)} landed "
@@ -15037,7 +15074,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "measure. The merge subject names the lane BRANCH; `fleet spawn` "
             "records that branch on the worker row, so a lane registered "
             "before that field existed needs its row's `branch` set (or its "
-            "worktree restored) before this wave can close.")
+            "worktree restored), or name its row with `--alias "
+            "<merge-lane>=<worker>`, before this wave can close.")
 
     # Claim first: the reap, floor, and git operations below can take time,
     # but an unclaimed body must not perform even the janitorial mutation.
@@ -15065,11 +15103,12 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # The roster's refusal is intentional: its schema has no usage field.
     # Durable outcomes are wave-bounded by the landed lane's current session.
     claude_tokens = (roster_tokens if not roster_tokens.startswith("UNMEASURED")
-                     else _wave_outcomes_claude_tokens(repo, lanes, run=run))
+                     else _wave_outcomes_claude_tokens(repo, lanes, run=run,
+                                                       aliases=aliases))
     lane_text = ", ".join(f"{name}: {substrate}" for name, substrate, _sha in lanes)
     if not lane_text:
         lane_text = "none"
-    codex_tokens = (_wave_codex_tokens(repo, lanes, run=run)
+    codex_tokens = (_wave_codex_tokens(repo, lanes, run=run, aliases=aliases)
                     if any(substrate == "codex" for _name, substrate, _sha in lanes)
                     else "0")
     token_values = [claude_tokens, codex_tokens]
@@ -15092,7 +15131,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                            if reasons or bin_added == 0 else
                            f"{int(token_text) / bin_added:.2f}"
                            f" ({token_text} tokens / {bin_added} added bin lines)")
-    external_lines = _wave_external_lines(repo, lanes, base, run=run)
+    external_lines = _wave_external_lines(repo, lanes, base, run=run,
+                                          aliases=aliases)
     protected = reap_stats.get("protected_unread_mail", 0)
     throughput = (
         f"THROUGHPUT wave {wave_id} ({base}..{tree}): "
@@ -15114,7 +15154,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         _wave_prepend_journal(repo / "supervisor" / "JOURNAL.md", throughput)
         progress_rows = _wave_refresh_progress(repo, wave_id)
         roll = roll_supervisor_journal(home=repo)
-        landed_names = _wave_mark_landed_lanes(repo, lanes, run=run)
+        landed_names = _wave_mark_landed_lanes(repo, lanes, run=run, aliases=aliases)
         write_incarnation(claim)
     _deliver_notices(notices)
     receipt = state_dir() / "wave-close" / f"{wave_id}.json"
@@ -19194,6 +19234,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="base commit SHA for the throughput diff (default: previous wave-close commit)")
     p_wave.add_argument("--changelog", required=True,
                         help="CHANGELOG sentences, or @file containing them")
+    p_wave.add_argument("--alias", action="append", default=None,
+                        metavar="MERGE_LANE=WORKER",
+                        help="join a merge(<lane>) token to the registry worker it "
+                             "landed from (renamed or re-dispatched lanes); repeatable")
     p_wave.add_argument("--sid", help="override caller session id")
     p_wave.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
