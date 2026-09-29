@@ -968,3 +968,159 @@ def test_new_worker_record_keeps_the_lane_branch():
                                      branch="w99/lane-join")
     assert record["branch"] == "w99/lane-join"
     assert fleet.new_worker_record(None, "/tmp/lane", "task", "accept")["branch"] is None
+
+
+class TestPerHomeFloorConfig:
+    """w109: every PX wave-close since W11 refused on the floor.
+
+    `_wave_floor` assumed the fleet repo: `uv run --no-project --with pytest`
+    (no home project, so `botx`, `httpx`, `numpy` ... were ModuleNotFound),
+    python3.10 + python3.12 (PX needs >=3.11), and the fleet's own expected
+    failure ids. A home now describes its floor in `supervisor/wave-close.json`;
+    with no such file the floor is byte-for-byte the fleet repo's.
+    """
+
+    def _stub(self, calls, stdout_for):
+        def fake_run(argv, **kwargs):
+            if "clone" in argv[:3]:
+                dest = pathlib.Path(argv[-1])
+                for rel in ("tests/test_a.py", "tests/unit/test_b.py",
+                            "checks/test_c.py", "tests/helper.py"):
+                    (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (dest / rel).write_text("", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, "tree-sha\n", "")
+            calls.append((argv, kwargs.get("env") or {}))
+            return subprocess.CompletedProcess(argv, 1, stdout_for(argv), "")
+        return fake_run
+
+    @staticmethod
+    def _write(home, payload):
+        path = home / "supervisor" / "wave-close.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
+                        encoding="utf-8")
+
+    def test_no_config_is_exactly_the_fleet_repo_floor(self, tmp_path):
+        config, source = fleet._wave_floor_config(tmp_path)
+        assert source == "default"
+        assert config["interpreters"] == ["3.10", "3.12"]
+        assert set(config["expected_failures"]) == fleet.WAVE_CLOSE_EXPECTED_FAILURES
+        expected = sorted(fleet.WAVE_CLOSE_EXPECTED_FAILURES)
+        calls = []
+
+        def stdout_for(argv):
+            # Report the host's expected set once, from the first half only.
+            first_half = "tests/test_a.py" in argv
+            lines = [f"FAILED {node} - boom" for node in expected] if first_half else []
+            count = len(expected) if first_half else 0
+            return "\n".join(lines + [f"{count} failed, 3 passed in 0.1s"]) + "\n"
+
+        results, tree = fleet._wave_floor(
+            tmp_path, 99, run=self._stub(calls, stdout_for),
+            which=lambda name: f"/usr/bin/{name}", log_root=tmp_path / "logs")
+        assert tree == "tree-sha"
+        assert list(results) == ["python3.10", "python3.12"]
+        assert len(calls) == 4
+        for argv, env in calls:
+            assert argv[1:7] == ["run", "--no-project", "--python", argv[4],
+                                 "--with", "pytest"]
+            assert argv[7:12] == ["python", "-m", "pytest", "-q", "--color=no"]
+            assert env["UV_OFFLINE"] == "1"
+            assert env["UV_CACHE_DIR"] == "/tmp/w64-initrepo-uv-cache"
+        # Default test paths are tests/ only: checks/ is not swept in.
+        swept = {path for argv, _env in calls for path in argv[12:]}
+        assert swept == {"tests/test_a.py", "tests/unit/test_b.py"}
+
+    def test_a_home_config_names_its_interpreter_setup_paths_and_failures(self, tmp_path):
+        self._write(tmp_path, {
+            "interpreters": ["3.12"],
+            "uv_run_args": ["--no-project", "--python", "{python}", "--with", "pytest",
+                            "--with-editable", ".[dev]"],
+            "test_paths": ["tests", "checks/test_c.py"],
+            "pytest_args": ["-p", "no:cacheprovider"],
+            "expected_failures": ["tests/test_a.py::test_known"],
+            "env": {"PYTHONPATH": "src", "UV_CACHE_DIR": None},
+            "uv_offline": False,
+        })
+        calls = []
+
+        def stdout_for(argv):
+            if "tests/test_a.py" in argv:
+                return "FAILED tests/test_a.py::test_known - x\n1 failed, 1 passed in 0.1s\n"
+            return "2 passed in 0.1s\n"
+
+        seen = []
+        results, _tree = fleet._wave_floor(
+            tmp_path, 99, run=self._stub(calls, stdout_for),
+            which=lambda name: seen.append(name) or f"/usr/bin/{name}",
+            log_root=tmp_path / "logs")
+        assert list(results) == ["python3.12"], "a single interpreter needs no comparison"
+        assert "python3.10" not in seen
+        assert results["python3.12"]["failures"] == ["tests/test_a.py::test_known"]
+        assert len(calls) == 2
+        for argv, env in calls:
+            assert argv[1:10] == ["run", "--no-project", "--python", "3.12", "--with",
+                                  "pytest", "--with-editable", ".[dev]", "python"]
+            assert argv[10:16] == ["-m", "pytest", "-q", "--color=no", "-p",
+                                   "no:cacheprovider"]
+            assert env["PYTHONPATH"] == "src"
+            assert "UV_CACHE_DIR" not in env, "null unsets the variable"
+            assert "UV_OFFLINE" not in env
+        swept = {path for argv, _env in calls for path in argv[16:]}
+        assert swept == {"tests/test_a.py", "tests/unit/test_b.py", "checks/test_c.py"}
+
+    def test_a_config_with_no_failure_list_expects_a_clean_floor(self, tmp_path):
+        """The fleet's host-failure ids are fleet test ids; a home config that
+        names none must not inherit them -- and a real failure must refuse."""
+        self._write(tmp_path, {"interpreters": ["3.12"]})
+        config, source = fleet._wave_floor_config(tmp_path)
+        assert source == "supervisor/wave-close.json"
+        assert config["expected_failures"] == []
+        with pytest.raises(fleet.FleetCliError, match="expected host"):
+            fleet._wave_floor(
+                tmp_path, 99,
+                run=self._stub([], lambda argv:
+                               "FAILED tests/test_a.py::test_x - y\n1 failed in 0.1s\n"),
+                which=lambda name: f"/usr/bin/{name}", log_root=tmp_path / "logs")
+
+    def test_three_interpreters_must_all_agree(self, tmp_path):
+        self._write(tmp_path, {"interpreters": ["3.11", "3.12", "3.13"]})
+
+        def stdout_for(argv):
+            return ("1 failed, 1 passed in 0.1s\nFAILED tests/test_a.py::t\n"
+                    if "3.13" in argv else "2 passed in 0.1s\n")
+
+        with pytest.raises(fleet.FleetCliError, match="differ between interpreters"):
+            fleet._wave_floor(tmp_path, 99, run=self._stub([], stdout_for),
+                              which=lambda name: f"/usr/bin/{name}",
+                              log_root=tmp_path / "logs")
+
+    @pytest.mark.parametrize("payload, needle", [
+        ("{not json", "not valid JSON"),
+        ([], "JSON object"),
+        ({"interpreter": ["3.12"]}, "unknown key"),
+        ({"interpreters": []}, "non-empty"),
+        ({"interpreters": ["python3.12"]}, "X.Y"),
+        ({"interpreters": ["3.12", "3.12"]}, "distinct"),
+        ({"uv_run_args": ["--no-project", "--with", "pytest"]}, "{python}"),
+        ({"test_paths": ["/abs/tests"]}, "relative"),
+        ({"test_paths": ["../other/tests"]}, "relative"),
+        ({"env": {"X": 1}}, "`env`"),
+        ({"uv_offline": "yes"}, "true or false"),
+        ({"expected_failures": "tests/x.py::t"}, "list of strings"),
+    ])
+    def test_a_malformed_config_refuses(self, tmp_path, payload, needle):
+        self._write(tmp_path, payload)
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_floor_config(tmp_path)
+        assert needle in str(excinfo.value)
+
+    def test_the_config_is_read_before_the_claim_and_passed_to_the_floor(self):
+        """A malformed config must refuse before the claim, the reap and the
+        clone -- and the floor must run the config that was validated."""
+        import inspect
+        src = inspect.getsource(fleet.cmd_wave_close)
+        assert src.index("_wave_floor_config(repo)") < src.index("with fleet_lock():")
+        assert "config=floor_config" in src

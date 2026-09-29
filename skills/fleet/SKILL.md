@@ -194,6 +194,22 @@ Run `fleet wave-close --base <sha> --changelog @<file>` at the wave boundary. Re
 
 Merge every landing lane with a subject starting `merge(<lane>): <summary>` -- never git's own default `Merge <branch>: ...` subject. `wave-close` attributes lane workers/tokens/external_lines by matching that literal convention against `git log --merges` in the closing range; a merge subject it cannot match is not counted as a zero-lane wave, it makes `wave-close` refuse the close and name the unattributed commit(s). A lane's own sync merges of the base branch into itself (any subject) are recognised structurally and need no convention subject; merging any other branch into a lane does.
 
+The floor runs in a fresh clone of the home. With no config it is the fleet repo's own floor (python3.10 and python3.12, `uv run --no-project --with pytest`, `tests/`, the fleet's expected host failures). Any other home -- its own project, deps, interpreters or failure set -- commits `supervisor/wave-close.json`; every key is optional:
+
+```json
+{
+  "interpreters": ["3.12"],
+  "uv_run_args": ["--no-project", "--python", "{python}", "--with", "pytest", "--with-editable", ".[dev]"],
+  "test_paths": ["tests"],
+  "pytest_args": [],
+  "expected_failures": [],
+  "env": {"UV_CACHE_DIR": null},
+  "uv_offline": true
+}
+```
+
+`{python}` is replaced by each interpreter and must be present. `expected_failures` defaults to empty once a config exists. An `env` value of `null` unsets that variable (the floor otherwise pins `UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache`). One interpreter skips the cross-interpreter comparison; two or more must agree on totals and failures. Unknown keys or malformed values refuse the close before the claim.
+
 `<lane>` is the lane **branch**, not its short name: `merge(w99/lane-join)`, never `merge(w99)`. `wave-close` resolves that token as a branch to join the lane to its registry record, and the worker record keeps the branch it was dispatched on, so the join survives `git worktree remove`. `fleet land` prints the exact command to run, in that form. A lane that parses but resolves to no record and no worktree is refused with `UNJOINED: N of M`, exactly as an unparsed subject is: a lane it cannot join has no substrate, no session and no token total, and publishing a zero for it is the lie wave 86 told on a 701-line wave.
 
 ## Handoff

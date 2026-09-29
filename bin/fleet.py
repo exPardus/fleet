@@ -28,7 +28,7 @@ import uuid
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
@@ -759,7 +759,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15095) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15206) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -12608,10 +12608,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2529, :2564,
     :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
-    :8917, :8928, :9024, :9539, :12558, :16190, :16191, :16252, :17552, :19438`).
+    :8917, :8928, :9024, :9539, :12558, :16301, :16302, :16363, :17663, :19549`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7100, :7552, :10984,
-    :18280. This makes union identity safe; the age boundary distinguishes respawn.
+    :18391. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13327,7 +13327,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7100, :7552, :10984,
-    # :18280) -- so union identity cannot make one body answer for another.
+    # :18391) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -13857,6 +13857,17 @@ WAVE_CLOSE_EXPECTED_FAILURES = frozenset({
     "tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces",
     "tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command",
 })
+# A home's own floor; absent, the floor is the fleet repo's (SPEC wave-close).
+WAVE_CLOSE_FLOOR_CONFIG = ("supervisor", "wave-close.json")
+WAVE_CLOSE_FLOOR_DEFAULTS = {
+    "interpreters": ["3.10", "3.12"],
+    "uv_run_args": ["--no-project", "--python", "{python}", "--with", "pytest"],
+    "test_paths": ["tests"],
+    "pytest_args": [],
+    "expected_failures": None,
+    "env": {},
+    "uv_offline": True,
+}
 WAVE_CLOSE_PUSH_ATTEMPTS = 4  # initial push plus three retries
 WAVE_CLOSE_PUSH_WINDOW_SECONDS = 300.0
 
@@ -14720,9 +14731,96 @@ def _wave_parse_pytest_result(stdout, stderr, returncode):
     return counts, failures
 
 
+def _wave_floor_config(repo):
+    """Return ``(config, source)``; a malformed file refuses, never defaults."""
+    path = Path(repo).joinpath(*WAVE_CLOSE_FLOOR_CONFIG)
+    config = {key: (list(value) if isinstance(value, list) else
+                    dict(value) if isinstance(value, dict) else value)
+              for key, value in WAVE_CLOSE_FLOOR_DEFAULTS.items()}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        config["expected_failures"] = sorted(WAVE_CLOSE_EXPECTED_FAILURES)
+        return config, "default"
+    except (OSError, UnicodeError) as exc:
+        raise FleetCliError(f"wave-close: cannot read floor config {path}: {exc}") from exc
+    rel = "/".join(WAVE_CLOSE_FLOOR_CONFIG)
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise FleetCliError(f"wave-close: {rel} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise FleetCliError(f"wave-close: {rel} must be a JSON object")
+    unknown = sorted(set(payload) - set(WAVE_CLOSE_FLOOR_DEFAULTS))
+    if unknown:
+        raise FleetCliError(f"wave-close: {rel} has unknown key(s): {', '.join(unknown)}")
+
+    def strings(key, value, allow_empty=True):
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value) \
+                or (not allow_empty and not value):
+            raise FleetCliError(
+                f"wave-close: {rel} `{key}` must be a"
+                + ("" if allow_empty else " non-empty") + " list of strings")
+        return list(value)
+
+    if "interpreters" in payload:
+        versions = strings("interpreters", payload["interpreters"], allow_empty=False)
+        bad = [item for item in versions if not re.fullmatch(r"\d+\.\d+", item)]
+        if bad or len(set(versions)) != len(versions):
+            raise FleetCliError(
+                f"wave-close: {rel} `interpreters` must be distinct X.Y versions: {versions}")
+        config["interpreters"] = versions
+    if "uv_run_args" in payload:
+        args = strings("uv_run_args", payload["uv_run_args"], allow_empty=False)
+        if "{python}" not in args:
+            raise FleetCliError(
+                f"wave-close: {rel} `uv_run_args` must contain \"{{python}}\" "
+                "(e.g. \"--python\", \"{python}\") so each half runs the named interpreter")
+        config["uv_run_args"] = args
+    if "test_paths" in payload:
+        paths = strings("test_paths", payload["test_paths"], allow_empty=False)
+        for item in paths:
+            pure = PurePosixPath(item.replace("\\", "/"))
+            if pure.is_absolute() or ".." in pure.parts or re.match(r"^[A-Za-z]:", item):
+                raise FleetCliError(
+                    f"wave-close: {rel} `test_paths` must be relative to the home: {item}")
+        config["test_paths"] = paths
+    if "pytest_args" in payload:
+        config["pytest_args"] = strings("pytest_args", payload["pytest_args"])
+    config["expected_failures"] = sorted(set(strings(
+        "expected_failures", payload.get("expected_failures", []))))
+    if "env" in payload:
+        env = payload["env"]
+        if not isinstance(env, dict) or not all(
+                isinstance(key, str) and (value is None or isinstance(value, str))
+                for key, value in env.items()):
+            raise FleetCliError(
+                f"wave-close: {rel} `env` must map names to strings (or null to unset)")
+        config["env"] = dict(env)
+    if "uv_offline" in payload:
+        if not isinstance(payload["uv_offline"], bool):
+            raise FleetCliError(f"wave-close: {rel} `uv_offline` must be true or false")
+        config["uv_offline"] = payload["uv_offline"]
+    return config, rel
+
+
+def _wave_floor_files(clone, test_paths):
+    files = set()
+    for item in test_paths:
+        target = clone / item
+        if target.is_file():
+            files.add(target.relative_to(clone).as_posix())
+        elif target.is_dir():
+            files.update(path.relative_to(clone).as_posix()
+                         for path in target.rglob("test_*.py"))
+    return sorted(files)
+
+
 def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
-                log_root=None):
-    """Run both foreground halves for each required interpreter in a fresh clone."""
+                log_root=None, config=None):
+    """Run both foreground halves for each configured interpreter in a fresh clone."""
+    if config is None:
+        config, _source = _wave_floor_config(repo)
     # Check prerequisites before paying for a clone.
     uv = which("uv")
     if uv is None:
@@ -14736,13 +14834,12 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                   run=run)
         # Walk the fresh clone itself so nested suites such as integration are
         # included and the one derived list drives both halves.
-        files = sorted(path.relative_to(clone).as_posix()
-                       for path in clone.joinpath("tests").rglob("test_*.py"))
+        files = _wave_floor_files(clone, config["test_paths"])
         if not files:
             raise FleetCliError("wave-close: fresh clone contains no test files")
         midpoint = (len(files) + 1) // 2
         halves = (files[:midpoint], files[midpoint:])
-        interpreters = ("python3.10", "python3.12")
+        interpreters = [f"python{version}" for version in config["interpreters"]]
         results = {}
         if log_root is None:
             log_root = state_dir() / "wave-close" / str(wave_id)
@@ -14763,13 +14860,22 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                 for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE",
                             "FLEET_WORKER"):
                     env.pop(key, None)
-                env["UV_OFFLINE"] = "1"
+                if config["uv_offline"]:
+                    env["UV_OFFLINE"] = "1"
+                else:
+                    env.pop("UV_OFFLINE", None)
                 env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
+                for key, value in config["env"].items():
+                    if value is None:
+                        env.pop(key, None)
+                    else:
+                        env[key] = value
                 # uv supplies pytest and the selected interpreter. Resolve the interpreter
                 # first so a missing local installation fails instead of downloading one.
-                proc = run([uv, "run", "--no-project", "--python", version,
-                            "--with", "pytest", "python", "-m", "pytest",
-                            "-q", "--color=no", *half],
+                uv_args = [version if arg == "{python}" else arg
+                           for arg in config["uv_run_args"]]
+                proc = run([uv, "run", *uv_args, "python", "-m", "pytest",
+                            "-q", "--color=no", *config["pytest_args"], *half],
                            cwd=str(clone), env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
                 log = Path(log_root) / f"{interpreter}-half-{number}.log"
@@ -14787,18 +14893,19 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                 failures |= half_failures
             aggregate["failures"] = sorted(failures)
             results[interpreter] = aggregate
+        first = results[interpreters[0]]
         comparable = [{key: value for key, value in result.items()
                        if key != "failures"} for result in results.values()]
-        if comparable[0] != comparable[1]:
+        if any(item != comparable[0] for item in comparable[1:]):
             raise FleetCliError(
                 f"wave-close: floor totals differ between interpreters: {results}")
-        if results["python3.12"]["failures"] != results["python3.10"]["failures"]:
+        if any(result["failures"] != first["failures"] for result in results.values()):
             raise FleetCliError(
                 f"wave-close: floor failure sets differ between interpreters: {results}")
-        if set(results["python3.10"]["failures"]) != WAVE_CLOSE_EXPECTED_FAILURES:
+        if set(first["failures"]) != set(config["expected_failures"]):
             raise FleetCliError(
                 "wave-close: floor failure set differs from the expected host "
-                f"assumptions: {results['python3.10']['failures']}")
+                f"assumptions: {first['failures']}")
         return results, _wave_git(clone, "rev-parse", "HEAD", run=run).stdout.strip()
     finally:
         shutil.rmtree(clone_parent, ignore_errors=True)
@@ -14863,7 +14970,7 @@ def _wave_push(repo, run=subprocess.run, sleep=time.sleep):
 
 def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                    sleep=time.sleep) -> int:
-    """Close one wave from a clean checkout after a strict two-interpreter floor."""
+    """Close one wave from a clean checkout after the home's strict floor."""
     repo = _wave_repo_root(run=run)
     raw_base = getattr(args, "base", None)
     base = (_wave_previous_close(repo, run=run) if raw_base is None
@@ -14882,6 +14989,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(
             "wave-close: CHANGELOG coverage missing for merge commit(s) since "
             f"{base}: {', '.join(gaps)}")
+    floor_config, floor_source = _wave_floor_config(repo)
     # Check committer identity before the expensive reap and interpreter floor.
     identity = run(["git", "-C", str(repo), "var", "GIT_COMMITTER_IDENT"],
                    capture_output=True, text=True, encoding="utf-8",
@@ -14948,7 +15056,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                                               reap_stats=reap_stats)
     if reap_error:
         print(f"wave-close: reap note: {reap_error}", file=sys.stderr)
-    floor, tree = _wave_floor(repo, wave_id, run=run, which=which)
+    floor, tree = _wave_floor(repo, wave_id, run=run, which=which,
+                              config=floor_config)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
     roster_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
@@ -15015,7 +15124,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         receipt_roll["history"] = str(receipt_roll["history"])
     receipt.write_text(json.dumps({"wave": wave_id, "base": base, "tree": tree,
                                    "throughput": throughput, "changed_paths": changed_paths,
-                                   "floor": floor, "progress_rows": progress_rows,
+                                   "floor": floor, "floor_config": floor_source,
+                                   "progress_rows": progress_rows,
                                    "journal_roll": receipt_roll}, indent=2), encoding="utf-8")
     _wave_git(repo, "add", "-A", run=run)
     _wave_git(repo, "commit", "-m", f"fleet wave-close: wave {wave_id}", run=run)
@@ -15048,7 +15158,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         print(f"wave-close: reap note: {post_reap_error}", file=sys.stderr)
 
     print(throughput)
-    print(f"wave-close: floor tree={tree}; journal rolled={roll['rolled']}; "
+    print(f"wave-close: floor tree={tree} (config: {floor_source}); "
+          f"journal rolled={roll['rolled']}; "
           f"progress rows refreshed={progress_rows}; push attempts={attempts}")
     print(f"wave-close: worktrees removed: {pruned['removed']}; "
           f"worktrees skipped: {pruned['skipped']} "
