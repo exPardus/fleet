@@ -194,7 +194,7 @@ Run `fleet wave-close --base <sha> --changelog @<file>` at the wave boundary. Re
 
 Merge every landing lane with a subject starting `merge(<lane>): <summary>` -- never git's own default `Merge <branch>: ...` subject. `wave-close` attributes lane workers/tokens/external_lines by matching that literal convention against `git log --merges` in the closing range; a merge subject it cannot match is not counted as a zero-lane wave, it makes `wave-close` refuse the close and name the unattributed commit(s). A lane's own sync merges of the base branch into itself (any subject) are recognised structurally and need no convention subject; merging any other branch into a lane does.
 
-The floor runs in a fresh clone of the home. With no config it is the fleet repo's own floor (python3.10 and python3.12, `uv run --no-project --with pytest`, `tests/`, the fleet's expected host failures). Any other home -- its own project, deps, interpreters or failure set -- commits `supervisor/wave-close.json`; every key is optional:
+The floor runs in a fresh clone of the home. With no config it is the fleet repo's own floor (python3.10 and python3.12, `uv run --no-project --with pytest`, `tests/`, the fleet's expected host failures). Any other home -- its own project, deps, interpreters or failure set -- writes `supervisor/wave-close.json`, read from the home checkout (tracked or git-ignored); every key is optional:
 
 ```json
 {
