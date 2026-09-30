@@ -14268,7 +14268,7 @@ def _wave_aliases(repo, raw) -> dict:
         lane, name = lane.strip(), name.strip()
         if not sep or not lane or not name:
             raise FleetCliError(f"wave-close: --alias must be <merge-lane>=<worker>: {item!r}")
-        if aliases.get(lane, name) != name:
+        if lane in aliases:
             raise FleetCliError(f"wave-close: --alias names lane {lane} twice")
         if not isinstance(workers.get(name), dict):
             raise FleetCliError(

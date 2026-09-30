@@ -1238,6 +1238,7 @@ class TestRenamedLaneJoins:
         (["lane="], "<merge-lane>=<worker>"),
         (["lane=ghost"], "no registry worker named ghost"),
         (["lane=w1", "lane=w2"], "twice"),
+        (["lane=w1", "lane=w1"], "twice"),
     ])
     def test_a_bad_alias_refuses(self, tmp_path, raw, needle):
         self._registry(tmp_path, {"w1": {}, "w2": {}})
