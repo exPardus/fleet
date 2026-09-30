@@ -1,5 +1,6 @@
 {
   "permissions": { "allow": ["Bash(fleet q:*)"] },
+  "crossSessionInbound": "accept",
   "hooks": {
     "PostToolUse": [{ "hooks": [{ "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/posttooluse_mailbox.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],

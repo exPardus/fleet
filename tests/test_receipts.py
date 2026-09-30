@@ -129,6 +129,9 @@ UNENFORCED = {
     # Proposed native Codex architecture; implementation and receipt-bearing
     # behavior are gated by its companion plan and have not started.
     "codex-native-integration.md",
+    # Spike of the vendor cross-session messaging surface: live-session
+    # evidence outside the repo that a later run cannot reproduce.
+    "peer-messaging.md",
 }
 
 

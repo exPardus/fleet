@@ -3927,7 +3927,7 @@ VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                           "resume-limited", "sup-heartbeat", "interface-register")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result",
                         "home", "knowledge", "attach", "wait", "sup-status",
-                        "sup-context", "sup-guard", "q", "index")
+                        "sup-context", "sup-guard", "q", "index", "address")
 
 #: Tier ranking. A verb matching two tokens takes the WORST of them, which is
 #: the only direction §5's *"worst irreversible effect in the wrong home"*
@@ -12608,7 +12608,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2529, :2564,
     :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
-    :8917, :8928, :9024, :9539, :12558, :16341, :16342, :16403, :17703, :19593`).
+    :8917, :8928, :9024, :9539, :12558, :16341, :16342, :16403, :17703, :19599`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7100, :7552, :10984,
     :18431. This makes union identity safe; the age boundary distinguishes respawn.
@@ -19019,6 +19019,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_result = sub.add_parser("result", help="final result text of last completed turn")
     p_result.add_argument("name")
+    p_address = sub.add_parser(
+        "address", help="exact native session name for SendMessage `to`")
+    p_address.add_argument("name")
+    p_address.add_argument("--json", action="store_true")
 
     p_wait = sub.add_parser("wait", help="block until turn(s) end")
     p_wait.add_argument("names", nargs="+")
@@ -19472,6 +19476,8 @@ def main(argv=None) -> int:
             return cmd_peek(args)
         if args.command == "result":
             return cmd_result(args)
+        if args.command == "address":
+            return cmd_address(args)
         if args.command == "wait":
             return cmd_wait(args)
         if args.command == "send":
@@ -19773,6 +19779,63 @@ def cmd_lane_done(args) -> int:
             break
     return 0
 
+
+
+_NATIVE_ADDRESS_LIVE = ("idle", "busy", "waiting")
+
+
+def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
+    args.name = _resolve_worker_target(args.name)
+    data = read_registry_no_repair()
+    rec = data["workers"].get(args.name)
+    if rec is None:
+        raise FleetCliError(f"unknown worker: {args.name!r}")
+    if _is_codex_record(rec):
+        raise FleetCliError(
+            f"{args.name}: a Codex worker has no native Claude session address; "
+            f"use `fleet send`")
+    sid = rec.get("session_id")
+    ok, entries = _fetch_agents_roster(which=which, run=run)
+    if not ok:
+        raise FleetCliError(f"{args.name}: roster unavailable ({entries})")
+    entry = _roster_entry_for(entries, sid)
+    retired = rec.get("retired_sids") or []
+    stale = [e for e in entries
+             if isinstance(e, dict) and e.get("sessionId") in retired
+             and isinstance(e.get("pid"), int)
+             and e.get("status") in _NATIVE_ADDRESS_LIVE]
+    for e in stale:
+        print(f"WARNING: retired session {e.get('sessionId')} of {args.name} "
+              f"is still live as {e.get('name')!r}; do not message it",
+              file=sys.stderr)
+    live = (isinstance(entry, dict) and isinstance(entry.get("pid"), int)
+            and entry.get("status") in _NATIVE_ADDRESS_LIVE)
+    if not live:
+        raise FleetCliError(
+            f"{args.name}: session {sid} is not live -- a native message would "
+            f"not be delivered; use `fleet send` (fork-steer) or `fleet respawn`")
+    native = entry.get("name")
+    if not isinstance(native, str) or not native:
+        raise FleetCliError(f"{args.name}: roster entry for {sid} has no name")
+    twins = sum(1 for e in entries
+                if isinstance(e, dict) and e.get("name") == native
+                and e.get("status") in _NATIVE_ADDRESS_LIVE)
+    if getattr(args, "json", False):
+        print(json.dumps({"worker": args.name, "to": native, "session_id": sid,
+                          "status": entry.get("status"), "mode": rec.get("mode"),
+                          "live_same_name": twins,
+                          "live_retired_sids": [e.get("sessionId") for e in stale]}))
+        return 0
+    print(native)
+    if entry.get("status") == "waiting":
+        print(f"NOTE: {args.name} is waiting on "
+              f"{entry.get('waitingFor') or 'a prompt'}; a message queues "
+              f"until that clears", file=sys.stderr)
+    if twins > 1:
+        print(f"WARNING: {twins} live sessions carry this name; SendMessage "
+              f"will ask for the [ref] -- pick the one whose ListAgents row "
+              f"matches session {sid}", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

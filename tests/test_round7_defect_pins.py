@@ -442,7 +442,9 @@ RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                        "resume-limited", "sup-heartbeat", "interface-register")
 RATIFIED_ORDINARY = ("spawn", "status", "peek", "result",
                      "home", "knowledge", "attach", "wait", "sup-status",
-                     "sup-context", "sup-guard", "q", "index")
+                     "sup-context", "sup-guard", "q", "index",
+                     # [w110/peer-messaging] read-only, like `result`
+                     "address")
 
 # Named by the ratified table but NOT YET BUILT. Kept separate so the "the table
 # cites no dead verb" pin cannot be satisfied by an unbuilt name.

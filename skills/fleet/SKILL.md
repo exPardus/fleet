@@ -136,6 +136,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet status [NAME] [--json] [--stale-ok] [--all]`: show worker state, optionally including archived rows.
 - `fleet peek NAME [-n LINES]`: print a bounded recent event digest.
 - `fleet result NAME`: print the last completed turn's result.
+- `fleet address NAME`: print the exact native session name to pass as `SendMessage` `to` (live sessions only; `supervisor` resolves to the claim holder). A native message steers a live session in place, without a fork. See `docs/specs/peer-messaging.md`.
 - `fleet wait NAME... [--any|--all] [--timeout SECONDS]`: wait for one or more turns to finish.
 - `fleet send NAME MESSAGE [--force-band]`: deliver a worker message or start its next turn.
 - `fleet interrupt NAME`: stop the worker's current turn.
