@@ -14196,18 +14196,27 @@ def _wave_substrate_of_record(record):
     return None
 
 
+def _wave_default_branches(repo, run=subprocess.run) -> set:
+    """The branches lanes land on: the home's HEAD branch and origin's HEAD."""
+    names = set()
+    for ref in ("HEAD", "refs/remotes/origin/HEAD"):
+        result = _wave_git(repo, "symbolic-ref", "--quiet", ref, run=run, check=False)
+        name = result.stdout.strip() if result.returncode == 0 else ""
+        for prefix in ("refs/heads/", "refs/remotes/origin/"):
+            if name.startswith(prefix):
+                names.add(name[len(prefix):])
+    return names
+
+
 def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     """Join a merge-subject lane token to its registry record and worktree.
 
-    The merge subject carries the lane BRANCH (``merge(w99/lane-join): ...``,
-    the form `fleet land` prints), and the worker record keeps that branch
-    beside ``cwd``, so the join survives ``git worktree remove`` (queue item
-    16). Order: an explicit ``--alias`` (lane -> worker name), the recorded
-    branch, the worktree's ``cwd``, then a worker NAMED like the token -- a
-    renamed or re-dispatched lane merged under its worker name.
+    The token is the lane BRANCH; the record keeps it beside ``cwd``, so the
+    join survives ``git worktree remove``. Order: ``--alias``, the recorded
+    branch, the worktree's ``cwd``, then a worker NAMED like the token whose
+    row records no branch or the default branch. Several candidates refuse.
 
-    Returns ``(worktree, name, record)``. All three are None when the lane
-    joins to nothing at all; a caller must then report UNJOINED (item 26).
+    Returns ``(worktree, name, record)``; all None means UNJOINED.
     """
     if workers is None:
         workers = _wave_registry_workers(repo)
@@ -14220,20 +14229,32 @@ def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
             found = _wave_lane_worktree(repo, record["branch"], run=run)
         return found, name, record
 
+    def only(names, how):
+        if len(names) > 1:
+            raise FleetCliError(
+                f"wave-close: lane {lane} is ambiguous: {how} matches workers "
+                f"{', '.join(sorted(names))} -- pass --alias {lane}=<worker>")
+        return names[0]
+
     target = (aliases or {}).get(lane)
     if isinstance(workers.get(target), dict):
         return joined(target)
-    branched = [name for name, record in workers.items()
-                if isinstance(record, dict) and record.get("branch") == lane]
+    rows = {name: record for name, record in workers.items() if isinstance(record, dict)}
+    branched = [name for name, record in rows.items() if record.get("branch") == lane]
     if branched:
-        name = lane if lane in branched else branched[0]
-        return worktree, name, workers[name]
+        return worktree, only(branched, "branch"), rows[branched[0]]
     if worktree is not None:
-        for name, record in workers.items():
-            if isinstance(record, dict) and _wave_same_path(record.get("cwd"), worktree):
-                return worktree, name, record
-    if isinstance(workers.get(lane), dict):
-        return joined(lane)
+        placed = [name for name, record in rows.items()
+                  if _wave_same_path(record.get("cwd"), worktree)]
+        if placed:
+            name = only(placed, "worktree cwd")
+            return worktree, name, rows[name]
+    record = rows.get(lane)
+    if record is not None:
+        branch = record.get("branch")
+        elsewhere = worktree is not None and record.get("cwd")
+        if not elsewhere and (not branch or branch in _wave_default_branches(repo, run=run)):
+            return joined(lane)
     # A worktree with no record: the lane is this repo's, its substrate is not.
     return worktree, None, None
 

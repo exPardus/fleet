@@ -1145,22 +1145,67 @@ class TestRenamedLaneJoins:
         (root / "state" / "fleet.json").write_text(
             json.dumps({"workers": workers}), encoding="utf-8")
 
-    def test_a_worker_named_like_the_token_joins_through_its_recorded_branch(self, tmp_path):
+    @staticmethod
+    def _run(tree, branch, head="master", origin=None):
+        """`_worktree_run` that also answers the default-branch probes."""
+        listing = _worktree_run(tree, branch)
+
+        def run(argv, **kwargs):
+            if argv[1] == "symbolic-ref":
+                ref = {"HEAD": head and f"refs/heads/{head}",
+                       "refs/remotes/origin/HEAD": origin and f"refs/remotes/origin/{origin}"
+                       }[argv[-1]]
+                return subprocess.CompletedProcess(argv, 0 if ref else 1, (ref or "") + "\n", "")
+            return listing(argv, **kwargs)
+        return run
+
+    def test_a_worker_named_like_the_token_joins_when_its_row_ran_on_the_default_branch(
+            self, tmp_path):
+        """The px-w14-q16v2 shape: `merge(px-w14-q16v2)` and its row on master."""
+        self._registry(tmp_path, {
+            "px-w14-q16v2": {"branch": "master", "substrate": "claude"},
+            "unbranched": {"substrate": "codex"},
+            "on-main": {"branch": "main", "substrate": "claude"}})
+        run = self._run(tmp_path / "none", "unrelated")
+        assert fleet._wave_lane_join(tmp_path, "px-w14-q16v2", run=run)[1] == "px-w14-q16v2"
+        assert fleet._wave_lane_join(tmp_path, "unbranched", run=run)[1] == "unbranched"
+        assert fleet._wave_lane_join(tmp_path, "on-main", run=run)[1] is None
+        run = self._run(tmp_path / "none", "unrelated", head="lane", origin="main")
+        assert fleet._wave_lane_join(tmp_path, "on-main", run=run)[1] == "on-main"
+
+    def test_a_worker_named_like_the_token_does_not_join_when_its_row_points_elsewhere(
+            self, tmp_path):
+        """w110 B1: `merge(px-w12-nores-2)` whose row kept branch `px-w12-nores`
+        (or whose cwd is another worktree) needs an explicit alias."""
         tree = tmp_path / "wt-nores"
         self._registry(tmp_path, {
-            "px-w12-nores": {"branch": "px-w12-nores", "cwd": str(tree),
-                             "substrate": "claude"},
             "px-w12-nores-2": {"branch": "px-w12-nores", "cwd": str(tree),
                                "substrate": "codex"},
-        })
-        run = _worktree_run(tree, "px-w12-nores")
-        worktree, name, record = fleet._wave_lane_join(tmp_path, "px-w12-nores-2", run=run)
-        assert (name, worktree) == ("px-w12-nores-2", tree)
-        assert record["substrate"] == "codex"
-        # Two rows share the branch: the one NAMED like the token wins.
-        assert fleet._wave_lane_join(tmp_path, "px-w12-nores", run=run)[1] == "px-w12-nores"
+            "w-lane": {"cwd": str(tmp_path / "other"), "substrate": "claude"}})
+        run = self._run(tree, "px-w12-nores")
+        assert fleet._wave_lane_join(tmp_path, "px-w12-nores-2", run=run) == (None, None, None)
         assert fleet._wave_unjoined_lanes(
-            tmp_path, [("px-w12-nores-2", "codex", "abc")], run=run) == []
+            tmp_path, [("px-w12-nores-2", "codex", "abc")], run=run) == ["px-w12-nores-2"]
+        worktree, name, _record = fleet._wave_lane_join(
+            tmp_path, "px-w12-nores-2", run=run, aliases={"px-w12-nores-2": "px-w12-nores-2"})
+        assert (name, worktree) == ("px-w12-nores-2", tree)
+        lane_tree = tmp_path / "wt-lane"
+        run = self._run(lane_tree, "w-lane")
+        assert fleet._wave_lane_join(tmp_path, "w-lane", run=run) == (lane_tree, None, None)
+
+    @pytest.mark.parametrize("field", ["branch", "cwd"])
+    def test_several_candidate_rows_refuse_and_name_them(self, tmp_path, field):
+        tree = tmp_path / "wt"
+        shared = "lane" if field == "branch" else str(tree)
+        self._registry(tmp_path, {"lane": {field: shared}, "lane-2": {field: shared}})
+        run = self._run(tree, "lane")
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_lane_join(tmp_path, "lane", run=run)
+        assert "ambiguous" in str(excinfo.value)
+        assert "lane, lane-2" in str(excinfo.value)
+        assert "--alias lane=<worker>" in str(excinfo.value)
+        assert fleet._wave_lane_join(
+            tmp_path, "lane", run=run, aliases={"lane": "lane-2"})[1] == "lane-2"
 
     def test_an_alias_joins_a_lane_whose_token_names_neither_branch_nor_worker(self, tmp_path):
         self._registry(tmp_path, {
