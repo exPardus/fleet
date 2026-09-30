@@ -14827,6 +14827,11 @@ def _wave_floor_config(repo):
                 for key, value in env.items()):
             raise FleetCliError(
                 f"wave-close: {rel} `env` must map names to strings (or null to unset)")
+        bad = [key for key in env if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)]
+        if bad:
+            raise FleetCliError(
+                f"wave-close: {rel} `env` names must be identifiers "
+                f"(no '=', NUL or empty name): {bad}")
         config["env"] = dict(env)
     if "uv_offline" in payload:
         if not isinstance(payload["uv_offline"], bool):

@@ -1108,6 +1108,11 @@ class TestPerHomeFloorConfig:
         ({"test_paths": ["/abs/tests"]}, "relative"),
         ({"test_paths": ["../other/tests"]}, "relative"),
         ({"env": {"X": 1}}, "`env`"),
+        # w110 B2: names the OS rejects refuse at parse, before any claim.
+        ({"env": {"": "1"}}, "identifiers"),
+        ({"env": {"A=B": "1"}}, "identifiers"),
+        ({"env": {"A\u0000B": "1"}}, "identifiers"),
+        ({"env": {"1A": "1"}}, "identifiers"),
         ({"uv_offline": "yes"}, "true or false"),
         ({"expected_failures": "tests/x.py::t"}, "list of strings"),
     ])
