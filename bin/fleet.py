@@ -14214,7 +14214,8 @@ def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     The token is the lane BRANCH; the record keeps it beside ``cwd``, so the
     join survives ``git worktree remove``. Order: ``--alias``, the recorded
     branch, the worktree's ``cwd``, then a worker NAMED like the token whose
-    row records no branch or the default branch. Several candidates refuse.
+    row records no branch or the default branch and no ``cwd`` but the home
+    root. Several candidates refuse.
 
     Returns ``(worktree, name, record)``; all None means UNJOINED.
     """
@@ -14252,7 +14253,8 @@ def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     record = rows.get(lane)
     if record is not None:
         branch = record.get("branch")
-        elsewhere = worktree is not None and record.get("cwd")
+        cwd = record.get("cwd")
+        elsewhere = bool(cwd) and not _wave_same_path(cwd, repo)
         if not elsewhere and (not branch or branch in _wave_default_branches(repo, run=run)):
             return joined(lane)
     # A worktree with no record: the lane is this repo's, its substrate is not.

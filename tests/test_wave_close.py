@@ -1193,6 +1193,27 @@ class TestRenamedLaneJoins:
         run = self._run(lane_tree, "w-lane")
         assert fleet._wave_lane_join(tmp_path, "w-lane", run=run) == (lane_tree, None, None)
 
+    @pytest.mark.parametrize("cwd, joins", [
+        (None, True), ("", True), ("HOME", True),
+        ("other-worktree", False), ("removed-worktree", False)])
+    def test_the_name_fallback_needs_no_cwd_or_the_home_root_once_the_worktree_is_gone(
+            self, tmp_path, cwd, joins):
+        """w110 re-review: with the lane worktree pruned, a same-named row
+        whose cwd names ANOTHER worktree path (existing or not) must not join."""
+        (tmp_path / "other-worktree").mkdir()
+        record = {"substrate": "claude"}
+        if cwd is not None:
+            record["cwd"] = {"HOME": str(tmp_path), "": ""}.get(cwd, str(tmp_path / cwd))
+        self._registry(tmp_path, {"w-lane": record})
+        run = self._run(tmp_path / "none", "unrelated")
+        lanes = [("w-lane", "claude", "abc")]
+        assert fleet._wave_lane_join(tmp_path, "w-lane", run=run)[1] == (
+            "w-lane" if joins else None)
+        assert fleet._wave_unjoined_lanes(tmp_path, lanes, run=run) == (
+            [] if joins else ["w-lane"])
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, lanes, run=run, aliases={"w-lane": "w-lane"}) == []
+
     @pytest.mark.parametrize("field", ["branch", "cwd"])
     def test_several_candidate_rows_refuse_and_name_them(self, tmp_path, field):
         tree = tmp_path / "wt"
