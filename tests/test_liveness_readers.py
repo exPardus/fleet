@@ -334,6 +334,10 @@ class TestTheCensus:
             # call-site map above already carries it as
             # `_cmd_respawn_supervisor._any_live`
             "_any_live",
+            # nested in `cmd_address` (w110): decides whether a roster row is
+            # a deliverable native address -- a pid AND a live status -- for
+            # the registered session and for every same-name duplicate alike.
+            "is_live",
         }
         excluded = {
             # roster PLUMBING, not a liveness verdict

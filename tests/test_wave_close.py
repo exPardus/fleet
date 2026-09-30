@@ -731,7 +731,7 @@ def test_wave_close_marks_landed_lanes_under_the_lock_before_write_incarnation()
     assert marker in src
     after = src.split(marker, 1)[1]
     before_write = after.split("write_incarnation(claim)", 1)[0]
-    assert "_wave_mark_landed_lanes(repo, lanes, run=run)" in before_write, (
+    assert "_wave_mark_landed_lanes(repo, lanes, run=run, aliases=aliases)" in before_write, (
         "wave-close does not mark landed lanes before writing the claim")
 
 
@@ -770,7 +770,7 @@ def test_wave_close_stops_landed_sessions_outside_the_lock_then_reaps_again():
         f"fleet_lock() at {sorted(stop_calls & locked)} -- each stop can "
         "block up to its timeout and must run unlocked")
 
-    mark_at = src.index("_wave_mark_landed_lanes(repo, lanes, run=run)")
+    mark_at = src.index("_wave_mark_landed_lanes(repo, lanes, run=run, aliases=aliases)")
     stop_at = src.index("_wave_stop_landed_sessions(")
     reap_calls = [m.start() for m in re.finditer(r"_supervisor_reap\(", src)]
     assert len(reap_calls) >= 2, (
@@ -968,3 +968,363 @@ def test_new_worker_record_keeps_the_lane_branch():
                                      branch="w99/lane-join")
     assert record["branch"] == "w99/lane-join"
     assert fleet.new_worker_record(None, "/tmp/lane", "task", "accept")["branch"] is None
+
+
+class TestPerHomeFloorConfig:
+    """w109: every PX wave-close since W11 refused on the floor.
+
+    `_wave_floor` assumed the fleet repo: `uv run --no-project --with pytest`
+    (no home project, so `botx`, `httpx`, `numpy` ... were ModuleNotFound),
+    python3.10 + python3.12 (PX needs >=3.11), and the fleet's own expected
+    failure ids. A home now describes its floor in `supervisor/wave-close.json`;
+    with no such file the floor is byte-for-byte the fleet repo's.
+    """
+
+    def _stub(self, calls, stdout_for):
+        def fake_run(argv, **kwargs):
+            if "clone" in argv[:3]:
+                dest = pathlib.Path(argv[-1])
+                for rel in ("tests/test_a.py", "tests/unit/test_b.py",
+                            "checks/test_c.py", "tests/helper.py"):
+                    (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (dest / rel).write_text("", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, "tree-sha\n", "")
+            calls.append((argv, kwargs.get("env") or {}))
+            return subprocess.CompletedProcess(argv, 1, stdout_for(argv), "")
+        return fake_run
+
+    @staticmethod
+    def _write(home, payload):
+        path = home / "supervisor" / "wave-close.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload if isinstance(payload, str) else json.dumps(payload),
+                        encoding="utf-8")
+
+    def test_no_config_is_exactly_the_fleet_repo_floor(self, tmp_path):
+        config, source = fleet._wave_floor_config(tmp_path)
+        assert source == "default"
+        assert config["interpreters"] == ["3.10", "3.12"]
+        assert set(config["expected_failures"]) == fleet.WAVE_CLOSE_EXPECTED_FAILURES
+        expected = sorted(fleet.WAVE_CLOSE_EXPECTED_FAILURES)
+        calls = []
+
+        def stdout_for(argv):
+            # Report the host's expected set once, from the first half only.
+            first_half = "tests/test_a.py" in argv
+            lines = [f"FAILED {node} - boom" for node in expected] if first_half else []
+            count = len(expected) if first_half else 0
+            return "\n".join(lines + [f"{count} failed, 3 passed in 0.1s"]) + "\n"
+
+        results, tree = fleet._wave_floor(
+            tmp_path, 99, run=self._stub(calls, stdout_for),
+            which=lambda name: f"/usr/bin/{name}", log_root=tmp_path / "logs")
+        assert tree == "tree-sha"
+        assert list(results) == ["python3.10", "python3.12"]
+        assert len(calls) == 4
+        for argv, env in calls:
+            assert argv[1:7] == ["run", "--no-project", "--python", argv[4],
+                                 "--with", "pytest"]
+            assert argv[7:12] == ["python", "-m", "pytest", "-q", "--color=no"]
+            assert env["UV_OFFLINE"] == "1"
+            assert env["UV_CACHE_DIR"] == "/tmp/w64-initrepo-uv-cache"
+        # Default test paths are tests/ only: checks/ is not swept in.
+        swept = {path for argv, _env in calls for path in argv[12:]}
+        assert swept == {"tests/test_a.py", "tests/unit/test_b.py"}
+
+    def test_a_home_config_names_its_interpreter_setup_paths_and_failures(self, tmp_path):
+        self._write(tmp_path, {
+            "interpreters": ["3.12"],
+            "uv_run_args": ["--no-project", "--python", "{python}", "--with", "pytest",
+                            "--with-editable", ".[dev]"],
+            "test_paths": ["tests", "checks/test_c.py"],
+            "pytest_args": ["-p", "no:cacheprovider"],
+            "expected_failures": ["tests/test_a.py::test_known"],
+            "env": {"PYTHONPATH": "src", "UV_CACHE_DIR": None},
+            "uv_offline": False,
+        })
+        calls = []
+
+        def stdout_for(argv):
+            if "tests/test_a.py" in argv:
+                return "FAILED tests/test_a.py::test_known - x\n1 failed, 1 passed in 0.1s\n"
+            return "2 passed in 0.1s\n"
+
+        seen = []
+        results, _tree = fleet._wave_floor(
+            tmp_path, 99, run=self._stub(calls, stdout_for),
+            which=lambda name: seen.append(name) or f"/usr/bin/{name}",
+            log_root=tmp_path / "logs")
+        assert list(results) == ["python3.12"], "a single interpreter needs no comparison"
+        assert "python3.10" not in seen
+        assert results["python3.12"]["failures"] == ["tests/test_a.py::test_known"]
+        assert len(calls) == 2
+        for argv, env in calls:
+            assert argv[1:10] == ["run", "--no-project", "--python", "3.12", "--with",
+                                  "pytest", "--with-editable", ".[dev]", "python"]
+            assert argv[10:16] == ["-m", "pytest", "-q", "--color=no", "-p",
+                                   "no:cacheprovider"]
+            assert env["PYTHONPATH"] == "src"
+            assert "UV_CACHE_DIR" not in env, "null unsets the variable"
+            assert "UV_OFFLINE" not in env
+        swept = {path for argv, _env in calls for path in argv[16:]}
+        assert swept == {"tests/test_a.py", "tests/unit/test_b.py", "checks/test_c.py"}
+
+    def test_a_config_with_no_failure_list_expects_a_clean_floor(self, tmp_path):
+        """The fleet's host-failure ids are fleet test ids; a home config that
+        names none must not inherit them -- and a real failure must refuse."""
+        self._write(tmp_path, {"interpreters": ["3.12"]})
+        config, source = fleet._wave_floor_config(tmp_path)
+        assert source == "supervisor/wave-close.json"
+        assert config["expected_failures"] == []
+        with pytest.raises(fleet.FleetCliError, match="expected host"):
+            fleet._wave_floor(
+                tmp_path, 99,
+                run=self._stub([], lambda argv:
+                               "FAILED tests/test_a.py::test_x - y\n1 failed in 0.1s\n"),
+                which=lambda name: f"/usr/bin/{name}", log_root=tmp_path / "logs")
+
+    def test_three_interpreters_must_all_agree(self, tmp_path):
+        self._write(tmp_path, {"interpreters": ["3.11", "3.12", "3.13"]})
+
+        def stdout_for(argv):
+            return ("1 failed, 1 passed in 0.1s\nFAILED tests/test_a.py::t\n"
+                    if "3.13" in argv else "2 passed in 0.1s\n")
+
+        with pytest.raises(fleet.FleetCliError, match="differ between interpreters"):
+            fleet._wave_floor(tmp_path, 99, run=self._stub([], stdout_for),
+                              which=lambda name: f"/usr/bin/{name}",
+                              log_root=tmp_path / "logs")
+
+    @pytest.mark.parametrize("payload, needle", [
+        ("{not json", "not valid JSON"),
+        ([], "JSON object"),
+        ({"interpreter": ["3.12"]}, "unknown key"),
+        ({"interpreters": []}, "non-empty"),
+        ({"interpreters": ["python3.12"]}, "X.Y"),
+        ({"interpreters": ["3.12", "3.12"]}, "distinct"),
+        ({"uv_run_args": ["--no-project", "--with", "pytest"]}, "{python}"),
+        ({"test_paths": ["/abs/tests"]}, "relative"),
+        ({"test_paths": ["../other/tests"]}, "relative"),
+        ({"env": {"X": 1}}, "`env`"),
+        # w110 B2: names the OS rejects refuse at parse, before any claim.
+        ({"env": {"": "1"}}, "identifiers"),
+        ({"env": {"A=B": "1"}}, "identifiers"),
+        ({"env": {"A\u0000B": "1"}}, "identifiers"),
+        ({"env": {"1A": "1"}}, "identifiers"),
+        ({"uv_offline": "yes"}, "true or false"),
+        ({"expected_failures": "tests/x.py::t"}, "list of strings"),
+    ])
+    def test_a_malformed_config_refuses(self, tmp_path, payload, needle):
+        self._write(tmp_path, payload)
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_floor_config(tmp_path)
+        assert needle in str(excinfo.value)
+
+    def test_the_config_is_read_before_the_claim_and_passed_to_the_floor(self):
+        """A malformed config must refuse before the claim, the reap and the
+        clone -- and the floor must run the config that was validated."""
+        import inspect
+        src = inspect.getsource(fleet.cmd_wave_close)
+        assert src.index("_wave_floor_config(repo)") < src.index("with fleet_lock():")
+        assert "config=floor_config" in src
+
+
+class TestRenamedLaneJoins:
+    """w109 (defect logged 2026-09-29T20:20Z): a lane whose registry branch
+    differs from its `merge(<lane>)` token came out UNJOINED and blocked the
+    PX close. Measured shapes: `merge(px-w12-nores-2)` whose row kept branch
+    `px-w12-nores` (a re-dispatch into the same worktree), and
+    `merge(px-w14-q16v2)` whose row ran on `master`. A worker NAMED like the
+    token now joins; any other rename joins through `--alias LANE=WORKER`."""
+
+    @staticmethod
+    def _registry(root, workers):
+        (root / "state").mkdir(parents=True, exist_ok=True)
+        (root / "state" / "fleet.json").write_text(
+            json.dumps({"workers": workers}), encoding="utf-8")
+
+    @staticmethod
+    def _run(tree, branch, head="master", origin=None):
+        """`_worktree_run` that also answers the default-branch probes."""
+        listing = _worktree_run(tree, branch)
+
+        def run(argv, **kwargs):
+            if argv[1] == "symbolic-ref":
+                ref = {"HEAD": head and f"refs/heads/{head}",
+                       "refs/remotes/origin/HEAD": origin and f"refs/remotes/origin/{origin}"
+                       }[argv[-1]]
+                return subprocess.CompletedProcess(argv, 0 if ref else 1, (ref or "") + "\n", "")
+            return listing(argv, **kwargs)
+        return run
+
+    def test_a_worker_named_like_the_token_joins_when_its_row_ran_on_the_default_branch(
+            self, tmp_path):
+        """The px-w14-q16v2 shape: `merge(px-w14-q16v2)` and its row on master."""
+        self._registry(tmp_path, {
+            "px-w14-q16v2": {"branch": "master", "substrate": "claude"},
+            "unbranched": {"substrate": "codex"},
+            "on-main": {"branch": "main", "substrate": "claude"}})
+        run = self._run(tmp_path / "none", "unrelated")
+        assert fleet._wave_lane_join(tmp_path, "px-w14-q16v2", run=run)[1] == "px-w14-q16v2"
+        assert fleet._wave_lane_join(tmp_path, "unbranched", run=run)[1] == "unbranched"
+        assert fleet._wave_lane_join(tmp_path, "on-main", run=run)[1] is None
+        run = self._run(tmp_path / "none", "unrelated", head="lane", origin="main")
+        assert fleet._wave_lane_join(tmp_path, "on-main", run=run)[1] == "on-main"
+
+    def test_a_worker_named_like_the_token_does_not_join_when_its_row_points_elsewhere(
+            self, tmp_path):
+        """w110 B1: `merge(px-w12-nores-2)` whose row kept branch `px-w12-nores`
+        (or whose cwd is another worktree) needs an explicit alias."""
+        tree = tmp_path / "wt-nores"
+        self._registry(tmp_path, {
+            "px-w12-nores-2": {"branch": "px-w12-nores", "cwd": str(tree),
+                               "substrate": "codex"},
+            "w-lane": {"cwd": str(tmp_path / "other"), "substrate": "claude"}})
+        run = self._run(tree, "px-w12-nores")
+        assert fleet._wave_lane_join(tmp_path, "px-w12-nores-2", run=run) == (None, None, None)
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("px-w12-nores-2", "codex", "abc")], run=run) == ["px-w12-nores-2"]
+        worktree, name, _record = fleet._wave_lane_join(
+            tmp_path, "px-w12-nores-2", run=run, aliases={"px-w12-nores-2": "px-w12-nores-2"})
+        assert (name, worktree) == ("px-w12-nores-2", tree)
+        lane_tree = tmp_path / "wt-lane"
+        run = self._run(lane_tree, "w-lane")
+        assert fleet._wave_lane_join(tmp_path, "w-lane", run=run) == (lane_tree, None, None)
+
+    @pytest.mark.parametrize("cwd, joins", [
+        (None, True), ("", True), ("HOME", True),
+        ("other-worktree", False), ("removed-worktree", False)])
+    def test_the_name_fallback_needs_no_cwd_or_the_home_root_once_the_worktree_is_gone(
+            self, tmp_path, cwd, joins):
+        """w110 re-review: with the lane worktree pruned, a same-named row
+        whose cwd names ANOTHER worktree path (existing or not) must not join."""
+        (tmp_path / "other-worktree").mkdir()
+        record = {"substrate": "claude"}
+        if cwd is not None:
+            record["cwd"] = {"HOME": str(tmp_path), "": ""}.get(cwd, str(tmp_path / cwd))
+        self._registry(tmp_path, {"w-lane": record})
+        run = self._run(tmp_path / "none", "unrelated")
+        lanes = [("w-lane", "claude", "abc")]
+        assert fleet._wave_lane_join(tmp_path, "w-lane", run=run)[1] == (
+            "w-lane" if joins else None)
+        assert fleet._wave_unjoined_lanes(tmp_path, lanes, run=run) == (
+            [] if joins else ["w-lane"])
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, lanes, run=run, aliases={"w-lane": "w-lane"}) == []
+
+    @pytest.mark.parametrize("field", ["branch", "cwd"])
+    def test_several_candidate_rows_refuse_and_name_them(self, tmp_path, field):
+        tree = tmp_path / "wt"
+        shared = "lane" if field == "branch" else str(tree)
+        self._registry(tmp_path, {"lane": {field: shared}, "lane-2": {field: shared}})
+        run = self._run(tree, "lane")
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_lane_join(tmp_path, "lane", run=run)
+        assert "ambiguous" in str(excinfo.value)
+        assert "lane, lane-2" in str(excinfo.value)
+        assert "--alias lane=<worker>" in str(excinfo.value)
+        assert fleet._wave_lane_join(
+            tmp_path, "lane", run=run, aliases={"lane": "lane-2"})[1] == "lane-2"
+
+    def test_an_alias_joins_a_lane_whose_token_names_neither_branch_nor_worker(self, tmp_path):
+        self._registry(tmp_path, {
+            "px-w14-q16v2": {"branch": "master", "cwd": str(tmp_path),
+                             "substrate": "claude"}})
+        run = _worktree_run(tmp_path, "master")
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("px-w14-q16", "claude", "abc")], run=run) == ["px-w14-q16"]
+        aliases = fleet._wave_aliases(tmp_path, ["px-w14-q16=px-w14-q16v2"])
+        assert aliases == {"px-w14-q16": "px-w14-q16v2"}
+        worktree, name, _record = fleet._wave_lane_join(
+            tmp_path, "px-w14-q16", run=run, aliases=aliases)
+        assert (name, worktree) == ("px-w14-q16v2", tmp_path)
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("px-w14-q16", "claude", "abc")], run=run, aliases=aliases) == []
+        assert fleet._wave_external_lines(
+            tmp_path, [("px-w14-q16", "claude", "abc")], "base", run=run,
+            aliases=aliases).startswith("0 (MEASURED")
+
+    def test_an_alias_outranks_a_branch_match(self, tmp_path):
+        self._registry(tmp_path, {"old": {"branch": "lane"}, "new": {"branch": "other"}})
+        run = _worktree_run(tmp_path / "none", "unrelated")
+        assert fleet._wave_lane_join(tmp_path, "lane", run=run)[1] == "old"
+        assert fleet._wave_lane_join(
+            tmp_path, "lane", run=run, aliases={"lane": "new"})[1] == "new"
+
+    @pytest.mark.parametrize("raw, needle", [
+        (["no-equals"], "<merge-lane>=<worker>"),
+        (["=w"], "<merge-lane>=<worker>"),
+        (["lane="], "<merge-lane>=<worker>"),
+        (["lane=ghost"], "no registry worker named ghost"),
+        (["lane=w1", "lane=w2"], "twice"),
+        (["lane=w1", "lane=w1"], "twice"),
+    ])
+    def test_a_bad_alias_refuses(self, tmp_path, raw, needle):
+        self._registry(tmp_path, {"w1": {}, "w2": {}})
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_aliases(tmp_path, raw)
+        assert needle in str(excinfo.value)
+
+    def test_no_alias_is_an_empty_map_without_reading_the_registry(self, tmp_path):
+        assert fleet._wave_aliases(tmp_path / "missing", None) == {}
+
+    def test_wave_close_joins_a_renamed_lane_only_with_its_alias(self, tmp_path, monkeypatch):
+        """End to end through the real `git`: the renamed lane refuses as
+        UNJOINED, an alias for a lane that did not land refuses, and the right
+        alias gets past attribution to the claim (which this fixture lacks)."""
+        def git(*args):
+            return subprocess.run(["git", "-C", str(repo), *args], check=True,
+                                  capture_output=True, text=True, encoding="utf-8")
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        git("init", "-q")
+        git("config", "user.email", "wave-close-tests@example.invalid")
+        git("config", "user.name", "wave-close tests")
+        (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
+        (repo / "docs").mkdir()
+        (repo / "docs" / "CHANGELOG.md").write_text("# Operator changelog\n\n",
+                                                    encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "base")
+        base = git("rev-parse", "HEAD").stdout.strip()
+        git("checkout", "-qb", "w99/first-try")
+        (repo / "lane.txt").write_text("work\n", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-qm", "lane work")
+        git("checkout", "-q", "-")
+        git("merge", "--no-ff", "-m", "merge(w99/first-try): lane work", "w99/first-try")
+        git("branch", "-D", "w99/first-try")
+        merge_sha = git("rev-parse", "HEAD").stdout.strip()
+        self._registry(repo, {"w99-redo": {"branch": "w99/redo", "cwd": str(repo / "gone"),
+                                           "substrate": "claude"}})
+        monkeypatch.chdir(repo)
+
+        def close(alias):
+            return fleet.cmd_wave_close(argparse.Namespace(
+                base=base, changelog=f"- `{merge_sha[:7]}` lane work landed",
+                alias=alias, sid=None, nonce=None))
+
+        with pytest.raises(fleet.FleetCliError, match=r"UNJOINED: 1 of 1.*--alias"):
+            close(None)
+        with pytest.raises(fleet.FleetCliError, match=r"no merge in .* landed: w99/other"):
+            close(["w99/other=w99-redo"])
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            close(["w99/first-try=w99-redo"])
+        assert "UNJOINED" not in str(excinfo.value)
+        assert "--alias" not in str(excinfo.value)
+        assert not git("status", "--porcelain").stdout.strip()
+
+    def test_the_alias_checks_precede_every_mutation_in_cmd_wave_close(self):
+        import inspect
+        src = inspect.getsource(fleet.cmd_wave_close)
+        lock_at = src.index("with fleet_lock():")
+        assert src.index("_wave_aliases(repo,") < lock_at
+        assert src.index("--alias names lane(s)") < lock_at
+
+    def test_the_parser_collects_repeated_aliases(self):
+        args = fleet.build_parser().parse_args([
+            "wave-close", "--changelog", "x", "--alias", "a=b", "--alias", "c=d"])
+        assert args.alias == ["a=b", "c=d"]

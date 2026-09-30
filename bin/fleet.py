@@ -28,7 +28,7 @@ import uuid
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
@@ -759,7 +759,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15095) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15274) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3927,7 +3927,7 @@ VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                           "resume-limited", "sup-heartbeat", "interface-register")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result",
                         "home", "knowledge", "attach", "wait", "sup-status",
-                        "sup-context", "sup-guard", "q", "index")
+                        "sup-context", "sup-guard", "q", "index", "address")
 
 #: Tier ranking. A verb matching two tokens takes the WORST of them, which is
 #: the only direction §5's *"worst irreversible effect in the wrong home"*
@@ -12608,10 +12608,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2529, :2564,
     :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
-    :8917, :8928, :9024, :9539, :12558, :16190, :16191, :16252, :17552, :19438`).
+    :8917, :8928, :9024, :9539, :12558, :16369, :16370, :16431, :17731, :19627`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7100, :7552, :10984,
-    :18280. This makes union identity safe; the age boundary distinguishes respawn.
+    :18459. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13327,7 +13327,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7100, :7552, :10984,
-    # :18280) -- so union identity cannot make one body answer for another.
+    # :18459) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -13857,6 +13857,17 @@ WAVE_CLOSE_EXPECTED_FAILURES = frozenset({
     "tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_may_be_a_path_containing_spaces",
     "tests/test_terminal_surface.py::TestCollaboratorInstall::test_fleet_python_still_accepts_a_multi_word_command",
 })
+# A home's own floor; absent, the floor is the fleet repo's (SPEC wave-close).
+WAVE_CLOSE_FLOOR_CONFIG = ("supervisor", "wave-close.json")
+WAVE_CLOSE_FLOOR_DEFAULTS = {
+    "interpreters": ["3.10", "3.12"],
+    "uv_run_args": ["--no-project", "--python", "{python}", "--with", "pytest"],
+    "test_paths": ["tests"],
+    "pytest_args": [],
+    "expected_failures": None,
+    "env": {},
+    "uv_offline": True,
+}
 WAVE_CLOSE_PUSH_ATTEMPTS = 4  # initial push plus three retries
 WAVE_CLOSE_PUSH_WINDOW_SECONDS = 300.0
 
@@ -14185,36 +14196,90 @@ def _wave_substrate_of_record(record):
     return None
 
 
-def _wave_lane_join(repo, lane, run=subprocess.run, workers=None):
+def _wave_default_branches(repo, run=subprocess.run) -> set:
+    """The branches lanes land on: the home's HEAD branch and origin's HEAD."""
+    names = set()
+    for ref in ("HEAD", "refs/remotes/origin/HEAD"):
+        result = _wave_git(repo, "symbolic-ref", "--quiet", ref, run=run, check=False)
+        name = result.stdout.strip() if result.returncode == 0 else ""
+        for prefix in ("refs/heads/", "refs/remotes/origin/"):
+            if name.startswith(prefix):
+                names.add(name[len(prefix):])
+    return names
+
+
+def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     """Join a merge-subject lane token to its registry record and worktree.
 
-    The merge subject carries the lane BRANCH (``merge(w99/lane-join): ...``,
-    the form `fleet land` prints), and the worker record keeps that branch
-    beside ``cwd``, so the join survives ``git worktree remove`` -- the
-    routine tidy-up step that used to delete the only join key (queue item
-    16). The worktree table stays as the fallback for records written before
-    the branch was kept and for lanes dispatched outside this home.
+    The token is the lane BRANCH; the record keeps it beside ``cwd``, so the
+    join survives ``git worktree remove``. Order: ``--alias``, the recorded
+    branch, the worktree's ``cwd``, then a worker NAMED like the token whose
+    row records no branch or the default branch and no ``cwd`` but the home
+    root. Several candidates refuse.
 
-    Returns ``(worktree, name, record)``. All three are None when the lane
-    joins to nothing at all; a caller must then report UNJOINED rather than
-    fold the lane into a figure it did not measure (queue item 26).
+    Returns ``(worktree, name, record)``; all None means UNJOINED.
     """
     if workers is None:
         workers = _wave_registry_workers(repo)
     worktree = _wave_lane_worktree(repo, lane, run=run)
-    for name, record in workers.items():
-        if isinstance(record, dict) and record.get("branch") == lane:
-            return worktree, name, record
-    if worktree is None:
-        return None, None, None
-    for name, record in workers.items():
-        if isinstance(record, dict) and _wave_same_path(record.get("cwd"), worktree):
-            return worktree, name, record
+
+    def joined(name):
+        record = workers[name]
+        found = worktree
+        if found is None and isinstance(record.get("branch"), str):
+            found = _wave_lane_worktree(repo, record["branch"], run=run)
+        return found, name, record
+
+    def only(names, how):
+        if len(names) > 1:
+            raise FleetCliError(
+                f"wave-close: lane {lane} is ambiguous: {how} matches workers "
+                f"{', '.join(sorted(names))} -- pass --alias {lane}=<worker>")
+        return names[0]
+
+    target = (aliases or {}).get(lane)
+    if isinstance(workers.get(target), dict):
+        return joined(target)
+    rows = {name: record for name, record in workers.items() if isinstance(record, dict)}
+    branched = [name for name, record in rows.items() if record.get("branch") == lane]
+    if branched:
+        return worktree, only(branched, "branch"), rows[branched[0]]
+    if worktree is not None:
+        placed = [name for name, record in rows.items()
+                  if _wave_same_path(record.get("cwd"), worktree)]
+        if placed:
+            name = only(placed, "worktree cwd")
+            return worktree, name, rows[name]
+    record = rows.get(lane)
+    if record is not None:
+        branch = record.get("branch")
+        cwd = record.get("cwd")
+        elsewhere = bool(cwd) and not _wave_same_path(cwd, repo)
+        if not elsewhere and (not branch or branch in _wave_default_branches(repo, run=run)):
+            return joined(lane)
     # A worktree with no record: the lane is this repo's, its substrate is not.
     return worktree, None, None
 
 
-def _wave_unjoined_lanes(repo, lanes, run=subprocess.run) -> list:
+def _wave_aliases(repo, raw) -> dict:
+    """Parse ``--alias LANE=WORKER`` pairs; a target not in the registry refuses."""
+    aliases = {}
+    workers = _wave_registry_workers(repo) if raw else {}
+    for item in raw or ():
+        lane, sep, name = str(item).partition("=")
+        lane, name = lane.strip(), name.strip()
+        if not sep or not lane or not name:
+            raise FleetCliError(f"wave-close: --alias must be <merge-lane>=<worker>: {item!r}")
+        if lane in aliases:
+            raise FleetCliError(f"wave-close: --alias names lane {lane} twice")
+        if not isinstance(workers.get(name), dict):
+            raise FleetCliError(
+                f"wave-close: --alias {lane}={name}: no registry worker named {name}")
+        aliases[lane] = name
+    return aliases
+
+
+def _wave_unjoined_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Return the lanes that parsed from a merge subject but joined to nothing.
 
     A parsed-but-unjoined lane is exactly as unattributable as an unparsed
@@ -14229,7 +14294,7 @@ def _wave_unjoined_lanes(repo, lanes, run=subprocess.run) -> list:
     unjoined = []
     for lane, _substrate, _sha in lanes:
         worktree, name, _record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         if worktree is None and name is None:
             unjoined.append(lane)
     return unjoined
@@ -14316,7 +14381,7 @@ def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
     return sync
 
 
-def _wave_merge_audit(repo, base, run=subprocess.run):
+def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
 
     ``lanes`` holds every merge whose subject matches the `merge(<lane>):`
@@ -14350,7 +14415,7 @@ def _wave_merge_audit(repo, base, run=subprocess.run):
         # then read the substrate from that record, so the lane stays
         # attributable after its worktree is pruned (queue items 16 and 26).
         worktree, _name, record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         substrate = _wave_record_substrate(repo, worktree, record=record)
         lanes.append((lane, substrate, commit[:7]))
     return lanes, unparsed
@@ -14361,7 +14426,7 @@ def _wave_landed_lanes(repo, base, run=subprocess.run):
     return _wave_merge_audit(repo, base, run=run)[0]
 
 
-def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
+def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Write lane_state=landed on each landed lane's registry record.
 
     A merged branch alone is not landing evidence for the reap predicate
@@ -14379,7 +14444,7 @@ def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run) -> list:
     marked = []
     for lane, _substrate, _sha in lanes:
         _worktree, name, record = _wave_lane_join(
-            repo, lane, run=run, workers=data["workers"])
+            repo, lane, run=run, workers=data["workers"], aliases=aliases)
         if name is None or not isinstance(record, dict):
             continue
         if record.get("lane_state") in ("landed", "abandoned"):
@@ -14474,7 +14539,7 @@ def _wave_registry_mcx_ids(repo, worktree) -> set:
     return ids
 
 
-def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
+def _wave_codex_tokens(repo, lanes=None, run=subprocess.run, aliases=None):
     """Sum Codex usage from mcx records in the landed lane worktrees.
 
     Completed mcx jobs conventionally leave a text ``result`` plus an
@@ -14495,7 +14560,7 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
             if substrate != "codex":
                 continue
             worktree = _wave_lane_join(
-                repo, lane, run=run, workers=workers)[0]
+                repo, lane, run=run, workers=workers, aliases=aliases)[0]
             if worktree is not None:
                 roots.append(Path(worktree))
             else:
@@ -14586,7 +14651,7 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run):
     return str(total) if measured else "UNMEASURED (mcx usage missing)"
 
 
-def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
+def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run, aliases=None):
     """Sum Claude outcome usage for the landed lanes in this wave.
 
     The roster has no usage field, so this reads ``state/outcomes``.  It is
@@ -14620,7 +14685,7 @@ def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
     sessions = []
     for lane in claude_lanes:
         _worktree, name, record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         if name is None or not isinstance(record, dict) \
                 or not record.get("session_id"):
             return "UNMEASURED (Claude lane session missing from registry)"
@@ -14662,7 +14727,7 @@ def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run):
     return str(total)
 
 
-def _wave_external_lines(repo, lanes, base, run=subprocess.run):
+def _wave_external_lines(repo, lanes, base, run=subprocess.run, aliases=None):
     """Count lines this wave's lanes landed in repositories other than ``repo``.
 
     Git's numstat is repository-scoped, so it can never see another repository.
@@ -14683,7 +14748,7 @@ def _wave_external_lines(repo, lanes, base, run=subprocess.run):
     unresolved = []
     for lane, _substrate, _sha in lanes:
         worktree, name, _record = _wave_lane_join(
-            repo, lane, run=run, workers=workers)
+            repo, lane, run=run, workers=workers, aliases=aliases)
         # A record joined by branch is this repo's lane even after its
         # worktree is pruned: the branch is a ref of THIS repository (that is
         # where the merge subject was read), so its lines landed here. Only a
@@ -14720,9 +14785,101 @@ def _wave_parse_pytest_result(stdout, stderr, returncode):
     return counts, failures
 
 
+def _wave_floor_config(repo):
+    """Return ``(config, source)``; a malformed file refuses, never defaults."""
+    path = Path(repo).joinpath(*WAVE_CLOSE_FLOOR_CONFIG)
+    config = {key: (list(value) if isinstance(value, list) else
+                    dict(value) if isinstance(value, dict) else value)
+              for key, value in WAVE_CLOSE_FLOOR_DEFAULTS.items()}
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        config["expected_failures"] = sorted(WAVE_CLOSE_EXPECTED_FAILURES)
+        return config, "default"
+    except (OSError, UnicodeError) as exc:
+        raise FleetCliError(f"wave-close: cannot read floor config {path}: {exc}") from exc
+    rel = "/".join(WAVE_CLOSE_FLOOR_CONFIG)
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        raise FleetCliError(f"wave-close: {rel} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise FleetCliError(f"wave-close: {rel} must be a JSON object")
+    unknown = sorted(set(payload) - set(WAVE_CLOSE_FLOOR_DEFAULTS))
+    if unknown:
+        raise FleetCliError(f"wave-close: {rel} has unknown key(s): {', '.join(unknown)}")
+
+    def strings(key, value, allow_empty=True):
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value) \
+                or (not allow_empty and not value):
+            raise FleetCliError(
+                f"wave-close: {rel} `{key}` must be a"
+                + ("" if allow_empty else " non-empty") + " list of strings")
+        return list(value)
+
+    if "interpreters" in payload:
+        versions = strings("interpreters", payload["interpreters"], allow_empty=False)
+        bad = [item for item in versions if not re.fullmatch(r"\d+\.\d+", item)]
+        if bad or len(set(versions)) != len(versions):
+            raise FleetCliError(
+                f"wave-close: {rel} `interpreters` must be distinct X.Y versions: {versions}")
+        config["interpreters"] = versions
+    if "uv_run_args" in payload:
+        args = strings("uv_run_args", payload["uv_run_args"], allow_empty=False)
+        if "{python}" not in args:
+            raise FleetCliError(
+                f"wave-close: {rel} `uv_run_args` must contain \"{{python}}\" "
+                "(e.g. \"--python\", \"{python}\") so each half runs the named interpreter")
+        config["uv_run_args"] = args
+    if "test_paths" in payload:
+        paths = strings("test_paths", payload["test_paths"], allow_empty=False)
+        for item in paths:
+            pure = PurePosixPath(item.replace("\\", "/"))
+            if pure.is_absolute() or ".." in pure.parts or re.match(r"^[A-Za-z]:", item):
+                raise FleetCliError(
+                    f"wave-close: {rel} `test_paths` must be relative to the home: {item}")
+        config["test_paths"] = paths
+    if "pytest_args" in payload:
+        config["pytest_args"] = strings("pytest_args", payload["pytest_args"])
+    config["expected_failures"] = sorted(set(strings(
+        "expected_failures", payload.get("expected_failures", []))))
+    if "env" in payload:
+        env = payload["env"]
+        if not isinstance(env, dict) or not all(
+                isinstance(key, str) and (value is None or isinstance(value, str))
+                for key, value in env.items()):
+            raise FleetCliError(
+                f"wave-close: {rel} `env` must map names to strings (or null to unset)")
+        bad = [key for key in env if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)]
+        if bad:
+            raise FleetCliError(
+                f"wave-close: {rel} `env` names must be identifiers "
+                f"(no '=', NUL or empty name): {bad}")
+        config["env"] = dict(env)
+    if "uv_offline" in payload:
+        if not isinstance(payload["uv_offline"], bool):
+            raise FleetCliError(f"wave-close: {rel} `uv_offline` must be true or false")
+        config["uv_offline"] = payload["uv_offline"]
+    return config, rel
+
+
+def _wave_floor_files(clone, test_paths):
+    files = set()
+    for item in test_paths:
+        target = clone / item
+        if target.is_file():
+            files.add(target.relative_to(clone).as_posix())
+        elif target.is_dir():
+            files.update(path.relative_to(clone).as_posix()
+                         for path in target.rglob("test_*.py"))
+    return sorted(files)
+
+
 def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
-                log_root=None):
-    """Run both foreground halves for each required interpreter in a fresh clone."""
+                log_root=None, config=None):
+    """Run both foreground halves for each configured interpreter in a fresh clone."""
+    if config is None:
+        config, _source = _wave_floor_config(repo)
     # Check prerequisites before paying for a clone.
     uv = which("uv")
     if uv is None:
@@ -14736,13 +14893,12 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                   run=run)
         # Walk the fresh clone itself so nested suites such as integration are
         # included and the one derived list drives both halves.
-        files = sorted(path.relative_to(clone).as_posix()
-                       for path in clone.joinpath("tests").rglob("test_*.py"))
+        files = _wave_floor_files(clone, config["test_paths"])
         if not files:
             raise FleetCliError("wave-close: fresh clone contains no test files")
         midpoint = (len(files) + 1) // 2
         halves = (files[:midpoint], files[midpoint:])
-        interpreters = ("python3.10", "python3.12")
+        interpreters = [f"python{version}" for version in config["interpreters"]]
         results = {}
         if log_root is None:
             log_root = state_dir() / "wave-close" / str(wave_id)
@@ -14763,13 +14919,22 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                 for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE",
                             "FLEET_WORKER"):
                     env.pop(key, None)
-                env["UV_OFFLINE"] = "1"
+                if config["uv_offline"]:
+                    env["UV_OFFLINE"] = "1"
+                else:
+                    env.pop("UV_OFFLINE", None)
                 env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
+                for key, value in config["env"].items():
+                    if value is None:
+                        env.pop(key, None)
+                    else:
+                        env[key] = value
                 # uv supplies pytest and the selected interpreter. Resolve the interpreter
                 # first so a missing local installation fails instead of downloading one.
-                proc = run([uv, "run", "--no-project", "--python", version,
-                            "--with", "pytest", "python", "-m", "pytest",
-                            "-q", "--color=no", *half],
+                uv_args = [version if arg == "{python}" else arg
+                           for arg in config["uv_run_args"]]
+                proc = run([uv, "run", *uv_args, "python", "-m", "pytest",
+                            "-q", "--color=no", *config["pytest_args"], *half],
                            cwd=str(clone), env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace")
                 log = Path(log_root) / f"{interpreter}-half-{number}.log"
@@ -14787,18 +14952,19 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
                 failures |= half_failures
             aggregate["failures"] = sorted(failures)
             results[interpreter] = aggregate
+        first = results[interpreters[0]]
         comparable = [{key: value for key, value in result.items()
                        if key != "failures"} for result in results.values()]
-        if comparable[0] != comparable[1]:
+        if any(item != comparable[0] for item in comparable[1:]):
             raise FleetCliError(
                 f"wave-close: floor totals differ between interpreters: {results}")
-        if results["python3.12"]["failures"] != results["python3.10"]["failures"]:
+        if any(result["failures"] != first["failures"] for result in results.values()):
             raise FleetCliError(
                 f"wave-close: floor failure sets differ between interpreters: {results}")
-        if set(results["python3.10"]["failures"]) != WAVE_CLOSE_EXPECTED_FAILURES:
+        if set(first["failures"]) != set(config["expected_failures"]):
             raise FleetCliError(
                 "wave-close: floor failure set differs from the expected host "
-                f"assumptions: {results['python3.10']['failures']}")
+                f"assumptions: {first['failures']}")
         return results, _wave_git(clone, "rev-parse", "HEAD", run=run).stdout.strip()
     finally:
         shutil.rmtree(clone_parent, ignore_errors=True)
@@ -14863,7 +15029,7 @@ def _wave_push(repo, run=subprocess.run, sleep=time.sleep):
 
 def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                    sleep=time.sleep) -> int:
-    """Close one wave from a clean checkout after a strict two-interpreter floor."""
+    """Close one wave from a clean checkout after the home's strict floor."""
     repo = _wave_repo_root(run=run)
     raw_base = getattr(args, "base", None)
     base = (_wave_previous_close(repo, run=run) if raw_base is None
@@ -14882,6 +15048,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(
             "wave-close: CHANGELOG coverage missing for merge commit(s) since "
             f"{base}: {', '.join(gaps)}")
+    floor_config, floor_source = _wave_floor_config(repo)
     # Check committer identity before the expensive reap and interpreter floor.
     identity = run(["git", "-C", str(repo), "var", "GIT_COMMITTER_IDENT"],
                    capture_output=True, text=True, encoding="utf-8",
@@ -14900,7 +15067,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # `merge(<lane>):` subject convention, so every figure this function
     # would derive from the lane list (workers, tokens, external_lines,
     # tokens_per_bin_line) is a confident zero it never measured.
-    lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run)
+    aliases = _wave_aliases(repo, getattr(args, "alias", None))
+    lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run, aliases=aliases)
     if unparsed_merges:
         total = len(lanes) + len(unparsed_merges)
         raise FleetCliError(
@@ -14919,7 +15087,12 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # 701-line wave for exactly this reason (queue items 25 and 26). Refuse
     # here, beside the unparsed refusal and before the claim, the reap and the
     # floor, rather than after paying for a close that cannot be honest.
-    unjoined = _wave_unjoined_lanes(repo, lanes, run=run)
+    stray = sorted(set(aliases) - {lane for lane, _substrate, _sha in lanes})
+    if stray:
+        raise FleetCliError(
+            f"wave-close: --alias names lane(s) no merge in {base}..HEAD landed: "
+            f"{', '.join(stray)}")
+    unjoined = _wave_unjoined_lanes(repo, lanes, run=run, aliases=aliases)
     if unjoined:
         raise FleetCliError(
             f"wave-close: UNJOINED: {len(unjoined)} of {len(lanes)} landed "
@@ -14929,7 +15102,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "measure. The merge subject names the lane BRANCH; `fleet spawn` "
             "records that branch on the worker row, so a lane registered "
             "before that field existed needs its row's `branch` set (or its "
-            "worktree restored) before this wave can close.")
+            "worktree restored), or name its row with `--alias "
+            "<merge-lane>=<worker>`, before this wave can close.")
 
     # Claim first: the reap, floor, and git operations below can take time,
     # but an unclaimed body must not perform even the janitorial mutation.
@@ -14948,7 +15122,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                                               reap_stats=reap_stats)
     if reap_error:
         print(f"wave-close: reap note: {reap_error}", file=sys.stderr)
-    floor, tree = _wave_floor(repo, wave_id, run=run, which=which)
+    floor, tree = _wave_floor(repo, wave_id, run=run, which=which,
+                              config=floor_config)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
     roster_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
@@ -14956,11 +15131,12 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # The roster's refusal is intentional: its schema has no usage field.
     # Durable outcomes are wave-bounded by the landed lane's current session.
     claude_tokens = (roster_tokens if not roster_tokens.startswith("UNMEASURED")
-                     else _wave_outcomes_claude_tokens(repo, lanes, run=run))
+                     else _wave_outcomes_claude_tokens(repo, lanes, run=run,
+                                                       aliases=aliases))
     lane_text = ", ".join(f"{name}: {substrate}" for name, substrate, _sha in lanes)
     if not lane_text:
         lane_text = "none"
-    codex_tokens = (_wave_codex_tokens(repo, lanes, run=run)
+    codex_tokens = (_wave_codex_tokens(repo, lanes, run=run, aliases=aliases)
                     if any(substrate == "codex" for _name, substrate, _sha in lanes)
                     else "0")
     token_values = [claude_tokens, codex_tokens]
@@ -14983,7 +15159,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                            if reasons or bin_added == 0 else
                            f"{int(token_text) / bin_added:.2f}"
                            f" ({token_text} tokens / {bin_added} added bin lines)")
-    external_lines = _wave_external_lines(repo, lanes, base, run=run)
+    external_lines = _wave_external_lines(repo, lanes, base, run=run,
+                                          aliases=aliases)
     protected = reap_stats.get("protected_unread_mail", 0)
     throughput = (
         f"THROUGHPUT wave {wave_id} ({base}..{tree}): "
@@ -15005,7 +15182,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         _wave_prepend_journal(repo / "supervisor" / "JOURNAL.md", throughput)
         progress_rows = _wave_refresh_progress(repo, wave_id)
         roll = roll_supervisor_journal(home=repo)
-        landed_names = _wave_mark_landed_lanes(repo, lanes, run=run)
+        landed_names = _wave_mark_landed_lanes(repo, lanes, run=run, aliases=aliases)
         write_incarnation(claim)
     _deliver_notices(notices)
     receipt = state_dir() / "wave-close" / f"{wave_id}.json"
@@ -15015,7 +15192,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         receipt_roll["history"] = str(receipt_roll["history"])
     receipt.write_text(json.dumps({"wave": wave_id, "base": base, "tree": tree,
                                    "throughput": throughput, "changed_paths": changed_paths,
-                                   "floor": floor, "progress_rows": progress_rows,
+                                   "floor": floor, "floor_config": floor_source,
+                                   "progress_rows": progress_rows,
                                    "journal_roll": receipt_roll}, indent=2), encoding="utf-8")
     _wave_git(repo, "add", "-A", run=run)
     _wave_git(repo, "commit", "-m", f"fleet wave-close: wave {wave_id}", run=run)
@@ -15048,7 +15226,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         print(f"wave-close: reap note: {post_reap_error}", file=sys.stderr)
 
     print(throughput)
-    print(f"wave-close: floor tree={tree}; journal rolled={roll['rolled']}; "
+    print(f"wave-close: floor tree={tree} (config: {floor_source}); "
+          f"journal rolled={roll['rolled']}; "
           f"progress rows refreshed={progress_rows}; push attempts={attempts}")
     print(f"wave-close: worktrees removed: {pruned['removed']}; "
           f"worktrees skipped: {pruned['skipped']} "
@@ -18868,6 +19047,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_result = sub.add_parser("result", help="final result text of last completed turn")
     p_result.add_argument("name")
+    p_address = sub.add_parser(
+        "address", help="exact native session name for SendMessage `to`")
+    p_address.add_argument("name")
+    p_address.add_argument("--json", action="store_true")
 
     p_wait = sub.add_parser("wait", help="block until turn(s) end")
     p_wait.add_argument("names", nargs="+")
@@ -19083,6 +19266,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="base commit SHA for the throughput diff (default: previous wave-close commit)")
     p_wave.add_argument("--changelog", required=True,
                         help="CHANGELOG sentences, or @file containing them")
+    p_wave.add_argument("--alias", action="append", default=None,
+                        metavar="MERGE_LANE=WORKER",
+                        help="join a merge(<lane>) token to the registry worker it "
+                             "landed from (renamed or re-dispatched lanes); repeatable")
     p_wave.add_argument("--sid", help="override caller session id")
     p_wave.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
@@ -19317,6 +19504,8 @@ def main(argv=None) -> int:
             return cmd_peek(args)
         if args.command == "result":
             return cmd_result(args)
+        if args.command == "address":
+            return cmd_address(args)
         if args.command == "wait":
             return cmd_wait(args)
         if args.command == "send":
@@ -19618,6 +19807,74 @@ def cmd_lane_done(args) -> int:
             break
     return 0
 
+
+
+_NATIVE_ADDRESS_LIVE = ("idle", "busy", "waiting")
+
+
+def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
+    args.name = _resolve_worker_target(args.name)
+    data = read_registry_no_repair()
+    rec = data["workers"].get(args.name)
+    if rec is None:
+        raise FleetCliError(f"unknown worker: {args.name!r}")
+    if _is_codex_record(rec):
+        raise FleetCliError(
+            f"{args.name}: a Codex worker has no native Claude session address; "
+            f"use `fleet send`")
+    sid = rec.get("session_id")
+    ok, entries = _fetch_agents_roster(which=which, run=run)
+    if not ok:
+        raise FleetCliError(f"{args.name}: roster unavailable ({entries})")
+    entry = _roster_entry_for(entries, sid)
+    retired = rec.get("retired_sids") or []
+    stale = [e for e in entries
+             if isinstance(e, dict) and e.get("sessionId") in retired
+             and isinstance(e.get("pid"), int)
+             and e.get("status") in _NATIVE_ADDRESS_LIVE]
+    for e in stale:
+        print(f"WARNING: retired session {e.get('sessionId')} of {args.name} "
+              f"is still live as {e.get('name')!r}; do not message it",
+              file=sys.stderr)
+    def is_live(e):
+        return (isinstance(e, dict) and isinstance(e.get("pid"), int)
+                and e.get("status") in _NATIVE_ADDRESS_LIVE)
+
+    if not is_live(entry):
+        raise FleetCliError(
+            f"{args.name}: session {sid} is not live -- a native message would "
+            f"not be delivered; use `fleet send` (fork-steer) or `fleet respawn`")
+    native = entry.get("name")
+    if not isinstance(native, str) or not native:
+        raise FleetCliError(f"{args.name}: roster entry for {sid} has no name")
+    twins = [e for e in entries if is_live(e) and e.get("name") == native]
+    if len(twins) > 1:
+        # SendMessage resolves by name and ListAgents shows no sid: refuse.
+        others = [e.get("sessionId") for e in twins if e.get("sessionId") != sid]
+        dups = [{"pid": e.get("pid"), "session_id": e.get("sessionId"),
+                 "status": e.get("status"), "registry": e.get("sessionId") == sid}
+                for e in twins]
+        error = (f"{len(twins)} live sessions carry the name {native!r}: "
+                 + ", ".join(f"pid {d['pid']} sid {d['session_id']}" for d in dups)
+                 + f"; the registry sid is {sid}. Stop the retired body "
+                 + " ".join(f"(`claude stop {o}`)" for o in others)
+                 + " and retry, or use `fleet send`")
+        if getattr(args, "json", False):
+            print(json.dumps({"worker": args.name, "error": error,
+                              "session_id": sid, "duplicates": dups}))
+            return 1
+        raise FleetCliError(f"{args.name}: {error}")
+    if getattr(args, "json", False):
+        print(json.dumps({"worker": args.name, "to": native, "session_id": sid,
+                          "status": entry.get("status"), "mode": rec.get("mode"),
+                          "live_retired_sids": [e.get("sessionId") for e in stale]}))
+        return 0
+    print(native)
+    if entry.get("status") == "waiting":
+        print(f"NOTE: {args.name} is waiting on "
+              f"{entry.get('waitingFor') or 'a prompt'}; a message queues "
+              f"until that clears", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
