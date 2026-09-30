@@ -84,12 +84,25 @@ def test_a_live_retired_body_is_named_and_never_returned(monkeypatch, capsys):
     assert old in err and "do not message it" in err
 
 
-def test_two_live_sessions_with_one_name_warn(monkeypatch, capsys):
-    sid = _seed("w1")
-    _roster(monkeypatch, [_row(sid, "fleet|w1|h"),
-                          _row(str(uuid.uuid4()), "fleet|w1|h")])
-    assert fleet.cmd_address(_args("w1")) == 0
-    assert "[ref]" in capsys.readouterr().err
+def test_two_live_sessions_with_one_name_refuse_and_name_both(monkeypatch, capsys):
+    """w110 B3: SendMessage resolves by name and ListAgents shows no sid, so
+    a shared name cannot be addressed safely. The refusal names each pid and
+    sid and the retired body to stop."""
+    old = str(uuid.uuid4())
+    sid = _seed("w1", retired=[old])
+    _roster(monkeypatch, [_row(sid, "fleet|w1|h", pid=11),
+                          _row(old, "fleet|w1|h", pid=22)])
+    with pytest.raises(fleet.FleetCliError) as excinfo:
+        fleet.cmd_address(_args("w1"))
+    message = str(excinfo.value)
+    assert f"pid 11 sid {sid}" in message and f"pid 22 sid {old}" in message
+    assert f"claude stop {old}" in message and f"claude stop {sid}" not in message
+    capsys.readouterr()
+    assert fleet.cmd_address(_args("w1", "--json")) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert "to" not in out and f"claude stop {old}" in out["error"]
+    assert [(d["pid"], d["session_id"], d["registry"]) for d in out["duplicates"]] == [
+        (11, sid, True), (22, old, False)]
 
 
 def test_roster_failure_is_a_refusal(monkeypatch):

@@ -19843,13 +19843,28 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
     native = entry.get("name")
     if not isinstance(native, str) or not native:
         raise FleetCliError(f"{args.name}: roster entry for {sid} has no name")
-    twins = sum(1 for e in entries
-                if isinstance(e, dict) and e.get("name") == native
-                and e.get("status") in _NATIVE_ADDRESS_LIVE)
+    twins = [e for e in entries
+             if isinstance(e, dict) and e.get("name") == native
+             and e.get("status") in _NATIVE_ADDRESS_LIVE]
+    if len(twins) > 1:
+        # SendMessage resolves by name and ListAgents shows no sid: refuse.
+        others = [e.get("sessionId") for e in twins if e.get("sessionId") != sid]
+        dups = [{"pid": e.get("pid"), "session_id": e.get("sessionId"),
+                 "status": e.get("status"), "registry": e.get("sessionId") == sid}
+                for e in twins]
+        error = (f"{len(twins)} live sessions carry the name {native!r}: "
+                 + ", ".join(f"pid {d['pid']} sid {d['session_id']}" for d in dups)
+                 + f"; the registry sid is {sid}. Stop the retired body "
+                 + " ".join(f"(`claude stop {o}`)" for o in others)
+                 + " and retry, or use `fleet send`")
+        if getattr(args, "json", False):
+            print(json.dumps({"worker": args.name, "error": error,
+                              "session_id": sid, "duplicates": dups}))
+            return 1
+        raise FleetCliError(f"{args.name}: {error}")
     if getattr(args, "json", False):
         print(json.dumps({"worker": args.name, "to": native, "session_id": sid,
                           "status": entry.get("status"), "mode": rec.get("mode"),
-                          "live_same_name": twins,
                           "live_retired_sids": [e.get("sessionId") for e in stale]}))
         return 0
     print(native)
@@ -19857,10 +19872,6 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
         print(f"NOTE: {args.name} is waiting on "
               f"{entry.get('waitingFor') or 'a prompt'}; a message queues "
               f"until that clears", file=sys.stderr)
-    if twins > 1:
-        print(f"WARNING: {twins} live sessions carry this name; SendMessage "
-              f"will ask for the [ref] -- pick the one whose ListAgents row "
-              f"matches session {sid}", file=sys.stderr)
     return 0
 
 

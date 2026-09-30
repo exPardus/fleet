@@ -70,8 +70,11 @@ row's exact `name`. Use that value as the `SendMessage` `to`.
 - `waiting` (the session is on a permission prompt) is addressable. It prints
   a note that the message queues until the prompt clears.
 - Warns when a retired sid of the worker is live, and names it.
-- Warns when two live sessions share the name. SendMessage then asks for the
-  `[ref]`. The roster does not carry the ref.
+- Refuses when two or more live sessions share the name: SendMessage resolves
+  by name and ListAgents shows no session id, so the caller cannot tell the
+  bodies apart. Exit is non-zero; the message (and the `--json` `error`
+  field, with a `duplicates` list) names each pid and session id and the
+  `claude stop <sid>` for each body that is not the registry sid.
 - Codex workers are refused. They have no Claude session.
 
 ### `crossSessionInbound: "accept"` in `worker-settings.template.json`
