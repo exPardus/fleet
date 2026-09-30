@@ -105,6 +105,20 @@ def test_two_live_sessions_with_one_name_refuse_and_name_both(monkeypatch, capsy
         (11, sid, True), (22, old, False)]
 
 
+@pytest.mark.parametrize("status, pid", [("idle", None), (None, 22), ("stopped", 22)])
+def test_a_same_name_row_that_is_not_live_is_not_a_duplicate(monkeypatch, capsys,
+                                                             status, pid):
+    """w110 re-review: a same-name roster row counts as a duplicate only when
+    it passes the registered session's own liveness check (pid and status)."""
+    sid = _seed("w1")
+    _roster(monkeypatch, [_row(sid, "fleet|w1|h", pid=11),
+                          _row(str(uuid.uuid4()), "fleet|w1|h", status=status, pid=pid)])
+    assert fleet.cmd_address(_args("w1")) == 0
+    assert capsys.readouterr().out.strip() == "fleet|w1|h"
+    assert fleet.cmd_address(_args("w1", "--json")) == 0
+    assert "error" not in json.loads(capsys.readouterr().out)
+
+
 def test_roster_failure_is_a_refusal(monkeypatch):
     _seed("w1")
     _roster(monkeypatch, "boom", ok=False)

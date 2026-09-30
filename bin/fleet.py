@@ -19836,18 +19836,18 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
         print(f"WARNING: retired session {e.get('sessionId')} of {args.name} "
               f"is still live as {e.get('name')!r}; do not message it",
               file=sys.stderr)
-    live = (isinstance(entry, dict) and isinstance(entry.get("pid"), int)
-            and entry.get("status") in _NATIVE_ADDRESS_LIVE)
-    if not live:
+    def is_live(e):
+        return (isinstance(e, dict) and isinstance(e.get("pid"), int)
+                and e.get("status") in _NATIVE_ADDRESS_LIVE)
+
+    if not is_live(entry):
         raise FleetCliError(
             f"{args.name}: session {sid} is not live -- a native message would "
             f"not be delivered; use `fleet send` (fork-steer) or `fleet respawn`")
     native = entry.get("name")
     if not isinstance(native, str) or not native:
         raise FleetCliError(f"{args.name}: roster entry for {sid} has no name")
-    twins = [e for e in entries
-             if isinstance(e, dict) and e.get("name") == native
-             and e.get("status") in _NATIVE_ADDRESS_LIVE]
+    twins = [e for e in entries if is_live(e) and e.get("name") == native]
     if len(twins) > 1:
         # SendMessage resolves by name and ListAgents shows no sid: refuse.
         others = [e.get("sessionId") for e in twins if e.get("sessionId") != sid]
