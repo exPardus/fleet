@@ -313,6 +313,39 @@ def test_wave_close_refuses_an_unattributable_range_before_any_mutation(
     assert not git("status", "--porcelain").stdout.strip()
 
 
+def test_merge_audit_accepts_hotfix_bookkeeping_without_joining_a_worker(tmp_path):
+    """Interface hotfix merges are bookkeeping, not worker lanes."""
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge(hotfix/wake): repair\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    assert fleet._wave_merge_audit(tmp_path, "base", run=run) == ([], [])
+
+
+def test_merge_audit_still_refuses_unknown_merge_classes(tmp_path):
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge/unknown: repair\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    lanes, unparsed = fleet._wave_merge_audit(tmp_path, "base", run=run)
+    assert lanes == []
+    assert unparsed == ["abcdef1"]
+
+
+def test_hotfix_merge_is_listed_separately_from_worker_lanes(tmp_path):
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(
+                argv, 0, "abcdef1234567\tmerge(hotfix/wake): repair\n", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    assert fleet._wave_hotfix_merges(tmp_path, "base", run=run) == ["hotfix/wake"]
+
+
 def test_unparsed_merge_refusal_precedes_every_mutation_in_cmd_wave_close():
     """Static ordering guard alongside the real-git proof above: the
     UNPARSED refusal must sit, in source, before the first

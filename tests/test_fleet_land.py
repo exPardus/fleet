@@ -155,6 +155,19 @@ def test_check_commands_docs_currency_catches_a_lane_report_missing_done(tmp_pat
     assert checks["docs-currency"] != 0
 
 
+def test_foreign_home_config_disables_fleet_only_land_gates(tmp_path):
+    """A configured foreign home must not require fleet-repo gate scripts."""
+    worktree = tmp_path / "foreign"
+    worktree.mkdir()
+    (worktree / "supervisor").mkdir()
+    (worktree / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"interpreters": ["3.12"], "gates": []}), encoding="utf-8")
+
+    checks = fleet_land._check_commands(worktree, [])
+
+    assert checks == []
+
+
 def test_result_requires_a_command_for_every_claim(tmp_path):
     report = tmp_path / "docs" / "lanes"
     report.mkdir(parents=True)

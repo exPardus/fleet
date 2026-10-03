@@ -25,6 +25,7 @@ _REQUIRED_RESULT_KEYS = {
 }
 _TEST_KEYS = {"command", "rc", "passed", "failed", "skipped"}
 _CLAIM_KEYS = {"claim", "command"}
+_BUILTIN_GATES = {"docs-currency", "receipts"}
 
 
 def _git(repo: Path, *args: str, cwd: Path | None = None,
@@ -283,19 +284,71 @@ def _run_shell(command: str, cwd: Path, log_dir: Path,
     return result.returncode
 
 
+def _land_gates(worktree: Path) -> list[tuple[str, str]]:
+    """Resolve the named landing gates declared by the home.
+
+    The fleet checkout has no config and keeps its historical gates. A foreign
+    home opts into its own gate set by creating ``supervisor/wave-close.json``;
+    an omitted ``gates`` key then means no fleet-specific checks. Custom gates
+    are explicit ``{"name": ..., "command": ...}`` entries and run in the
+    lane worktree, just like the recorded lane tests.
+    """
+    path = worktree / "supervisor" / "wave-close.json"
+    # `cmd_land` runs from the home checkout while validating a linked lane
+    # worktree. A git-ignored or newer home config may therefore exist only at
+    # the checkout root, not in the lane branch being rebased.
+    home_path = Path.cwd() / "supervisor" / "wave-close.json"
+    if not path.exists() and home_path.exists():
+        path = home_path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        python = shlex.quote(sys.executable)
+        return [
+            ("docs-currency", f"{python} tests/test_docs_currency.py ."),
+            ("receipts", f"{python} tools/verify_receipts.py --strict "
+             "--skip-volatile docs/specs/*.md"),
+        ]
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise FleetCliError(f"land: cannot read {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise FleetCliError("land: supervisor/wave-close.json must be a JSON object")
+    gates = payload.get("gates", [])
+    if not isinstance(gates, list):
+        raise FleetCliError("land: supervisor/wave-close.json `gates` must be a list")
+    resolved = []
+    for index, gate in enumerate(gates):
+        if isinstance(gate, str):
+            if gate not in _BUILTIN_GATES:
+                raise FleetCliError(
+                    f"land: supervisor/wave-close.json gates[{index}] names "
+                    f"unknown built-in gate {gate!r}")
+            python = shlex.quote(sys.executable)
+            command = (f"{python} tests/test_docs_currency.py ." if gate == "docs-currency"
+                       else f"{python} tools/verify_receipts.py --strict "
+                            "--skip-volatile docs/specs/*.md")
+            resolved.append((gate, command))
+            continue
+        if (not isinstance(gate, dict) or set(gate) != {"name", "command"}
+                or not isinstance(gate["name"], str)
+                or not gate["name"].strip()
+                or not isinstance(gate["command"], str)
+                or not gate["command"].strip()):
+            raise FleetCliError(
+                f"land: supervisor/wave-close.json gates[{index}] must be a "
+                "gate name or {name, command} object")
+        resolved.append((gate["name"], gate["command"]))
+    return resolved
+
+
 def _check_commands(worktree: Path, tests: list[dict]) -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
     checks = []
     for index, item in enumerate(tests, start=1):
         checks.append((f"tests[{index}]", _run_shell(
             item["command"], worktree, log_dir, f"test-{index}")))
-    python = shlex.quote(sys.executable)
-    checks.append(("docs-currency", _run_shell(
-        f"{python} tests/test_docs_currency.py .", worktree, log_dir,
-        "docs-currency")))
-    checks.append(("receipts", _run_shell(
-        f"{python} tools/verify_receipts.py --strict --skip-volatile docs/specs/*.md",
-        worktree, log_dir, "receipts")))
+    for name, command in _land_gates(worktree):
+        checks.append((name, _run_shell(command, worktree, log_dir, name)))
     return checks
 
 
