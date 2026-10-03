@@ -260,6 +260,19 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 | `init [--home PATH] [--statusline [--chain\|--force]]` | Bare `init` creates an initialized fleet home in cwd: `state/fleet.json` plus rendered `state/worker-settings.json` (G-K5 Reading A, 2026-09-10). It does not register the home globally. Explicit `--home PATH` also appends its registration (DESTRUCTIVE, E2); it refuses with `--fleet-home` or `--statusline`. Explicit `--fleet-home` keeps settings rendering in the selected initialized home; `--statusline` keeps existing resolved-home setup and installs into `~/.claude/settings.json`, refusing foreign incumbents (terminal-surface D6). Scheduler flags remain removed. |
 | `home` / `knowledge` | Print resolved `FLEET_HOME`; print `knowledge/INDEX.md`. |
 
+The wave-close row's per-home configuration also owns landing gates: a missing
+`supervisor/wave-close.json` preserves the fleet home's `docs-currency` and
+`receipts` gates, while a configured foreign home defaults to no fleet-specific
+gate and may select named built-ins or `{name, command}` checks. Merge subjects
+`merge(hotfix/<name>): ...` are interface/supervisor bookkeeping, listed in
+throughput with workers `0` and exempt from worker joining; unknown merge
+subjects remain UNPARSED and refuse the close. Both the floor and landing-gate
+configuration are resolved from the home checkout root, even when `fleet land`
+is invoked from a nested directory or a linked lane worktree; refusal totals
+count every merge in the range, including hotfix bookkeeping. Named gates use
+one shared allowlist (`docs-currency` and `receipts`); unknown names refuse
+before either landing or wave-close work begins.
+
 ## 8. Outcome store + the hook write boundary
 
 **The outcome store** (`state/outcomes/<key>.jsonl`; key = worker NAME resolved from the registry, sid-keyed fallback on any resolution failure) is the discriminator's data source and the result surface. Writers, exactly two:

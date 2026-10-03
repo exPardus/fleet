@@ -759,7 +759,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15274) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15321) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -12608,10 +12608,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2529, :2564,
     :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
-    :8917, :8928, :9024, :9539, :12558, :16369, :16370, :16431, :17731, :19627`).
+    :8917, :8928, :9024, :9539, :12558, :16416, :16417, :16478, :17778, :19676`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7100, :7552, :10984,
-    :18459. This makes union identity safe; the age boundary distinguishes respawn.
+    :18506. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13327,7 +13327,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7100, :7552, :10984,
-    # :18459) -- so union identity cannot make one body answer for another.
+    # :18506) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -13867,6 +13867,10 @@ WAVE_CLOSE_FLOOR_DEFAULTS = {
     "expected_failures": None,
     "env": {},
     "uv_offline": True,
+    # Landing gates are selected by fleet_land. A missing config retains the
+    # fleet home's historical docs/receipt gates; a foreign config defaults to
+    # no fleet-specific gates and may name explicit built-ins or commands.
+    "gates": None,
 }
 WAVE_CLOSE_PUSH_ATTEMPTS = 4  # initial push plus three retries
 WAVE_CLOSE_PUSH_WINDOW_SECONDS = 300.0
@@ -14384,8 +14388,10 @@ def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
 def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
 
-    ``lanes`` holds every merge whose subject matches the `merge(<lane>):`
-    convention, with its worktree-derived substrate. ``unparsed`` holds the
+    ``lanes`` holds every worker merge whose subject matches the
+    `merge(<lane>):` convention, with its worktree-derived substrate.
+    ``merge(hotfix/<name>): ...`` bookkeeping is intentionally omitted from
+    ``lanes`` and reported separately by ``_wave_hotfix_merges``. ``unparsed`` holds the
     short SHAs of merges that did not -- e.g. git's own default
     ``Merge <branch> into <branch>`` subject -- and a caller must never fold
     those into a lane count it then reports as MEASURED: they are a range it
@@ -14411,6 +14417,12 @@ def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
                 unparsed.append(commit[:7])
             continue
         lane = match.group(1)
+        # Interface/supervisor hotfixes use the same merge subject envelope so
+        # they remain visible in the range, but they have no worker row or
+        # substrate. Keep them out of the worker lane list; cmd_wave_close
+        # reports them as bookkeeping instead of refusing UNJOINED.
+        if lane.lower().startswith("hotfix/"):
+            continue
         # The subject token is a BRANCH: join it to the lane's record first,
         # then read the substrate from that record, so the lane stays
         # attributable after its worktree is pruned (queue items 16 and 26).
@@ -14419,6 +14431,19 @@ def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
         substrate = _wave_record_substrate(repo, worktree, record=record)
         lanes.append((lane, substrate, commit[:7]))
     return lanes, unparsed
+
+
+def _wave_hotfix_merges(repo, base, run=subprocess.run) -> list[str]:
+    """Return interface/supervisor hotfix branch tokens in the merge range."""
+    result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
+                       f"{base}..HEAD", run=run)
+    hotfixes = []
+    for line in result.stdout.splitlines():
+        commit, _, subject = line.partition("\t")
+        match = re.search(r"^merge\((hotfix/[^)]+)\):", subject, re.IGNORECASE)
+        if match:
+            hotfixes.append(match.group(1))
+    return hotfixes
 
 
 def _wave_landed_lanes(repo, base, run=subprocess.run):
@@ -14841,6 +14866,25 @@ def _wave_floor_config(repo):
         config["test_paths"] = paths
     if "pytest_args" in payload:
         config["pytest_args"] = strings("pytest_args", payload["pytest_args"])
+    if "gates" in payload:
+        gates = payload["gates"]
+        if not isinstance(gates, list):
+            raise FleetCliError(f"wave-close: {rel} `gates` must be a list")
+        for index, gate in enumerate(gates):
+            if isinstance(gate, str) and gate in fleet_land.LAND_GATE_NAMES:
+                continue
+            if isinstance(gate, str):
+                raise FleetCliError(
+                    f"wave-close: {rel} `gates[{index}]` names unknown gate "
+                    f"{gate!r}; choose one of {sorted(fleet_land.LAND_GATE_NAMES)}")
+            if (isinstance(gate, dict) and set(gate) == {"name", "command"}
+                    and isinstance(gate["name"], str) and gate["name"].strip()
+                    and isinstance(gate["command"], str) and gate["command"].strip()):
+                continue
+            raise FleetCliError(
+                f"wave-close: {rel} `gates[{index}]` must be a name or "
+                "{name, command} object")
+        config["gates"] = list(gates)
     config["expected_failures"] = sorted(set(strings(
         "expected_failures", payload.get("expected_failures", []))))
     if "env" in payload:
@@ -15069,10 +15113,11 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     # tokens_per_bin_line) is a confident zero it never measured.
     aliases = _wave_aliases(repo, getattr(args, "alias", None))
     lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run, aliases=aliases)
+    hotfixes = _wave_hotfix_merges(repo, base, run=run)
+    merge_count = len(lanes) + len(unparsed_merges) + len(hotfixes)
     if unparsed_merges:
-        total = len(lanes) + len(unparsed_merges)
         raise FleetCliError(
-            f"wave-close: UNPARSED: {len(unparsed_merges)} of {total} "
+            f"wave-close: UNPARSED: {len(unparsed_merges)} of {merge_count} "
             f"merge(s) in {base}..HEAD do not match the `merge(<lane>):` "
             "subject convention and cannot be attributed to a lane "
             f"({', '.join(unparsed_merges)}) -- refusing to publish "
@@ -15095,7 +15140,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     unjoined = _wave_unjoined_lanes(repo, lanes, run=run, aliases=aliases)
     if unjoined:
         raise FleetCliError(
-            f"wave-close: UNJOINED: {len(unjoined)} of {len(lanes)} landed "
+            f"wave-close: UNJOINED: {len(unjoined)} of {merge_count} landed "
             f"lane(s) in {base}..HEAD resolve to no registry record and no "
             f"worktree ({', '.join(unjoined)}) -- refusing to publish "
             "workers/tokens/external_lines/tokens_per_bin_line it could not "
@@ -15134,6 +15179,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
                      else _wave_outcomes_claude_tokens(repo, lanes, run=run,
                                                        aliases=aliases))
     lane_text = ", ".join(f"{name}: {substrate}" for name, substrate, _sha in lanes)
+    if hotfixes:
+        lane_text += ("; " if lane_text else "") + "hotfixes: " + ", ".join(hotfixes)
     if not lane_text:
         lane_text = "none"
     codex_tokens = (_wave_codex_tokens(repo, lanes, run=run, aliases=aliases)
@@ -19470,6 +19517,8 @@ def main(argv=None) -> int:
     # the legacy/environment resolver.  Keep that provenance after the global
     # selector itself has been stripped before argparse.
     args._fleet_home_explicit = home_flag is not None
+    if home_flag is not None:
+        args._fleet_home = home_flag
     try:
         # Land is a repository operation owned by its leaf module. It must not
         # resolve or read fleet-home state before it can prepare a lane.
