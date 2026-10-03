@@ -227,6 +227,30 @@ def test_home_gate_config_wins_over_lane_config_from_a_subdirectory(tmp_path, mo
     assert fleet_land._land_gates(lane) == [("home-gate", "true")]
 
 
+def test_linked_lane_worktree_cannot_override_home_gate_config(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    _git(home, "init", "-q")
+    _git(home, "config", "user.email", "gates@example.invalid")
+    _git(home, "config", "user.name", "gate tests")
+    (home / "README.md").write_text("home\n", encoding="utf-8")
+    _git(home, "add", "README.md")
+    _git(home, "commit", "-qm", "home")
+    (home / "supervisor").mkdir()
+    (home / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": [{"name": "required", "command": "true"}]}),
+        encoding="utf-8")
+    lane = tmp_path / "lane"
+    _git(home, "worktree", "add", "-qb", "w1/gates", str(lane), "HEAD")
+    (lane / "supervisor").mkdir()
+    (lane / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": []}), encoding="utf-8")
+    monkeypatch.delenv("FLEET_HOME", raising=False)
+    monkeypatch.chdir(lane)
+
+    assert fleet_land._land_gates(lane) == [("required", "true")]
+
+
 def test_result_requires_a_command_for_every_claim(tmp_path):
     report = tmp_path / "docs" / "lanes"
     report.mkdir(parents=True)

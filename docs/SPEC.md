@@ -269,7 +269,9 @@ throughput with workers `0` and exempt from worker joining; unknown merge
 subjects remain UNPARSED and refuse the close. Both the floor and landing-gate
 configuration are resolved from the home checkout root, even when `fleet land`
 is invoked from a nested directory or a linked lane worktree; refusal totals
-count every merge in the range, including hotfix bookkeeping.
+count every merge in the range, including hotfix bookkeeping. Named gates use
+one shared allowlist (`docs-currency` and `receipts`); unknown names refuse
+before either landing or wave-close work begins.
 
 ## 8. Outcome store + the hook write boundary
 

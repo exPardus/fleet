@@ -759,7 +759,7 @@ def _quarantine_artifacts() -> list:
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:15317) -- render the release explanation.
+      * `_tombstone_releasing_body` (:15321) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -12608,10 +12608,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:2529, :2564,
     :2594, :2633, :2670, :2732, :2812, :3776, :8144, :8306, :8503, :8629, :8665, :8836, :8837, :8907,
-    :8917, :8928, :9024, :9539, :12558, :16412, :16413, :16474, :17774, :19670`).
+    :8917, :8928, :9024, :9539, :12558, :16416, :16417, :16478, :17778, :19676`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :7100, :7552, :10984,
-    :18502. This makes union identity safe; the age boundary distinguishes respawn.
+    :18506. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -13327,7 +13327,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:7100, :7552, :10984,
-    # :18502) -- so union identity cannot make one body answer for another.
+    # :18506) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -14871,8 +14871,12 @@ def _wave_floor_config(repo):
         if not isinstance(gates, list):
             raise FleetCliError(f"wave-close: {rel} `gates` must be a list")
         for index, gate in enumerate(gates):
-            if isinstance(gate, str) and gate.strip():
+            if isinstance(gate, str) and gate in fleet_land.LAND_GATE_NAMES:
                 continue
+            if isinstance(gate, str):
+                raise FleetCliError(
+                    f"wave-close: {rel} `gates[{index}]` names unknown gate "
+                    f"{gate!r}; choose one of {sorted(fleet_land.LAND_GATE_NAMES)}")
             if (isinstance(gate, dict) and set(gate) == {"name", "command"}
                     and isinstance(gate["name"], str) and gate["name"].strip()
                     and isinstance(gate["command"], str) and gate["command"].strip()):
@@ -19513,6 +19517,8 @@ def main(argv=None) -> int:
     # the legacy/environment resolver.  Keep that provenance after the global
     # selector itself has been stripped before argparse.
     args._fleet_home_explicit = home_flag is not None
+    if home_flag is not None:
+        args._fleet_home = home_flag
     try:
         # Land is a repository operation owned by its leaf module. It must not
         # resolve or read fleet-home state before it can prepare a lane.

@@ -7,6 +7,7 @@ on the fleet kernel or its parser globals.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -25,7 +26,7 @@ _REQUIRED_RESULT_KEYS = {
 }
 _TEST_KEYS = {"command", "rc", "passed", "failed", "skipped"}
 _CLAIM_KEYS = {"claim", "command"}
-_BUILTIN_GATES = {"docs-currency", "receipts"}
+LAND_GATE_NAMES = frozenset(("docs-currency", "receipts"))
 
 
 def _git(repo: Path, *args: str, cwd: Path | None = None,
@@ -52,6 +53,20 @@ def _repo_root() -> Path:
     if not raw:
         raise FleetCliError("land: current directory is not a Git worktree")
     return Path(raw).resolve()
+
+
+def _controlling_home_root() -> Path:
+    """Resolve the checkout that controls a linked lane's landing gates."""
+    configured = os.environ.get("FLEET_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    try:
+        entries = _worktree_entries(Path.cwd())
+    except FleetCliError:
+        return Path.cwd().resolve()
+    if entries:
+        return entries[0][0].resolve()
+    return _repo_root()
 
 
 def _validate_lane_name(lane: object) -> str:
@@ -284,7 +299,7 @@ def _run_shell(command: str, cwd: Path, log_dir: Path,
     return result.returncode
 
 
-def _land_gates(worktree: Path) -> list[tuple[str, str]]:
+def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str, str]]:
     """Resolve the named landing gates declared by the home.
 
     The fleet checkout has no config and keeps its historical gates. A foreign
@@ -296,11 +311,8 @@ def _land_gates(worktree: Path) -> list[tuple[str, str]]:
     # `cmd_land` runs from the home checkout while validating a linked lane
     # worktree. Resolve the current checkout through Git so invocation from a
     # subdirectory still uses the home config; never inspect the lane branch.
-    try:
-        home_root = _repo_root()
-    except FleetCliError:
-        # Direct unit callers may provide a synthetic non-git worktree.
-        home_root = Path.cwd()
+    home_root = (home_root.resolve() if home_root is not None
+                 else _controlling_home_root())
     path = home_root / "supervisor" / "wave-close.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -321,7 +333,7 @@ def _land_gates(worktree: Path) -> list[tuple[str, str]]:
     resolved = []
     for index, gate in enumerate(gates):
         if isinstance(gate, str):
-            if gate not in _BUILTIN_GATES:
+            if gate not in LAND_GATE_NAMES:
                 raise FleetCliError(
                     f"land: supervisor/wave-close.json gates[{index}] names "
                     f"unknown built-in gate {gate!r}")
@@ -343,13 +355,14 @@ def _land_gates(worktree: Path) -> list[tuple[str, str]]:
     return resolved
 
 
-def _check_commands(worktree: Path, tests: list[dict]) -> list[tuple[str, int]]:
+def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = None) \
+        -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
     checks = []
     for index, item in enumerate(tests, start=1):
         checks.append((f"tests[{index}]", _run_shell(
             item["command"], worktree, log_dir, f"test-{index}")))
-    for name, command in _land_gates(worktree):
+    for name, command in _land_gates(worktree, home_root=home_root):
         checks.append((name, _run_shell(command, worktree, log_dir, name)))
     return checks
 
@@ -369,7 +382,10 @@ def cmd_land(args) -> int:
     if source_branch == lane_branch:
         raise FleetCliError("land: lane branch cannot be its own source branch")
     _rebase(repo, worktree, lane_branch, source_branch)
-    checks = _check_commands(worktree, payload["tests"])
+    home_override = getattr(args, "_fleet_home", None)
+    checks = (_check_commands(worktree, payload["tests"],
+                              home_root=Path(home_override))
+              if home_override else _check_commands(worktree, payload["tests"]))
     tip = _git_output(repo, "rev-parse", f"refs/heads/{lane_branch}")
     stat = _git_output(repo, "diff", "--shortstat", f"{base}..{tip}") or "0 files changed"
     red = [name for name, rc in checks if rc != 0]

@@ -350,6 +350,12 @@ def test_unparsed_count_includes_hotfix_merges():
     assert "len(lanes) + len(unparsed_merges) + len(hotfixes)" in src
 
 
+def test_floor_config_rejects_unknown_builtin_gate_name(tmp_path):
+    TestPerHomeFloorConfig._write(tmp_path, {"gates": ["not-a-fleet-gate"]})
+    with pytest.raises(fleet.FleetCliError, match="unknown gate"):
+        fleet._wave_floor_config(tmp_path)
+
+
 def test_hotfix_merge_is_listed_separately_from_worker_lanes(tmp_path):
     def run(argv, **kwargs):
         if argv[1] == "log":
