@@ -298,14 +298,22 @@ def test_wave_close_refuses_an_unattributable_range_before_any_mutation(
     git("checkout", "-q", "-")
     git("merge", "--no-ff", "--no-edit", "w83/x")
     merge_sha = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-qb", "hotfix/wake")
+    (repo / "hotfix.txt").write_text("repair\n", encoding="utf-8")
+    git("add", "hotfix.txt")
+    git("commit", "-qm", "hotfix work")
+    git("checkout", "-q", "-")
+    git("merge", "--no-ff", "-m", "merge(hotfix/wake): repair", "hotfix/wake")
+    hotfix_sha = git("rev-parse", "HEAD").stdout.strip()
     changelog_before = (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
     log_before = git("log", "--oneline").stdout
 
     monkeypatch.chdir(repo)
     args = argparse.Namespace(
-        base=base, changelog=f"- `{merge_sha[:7]}` lane work landed",
+        base=base, changelog=(f"- `{merge_sha[:7]}` lane work landed\n"
+                              f"- `{hotfix_sha[:7]}` hotfix landed"),
         sid=None, nonce=None)
-    with pytest.raises(fleet.FleetCliError, match=r"UNPARSED: 1 of 1"):
+    with pytest.raises(fleet.FleetCliError, match=r"UNPARSED: 1 of 2"):
         fleet.cmd_wave_close(args)
 
     assert (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8") == changelog_before
@@ -334,6 +342,12 @@ def test_merge_audit_still_refuses_unknown_merge_classes(tmp_path):
     lanes, unparsed = fleet._wave_merge_audit(tmp_path, "base", run=run)
     assert lanes == []
     assert unparsed == ["abcdef1"]
+
+
+def test_unparsed_count_includes_hotfix_merges():
+    import inspect
+    src = inspect.getsource(fleet.cmd_wave_close)
+    assert "len(lanes) + len(unparsed_merges) + len(hotfixes)" in src
 
 
 def test_hotfix_merge_is_listed_separately_from_worker_lanes(tmp_path):
@@ -956,14 +970,22 @@ def test_wave_close_refuses_a_lane_that_parses_but_joins_to_nothing(
     git("checkout", "-q", "-")
     git("merge", "--no-ff", "-m", "merge(w99/lane-join): lane work", "w99/lane-join")
     merge_sha = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-qb", "hotfix/close-note")
+    (repo / "hotfix.txt").write_text("note\n", encoding="utf-8")
+    git("add", "hotfix.txt")
+    git("commit", "-qm", "hotfix work")
+    git("checkout", "-q", "-")
+    git("merge", "--no-ff", "-m", "merge(hotfix/close-note): note", "hotfix/close-note")
+    hotfix_sha = git("rev-parse", "HEAD").stdout.strip()
     changelog_before = (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
     log_before = git("log", "--oneline").stdout
 
     monkeypatch.chdir(repo)
     args = argparse.Namespace(
-        base=base, changelog=f"- `{merge_sha[:7]}` lane work landed",
+        base=base, changelog=(f"- `{merge_sha[:7]}` lane work landed\n"
+                              f"- `{hotfix_sha[:7]}` hotfix landed"),
         sid=None, nonce=None)
-    with pytest.raises(fleet.FleetCliError, match=r"UNJOINED: 1 of 1"):
+    with pytest.raises(fleet.FleetCliError, match=r"UNJOINED: 1 of 2"):
         fleet.cmd_wave_close(args)
 
     assert (repo / "docs" / "CHANGELOG.md").read_text(encoding="utf-8") == changelog_before

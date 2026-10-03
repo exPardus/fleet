@@ -15110,10 +15110,10 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     aliases = _wave_aliases(repo, getattr(args, "alias", None))
     lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run, aliases=aliases)
     hotfixes = _wave_hotfix_merges(repo, base, run=run)
+    merge_count = len(lanes) + len(unparsed_merges) + len(hotfixes)
     if unparsed_merges:
-        total = len(lanes) + len(unparsed_merges)
         raise FleetCliError(
-            f"wave-close: UNPARSED: {len(unparsed_merges)} of {total} "
+            f"wave-close: UNPARSED: {len(unparsed_merges)} of {merge_count} "
             f"merge(s) in {base}..HEAD do not match the `merge(<lane>):` "
             "subject convention and cannot be attributed to a lane "
             f"({', '.join(unparsed_merges)}) -- refusing to publish "
@@ -15136,7 +15136,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     unjoined = _wave_unjoined_lanes(repo, lanes, run=run, aliases=aliases)
     if unjoined:
         raise FleetCliError(
-            f"wave-close: UNJOINED: {len(unjoined)} of {len(lanes)} landed "
+            f"wave-close: UNJOINED: {len(unjoined)} of {merge_count} landed "
             f"lane(s) in {base}..HEAD resolve to no registry record and no "
             f"worktree ({', '.join(unjoined)}) -- refusing to publish "
             "workers/tokens/external_lines/tokens_per_bin_line it could not "

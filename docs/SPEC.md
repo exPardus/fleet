@@ -266,7 +266,10 @@ The wave-close row's per-home configuration also owns landing gates: a missing
 gate and may select named built-ins or `{name, command}` checks. Merge subjects
 `merge(hotfix/<name>): ...` are interface/supervisor bookkeeping, listed in
 throughput with workers `0` and exempt from worker joining; unknown merge
-subjects remain UNPARSED and refuse the close.
+subjects remain UNPARSED and refuse the close. Both the floor and landing-gate
+configuration are resolved from the home checkout root, even when `fleet land`
+is invoked from a nested directory or a linked lane worktree; refusal totals
+count every merge in the range, including hotfix bookkeeping.
 
 ## 8. Outcome store + the hook write boundary
 

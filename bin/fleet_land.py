@@ -293,13 +293,15 @@ def _land_gates(worktree: Path) -> list[tuple[str, str]]:
     are explicit ``{"name": ..., "command": ...}`` entries and run in the
     lane worktree, just like the recorded lane tests.
     """
-    path = worktree / "supervisor" / "wave-close.json"
     # `cmd_land` runs from the home checkout while validating a linked lane
-    # worktree. A git-ignored or newer home config may therefore exist only at
-    # the checkout root, not in the lane branch being rebased.
-    home_path = Path.cwd() / "supervisor" / "wave-close.json"
-    if not path.exists() and home_path.exists():
-        path = home_path
+    # worktree. Resolve the current checkout through Git so invocation from a
+    # subdirectory still uses the home config; never inspect the lane branch.
+    try:
+        home_root = _repo_root()
+    except FleetCliError:
+        # Direct unit callers may provide a synthetic non-git worktree.
+        home_root = Path.cwd()
+    path = home_root / "supervisor" / "wave-close.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
