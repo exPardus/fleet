@@ -89,6 +89,9 @@ for line in sys.stdin:
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
     elif message.get("method") in ("turn/start", "turn/steer", "turn/interrupt"):
+        if (message.get("method") == "turn/start"
+                and os.environ.get("FAKE_DROP_TURN_RESPONSE") == "1"):
+            raise SystemExit(42)
         send({{"id": message["id"], "result": {{"turn": {{"id": "turn-1",
               "status": "inProgress"}}}}}})
 '''
@@ -107,13 +110,15 @@ def _home(tmp_path, name="home"):
     return home.resolve()
 
 
-def _ensure(tmp_path, home=None):
+def _ensure(tmp_path, home=None, env_overrides=None):
     module = _modules()
     home = home or _home(tmp_path)
     log = tmp_path / "app-server.jsonl"
     env = dict(os.environ)
     env["FAKE_APP_SERVER_LOG"] = str(log)
     env["CLAUDE_CODE_SESSION_ID"] = "must-not-reach-host"
+    if env_overrides:
+        env.update(env_overrides)
     client = module.CodexHostClient.ensure(
         home,
         app_server_command=[str(_fake_app_server(tmp_path))],
@@ -564,12 +569,13 @@ def test_symlinked_state_directory_is_not_followed_or_chmodded(tmp_path):
     home = _home(tmp_path)
     target = tmp_path / "foreign"
     target.mkdir(mode=0o755)
+    mode_before = stat.S_IMODE(target.stat().st_mode)
     (home / "state" / "codex").symlink_to(target, target_is_directory=True)
 
     with pytest.raises(module.UnsafeHostState, match="symlink"):
         module.CodexHostClient.ensure(home, ready_timeout=1)
 
-    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+    assert stat.S_IMODE(target.stat().st_mode) == mode_before
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink confinement")

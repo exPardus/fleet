@@ -60,6 +60,41 @@ def test_same_operation_replays_observed_result_without_second_mutation(tmp_path
         assert json.loads(_operation_file(client, "turn-op").read_text())["state"] == "committed"
     finally:
         _shutdown(client)
+        assert client.wait_for_exit(2)
+
+
+def test_provider_acceptance_with_lost_response_is_uncertain_and_never_replayed(
+        tmp_path, monkeypatch):
+    module, client, log = _ensure(
+        tmp_path, env_overrides={"FAKE_DROP_TURN_RESPONSE": "1"})
+    operation = _mutation("lost-provider-response", "turn/start")
+    try:
+        with pytest.raises(module.HostRejected, match="outcome is uncertain"):
+            client.call(operation, timeout=2)
+        record = json.loads(_operation_file(client, operation["operation_id"])
+                            .read_text())
+        assert record["state"] == "uncertain"
+        assert "outcome unknown" in record["reason"]
+    finally:
+        _shutdown(client)
+        assert client.wait_for_exit(2)
+
+    # A replacement host classifies the accepted intent before it publishes
+    # readiness. Retrying the same operation must remain blocked and must not
+    # issue a second provider turn.
+    monkeypatch.setattr(module, "HOST_HEARTBEAT_STALE_SECONDS", 0.0)
+    _module_value, replacement, _replacement_log = _ensure(
+        tmp_path, home=client.home)
+    try:
+        record = json.loads(_operation_file(
+            replacement, operation["operation_id"]).read_text())
+        assert record["state"] == "uncertain"
+        with pytest.raises(module.HostRejected, match="uncertain"):
+            replacement.call(operation, timeout=2)
+        assert _app_requests(log, "turn/start") == [
+            {"event": "request", "method": "turn/start"}]
+    finally:
+        _shutdown(replacement)
 
 
 @pytest.mark.parametrize("state", ["observed", "uncertain"])
