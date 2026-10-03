@@ -779,6 +779,11 @@ class OperationJournal:
             if existing.get("method") != method or existing.get("recovery") != record["recovery"]:
                 raise HostRejected(
                     f"operation {operation_id} reused with different immutable intent")
+            if (existing.get("generation") != self.generation
+                    and existing.get("state") in {"accepted", "uncertain"}):
+                raise HostRejected(
+                    f"operation {operation_id} acceptance is uncertain; "
+                    "reconcile before retry (another host generation owns it)")
             if existing.get("generation") != self.generation:
                 raise HostRejected(
                     f"operation {operation_id} belongs to another host generation")

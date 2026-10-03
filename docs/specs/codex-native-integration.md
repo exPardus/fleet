@@ -184,6 +184,10 @@ Each request carries `protocol_version`, `host_generation`, `operation_id`,
 digest. One operation ID has one digest/result. Responses echo those values;
 the client rejects another home, generation, operation, or digest.
 
+An accepted or uncertain operation from an older host generation is rejected
+with an explicit "reconcile before retry" uncertainty; generation rollover
+never turns a lost provider response into a replay.
+
 ## 5. Components and state
 
 - `bin/fleet_codex_protocol.py`: JSON-RPC framing, initialization, request
