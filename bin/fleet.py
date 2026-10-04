@@ -1610,6 +1610,14 @@ _CODEX_MODEL_RE = re.compile(r"^codex:(?P<bare>.+)$")
 _CODEX_WORKER_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
 MCX_DISPATCH_TIMEOUT_SECONDS = 60.0
 MCX_VERB_TIMEOUT_SECONDS = 30.0
+MCX_APPROVAL_BY_FLEET_MODE = {
+    "bypass": "unrestricted",
+    "accept": "auto",
+    "dontask": "never",
+    "plan": "never",
+    "omit": "never",
+}
+MCX_EFFORT_CHOICES = ("low", "medium", "high", "xhigh")
 
 
 def _codex_model_slug(model):
@@ -2069,14 +2077,38 @@ def _mcx_dir(record) -> Path:
     return Path(record.get("cwd") or ".") / ".mcx"
 
 
-def _mcx_env(cwd) -> dict:
+def _mcx_approval(mode: str) -> str:
+    """Map a Fleet permission mode to mcx's approval/sandbox contract."""
+    try:
+        return MCX_APPROVAL_BY_FLEET_MODE[mode]
+    except KeyError as exc:
+        raise FleetCliError(f"unsupported mcx permission mode: {mode!r}") from exc
+
+
+def _mcx_env(cwd, approval=None, effort=None) -> dict:
     """MCX_DIR pinned to <cwd>/.mcx so every verb finds the job regardless of
     its own cwd; MCX_WORKER stripped -- mcx refuses spawn/steer under it, and a
     fleet session that is itself an mcx worker must not inherit the guard."""
     env = dict(os.environ)
     env.pop("MCX_WORKER", None)
     env["MCX_DIR"] = (Path(cwd) / ".mcx").as_posix()
+    if approval is not None:
+        # Fleet's persisted mode is authoritative. In particular, do not let a
+        # caller's MCX_APPROVAL environment variable weaken a stricter mode.
+        env["MCX_APPROVAL"] = approval
+    if effort is not None:
+        env["MCX_EFFORT"] = effort
     return env
+
+
+def _mcx_record_env(record) -> dict:
+    """Return the durable approval/effort settings for a Codex row."""
+    approval = record.get("mcx_approval") or _mcx_approval(
+        record.get("mode") or "dontask")
+    effort = record.get("mcx_effort") or "medium"
+    if effort not in MCX_EFFORT_CHOICES:
+        raise FleetCliError(f"unsupported mcx reasoning effort: {effort!r}")
+    return {"approval": approval, "effort": effort}
 
 
 def _mcx_run(record, args, run=subprocess.run, which=shutil.which,
@@ -2090,7 +2122,9 @@ def _mcx_run(record, args, run=subprocess.run, which=shutil.which,
     cwd = record.get("cwd")
     run_cwd = cwd if cwd and Path(cwd).is_dir() else None
     try:
-        return run([exe, *args], cwd=run_cwd, env=_mcx_env(record.get("cwd") or "."),
+        settings = _mcx_record_env(record)
+        return run([exe, *args], cwd=run_cwd,
+                   env=_mcx_env(record.get("cwd") or ".", **settings),
                    capture_output=True, text=True, encoding="utf-8",
                    errors="replace", input=input_text, timeout=timeout)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -2111,7 +2145,7 @@ def _mcx_probe(record, run=subprocess.run, which=shutil.which):
     return {2: "working", 0: "idle"}.get(proc.returncode, "dead")
 
 
-def dispatch_codex(name, cwd, prompt_body, model,
+def dispatch_codex(name, cwd, prompt_body, model, mode="dontask", effort="medium",
                    run=subprocess.run, which=shutil.which):
     """Dispatch a Codex worker through mcx for `--model codex:<model>`.
 
@@ -2127,6 +2161,13 @@ def dispatch_codex(name, cwd, prompt_body, model,
         raise NativeDispatchError(
             f"dispatch_codex requires a codex:<model> string, got {model!r}")
     exe = _require_mcx(which)
+    approval = _mcx_approval(mode)
+    if effort is None:
+        effort = "medium"
+    if effort not in MCX_EFFORT_CHOICES:
+        raise NativeDispatchError(
+            f"dispatch_codex requires one of {', '.join(MCX_EFFORT_CHOICES)} effort values, "
+            f"got {effort!r}")
     try:
         tasks_dir().mkdir(parents=True, exist_ok=True)
         task_path = task_file_path(name)
@@ -2134,9 +2175,10 @@ def dispatch_codex(name, cwd, prompt_body, model,
     except OSError as exc:
         raise NativeDispatchError(f"task-file write failed: {exc}") from exc
     tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
-    argv = [exe, "spawn", "-m", bare, tiny_prompt]
+    argv = [exe, "spawn", "-m", bare, "-r", effort, tiny_prompt]
     try:
-        proc = run(argv, cwd=str(cwd), env=_mcx_env(cwd),
+        proc = run(argv, cwd=str(cwd), env=_mcx_env(cwd, approval=approval,
+                                                    effort=effort),
                    capture_output=True, text=True, encoding="utf-8",
                    errors="replace", timeout=MCX_DISPATCH_TIMEOUT_SECONDS)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -4291,7 +4333,7 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         by_status[status] = by_status.get(status, 0) + 1
         total_mail += mail
         total_cost += cost
-        rows.append({
+        row = {
             "name": name,
             "status": status,
             "turns": rec.get("turns", 0),
@@ -4316,7 +4358,12 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # Name shape identifies a supervisor body, including released or seized bodies.
             # The separate supervisor snapshot states which body holds the claim.
             "tier": "supervisor" if _is_supervisor_shaped(name) else "worker",
-        })
+        }
+        if _codex_record_route(rec) == "mcx":
+            row["mcx_approval"] = rec.get("mcx_approval") or _mcx_approval(
+                rec.get("mode") or "dontask")
+            row["mcx_effort"] = rec.get("mcx_effort") or "medium"
+        rows.append(row)
 
     snap["workers"] = rows
     snap["totals"] = {
@@ -5223,6 +5270,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             # Item 16: the lane branch is the durable join key for wave-close;
             # the worktree it is read from is the part that gets deleted.
             branch=_worktree_branch(cwd))
+        if codex_slug is not None and codex_adapter == "mcx":
+            record["mcx_approval"] = _mcx_approval(args.mode)
+            record["mcx_effort"] = getattr(args, "effort", None) or "medium"
         record["last_dispatch_at"] = now_iso()
         if codex_operation_id is not None:
             record.update({
@@ -5621,8 +5671,10 @@ def _cmd_spawn_codex_mcx(args, cwd, task, prompt, record,
         # Store the full brief once, inside the rollback envelope: an I/O failure
         # after pre-claim must not leave a worker that never launched.
         write_brief(name, task)
-        result = dispatch_codex(name, cwd, prompt, args.model,
-                                run=run, which=which)
+        result = dispatch_codex(
+            name, cwd, prompt, args.model, mode=record.get("mode") or args.mode,
+            effort=record.get("mcx_effort") or getattr(args, "effort", None),
+            run=run, which=which)
     except NativeDispatchError as exc:
         with fleet_lock():
             data = load_registry()
@@ -5840,6 +5892,8 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
             flags.append("resume-eligible")
         if w.get("archived_at"):
             flags.append("archived")
+        if w.get("mcx_approval"):
+            flags.append(f"mcx-approval:{w['mcx_approval']}")
         # Show nonzero recorded denial counts; the count makes no claim about a rule.
         denied = w.get("permission_denials")
         if isinstance(denied, int) and not isinstance(denied, bool) and denied > 0:
@@ -5909,6 +5963,10 @@ def _print_status_table(data: dict, names) -> None:
                 flag_list = flag_list + [f"permission-denied:{denied}"]
         else:
             cost_s = _cost_cell(rec.get("cost_usd"))
+        if _codex_record_route(rec) == "mcx":
+            approval = rec.get("mcx_approval") or _mcx_approval(
+                rec.get("mode") or "dontask")
+            flag_list = flag_list + [f"mcx-approval:{approval}"]
         flags = ",".join(flag_list) or "-"
         # Render unknown cells as ? and keep rendering the remaining workers.
         print(
@@ -5995,7 +6053,9 @@ def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
     _require_mcx_codex_record(name, rec, "peek")
     mcx_id = rec.get("mcx_id")
     if not mcx_id:
-        print(f"-- {name} (codex) --")
+        approval = rec.get("mcx_approval") or _mcx_approval(
+            rec.get("mode") or "dontask")
+        print(f"-- {name} (codex) -- approval={approval}")
         print("(no mcx worker id recorded -- dispatch may not have committed)")
         return 1
     log_path = _mcx_dir(rec) / mcx_id / "log"
@@ -6006,7 +6066,9 @@ def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
         print(f"{name}: cannot read mcx log {log_path.as_posix()}: {exc}",
               file=sys.stderr)
         return 1
-    print(f"-- {name} ({mcx_id}) --")
+    approval = rec.get("mcx_approval") or _mcx_approval(
+        rec.get("mode") or "dontask")
+    print(f"-- {name} ({mcx_id}) -- approval={approval}")
     tail = lines[-n:] if n else lines
     if not tail:
         print("(empty mcx log)")
@@ -7760,7 +7822,10 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
     # dispatch_codex writes the brief itself and hands mcx a pointer to it;
     # a codex lane never gets compose_prompt's Claude-worker preamble, so the
     # compose census (tests/test_index_compose) does not count this path.
-    result = dispatch_codex(name, cwd, task, model, run=run, which=which)
+    mcx_settings = _mcx_record_env(before)
+    result = dispatch_codex(
+        name, cwd, task, model, mode=before.get("mode") or "dontask",
+        effort=mcx_settings["effort"], run=run, which=which)
     new_id = result["mcx_id"]
 
     with fleet_lock():
@@ -7768,6 +7833,8 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
         rec = data["workers"].get(name)
         if rec is not None:
             rec["mcx_id"] = new_id
+            rec["mcx_approval"] = mcx_settings["approval"]
+            rec["mcx_effort"] = mcx_settings["effort"]
             # Write-only, via update(): the brief-preservation census flags any
             # literal ["task"] subscript as a capped-snapshot READ; the capped
             # field is provenance and this respawn never reads it back.
@@ -19056,6 +19123,8 @@ def build_parser() -> argparse.ArgumentParser:
     # on permission prompts.
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
+    p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
+                         help="Codex reasoning effort when --model is codex:<model>")
     p_spawn.add_argument(
         "--codex-adapter", choices=("mcx", "native"), default="mcx",
         dest="codex_adapter",

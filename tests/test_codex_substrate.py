@@ -36,12 +36,20 @@ def _write_rec(name, rec):
         fleet.save_registry(data)
 
 STUB_MCX = r"""#!/usr/bin/env python3
+import json
 import os
 import sys
 from pathlib import Path
 
 root = Path(os.environ["MCX_DIR"])
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+
+capture = os.environ.get("MCX_CAPTURE")
+if capture:
+    with Path(capture).open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"argv": sys.argv,
+                                 "approval": os.environ.get("MCX_APPROVAL"),
+                                 "effort": os.environ.get("MCX_EFFORT")}) + "\n")
 
 
 def fail(msg):
@@ -192,6 +200,52 @@ class TestSpawn:
         assert _job(worktree, rec["mcx_id"]).is_dir()
         assert not Path(os.environ["MCX_DIR"]).exists()
 
+    @pytest.mark.parametrize("mode,approval", [
+        ("bypass", "unrestricted"),
+        ("accept", "auto"),
+        ("dontask", "never"),
+        ("plan", "never"),
+        ("omit", "never"),
+    ])
+    def test_spawn_maps_fleet_mode_to_mcx_env_and_persists_it(
+            self, codex_home, monkeypatch, mode, approval):
+        worktree = codex_home / f"lane-{mode}"
+        worktree.mkdir()
+        capture = codex_home / f"capture-{mode}.jsonl"
+        monkeypatch.setenv("MCX_CAPTURE", str(capture))
+
+        # A caller override must not weaken the fleet mode selected above.
+        monkeypatch.setenv("MCX_APPROVAL", "unrestricted")
+        args = _spawn_args(worktree, name=f"cx-{mode}", mode=mode,
+                           effort="high")
+        assert fleet.cmd_spawn(args) == 0
+        entry = json.loads(capture.read_text(encoding="utf-8").splitlines()[-1])
+        argv = entry["argv"]
+        assert argv[1:4] == ["spawn", "-m", "gpt-5.6-luna"]
+        assert "-r" in argv and argv[argv.index("-r") + 1] == "high"
+        assert entry["approval"] == approval
+        assert entry["effort"] == "high"
+        rec = fleet.load_registry()["workers"][f"cx-{mode}"]
+        assert rec["mcx_approval"] == approval
+        assert rec["mcx_effort"] == "high"
+
+    def test_spawn_parser_accepts_codex_effort(self):
+        args = fleet.build_parser().parse_args([
+            "spawn", "cx1", "--dir", "/tmp", "--task", "work",
+            "--model", "codex:gpt-5.6-luna", "--effort", "xhigh",
+        ])
+        assert args.effort == "xhigh"
+
+    def test_status_and_peek_show_mcx_approval(self, codex_home, capsys):
+        worktree, rec = _spawn(codex_home, mode="accept")
+        snap = fleet.status_snapshot()
+        assert snap["workers"][0]["mcx_approval"] == "auto"
+        fleet.cmd_status(SimpleNamespace(name="cx1", json=False,
+                                         stale_ok=True, all=False))
+        assert "mcx-approval:auto" in capsys.readouterr().out
+        fleet.cmd_peek(SimpleNamespace(name="cx1", lines=1))
+        assert "approval=auto" in capsys.readouterr().out
+
     def test_spawn_without_mcx_refuses_and_rolls_back(self, codex_home,
                                                        monkeypatch):
         monkeypatch.setenv("PATH", "/nonexistent-bin")
@@ -307,6 +361,21 @@ class TestSend:
         assert after["status"] == "working"
         assert after["turns"] == rec["turns"] + 1
 
+    def test_steer_reuses_persisted_mcx_settings(self, codex_home, monkeypatch):
+        worktree, rec = _spawn(codex_home, mode="accept", effort="xhigh")
+        _set_state(worktree, rec["mcx_id"], "done")
+        capture = codex_home / "capture-steer.jsonl"
+        monkeypatch.setenv("MCX_CAPTURE", str(capture))
+
+        assert fleet.cmd_send(SimpleNamespace(
+            name="cx1", message="steer", nonce=None, force_band=False),
+            ) == 0
+        entries = [json.loads(line) for line in
+                   capture.read_text(encoding="utf-8").splitlines()]
+        steer_call = next(item for item in entries if item["argv"][1] == "steer")
+        assert steer_call["approval"] == "auto"
+        assert steer_call["effort"] == "xhigh"
+
     def test_send_to_a_running_lane_refuses_without_queueing(self, codex_home):
         worktree, rec = _spawn(codex_home)  # stub state: running
         with pytest.raises(fleet.FleetCliError, match="RESTARTS"):
@@ -386,6 +455,23 @@ class TestRespawn:
                 token_ceiling=None))
         assert fleet.load_registry()["workers"]["cx1"]["mcx_id"] == \
             rec["mcx_id"]
+
+    def test_respawn_reuses_persisted_mcx_settings(self, codex_home, monkeypatch):
+        worktree, rec = _spawn(codex_home, mode="bypass", effort="low")
+        _set_state(worktree, rec["mcx_id"], "done")
+        capture = codex_home / "capture-respawn.jsonl"
+        monkeypatch.setenv("MCX_CAPTURE", str(capture))
+
+        assert fleet.cmd_respawn(SimpleNamespace(
+            name="cx1", task=None, force=False, yes=True, nonce=None,
+            force_band=False, max_budget_usd=None, setting_sources=None,
+            token_ceiling=None)) == 0
+        entries = [json.loads(line) for line in
+                   capture.read_text(encoding="utf-8").splitlines()]
+        spawn_call = next(item for item in reversed(entries)
+                          if item["argv"][1] == "spawn")
+        assert spawn_call["approval"] == "unrestricted"
+        assert spawn_call["effort"] == "low"
 
 
 class TestWaveAccounting:

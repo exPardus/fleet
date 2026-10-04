@@ -199,6 +199,25 @@ claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worke
 - **Attach-verify (`_await_attach` @6114, 30 s window):** a joined roster entry is not a started session — rarely the daemon mints the entry and never attaches the runner (the never-attach wedge, live finding 2026-07-16). Life signals, any of: entry gains `status`/`pid`; entry reached a terminal/blocked state literal (it RAN — the discriminator owns the verdict); entry vanished post-join (reaped, not wedge-shaped); an outcome record for the sid exists (fast completion). **H1:** a full-window roster blackout (zero successful fetches) is CANNOT-VERIFY, never a wedge verdict — raises loudly and touches nothing, because a wedge verdict licenses stop/rm and must never be issued against a session never once observed.
 - **Single safe wedge-retry (C1):** on a wedge verdict, `claude stop` + `claude rm` the wedged session with short timeouts, then **verify** the cleanup (re-fetch; entry gone or still status/pid-free = retry-safe; entry live or roster unavailable = **refuse the retry** — two live sessions on one task file is the disaster case). Retry the whole dispatch exactly once with a fresh pre-snapshot; a second consecutive wedge gives up loudly. Events: `dispatch_wedged`, `dispatch_retried`.
 
+### 6.2 Codex/mcx launch settings
+
+Codex lanes use the mcx substrate rather than the native Claude roster. Fleet maps
+the worker's permission mode to mcx's approval/sandbox mode on every launch:
+
+| Fleet `--mode` | mcx `MCX_APPROVAL` |
+|---|---|
+| `bypass` | `unrestricted` |
+| `accept` | `auto` |
+| `dontask`, `plan`, `omit` | `never` |
+
+The mapped value is written as `mcx_approval` on the registry row and wins over an
+inherited `MCX_APPROVAL` environment variable; a caller cannot weaken Fleet's
+selected restriction. `--effort` is passed as mcx `-r` and persisted as
+`mcx_effort` (default `medium`). Respawn and steer reuse both persisted values;
+`fleet status` and `fleet peek` show the approval mode so a sandboxed lane is
+visible. Legacy rows without these fields derive approval from their saved Fleet
+mode and use medium effort.
+
 **Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).
 
 ### 6.1 The second dispatch path — supervisor successor (`cmd_sup_handoff_begin`)
@@ -240,7 +259,7 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 
 | Verb | Native behavior (receipt) |
 |---|---|
-| `spawn <name> --dir --task [--mode dontask] [--model] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. |
+| `spawn <name> --dir --task [--mode dontask] [--model] [--effort medium] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. Codex `--model codex:<model>` accepts `--effort low|medium|high|xhigh`; the selected effort and mcx approval are persisted on the row. |
 | `send <name> <text\|@file>` | `_cmd_send_native` @2928. Working (roster busy/waiting) → mailbox append, unchanged mid-turn path (G1). Idle → **fork-steer** (RATIFIED G2(b)): ceiling check via summed outcome tokens, pre-claim, mailbox append rides the drain, `dispatch_bg(resume_sid=old_sid)` mints a NEW sid; `_restamp_after_steer` (@5877) retires the old sid, restamps sid/short-id, `_migrate_residual_mailbox` (@5901) re-points late mail. Refuses: dead-suspected, dead/interrupted (→ respawn), limited (→ resume-limited), other sticky states, and any G9-suspicious roster. Rollback restores the mailbox claim and the pre-claim **only if** the record still matches the claim this call wrote. |
 | `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the probe-free/lock-free/write-free view path (`status_snapshot` @1558). Archived records hidden by default (`--all` or a named query includes them) and **never recomputed**. Epoch-frozen ⇒ verdicts carried, not derived. |
 | `peek <name> [-n]` | `_cmd_peek_native` @2607: last n substantive transcript records (assistant text/tool_use, user vs `isMeta`), tolerant parsing, works mid-turn (daemon writes the transcript live). No stream-json log exists to read. |
