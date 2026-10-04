@@ -26,7 +26,7 @@ WHAT IT PINS -- and nothing wider. Three claim shapes, each re-derived from
      inside a shell-ish fenced block with its comment lines stripped -- names
      a verb `build_parser()` actually ships (the day-5 rule: a doc describing
      a CLI is re-derived from `--help`, never from memory);
-     SCOPE: the six `ENTRY_DOCS`.
+     SCOPE: the five `ENTRY_DOCS`.
   2. a claim about how many checks `fleet doctor` has -- in ANY markup and in
      any of its phrasings (`28 checks`, `**28** checks`, `28 doctor checks`,
      `28 fleet health checks`, `checks: 28`, `checks -> 28`, and the separate
@@ -36,7 +36,7 @@ WHAT IT PINS -- and nothing wider. Three claim shapes, each re-derived from
      phrasing on 2026-08-09 (w50); see `_CHECK_COUNT` for why.
   3. a floor written `Python <M>.<N>+` (or the README badge's
      `python-<M>.<N>%2B`) equals `fleet.MIN_PYTHON_VERSION`.
-     SCOPE: the six `ENTRY_DOCS`.
+     SCOPE: the five `ENTRY_DOCS`.
 
 THE TWO SCOPES DIFFER ON PURPOSE, AND THE ASYMMETRY IS A KNOWN GAP RATHER
 THAN A DESIGN. Shapes 1 and 3 were not widened with shape 2 because widening
@@ -45,7 +45,7 @@ false-positive measurement, and w50's lane was the check count. A `fleet
 frobnicate` in `skills/fleet/SKILL.md` is still unheld today.
 
 WHAT IT DOES NOT PIN. An adversarial pass on 2026-08-05 planted 15 false
-claims across these six docs and all 15 stayed green. Read fairly that is the
+claims across these five docs and all 15 stayed green. Read fairly that is the
 shape of a NARROW pin rather than a broken one -- the three shapes above are
 held in their canonical phrasing, and the seed test proves the detectors fire.
 But a green run here must not be read as a wider promise than it is, so the
@@ -183,7 +183,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # on. Deliberately NOT every *.md in the tree -- `docs/specs/**` has its own
 # receipt harness (`tools/verify_receipts.py`), and the INTERNAL campaign docs
 # (`PLAN.md`, `PLAN-PROGRESS.md`, ...) are working ledgers whose stale numbers
-# are history rather than defects. These SIX are the files whose job is to be
+# are history rather than defects. These FIVE are the files whose job is to be
 # true for a stranger.
 #
 # `NEXT-SESSION.md` was named in that list until 2026-08-09 and is NOT an
@@ -196,9 +196,6 @@ ENTRY_DOCS = (
     "docs/concepts.md",
     "docs/README.md",
     "CONTRIBUTING.md",
-    # Not an entry surface a newcomer lands on, but a claim-dense one written
-    # from measurements: it goes stale the same way and is cheap to hold.
-    "docs/launch-readiness.md",
 )
 
 
@@ -410,7 +407,7 @@ def find_pass_fail_totals(text):
 # The population the CHECK-COUNT claim is held over -- DERIVED, not listed.
 # --------------------------------------------------------------------------
 #
-# `ENTRY_DOCS` is a hand-written list of six files, and `docs/SPEC.md` was
+# `ENTRY_DOCS` is a hand-written list of five files, and `docs/SPEC.md` was
 # never on it. That is why w50 found `**23** checks` there: the bold form
 # defeated the regex, but even written plainly the file was out of scope, and
 # the file-scope miss is the one that would have held on its own. A list
@@ -561,7 +558,7 @@ def test_doctor_check_counts_match_the_registered_checks(rel):
 
     Held over `CHECK_COUNT_DOCS` -- every tracked markdown file that is not
     dated history -- and not over `ENTRY_DOCS`, since w50: `docs/SPEC.md` was
-    not on the six-file list and carried `**23** checks` behind a real,
+    not on the five-file list and carried `**23** checks` behind a real,
     re-runnable, WRONG receipt for the whole time this pin has existed."""
     actual = _registered_doctor_checks()
     text = (REPO_ROOT / rel).read_text(encoding="utf-8")
@@ -756,7 +753,7 @@ def test_the_check_count_population_is_derived_and_split_correctly():
 
     # present: the stranger-facing surfaces AND the spec of record
     for rel in ("README.md", "docs/getting-started.md", "docs/concepts.md",
-                "docs/README.md", "CONTRIBUTING.md", "docs/launch-readiness.md",
+                "docs/README.md", "CONTRIBUTING.md",
                 "docs/SPEC.md", "CLAUDE.md", "docs/ROADMAP.md",
                 "skills/fleet/SKILL.md"):
         assert rel in tracked and rel in docs, rel
@@ -764,17 +761,13 @@ def test_the_check_count_population_is_derived_and_split_correctly():
     # absent: dated history. Fixing a quoted argument FABRICATES -- ratified
     # 2026-08-05. `docs/OPERATOR-GATES.md:24` quotes both `29 checks` and
     # `23 checks` inside an argument whose own prose says "the truth is 28".
-    for rel in ("docs/OPERATOR-GATES.md", "docs/PLAN-PROGRESS.md",
-        "docs/archive/SPEC-v2-history.md", "knowledge/lessons.md",
-                "supervisor/JOURNAL.md"):
+    for rel in ("docs/PRIOR-ART.md", "docs/specs/native-substrate.md",
+                "knowledge/projects/claude-fleet.md"):
         assert rel in tracked and rel not in docs, rel
 
-    # the exemption is by PATTERN, not by enumeration: a lane report written
-    # tomorrow is exempt without anyone editing a list -- which is the exact
-    # failure mode (a list scoped to what its author had in front of them)
-    # that this lane exists to remove.
-    assert any(p.startswith("docs/lanes/") for p in tracked)
-    assert not any(p.startswith("docs/lanes/") for p in docs)
+    # the exemption is by PATTERN, not by enumeration: although public-history
+    # scrubbing removes lane reports, a future local report is exempt without
+    # anyone editing a list.
     assert "docs/lanes/some-future-lane.md".startswith(_HISTORICAL_PREFIXES)
 
     # neither empty nor everything

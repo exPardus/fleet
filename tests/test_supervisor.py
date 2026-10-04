@@ -4126,7 +4126,10 @@ class TestOperatorGatesFile:
         that is all this asserts now; `test_settled_gates_are_recorded`
         below covers the other direction, so an empty file still fails."""
         repo = Path(__file__).resolve().parents[1]
-        text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
+        path = repo / "docs" / "OPERATOR-GATES.md"
+        if not path.exists():
+            pytest.skip("operator-only gates are omitted from the public tree")
+        text = path.read_text(encoding="utf-8")
         open_gates = [ln for ln in text.splitlines() if ln.strip().startswith("- [ ]")]
         for ln in open_gates:
             assert ln.strip().endswith("?"), f"a gate must be a question: {ln[:80]}"
@@ -4137,7 +4140,10 @@ class TestOperatorGatesFile:
         failure mode where someone deletes settled gates as clutter, which
         the format section explicitly forbids."""
         repo = Path(__file__).resolve().parents[1]
-        text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
+        path = repo / "docs" / "OPERATOR-GATES.md"
+        if not path.exists():
+            pytest.skip("operator-only gates are omitted from the public tree")
+        text = path.read_text(encoding="utf-8")
         settled = [ln for ln in text.splitlines() if ln.strip().startswith("- [x]")]
         assert settled, "the gates file records no settled decisions at all"
         for ln in settled:
@@ -4153,11 +4159,13 @@ class TestOperatorGatesFile:
         repo = Path(__file__).resolve().parents[1]
         skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
         ritual = skill.split("## Startup", 1)[1].split("\n## ", 1)[0]
-        assert "OPERATOR-GATES.md" in ritual
+        assert "OPERATOR-GATES.md" in ritual and "If " in ritual
 
 
 def test_committed_journal_board_has_at_most_three_checkpoints():
     """Pin the checked-in board; runtime rolling is owned by the build lane."""
     board = Path(__file__).resolve().parents[1] / "supervisor/JOURNAL.md"
+    if not board.exists():
+        pytest.skip("operator-only supervisor state is omitted from the public tree")
     headers = re.findall(r"^## .* CHECKPOINT\b.*$", board.read_text(encoding="utf-8"), re.M)
     assert len(headers) <= 3, f"{len(headers)} checkpoints: roll older entries into journal-history"

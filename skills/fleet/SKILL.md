@@ -88,7 +88,7 @@ the selected fleet home:
 
 ## Startup
 
-1. Read `$(fleet home)/docs/OPERATOR-GATES.md`; ask the operator about every open decision before dispatching or changing work.
+1. If `$(fleet home)/docs/OPERATOR-GATES.md` exists, read it and ask the operator about every open decision before dispatching or changing work.
 2. Run `fleet status`, `fleet sup-status`, and `fleet autoclean`.
 3. Read `$(fleet home)/knowledge/INDEX.md` and the relevant project note before touching a project.
 4. If the active campaign has no live supervisor, run `fleet sup-spawn --task @<brief>`; the interface never runs `sup-boot`.
