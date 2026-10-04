@@ -368,31 +368,29 @@ def _watch_mail_names(home) -> list[str]:
         return []
 
 
-def _watch_lane_states(home) -> dict[str, str]:
-    """Read registry rows without the lock or repair/quarantine side effects."""
+def _watch_lane_observation(home) -> tuple[dict[str, str], bool]:
+    """Read registry rows and report whether the observation was trustworthy."""
     try:
         path = Path(home) / "state" / "fleet.json"
         data = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError, UnicodeError):
-        return {}
+        return {}, False
     workers = data.get("workers") if isinstance(data, dict) else None
     if not isinstance(workers, dict):
-        return {}
-    return {str(name): str(row.get("status", "?"))
-            for name, row in workers.items()
-            if isinstance(row, dict) and not row.get("archived_at")}
+        return {}, False
+    return ({str(name): str(row.get("status", "?"))
+             for name, row in workers.items()
+             if isinstance(row, dict) and not row.get("archived_at")}, True)
+
+
+def _watch_lane_states(home) -> dict[str, str]:
+    """Read registry rows without the lock or repair/quarantine side effects."""
+    return _watch_lane_observation(home)[0]
 
 
 def _watch_mem_available_mb() -> int | None:
-    """Return Linux MemAvailable, or None where that kernel surface is absent."""
-    try:
-        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
-            if line.startswith("MemAvailable:"):
-                value = line.split()[1]
-                return int(value) // 1024
-    except (FileNotFoundError, OSError, ValueError, IndexError, UnicodeError):
-        return None
-    return None
+    """Return available memory through the platform adapter."""
+    return PLATFORM.memory_available_mb()
 
 
 def _watch_free_disk_gb(path) -> float | None:
@@ -402,12 +400,17 @@ def _watch_free_disk_gb(path) -> float | None:
         return None
 
 
-def _watch_mcx_states(mcx_dirs, run=subprocess.run, which=shutil.which) -> dict[str, str]:
-    """Read each mcx directory through its sole supported, read-only command."""
+def _watch_mcx_observation(mcx_dirs, run=None,
+                           which=None) -> tuple[dict[str, str], bool]:
+    """Read mcx state and report failure instead of manufacturing an empty view."""
     states = {}
+    if not mcx_dirs:
+        return states, True
+    run = subprocess.run if run is None else run
+    which = shutil.which if which is None else which
     exe = which("mcx")
     if not exe:
-        return states
+        return states, False
     for root in mcx_dirs:
         env = dict(os.environ)
         env["MCX_DIR"] = str(Path(root))
@@ -416,16 +419,21 @@ def _watch_mcx_states(mcx_dirs, run=subprocess.run, which=shutil.which) -> dict[
                        capture_output=True, text=True, encoding="utf-8",
                        errors="replace")
         except (OSError, subprocess.SubprocessError, TypeError):
-            continue
+            return {}, False
         if getattr(proc, "returncode", 1) != 0:
-            continue
+            return {}, False
         for line in (getattr(proc, "stdout", "") or "").splitlines():
             fields = line.split("\t")
             if len(fields) < 2:
                 fields = line.split(None, 1)
             if len(fields) >= 2 and fields[0] != "ID":
                 states[fields[0]] = fields[1]
-    return states
+    return states, True
+
+
+def _watch_mcx_states(mcx_dirs, run=None, which=None) -> dict[str, str]:
+    """Read each mcx directory through its sole supported, read-only command."""
+    return _watch_mcx_observation(mcx_dirs, run=run, which=which)[0]
 
 
 def _watch_format_gb(value: float) -> str:
@@ -433,14 +441,18 @@ def _watch_format_gb(value: float) -> str:
 
 
 def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
-              run=subprocess.run, which=shutil.which) -> int:
+              run=None, which=None) -> int:
     """Wait for the first mail, lane, resource, or mcx transition."""
     homes = [Path(p) for p in (getattr(args, "watch_homes", None) or [])]
     if not homes:
         homes = [Path(FLEET_HOME)]
     homes = [p.expanduser() for p in homes]
     mcx_dirs = [Path(p).expanduser() for p in (getattr(args, "mcx_dirs", None) or [])]
-    interval = max(0.0, float(getattr(args, "interval", 60)))
+    run = subprocess.run if run is None else run
+    which = shutil.which if which is None else which
+    interval = float(getattr(args, "interval", 60))
+    if interval <= 0:
+        raise FleetCliError("watch interval must be greater than 0 seconds")
     timeout = getattr(args, "timeout", None)
     timeout = None if timeout is None else max(0.0, float(timeout))
     mem_floor = int(getattr(args, "mem_floor_mb", 1500))
@@ -451,7 +463,15 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
         cursor, existed = _watch_read_cursor(home)
         cursors[home] = cursor
         fresh[home] = not existed
-    initial = dict(fresh)
+    lane_initial = dict(fresh)
+    mcx_initial = dict(fresh)
+    dirty = dict((home, False) for home in homes)
+    memory_supported = True
+    try:
+        _watch_mem_available_mb()
+    except UnsupportedPlatformError:
+        memory_supported = False
+        print("LOWMEM unsupported on this platform")
     started = clock()
     while True:
         events = []
@@ -462,39 +482,54 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
             for name in names:
                 if name not in seen:
                     cursor["mail"].append(name)
+                    dirty[home] = True
                     events.append((0, f"MAIL {home_tag(home)} {name}"))
                     break
-            current = _watch_lane_states(home)
-            if fresh[home]:
+            current, valid = _watch_lane_observation(home)
+            if not valid:
+                continue
+            if lane_initial[home]:
                 cursor["lanes"] = current
-                fresh[home] = False
+                lane_initial[home] = False
+                dirty[home] = True
             else:
+                if cursor["lanes"] != current:
+                    dirty[home] = True
                 for name in sorted(set(cursor["lanes"]) | set(current)):
                     old, new = cursor["lanes"].get(name, "?"), current.get(name, "?")
                     if old != new:
                         events.append((1, f"LANE {name} {old}->{new}"))
                 cursor["lanes"] = current
 
-        mcx = _watch_mcx_states(mcx_dirs, run=run, which=which)
+        mcx, mcx_valid = _watch_mcx_observation(mcx_dirs, run=run, which=which)
         # The cursor is per-home; mirror the mcx snapshot to every selected home.
-        for home in homes:
-            cursor = cursors[home]
-            if initial[home]:
-                cursor["mcx"] = mcx
-            else:
-                for ident in sorted(set(cursor["mcx"]) | set(mcx)):
-                    old, new = cursor["mcx"].get(ident, "?"), mcx.get(ident, "?")
-                    if old != new:
-                        events.append((2, f"LANE {ident} {old}->{new}"))
-                cursor["mcx"] = mcx
-            _watch_write_cursor(home, cursor)
+        if mcx_valid:
+            for home in homes:
+                cursor = cursors[home]
+                if mcx_initial[home]:
+                    cursor["mcx"] = mcx
+                    mcx_initial[home] = False
+                    dirty[home] = True
+                else:
+                    for ident in sorted(set(cursor["mcx"]) | set(mcx)):
+                        old, new = cursor["mcx"].get(ident, "?"), mcx.get(ident, "?")
+                        if old != new:
+                            events.append((2, f"LANE {ident} {old}->{new}"))
+                    if cursor["mcx"] != mcx:
+                        dirty[home] = True
+                    cursor["mcx"] = mcx
 
-        available = _watch_mem_available_mb()
+        for home in homes:
+            if dirty[home]:
+                _watch_write_cursor(home, cursors[home])
+
+        available = _watch_mem_available_mb() if memory_supported else None
         if available is not None and available < mem_floor:
             events.append((3, f"LOWMEM {available}"))
-        free = _watch_free_disk_gb(homes[0])
-        if free is not None and free < disk_floor:
-            events.append((4, f"LOWDISK {_watch_format_gb(free)}"))
+        for home in homes:
+            free = _watch_free_disk_gb(home)
+            if free is not None and free < disk_floor:
+                events.append((4, f"LOWDISK {_watch_format_gb(free)}"))
         if events:
             print(min(events, key=lambda item: item[0])[1])
             return 0
@@ -20595,6 +20630,16 @@ def _doctor_check_supervisor_handoff():
 # CLI: argparse wiring + main()
 # ---------------------------------------------------------------------------
 
+def _watch_interval_arg(value: str) -> float:
+    try:
+        interval = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("interval must be a number") from None
+    if interval <= 0:
+        raise argparse.ArgumentTypeError("interval must be greater than 0 seconds")
+    return interval
+
+
 def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
@@ -20907,7 +20952,7 @@ def build_parser() -> argparse.ArgumentParser:
                          metavar="DIR", help="mcx state directory; repeatable")
     p_watch.add_argument("--mem-floor-mb", type=int, default=1500)
     p_watch.add_argument("--disk-floor-gb", type=float, default=4)
-    p_watch.add_argument("--interval", type=float, default=60)
+    p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=float, default=None)
 
     p_relay = sub.add_parser(

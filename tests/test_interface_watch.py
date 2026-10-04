@@ -102,3 +102,87 @@ def test_watch_reports_low_resources(tmp_path, capsys, monkeypatch):
     )
     assert fleet.cmd_watch(args) == 0
     assert capsys.readouterr().out.strip() == "LOWMEM 12"
+
+
+def test_watch_rejects_nonpositive_interval(tmp_path):
+    with pytest.raises(SystemExit):
+        fleet.build_parser().parse_args(
+            ["watch", "--fleet-home", str(_home(tmp_path)), "--interval", "0"]
+        )
+
+
+def test_watch_keeps_lane_cursor_when_registry_unreadable(tmp_path, capsys):
+    home = _home(tmp_path)
+    cursor_path = home / "state" / "interface" / "watch-cursor.json"
+    cursor_path.write_text(json.dumps({"mail": [], "lanes": {"lane-a": "working"}, "mcx": {}}))
+    (home / "state" / "fleet.json").write_text("{broken", encoding="utf-8")
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args) == 3
+    assert capsys.readouterr().out == ""
+    assert json.loads(cursor_path.read_text())["lanes"] == {"lane-a": "working"}
+
+
+def test_watch_keeps_mcx_cursor_when_mcx_is_missing(tmp_path, capsys, monkeypatch):
+    home = _home(tmp_path)
+    cursor_path = home / "state" / "interface" / "watch-cursor.json"
+    cursor_path.write_text(json.dumps({"mail": [], "lanes": {"lane-a": "working"}, "mcx": {"abcd": "running"}}))
+    monkeypatch.setattr(fleet.shutil, "which", lambda _name: None)
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home), "--mcx-dir", str(tmp_path / ".mcx"), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args) == 3
+    assert capsys.readouterr().out == ""
+    assert json.loads(cursor_path.read_text())["mcx"] == {"abcd": "running"}
+
+
+def test_watch_keeps_mcx_cursor_when_mcx_fails(tmp_path, capsys, monkeypatch):
+    home = _home(tmp_path)
+    cursor_path = home / "state" / "interface" / "watch-cursor.json"
+    cursor_path.write_text(json.dumps({"mail": [], "lanes": {"lane-a": "working"}, "mcx": {"abcd": "running"}}))
+    monkeypatch.setattr(fleet.shutil, "which", lambda _name: "/fake/mcx")
+
+    class Proc:
+        returncode = 1
+        stdout = ""
+
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home), "--mcx-dir", str(tmp_path / ".mcx"), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args, run=lambda *a, **k: Proc()) == 3
+    assert capsys.readouterr().out == ""
+    assert json.loads(cursor_path.read_text())["mcx"] == {"abcd": "running"}
+
+
+def test_watch_announces_unsupported_memory_platform(tmp_path, capsys, monkeypatch):
+    home = _home(tmp_path)
+
+    class FakePlatform:
+        def memory_available_mb(self):
+            raise fleet.UnsupportedPlatformError("memory unavailable")
+
+    monkeypatch.setattr(fleet, "PLATFORM", FakePlatform())
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args) == 3
+    assert "LOWMEM unsupported on this platform" in capsys.readouterr().out
+
+
+def test_watch_checks_disk_for_every_home(tmp_path, capsys, monkeypatch):
+    home_a = _home(tmp_path / "a")
+    home_b = _home(tmp_path / "b")
+    checked = []
+
+    def free_disk(path):
+        checked.append(Path(path))
+        return 10 if Path(path) == home_a else 1
+
+    monkeypatch.setattr(fleet, "_watch_free_disk_gb", free_disk)
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home_a), "--fleet-home", str(home_b), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args) == 0
+    assert capsys.readouterr().out.strip() == "LOWDISK 1"
+    assert checked == [home_a, home_b]
