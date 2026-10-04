@@ -133,7 +133,14 @@ def test_branch_docs_currency():
 
 
 def test_new_lane_documents_have_done():
-    bad = [str(p.relative_to(REPO)) for p in lane_documents(REPO)
+    # ``docs/lanes`` is ignored per-home runtime data.  Do not let whatever
+    # reports happen to be present in the checkout change the public suite;
+    # the landing gate opts in by exporting its controlling FLEET_HOME.
+    configured = os.environ.get("FLEET_HOME")
+    if not configured:
+        return
+    home = Path(configured)
+    bad = [str(p) for p in lane_documents(home)
            if not has_done_after_title(p.read_text(encoding="utf-8"))]
     assert not bad, f"Missing DONE means immediately after title: {bad}"
 
