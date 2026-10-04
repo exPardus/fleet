@@ -91,6 +91,19 @@ class TestParsing:
         with pytest.raises(fleet.FleetCliError, match="outside"):
             fleet._enforce_tier_policy("supervisor", None, pol)
 
+    def test_stray_tier_model_after_policy_block_is_recorded(self, goals_home):
+        _write_goals(
+            goals_home,
+            "<!-- fleet-tier-policy\n"
+            "forbid-default: true\n"
+            "-->\n"
+            "tier-model: top=opus\n",
+        )
+        pol = fleet.read_tier_policy()
+        assert pol["_stray_tier_model_lines"] == [4]
+        with pytest.raises(fleet.FleetCliError, match="line 4"):
+            fleet._enforce_tier_policy("supervisor", None, pol)
+
     def test_forbid_default_rejects_unresolved_role(self, goals_home):
         _write_goals(goals_home,
                      "<!-- fleet-tier-policy\n"
@@ -102,6 +115,18 @@ class TestParsing:
         assert pol["forbid_default"] is True
         with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
             fleet._enforce_tier_policy("supervisor", None, pol)
+
+    def test_blank_model_is_treated_as_omitted(self, goals_home):
+        _write_goals(
+            goals_home,
+            "<!-- fleet-tier-policy\n"
+            "forbid-default: true\n"
+            "supervisor-tier-chain: top\n"
+            "-->\n",
+        )
+        pol = fleet.read_tier_policy()
+        with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+            fleet._enforce_tier_policy("supervisor", "  \t", pol)
 
     def test_sup_spawn_refuses_stray_policy_before_dispatch(self, goals_home,
                                                              monkeypatch):
