@@ -336,6 +336,213 @@ def append_interface_log(kind, detail, home=None) -> None:
     refresh_interface_board(home)
 
 
+def watch_cursor_path(home=None) -> Path:
+    """Durable lock-free cursor for the interface watcher."""
+    return interface_dir(home) / "watch-cursor.json"
+
+
+def _watch_read_cursor(home) -> tuple[dict, bool]:
+    path = watch_cursor_path(home)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, UnicodeError):
+        return ({"mail": [], "lanes": {}, "mcx": {}}, False)
+    if not isinstance(value, dict):
+        return ({"mail": [], "lanes": {}, "mcx": {}}, False)
+    mail = value.get("mail") if isinstance(value.get("mail"), list) else []
+    lanes = value.get("lanes") if isinstance(value.get("lanes"), dict) else {}
+    mcx = value.get("mcx") if isinstance(value.get("mcx"), dict) else {}
+    return ({"mail": [str(x) for x in mail], "lanes": dict(lanes),
+             "mcx": dict(mcx)}, True)
+
+
+def _watch_write_cursor(home, cursor: dict) -> None:
+    _write_json_atomic(watch_cursor_path(home), cursor)
+
+
+def _watch_mail_names(home) -> list[str]:
+    root = Path(home) / "mailbox" / "to-fleet"
+    try:
+        return sorted(p.name for p in root.iterdir() if p.is_file())
+    except (FileNotFoundError, OSError):
+        return []
+
+
+def _watch_lane_states(home) -> dict[str, str]:
+    """Read registry rows without the lock or repair/quarantine side effects."""
+    try:
+        path = Path(home) / "state" / "fleet.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError, UnicodeError):
+        return {}
+    workers = data.get("workers") if isinstance(data, dict) else None
+    if not isinstance(workers, dict):
+        return {}
+    return {str(name): str(row.get("status", "?"))
+            for name, row in workers.items()
+            if isinstance(row, dict) and not row.get("archived_at")}
+
+
+def _watch_mem_available_mb() -> int | None:
+    """Return Linux MemAvailable, or None where that kernel surface is absent."""
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+            if line.startswith("MemAvailable:"):
+                value = line.split()[1]
+                return int(value) // 1024
+    except (FileNotFoundError, OSError, ValueError, IndexError, UnicodeError):
+        return None
+    return None
+
+
+def _watch_free_disk_gb(path) -> float | None:
+    try:
+        return shutil.disk_usage(path).free / (1024 ** 3)
+    except OSError:
+        return None
+
+
+def _watch_mcx_states(mcx_dirs, run=subprocess.run, which=shutil.which) -> dict[str, str]:
+    """Read each mcx directory through its sole supported, read-only command."""
+    states = {}
+    exe = which("mcx")
+    if not exe:
+        return states
+    for root in mcx_dirs:
+        env = dict(os.environ)
+        env["MCX_DIR"] = str(Path(root))
+        try:
+            proc = run([exe, "list"], cwd=str(Path(root).parent), env=env,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+        except (OSError, subprocess.SubprocessError, TypeError):
+            continue
+        if getattr(proc, "returncode", 1) != 0:
+            continue
+        for line in (getattr(proc, "stdout", "") or "").splitlines():
+            fields = line.split("\t")
+            if len(fields) < 2:
+                fields = line.split(None, 1)
+            if len(fields) >= 2 and fields[0] != "ID":
+                states[fields[0]] = fields[1]
+    return states
+
+
+def _watch_format_gb(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
+              run=subprocess.run, which=shutil.which) -> int:
+    """Wait for the first mail, lane, resource, or mcx transition."""
+    homes = [Path(p) for p in (getattr(args, "watch_homes", None) or [])]
+    if not homes:
+        homes = [Path(FLEET_HOME)]
+    homes = [p.expanduser() for p in homes]
+    mcx_dirs = [Path(p).expanduser() for p in (getattr(args, "mcx_dirs", None) or [])]
+    interval = max(0.0, float(getattr(args, "interval", 60)))
+    timeout = getattr(args, "timeout", None)
+    timeout = None if timeout is None else max(0.0, float(timeout))
+    mem_floor = int(getattr(args, "mem_floor_mb", 1500))
+    disk_floor = float(getattr(args, "disk_floor_gb", 4))
+    cursors = {}
+    fresh = {}
+    for home in homes:
+        cursor, existed = _watch_read_cursor(home)
+        cursors[home] = cursor
+        fresh[home] = not existed
+    initial = dict(fresh)
+    started = clock()
+    while True:
+        events = []
+        for home in homes:
+            cursor = cursors[home]
+            names = _watch_mail_names(home)
+            seen = set(cursor["mail"])
+            for name in names:
+                if name not in seen:
+                    cursor["mail"].append(name)
+                    events.append((0, f"MAIL {home_tag(home)} {name}"))
+                    break
+            current = _watch_lane_states(home)
+            if fresh[home]:
+                cursor["lanes"] = current
+                fresh[home] = False
+            else:
+                for name in sorted(set(cursor["lanes"]) | set(current)):
+                    old, new = cursor["lanes"].get(name, "?"), current.get(name, "?")
+                    if old != new:
+                        events.append((1, f"LANE {name} {old}->{new}"))
+                cursor["lanes"] = current
+
+        mcx = _watch_mcx_states(mcx_dirs, run=run, which=which)
+        # The cursor is per-home; mirror the mcx snapshot to every selected home.
+        for home in homes:
+            cursor = cursors[home]
+            if initial[home]:
+                cursor["mcx"] = mcx
+            else:
+                for ident in sorted(set(cursor["mcx"]) | set(mcx)):
+                    old, new = cursor["mcx"].get(ident, "?"), mcx.get(ident, "?")
+                    if old != new:
+                        events.append((2, f"LANE {ident} {old}->{new}"))
+                cursor["mcx"] = mcx
+            _watch_write_cursor(home, cursor)
+
+        available = _watch_mem_available_mb()
+        if available is not None and available < mem_floor:
+            events.append((3, f"LOWMEM {available}"))
+        free = _watch_free_disk_gb(homes[0])
+        if free is not None and free < disk_floor:
+            events.append((4, f"LOWDISK {_watch_format_gb(free)}"))
+        if events:
+            print(min(events, key=lambda item: item[0])[1])
+            return 0
+        if timeout is not None and clock() - started >= timeout:
+            return 3
+        delay = interval
+        if timeout is not None:
+            delay = min(delay, max(0.0, timeout - (clock() - started)))
+        if delay <= 0:
+            return 3
+        sleep(delay)
+
+
+def cmd_relay_ack(args) -> int:
+    """Record one interface relay, atomically move its mail, and mark it seen."""
+    home = Path(FLEET_HOME)
+    source = Path(args.mail).expanduser()
+    if not source.is_absolute():
+        source = ((home / "mailbox" / "to-fleet" / source)
+                  if len(source.parts) == 1 else home / source)
+    lexical_inbox = home / "mailbox" / "to-fleet"
+    if source.parent != lexical_inbox:
+        raise FleetCliError(
+            f"mail must be an existing file directly under {lexical_inbox.as_posix()}")
+    source = source.resolve()
+    inbox = (home / "mailbox" / "to-fleet").resolve()
+    if source.parent != inbox or not source.is_file():
+        raise FleetCliError(
+            f"mail must be an existing file directly under {inbox.as_posix()}")
+    done = (home / "mailbox" / "done").resolve()
+    destination = done / source.name
+    if destination.exists():
+        raise FleetCliError(f"refusing to overwrite existing done mail {destination}")
+    text = str(args.line).replace("\r", " ").replace("\n", " ").strip()
+    line = f"{now_iso()} {text}\n"
+    logs = [interface_log_path(home)] + [Path(p) for p in (getattr(args, "mirror_log", None) or [])]
+    for log in logs:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_append_bytes(log, line.encode("utf-8", "replace"))
+    done.mkdir(parents=True, exist_ok=True)
+    os.replace(source, destination)
+    cursor, _ = _watch_read_cursor(home)
+    if source.name not in cursor["mail"]:
+        cursor["mail"].append(source.name)
+    _watch_write_cursor(home, cursor)
+    return 0
+
+
 def logs_dir() -> Path:
     return FLEET_HOME / "logs"
 
@@ -3969,12 +4176,12 @@ VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
                            "homes --add", "homes --retire",
                            # init --home appends to the machine list and is destructive.
                            # Bare init creates only its target home and uses the ordinary residual.
-                           "init --home", "journal-roll")
+                           "init --home", "journal-roll", "relay-ack")
 VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                           "resume-limited", "sup-heartbeat", "interface-register")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result",
                         "home", "knowledge", "attach", "wait", "sup-status",
-                        "sup-context", "sup-guard", "q", "index", "address")
+                        "sup-context", "sup-guard", "q", "index", "address", "watch")
 
 #: Tier ranking. A verb matching two tokens takes the WORST of them, which is
 #: the only direction §5's *"worst irreversible effect in the wrong home"*
@@ -4219,6 +4426,25 @@ def strip_global_fleet_home(argv: list) -> tuple:
     Autoclean retains its direct-call option while main consumes the global spelling.
     """
     out, value, seen = [], None, False
+    # `watch` is the one multi-home verb. Keep all global selectors as a list;
+    # the command dispatches directly and therefore does not use normal home
+    # resolution (which intentionally selects exactly one home).
+    command_token = None
+    scan = 0
+    while scan < len(argv):
+        token = argv[scan]
+        if token == _GLOBAL_HOME_FLAG:
+            scan += 2
+            continue
+        if token.startswith(_GLOBAL_HOME_FLAG + "="):
+            scan += 1
+            continue
+        if not token.startswith("-"):
+            command_token = token
+            break
+        scan += 1
+    watch_mode = command_token == "watch"
+    watch_values = []
     i = 0
     while i < len(argv):
         tok = argv[i]
@@ -4234,11 +4460,16 @@ def strip_global_fleet_home(argv: list) -> tuple:
             out.append(tok)
             i += 1
             continue
+        if watch_mode:
+            watch_values.append(found)
+            continue
         if seen and found != value:
             raise FleetCliError(
                 f"{_GLOBAL_HOME_FLAG} was given twice with different values "
                 f"({value!r} and {found!r}). One invocation names one home.")
         value, seen = found, True
+    if watch_mode:
+        return out, (watch_values if watch_values else None)
     return out, (value if seen else None)
 
 
@@ -19806,6 +20037,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="provider-minted current Codex thread; requires explicit "
              "--fleet-home and matching public caller/session/source evidence")
 
+    p_watch = sub.add_parser(
+        "watch", help="wait for mail, lane, mcx, memory, or disk events")
+    p_watch.add_argument("--fleet-home", dest="watch_homes", action="append",
+                         metavar="PATH", help="home to watch; repeatable")
+    p_watch.add_argument("--mcx-dir", dest="mcx_dirs", action="append",
+                         metavar="DIR", help="mcx state directory; repeatable")
+    p_watch.add_argument("--mem-floor-mb", type=int, default=1500)
+    p_watch.add_argument("--disk-floor-gb", type=float, default=4)
+    p_watch.add_argument("--interval", type=float, default=60)
+    p_watch.add_argument("--timeout", type=float, default=None)
+
+    p_relay = sub.add_parser(
+        "relay-ack", help="append an interface relay and acknowledge one mail file")
+    p_relay.add_argument("--mail", required=True, metavar="FILE")
+    p_relay.add_argument("--line", required=True, metavar="TEXT")
+    p_relay.add_argument("--mirror-log", action="append", default=None,
+                         metavar="PATH", help="additional log to append; repeatable")
+
     p_wave = sub.add_parser(
         "wave-close",
         help="reap, floor, account, land, push, and notify one wave boundary")
@@ -20031,6 +20280,10 @@ def main(argv=None) -> int:
         if (args.command == "init" and args.home is None
                 and home_flag is None and not args.statusline):
             return cmd_init(args, create_in=Path.cwd())
+        if args.command == "watch":
+            if home_flag:
+                args.watch_homes = list(args.watch_homes or []) + list(home_flag)
+            return cmd_watch(args)
         # §5's resolution order, applied before dispatch. Returns an exit code
         # only at the terminus (§5 step 5: views render and exit 0); every other
         # outcome either sets FLEET_HOME or refuses.
@@ -20095,6 +20348,8 @@ def main(argv=None) -> int:
             return cmd_journal_roll(args)
         if args.command == "interface-register":
             return cmd_interface_register(args)
+        if args.command == "relay-ack":
+            return cmd_relay_ack(args)
         if args.command == "wave-close":
             return cmd_wave_close(args)
         if args.command == "sup-heartbeat":

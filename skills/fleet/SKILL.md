@@ -83,6 +83,7 @@ the selected fleet home:
 - Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity. `supervisor limited` means wait for the recorded roster horizon; do not wake or spawn around that limit. The keeper pages it once until that horizon.
 - `bin/fleet_keeper.py --once --fleet-home <PATH> ...` accepts repeatable homes; it observes, wakes, and pages each independently, prefixes every page/wake line with that home's statusline tag, and stores dedup state under that home's `state/keeper/last-page.json`.
 - Treat a `SUPERVISOR:` line as a graceful generation handoff: acknowledge it, read `fleet sup-status --json`, record the transfer, and use the guard before any stillborn-successor dispatch.
+- Use `fleet watch` with `run_in_background` for interface watching; do not maintain a hand-written polling loop. Use `fleet relay-ack` to acknowledge and mirror handled mail.
 - Relay every `THROUGHPUT` line and offer one idea per wave; record the relay in the interface log.
 
 ## Startup
@@ -166,6 +167,8 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat; its header reports the caller's context occupancy and band verdict.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
+- `fleet watch [--fleet-home PATH ...] [--mcx-dir DIR ...] [--mem-floor-mb MB] [--disk-floor-gb GB] [--interval S] [--timeout S]`: wait for the first mail, fleet/mcx lane transition, low-memory, or low-disk event; exits 3 on timeout.
+- `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.

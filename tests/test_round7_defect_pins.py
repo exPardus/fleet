@@ -155,18 +155,18 @@ def _dests(parser):
 # ---------------------------------------------------------------------------
 
 class TestGlobalPositionFleetHome:
-    def test_autoclean_is_the_only_verb_defining_the_flag(self):
+    def test_autoclean_and_watch_are_the_only_verbs_defining_the_flag(self):
         """The census the brief asked for, DERIVED rather than listed: fixing
         only the site that was reported is how this project reproduces a miss at
         the next site, so the population is measured every run."""
         defining = sorted(verb for verb, sp in _verbs().items()
                           if "--fleet-home" in _option_strings(sp))
-        assert defining == ["autoclean"], (
+        assert defining == ["autoclean", "watch"], (
             f"verbs defining --fleet-home: {defining}. If this grew, a second "
             f"verb-local copy landed, or slice (a) promoted the flag BY ADDING "
             f"A TOP-LEVEL ARGPARSE OPTION; either way re-read the collision "
             f"lint below before proceeding. Do NOT read the converse: this "
-            f"census staying at ['autoclean'] is not evidence the flag is "
+            f"census staying at ['autoclean', 'watch'] is not evidence the flag is "
             f"unpromoted. MEASURED at slice a2's tip 39f84d0 -- a2 made the "
             f"flag global by consuming the token in `main()` BEFORE the parser "
             f"runs, and this census is unchanged there.")
@@ -437,14 +437,14 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         # [w47/homes] E2/homes split, operator 2026-08-08
                         "homes --add", "homes --retire",
                         # [w59/inithome] E2/init split, operator 2026-08-10
-                        "init --home", "journal-roll")
+                        "init --home", "journal-roll", "relay-ack")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                        "resume-limited", "sup-heartbeat", "interface-register")
 RATIFIED_ORDINARY = ("spawn", "status", "peek", "result",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "sup-guard", "q", "index",
                      # [w110/peer-messaging] read-only, like `result`
-                     "address")
+                     "address", "watch")
 
 # Named by the ratified table but NOT YET BUILT. Kept separate so the "the table
 # cites no dead verb" pin cannot be satisfied by an unbuilt name.
