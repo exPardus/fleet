@@ -4275,7 +4275,7 @@ TERMINUS_VIEW_VERBS = ("home", "knowledge", "status", "peek", "result",
 
 # Machine-scope verbs bypass home resolution, including ambiguous lookup, because
 # fleet homes must remain available to repair the list that caused the ambiguity.
-TERMINUS_EXEMPT_VERBS = ("homes",)
+TERMINUS_EXEMPT_VERBS = ("homes", "pr-poll")
 
 # Init's creation modes bypass home resolution: --home names its own creation
 # target; bare init creates cwd. Explicit --fleet-home and --statusline retain
@@ -4560,7 +4560,7 @@ VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
                            "init --home", "journal-roll", "relay-ack")
 VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                           "resume-limited", "sup-heartbeat", "interface-register")
-VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result",
+VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                         "home", "knowledge", "attach", "wait", "sup-status",
                         "sup-context", "sup-guard", "q", "index", "address", "watch")
 
@@ -6387,6 +6387,112 @@ def _hook_error_lines() -> list:
 
 def _hook_error_count() -> int:
     return len(_hook_error_lines())
+
+
+PR_POLL_TIMEOUT_SECONDS = 15
+PR_POLL_MAX_OUTPUT_CHARS = 64 * 1024
+PR_POLL_SELECTOR_MAX_CHARS = 512
+PR_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+
+
+def _pr_poll_sha(value, *, label: str) -> str:
+    """Validate and normalize a recorded or provider-reported commit SHA."""
+    if not isinstance(value, str):
+        raise FleetCliError(f"pr-poll: {label} must be a hexadecimal commit SHA")
+    value = value.strip().lower()
+    if not PR_SHA_RE.fullmatch(value):
+        raise FleetCliError(
+            f"pr-poll: {label} must be 7-64 hexadecimal characters")
+    return value
+
+
+def _pr_poll_json_output(stdout: str) -> dict:
+    """Decode the small JSON object requested from gh, with an explicit cap."""
+    if not isinstance(stdout, str) or len(stdout) > PR_POLL_MAX_OUTPUT_CHARS:
+        raise FleetCliError("pr-poll: gh output exceeded the 64 KiB bound")
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError) as exc:
+        raise FleetCliError("pr-poll: gh returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise FleetCliError("pr-poll: gh returned a non-object JSON response")
+    return payload
+
+
+def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
+    """Read a PR head SHA through gh and compare it with a recorded SHA.
+
+    This is deliberately a view: it never writes fleet state, takes the fleet
+    lock, or updates the recorded SHA. ``gh`` is the only network boundary and
+    is invoked once with a short timeout and a bounded response.
+    """
+    recorded = getattr(args, "since", None)
+    since_file = getattr(args, "since_file", None)
+    if since_file is not None:
+        try:
+            file_text = Path(since_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise FleetCliError(f"pr-poll: cannot read SHA file {since_file!r}: {exc}") from exc
+        if len(file_text) > 4096:
+            raise FleetCliError("pr-poll: SHA file exceeds the 4 KiB bound")
+        if recorded is not None:
+            raise FleetCliError("pr-poll: specify --since or --since-file, not both")
+        recorded = file_text
+    recorded = _pr_poll_sha(recorded, label="recorded SHA")
+
+    pr = getattr(args, "pr", None)
+    if not isinstance(pr, str) or not pr.strip():
+        raise FleetCliError("pr-poll: pull request is required")
+    pr = pr.strip()
+    if len(pr) > PR_POLL_SELECTOR_MAX_CHARS:
+        raise FleetCliError("pr-poll: pull request selector exceeds the 512-character bound")
+    executable = which("gh")
+    if not executable:
+        raise FleetCliError("pr-poll: gh CLI not found on PATH")
+
+    argv = [executable, "pr", "view", pr, "--json", "headRefOid"]
+    repo = getattr(args, "repo", None)
+    if repo:
+        if len(repo) > PR_POLL_SELECTOR_MAX_CHARS:
+            raise FleetCliError("pr-poll: repository selector exceeds the 512-character bound")
+        argv.extend(["--repo", repo])
+    try:
+        proc = run(argv, capture_output=True, text=True,
+                   timeout=PR_POLL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        raise FleetCliError(
+            f"pr-poll: gh timed out after {PR_POLL_TIMEOUT_SECONDS}s") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FleetCliError(f"pr-poll: could not run gh: {exc}") from exc
+    if getattr(proc, "returncode", 1) != 0:
+        stderr = str(getattr(proc, "stderr", "") or "").strip()
+        if len(stderr) > 2000:
+            stderr = stderr[:2000] + "..."
+        detail = f": {stderr}" if stderr else ""
+        raise FleetCliError(f"pr-poll: gh pr view failed (exit {proc.returncode}){detail}")
+
+    payload = _pr_poll_json_output(getattr(proc, "stdout", ""))
+    head = _pr_poll_sha(payload.get("headRefOid"), label="head SHA")
+    # GitHub returns the full object id, while an operator may have recorded a
+    # conventional abbreviated SHA. Treat either value as the same commit when
+    # one is an exact prefix of the other.
+    changed = not (head == recorded or head.startswith(recorded)
+                   or recorded.startswith(head))
+    result = {
+        "ok": True,
+        "pr": pr,
+        "repo": repo,
+        "recorded_sha": recorded,
+        "head_sha": head,
+        "changed": changed,
+        "changes": {"from": recorded, "to": head} if changed else [],
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, sort_keys=True))
+    else:
+        state = "changed" if result["changed"] else "unchanged"
+        print(f"{result['pr']}: {state} ({recorded} -> {head})")
+    return 0
 
 
 def cmd_status(args) -> int:
@@ -20925,6 +21031,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_result = sub.add_parser("result", help="final result text of last completed turn")
     p_result.add_argument("name")
+    p_pr_poll = sub.add_parser(
+        "pr-poll",
+        help="read a GitHub PR head SHA and report changes from a recorded SHA")
+    p_pr_poll.add_argument("pr", help="pull request number, URL, or gh PR selector")
+    pr_since = p_pr_poll.add_mutually_exclusive_group(required=True)
+    pr_since.add_argument("--since", "--recorded-sha", dest="since",
+                          help="recorded commit SHA to compare (never updated)")
+    pr_since.add_argument("--since-file", dest="since_file", metavar="PATH",
+                          help="read the recorded SHA from a small local file")
+    p_pr_poll.add_argument("--repo", default=None,
+                           help="OWNER/REPO passed to gh (otherwise gh resolves it)")
+    p_pr_poll.add_argument("--json", action="store_true",
+                           help="print the bounded result as JSON")
     p_address = sub.add_parser(
         "address", help="exact native session name for SendMessage `to`")
     p_address.add_argument("name")
@@ -21406,6 +21525,8 @@ def main(argv=None) -> int:
             return cmd_peek(args)
         if args.command == "result":
             return cmd_result(args)
+        if args.command == "pr-poll":
+            return cmd_pr_poll(args)
         if args.command == "address":
             return cmd_address(args)
         if args.command == "wait":

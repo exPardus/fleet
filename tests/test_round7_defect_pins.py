@@ -440,7 +440,7 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         "init --home", "journal-roll", "relay-ack")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
                        "resume-limited", "sup-heartbeat", "interface-register")
-RATIFIED_ORDINARY = ("spawn", "status", "peek", "result",
+RATIFIED_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "sup-guard", "q", "index",
                      # [w110/peer-messaging] read-only, like `result`

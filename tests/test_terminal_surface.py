@@ -754,7 +754,7 @@ class TestWorkerEnvStamp:
 
 COMMANDS_DIR = Path(__file__).resolve().parent.parent / "commands"
 
-READ_ONLY_COMMANDS = {"overview", "status", "peek", "result", "doctor"}
+READ_ONLY_COMMANDS = {"overview", "status", "peek", "result", "doctor", "pr-poll"}
 MUTATING_COMMANDS = {"spawn", "send", "interrupt", "respawn", "kill", "clean",
                      "attach", "release", "resume-limited"}
 
