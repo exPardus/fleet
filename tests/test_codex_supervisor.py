@@ -529,6 +529,25 @@ def test_native_guard_reads_public_active_thread_and_never_uses_claude_roster(
         "thread/read"]
 
 
+def test_native_guard_reports_parked_idle_claim_without_wake(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    claim = fleet.read_incarnation()
+    claim.update(parked_at=fleet.now_iso(),
+                 parked_reason="waiting for the external batch",
+                 parked_wake_condition="batch request arrives")
+    fleet.write_incarnation(claim)
+    client = FakeLifecycleClient(supervisor_home, thread_status="idle",
+                                 turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    observed = fleet._codex_sup_guard_observe()
+
+    assert observed["verdict"] == "PARKED"
+    assert observed["parked_reason"] == "waiting for the external batch"
+    assert observed["parked_active"] is True
+
+
 def test_native_guard_wakes_stale_idle_thread_without_creating_second_body(
         supervisor_home, monkeypatch, capsys):
     name, _inc = _seed_native_supervisor(supervisor_home, stale=True)

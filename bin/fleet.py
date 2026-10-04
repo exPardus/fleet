@@ -14318,8 +14318,8 @@ def _supervisor_park_info(claim, now=None) -> dict:
     """Return the file-only PARKED marker projection and expiry decision.
 
     A malformed or incomplete marker is deliberately inactive: it cannot hide
-    a dead body from the ordinary guard, while a future timestamp is treated as
-    active until the generous bound elapses.
+    a dead body from the ordinary guard. Future timestamps are invalid too;
+    only a marker at or before ``now`` can suppress a stalled-body page.
     """
     if not isinstance(claim, dict):
         return {"parked_at": None, "parked_reason": None,
@@ -14335,8 +14335,8 @@ def _supervisor_park_info(claim, now=None) -> dict:
             if now is None:
                 now = datetime.now(timezone.utc)
             age = (now - _parse_iso(parked_at)).total_seconds()
-            active = isinstance(reason, str) and bool(reason.strip()) \
-                and age <= SUPERVISOR_PARK_MAX_SECONDS
+            active = (isinstance(reason, str) and bool(reason.strip())
+                      and 0 <= age <= SUPERVISOR_PARK_MAX_SECONDS)
         except (TypeError, ValueError):
             pass
     return {"parked_at": parked_at if isinstance(parked_at, str) else None,
@@ -18761,6 +18761,10 @@ def _codex_sup_guard_observe():
         "turn_status": observed["turn_status"],
         "active_flags": observed["active_flags"],
     }
+    parked = _supervisor_park_info(claim)
+    detail.update({key: parked[key] for key in (
+        "parked_at", "parked_reason", "parked_wake_condition",
+        "parked_age_seconds", "parked_active", "parked_expired")})
     status = observed["provider_status"]
     if status in {"notLoaded", "systemError"}:
         return {**detail, "verdict": "PAGE",
@@ -18768,6 +18772,10 @@ def _codex_sup_guard_observe():
     if observed["active_flags"]:
         return {**detail, "verdict": "PAGE",
                 "reason": "native supervisor is waiting"}
+    if parked["parked_active"]:
+        detail["quiet"] = True
+        return {**detail, "verdict": "PARKED",
+                "reason": "supervisor parked by design"}
     try:
         age = (datetime.now(timezone.utc)
                - _parse_iso(claim["heartbeat_at"])).total_seconds()

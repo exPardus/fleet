@@ -1,6 +1,7 @@
 """Targeted tests for the interface's two-live-body supervisor guard."""
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -75,7 +76,7 @@ def test_stale_claim_with_no_live_union_sid_is_dispatch(home, monkeypatch, capsy
 def test_intentionally_parked_claim_is_not_paged_when_body_is_gone(
         home, monkeypatch, capsys):
     claim = fleet.read_incarnation()
-    claim.update(parked_at="2026-10-03T12:00:00Z",
+    claim.update(parked_at=fleet.now_iso(),
                  parked_reason="waiting for the external batch",
                  parked_wake_condition="batch request arrives")
     fleet.write_incarnation(claim)
@@ -85,7 +86,7 @@ def test_intentionally_parked_claim_is_not_paged_when_body_is_gone(
 
 def test_parked_guard_json_publishes_marker_fields(home, monkeypatch, capsys):
     claim = fleet.read_incarnation()
-    claim.update(parked_at="2026-10-03T12:00:00Z",
+    claim.update(parked_at=fleet.now_iso(),
                  parked_reason="waiting for the external batch",
                  parked_wake_condition="batch request arrives")
     fleet.write_incarnation(claim)
@@ -105,6 +106,18 @@ def test_expired_parked_marker_returns_to_normal_dispatch(home, monkeypatch, cap
     fleet.write_incarnation(claim)
     run_guard(monkeypatch, snapshot(age=4000), [])
     assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_future_parked_marker_is_invalid_and_expired(home):
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    info = fleet._supervisor_park_info({
+        "parked_at": future,
+        "parked_reason": "waiting for the external batch",
+    })
+    assert info["parked_active"] is False
+    assert info["parked_expired"] is True
+    assert info["parked_age_seconds"] < 0
 
 
 @pytest.mark.parametrize("ownership", ["lineage", "adopted", "retired_sid"])
