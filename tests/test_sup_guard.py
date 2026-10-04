@@ -72,6 +72,41 @@ def test_stale_claim_with_no_live_union_sid_is_dispatch(home, monkeypatch, capsy
     assert capsys.readouterr().out == "DISPATCH\n"
 
 
+def test_intentionally_parked_claim_is_not_paged_when_body_is_gone(
+        home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(parked_at="2026-10-03T12:00:00Z",
+                 parked_reason="waiting for the external batch",
+                 parked_wake_condition="batch request arrives")
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(age=4000), [])
+    assert capsys.readouterr().out == "PARKED\n"
+
+
+def test_parked_guard_json_publishes_marker_fields(home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(parked_at="2026-10-03T12:00:00Z",
+                 parked_reason="waiting for the external batch",
+                 parked_wake_condition="batch request arrives")
+    fleet.write_incarnation(claim)
+    fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True),
+                        snapshot_fn=lambda: snapshot(age=4000),
+                        roster_fn=roster())
+    result = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == "PARKED"
+    assert result["parked_reason"] == "waiting for the external batch"
+    assert result["parked_wake_condition"] == "batch request arrives"
+    assert result["parked_active"] is True
+
+
+def test_expired_parked_marker_returns_to_normal_dispatch(home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(parked_at="2020-01-01T00:00:00Z", parked_reason="old park")
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(age=4000), [])
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
 @pytest.mark.parametrize("ownership", ["lineage", "adopted", "retired_sid"])
 def test_stale_idle_holder_with_working_lane_wakes(home, monkeypatch, capsys,
                                                    ownership):

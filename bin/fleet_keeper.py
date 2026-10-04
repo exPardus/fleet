@@ -128,6 +128,10 @@ def rule_supervisor_stalled(obs, now):
     if guard.get("quiet") or guard.get("sent"):
         return None
     verdict = guard.get("verdict", "PAGE guard unavailable")
+    if verdict == "PARKED":
+        # PARKED is an explicit, bounded by-design idle state.  The guard owns
+        # expiry; once it expires it emits the ordinary PAGE/DISPATCH verdict.
+        return None
     if verdict == "OK":
         return None
     reason = guard.get("reason", "guard unavailable")

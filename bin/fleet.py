@@ -4862,7 +4862,10 @@ def _supervisor_tier_snapshot(now=None) -> dict:
     must not be interpreted as staleness.
     """
     out = {"goals_active": False, "state": "none",
-           "incarnation_id": None, "heartbeat_age_seconds": None}
+           "incarnation_id": None, "heartbeat_age_seconds": None,
+           "parked_at": None, "parked_reason": None,
+           "parked_wake_condition": None, "parked_age_seconds": None,
+           "parked_active": False, "parked_expired": False}
     try:
         out["goals_active"] = bool(supervisor_goals_active())
         claim = read_incarnation()
@@ -4870,6 +4873,7 @@ def _supervisor_tier_snapshot(now=None) -> dict:
             return out
         out["incarnation_id"] = claim.get("incarnation_id")
         out["state"] = "released" if claim.get("state") == "released" else "held"
+        out.update(_supervisor_park_info(claim, now=now))
         if now is None:
             now = datetime.now(timezone.utc)
         try:
@@ -7827,9 +7831,21 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
 
     refuse_if_archived(args.name, before, "send")
     if _is_codex_record(before):
-        return _cmd_send_codex(args.name, message, run=run, which=which)
-    return _cmd_send_native(args.name, message,
-                            run=run, which=which, sleep=sleep)
+        result = _cmd_send_codex(args.name, message, run=run, which=which)
+    else:
+        result = _cmd_send_native(args.name, message,
+                                  run=run, which=which, sleep=sleep)
+    # A successfully delivered supervisor wake/steer ends a PARKED marker.
+    # Keep this tiny claim write after the dispatch operation so a refused send
+    # does not falsely advertise that the external request was accepted.
+    if result == 0 and (args.name == SUPERVISOR_BODY_NAME
+                        or _is_supervisor_shaped(args.name)):
+        with fleet_lock():
+            claim = read_incarnation()
+            if isinstance(claim, dict) and claim.get("state") != "released":
+                _clear_supervisor_park(claim)
+                write_incarnation(claim)
+    return result
 
 
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
@@ -13141,6 +13157,9 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 # write HANDSHAKE separately because only the claim holder may write the journal.
 
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
+# A deliberate park suppresses stalled-body pages, but never indefinitely.  The
+# marker is claim-local and is evaluated by the read-only guard without probing.
+SUPERVISOR_PARK_MAX_SECONDS = 24 * 3600.0
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
 
 # three-tier §10.4 T_release bounds the wait for a steered supervisor to release.
@@ -13217,7 +13236,7 @@ SUCCESSOR_DEFAULT_MODE = "bypass"
 SUP_SPAWN_DEFAULT_MODE = "bypass"
 
 SUPERVISOR_JOURNAL_KINDS = (
-    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
+    "BOOT", "CHECKPOINT", "PROPOSAL", "PARKED", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
     "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
 )
 
@@ -13233,7 +13252,7 @@ SUPERVISOR_BOOT_HANDOFF_REFUSED_RC = 5
 SUPERVISOR_BODY_MAX_LINES = 3
 # Inline only substantive journal bodies; cap bytes as well as line count.
 SUPERVISOR_BOOT_JOURNAL_TAIL = 5
-SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS = frozenset({"CHECKPOINT", "PROPOSAL"})
+SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS = frozenset({"CHECKPOINT", "PROPOSAL", "PARKED"})
 SUPERVISOR_BOOT_INLINE_MIN = 2
 SUPERVISOR_LATEST_ENTRY_MAX_CHARS = 2000
 # Guarantee two substantive entries, then enforce the total inline budget.
@@ -13249,7 +13268,7 @@ holder, via `fleet sup-*` commands only. Never edit or delete entries.
 Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
 plus an optional trailing ` substrate=<substrate>` when the body's registry row
 records one (item 28, e.g. `substrate=openrouter/stealth/union-alpha`).
-Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
+Kinds: BOOT, CHECKPOINT, PROPOSAL, PARKED, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
 
 <!-- entries below -->
 """
@@ -14182,7 +14201,7 @@ def _journal_roll_header_hint(line: str) -> bool:
         return False
     return bool(re.match(
         r"^## (?:\d{4}-\d{2}-\d{2}(?:T|\s)|\S+ "
-        r"(?:BOOT|CHECKPOINT|PROPOSAL|SEIZED|RELEASED|LIMIT-TRANSFER|"
+        r"(?:BOOT|CHECKPOINT|PROPOSAL|PARKED|SEIZED|RELEASED|LIMIT-TRANSFER|"
         r"HANDOFF-BEGIN|HANDOFF-COMPLETE|HANDOFF-ABORT)\b)", body))
 
 
@@ -14293,6 +14312,45 @@ def supervisor_journal_append(kind: str, inc: str, sid: str, body: str,
     entry = f"{header}\n\n{safe_body}\n"
     with open(path, "a", encoding="utf-8") as f:
         f.write(entry)
+
+
+def _supervisor_park_info(claim, now=None) -> dict:
+    """Return the file-only PARKED marker projection and expiry decision.
+
+    A malformed or incomplete marker is deliberately inactive: it cannot hide
+    a dead body from the ordinary guard, while a future timestamp is treated as
+    active until the generous bound elapses.
+    """
+    if not isinstance(claim, dict):
+        return {"parked_at": None, "parked_reason": None,
+                "parked_wake_condition": None, "parked_age_seconds": None,
+                "parked_active": False, "parked_expired": False}
+    parked_at = claim.get("parked_at")
+    reason = claim.get("parked_reason")
+    wake = claim.get("parked_wake_condition")
+    age = None
+    active = False
+    if isinstance(parked_at, str) and parked_at:
+        try:
+            if now is None:
+                now = datetime.now(timezone.utc)
+            age = (now - _parse_iso(parked_at)).total_seconds()
+            active = isinstance(reason, str) and bool(reason.strip()) \
+                and age <= SUPERVISOR_PARK_MAX_SECONDS
+        except (TypeError, ValueError):
+            pass
+    return {"parked_at": parked_at if isinstance(parked_at, str) else None,
+            "parked_reason": reason if isinstance(reason, str) else None,
+            "parked_wake_condition": wake if isinstance(wake, str) else None,
+            "parked_age_seconds": age,
+            "parked_active": active,
+            "parked_expired": bool(reason and parked_at and not active)}
+
+
+def _clear_supervisor_park(claim: dict) -> None:
+    """Clear an intentional park marker in-place before a normal wake/checkpoint."""
+    for key in ("parked_at", "parked_reason", "parked_wake_condition"):
+        claim.pop(key, None)
 
 
 def _roster_live_sids(entries: list) -> set:
@@ -14760,7 +14818,7 @@ def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> l
 def _select_boot_journal_inline_indices(tail: list) -> set:
     """Which indices of the boot journal tail window get their body inlined.
 
-    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL) entries
+    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL/PARKED) entries
     are eligible -- a terse bookkeeping entry (BOOT/SEIZED/...) is a pointer
     regardless of position, including when it is the newest entry in the
     window (a boot's own just-written BOOT entry must not crowd out the
@@ -14952,6 +15010,9 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 # Proven resume restamps and refreshes the same claim, without seizure or new incarnation.
                 if presented == "pending":
                     _acknowledge_pending(claim)
+                # A successful boot is an explicit wake; an intentional park
+                # must not survive into the resumed generation.
+                _clear_supervisor_park(claim)
                 claim["session_id"] = caller_sid
                 claim["heartbeat_at"] = now_iso()
                 notices.append(_mint_pending_nonce(claim))
@@ -15579,8 +15640,27 @@ def _cmd_codex_sup_checkpoint(args, body):
                 or claim.get("pending_operation") is not None):
             raise FleetCliError(
                 "native Codex supervisor claim changed before checkpoint")
+        kind = args.kind
+        wake_condition = getattr(args, "wake_condition", None)
+        if kind == "PARKED":
+            if not body.strip():
+                raise FleetCliError("sup-checkpoint --kind PARKED requires a reason in the body")
+            if wake_condition is not None and len(wake_condition.strip()) > 500:
+                raise FleetCliError("sup-checkpoint: --wake-condition is limited to 500 characters")
+            claim["parked_at"] = now_iso()
+            claim["parked_reason"] = body.strip()
+            if wake_condition and wake_condition.strip():
+                claim["parked_wake_condition"] = wake_condition.strip()
+            else:
+                claim.pop("parked_wake_condition", None)
+            journal_body = body.strip()
+            if wake_condition and wake_condition.strip():
+                journal_body += f"\nWake condition: {wake_condition.strip()}"
+        else:
+            _clear_supervisor_park(claim)
+            journal_body = body
         supervisor_journal_append(
-            args.kind, binding.incarnation_id, binding.authority.value, body,
+            kind, binding.incarnation_id, binding.authority.value, journal_body,
             substrate="codex")
         roll = roll_supervisor_journal()
         claim["heartbeat_at"] = now_iso()
@@ -15604,13 +15684,32 @@ def cmd_sup_checkpoint(args) -> int:
         raise FleetCliError(
             f"sup-checkpoint: REFUSED body has {len(body_lines)} lines; "
             f"maximum is {SUPERVISOR_BODY_MAX_LINES}")
+    if args.kind == "PARKED" and not body.strip():
+        raise FleetCliError("sup-checkpoint --kind PARKED requires a reason in the body")
+    wake_condition = getattr(args, "wake_condition", None)
+    if wake_condition is not None and len(wake_condition.strip()) > 500:
+        raise FleetCliError("sup-checkpoint: --wake-condition is limited to 500 characters")
     if _claim_uses_native_codex():
         return _cmd_codex_sup_checkpoint(args, body)
     with fleet_lock():
         claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-checkpoint")
-        supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body,
+        if args.kind == "PARKED":
+            claim["parked_at"] = now_iso()
+            claim["parked_reason"] = body.strip()
+            if wake_condition and wake_condition.strip():
+                claim["parked_wake_condition"] = wake_condition.strip()
+            else:
+                claim.pop("parked_wake_condition", None)
+            journal_body = body.strip()
+            if wake_condition and wake_condition.strip():
+                journal_body += f"\nWake condition: {wake_condition.strip()}"
+        else:
+            _clear_supervisor_park(claim)
+            journal_body = body
+        supervisor_journal_append(args.kind, claim["incarnation_id"], caller,
+                                  journal_body,
                                   substrate=_record_substrate_for_sid(caller))
         roll = roll_supervisor_journal()
         occupancy = _transcript_occupancy(find_transcript_path(None, caller))
@@ -17994,7 +18093,10 @@ def _project_claim(claim, now=None):
         "incarnation_id", "session_id", "claimed_at", "heartbeat_at", "claimed_via",
         "lineage_id", "nonce_seq", "state", "released_at", "released_by_sid", "reason",
         "context_occupancy", "context_verdict", "context_measured_at",
-        "provider", "current_turn_id", "host_generation")}
+        "provider", "current_turn_id", "host_generation",
+        "parked_at", "parked_reason", "parked_wake_condition")}
+    out.update({key: info for key, info in _supervisor_park_info(claim).items()
+                if key in ("parked_age_seconds", "parked_active", "parked_expired")})
     holder = claim.get("holder")
     out["holder"] = ({key: holder.get(key) for key in ("provider", "thread_id")}
                      if isinstance(holder, dict) else None)
@@ -18403,6 +18505,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     sup = snapshot.get("supervisor") if isinstance(snapshot, dict) else None
     sup = sup if isinstance(sup, dict) else {}
     claim = read_incarnation()
+    parked = _supervisor_park_info(claim)
     state = sup.get("state")
     if state not in ("none", "held", "released", "unknown"):
         state = "unknown"
@@ -18478,6 +18581,12 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "context_verdict": claim.get("context_verdict") if isinstance(claim, dict) else None,
         "heartbeat_age_seconds": sup.get("heartbeat_age_seconds"),
         "goals_active": bool(sup.get("goals_active")),
+        "parked_at": parked["parked_at"],
+        "parked_reason": parked["parked_reason"],
+        "parked_wake_condition": parked["parked_wake_condition"],
+        "parked_age_seconds": parked["parked_age_seconds"],
+        "parked_active": parked["parked_active"],
+        "parked_expired": parked["parked_expired"],
     }
 
 
@@ -18489,7 +18598,9 @@ def _sup_guard_decide(observation):
         ("state", "claim_sids", "registry_ok", "registry_reason",
          "roster_ok", "roster_reason",
          "heartbeat_age_seconds", "body_name", "pending",
-         "handshake_exists", "limit_reset_at")
+         "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
+         "parked_wake_condition", "parked_age_seconds", "parked_active",
+         "parked_expired")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -18511,6 +18622,13 @@ def _sup_guard_decide(observation):
         return "PAGE", reason, detail
     if obs.get("pending"):
         return "PAGE", "handoff in flight", detail
+
+    # PARKED is an intentional, externally-woken idle state.  It wins over
+    # stale heartbeats, reaped/dead-suspected body rows, and ordinary dispatch
+    # advice, but only until its bounded marker expires.
+    if obs.get("state") == "held" and obs.get("parked_active"):
+        detail["quiet"] = True
+        return "PARKED", "supervisor parked by design", detail
 
     if obs.get("limited"):
         reason = "supervisor limited"
@@ -18591,7 +18709,7 @@ def _sup_guard_line(verdict, reason, target=None):
     if verdict == "WAKE":
         target = " ".join(str(target or SUPERVISOR_BODY_NAME).split())
         return f"WAKE {target}"
-    if verdict in {"OK", "DISPATCH"}:
+    if verdict in {"OK", "DISPATCH", "PARKED"}:
         return verdict
     reason = " ".join(str(reason).split())
     return f"PAGE {reason}"
@@ -21256,7 +21374,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_supckpt = sub.add_parser("sup-checkpoint", help="append a supervisor journal checkpoint (claim holder only) + refresh heartbeat")
     p_supckpt.add_argument("body", help="checkpoint text, or @file")
-    p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL"], default="CHECKPOINT")
+    p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL", "PARKED"], default="CHECKPOINT")
+    p_supckpt.add_argument("--wake-when", "--wake-condition", dest="wake_condition",
+                           help="optional condition that ends a PARKED checkpoint")
     p_supckpt.add_argument("--sid", help="override caller session id")
     p_supckpt.add_argument("--nonce", help=NONCE_ARG_HELP)
 
