@@ -287,11 +287,12 @@ class TestTheExemptionAndTheTierAgree:
         assert fleet.machine_exempting_flags("init", _ns(home="/x")) == ("--home",)
         assert fleet.machine_exempting_flags("homes", _ns()) == ()
 
-    def test_the_whole_verb_tuple_still_only_names_homes(self):
+    def test_the_whole_verb_tuple_names_machine_scope_verbs(self):
         """Explicit --fleet-home and statusline setup still take §5's order.
         Bare cwd creation has its own dispatch path, not a whole-verb exemption.
-        The machine exemption stays at FLAG granularity for --home."""
-        assert fleet.TERMINUS_EXEMPT_VERBS == ("homes",)
+        Machine-scope commands bypass home resolution; init stays at FLAG
+        granularity for --home."""
+        assert fleet.TERMINUS_EXEMPT_VERBS == ("homes", "pr-poll")
         assert "init" in fleet.TERMINUS_EXEMPT_FLAGS
 
 

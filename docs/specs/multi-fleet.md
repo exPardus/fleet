@@ -288,7 +288,7 @@ begins at a population of two, so below that there is no disagreement to correct
 > Cited by step number and by its own words, never by line. Step 1 reads *"Flag/lookup
 > disagreement → **mutating verbs** refuse without `--yes` + witness line."* The shipped
 > `apply_resolved_home` refuses **every** verb that is not in `TERMINUS_EXEMPT_VERBS` (today:
-> `homes` alone). Driven with a two-home list, the session's sid a member of home B, and
+> `homes` and `pr-poll`). Driven with a two-home list, the session's sid a member of home B, and
 > `--fleet-home` naming home A:
 >
 > | verb | ratified class | shipped |
