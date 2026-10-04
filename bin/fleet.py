@@ -6601,7 +6601,11 @@ def cmd_status(args) -> int:
             continue
         sid = rec.get("session_id") or rec.get("codex_thread_id")
         try:
-            notify_lane_done(n, "idle", expected_sid=sid)
+            notify_lane_done(
+                n, "idle", expected_sid=sid,
+                expected_mcx_id=(rec.get("mcx_id")
+                                 if _codex_record_route(rec) == "mcx" else None),
+            )
         except Exception:
             pass  # A status observation must remain usable if delivery fails.
 
@@ -7344,14 +7348,17 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                     elif persisted["status"] == "dead-suspected":
                         append_event("dead_suspected", n)
                 if _is_codex_record(rec) and persisted["status"] == "idle":
-                    completed_codex.append((n, rec.get("session_id") or
-                                            rec.get("codex_thread_id")))
+                    completed_codex.append(
+                        (n, rec.get("session_id") or rec.get("codex_thread_id"),
+                         rec.get("mcx_id")
+                         if _codex_record_route(rec) == "mcx" else None))
             # Save only actual changes; waiting on archived records must preserve file bytes.
             if changed:
                 save_registry(data)
-        for n, sid in completed_codex:
+        for n, sid, mcx_id in completed_codex:
             try:
-                notify_lane_done(n, "idle", expected_sid=sid)
+                notify_lane_done(n, "idle", expected_sid=sid,
+                                 expected_mcx_id=mcx_id)
             except Exception:
                 pass
 
@@ -21806,6 +21813,7 @@ def _lane_done_turn_key(name: str, rec: dict) -> list:
 
 
 def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
+                     expected_mcx_id: str | None = None,
                      run=subprocess.run, sleep=time.sleep) -> bool:
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
@@ -21820,6 +21828,8 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
             return False
         sid = rec.get("session_id") or rec.get("codex_thread_id")
         if expected_sid is not None and sid != expected_sid:
+            return False
+        if expected_mcx_id is not None and rec.get("mcx_id") != expected_mcx_id:
             return False
         claim = read_incarnation()
         if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
@@ -21875,18 +21885,24 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         if rc != 0:
             raise FleetCliError(f"{name}: completion mail send failed ({rc})")
     except Exception:
-        _settle_lane_done(name, sid, turn_key, delivered=False)
+        _settle_lane_done(name, sid, turn_key,
+                          expected_mcx_id=expected_mcx_id, delivered=False)
         raise
-    _settle_lane_done(name, sid, turn_key, delivered=True)
+    _settle_lane_done(name, sid, turn_key,
+                      expected_mcx_id=expected_mcx_id, delivered=True)
     return True
 
 
-def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
+def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
+                      delivered: bool) -> None:
     with fleet_lock():
         data = read_registry_no_repair()
         current = data["workers"].get(name)
         if not (isinstance(current, dict)
                 and (current.get("session_id") or current.get("codex_thread_id")) == sid):
+            return
+        if (expected_mcx_id is not None
+                and current.get("mcx_id") != expected_mcx_id):
             return
         pending = current.get("lane_done_pending")
         if isinstance(pending, dict) and pending.get("key") == turn_key:
@@ -21924,16 +21940,30 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
         if n in native:
             status = recompute_worker_native(n, rec, entries).get("status")
         elif _is_codex_record(rec):
-            status = rec.get("status")
+            if _codex_record_route(rec) == "mcx":
+                # mcx has no Claude Stop hook: a completed job is observed only
+                # by probing its adapter.  Use the same completion bridge as
+                # native lanes so the keeper's sweep wakes the owning
+                # supervisor even when no explicit `status`/`wait` command ran
+                # after mcx finished.
+                status = recompute_worker_codex(n, rec, run=run).get("status")
+            else:
+                # Native Codex rows have their own provider observation path;
+                # the mcx sweep must not accidentally probe that adapter.
+                status = rec.get("status")
         else:
             continue
         if status != "idle":
             continue
         try:
-            if notify_lane_done(n, "idle",
-                                expected_sid=rec.get("session_id")
-                                or rec.get("codex_thread_id"),
-                                run=run, sleep=sleep):
+            if notify_lane_done(
+                    n, "idle",
+                    expected_sid=rec.get("session_id")
+                    or rec.get("codex_thread_id"),
+                    expected_mcx_id=(rec.get("mcx_id")
+                                     if _codex_record_route(rec) == "mcx"
+                                     else None),
+                    run=run, sleep=sleep):
                 delivered.append(n)
         except Exception:
             pass
