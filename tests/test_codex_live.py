@@ -22,6 +22,13 @@ BOUNDED_LIVE_RECEIPT = (
     REPO / "docs" / "lanes" / "codex-native-bounded-live.json")
 
 
+def _local_receipt(path):
+    """Load an optional per-home acceptance receipt without requiring one."""
+    if not path.is_file():
+        pytest.skip("local Codex acceptance receipt is not present")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_fake_acceptance_manifest_names_existing_exact_probes():
     scope = {"__name__": "acceptance_manifest", "__file__": str(HARNESS)}
     exec(compile(HARNESS.read_text(encoding="utf-8"), str(HARNESS), "exec"), scope)
@@ -158,7 +165,7 @@ def test_public_no_inference_report_hash_has_explicit_scope():
 def test_checked_public_no_inference_receipt_is_sealed_and_clean():
     scope = {"__name__": "acceptance_receipt", "__file__": str(HARNESS)}
     exec(compile(HARNESS.read_text(encoding="utf-8"), str(HARNESS), "exec"), scope)
-    report = json.loads(NO_INFERENCE_RECEIPT.read_text(encoding="utf-8"))
+    report = _local_receipt(NO_INFERENCE_RECEIPT)
     claimed = report["evidence_hashes"].pop("output_payload_sha256")
 
     assert claimed == scope["_canonical_sha256"](report)
@@ -173,14 +180,14 @@ def test_checked_public_no_inference_receipt_is_sealed_and_clean():
 def test_live_receipts_are_sealed(path):
     scope = {"__name__": "acceptance_live_receipt", "__file__": str(HARNESS)}
     exec(compile(HARNESS.read_text(encoding="utf-8"), str(HARNESS), "exec"), scope)
-    report = json.loads(path.read_text(encoding="utf-8"))
+    report = _local_receipt(path)
     claimed = report["evidence_hashes"].pop("output_payload_sha256")
 
     assert claimed == scope["_canonical_sha256"](report)
 
 
 def test_checked_interface_live_receipt_has_no_provider_mutation():
-    report = json.loads(INTERFACE_LIVE_RECEIPT.read_text(encoding="utf-8"))
+    report = _local_receipt(INTERFACE_LIVE_RECEIPT)
 
     assert report["overall"] == "PASS"
     assert [home["label"] for home in report["homes"]] == ["fleet", "pm", "projecty"]
@@ -193,7 +200,7 @@ def test_checked_interface_live_receipt_has_no_provider_mutation():
 
 
 def test_checked_bounded_live_receipt_stopped_before_inference_and_retry():
-    report = json.loads(BOUNDED_LIVE_RECEIPT.read_text(encoding="utf-8"))
+    report = _local_receipt(BOUNDED_LIVE_RECEIPT)
 
     assert report["overall"] == "BLOCKED"
     assert "authentication required to read rate limits" in report["reason"]

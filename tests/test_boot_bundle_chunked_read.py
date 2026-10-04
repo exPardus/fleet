@@ -189,7 +189,7 @@ class TestBothDispatchPathsRedirectTheBoot:
 # ---------------------------------------------------------------------------
 # The seeds. Every discriminating power claimed above, on a known answer.
 # ---------------------------------------------------------------------------
-BUNDLE = "/home/x/fleet/state/tasks/sup~inc-1~boot.boot-bundle.txt"
+BUNDLE = "/home/user/fleet/state/tasks/sup~inc-1~boot.boot-bundle.txt"
 
 
 class TestTheDetectorCanSeeAWholeFileRead:

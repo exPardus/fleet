@@ -61,10 +61,10 @@ def tick(tmp_path, monkeypatch):
 
 
 def test_stale_idle_pid_sends_once_without_page(tick):
-    invoke, pages, sends, commands, _ = tick
+    invoke, pages, sends, commands, home = tick
     assert invoke() == 0
     assert len(sends) == 1
-    assert sends[0].message == '@supervisor/briefs/wake.md'
+    assert sends[0].message == f'@{home / "supervisor/briefs/wake.md"}'
     assert not pages
     assert len(commands) == 1 and '--do' in commands[0]
 

@@ -666,8 +666,8 @@ def _rule_obs(n, oldest, ref):
 
 
 GIT_ENV = dict(os.environ, GIT_CONFIG_NOSYSTEM="1",
-               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
-               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
 
 
 def _git_or_skip():

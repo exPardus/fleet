@@ -283,7 +283,7 @@ def test_wave_close_refuses_an_unattributable_range_before_any_mutation(
     repo = tmp_path / "repo"
     repo.mkdir()
     git("init", "-q")
-    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.email", "wave-close-tests@example.com")
     git("config", "user.name", "wave-close tests")
     (repo / "docs").mkdir()
     (repo / "docs" / "CHANGELOG.md").write_text("# Operator changelog\n\n", encoding="utf-8")
@@ -507,7 +507,7 @@ def _sync_repo(tmp_path):
         git("commit", "-qm", message)
 
     git("init", "-q", "-b", "main")
-    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.email", "wave-close-tests@example.com")
     git("config", "user.name", "wave-close tests")
     commit("README.md", "base")
     base = git("rev-parse", "HEAD")
@@ -851,7 +851,7 @@ def test_worktree_branch_reads_a_linked_worktree_head(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     git("init", "-q")
-    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.email", "wave-close-tests@example.com")
     git("config", "user.name", "wave-close tests")
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     git("add", "-A")
@@ -960,7 +960,7 @@ def test_wave_close_refuses_a_lane_that_parses_but_joins_to_nothing(
     repo = tmp_path / "repo"
     repo.mkdir()
     git("init", "-q")
-    git("config", "user.email", "wave-close-tests@example.invalid")
+    git("config", "user.email", "wave-close-tests@example.com")
     git("config", "user.name", "wave-close tests")
     (repo / "docs").mkdir()
     (repo / "docs" / "CHANGELOG.md").write_text("# Operator changelog\n\n",
@@ -1342,7 +1342,7 @@ class TestRenamedLaneJoins:
         repo = tmp_path / "repo"
         repo.mkdir()
         git("init", "-q")
-        git("config", "user.email", "wave-close-tests@example.invalid")
+        git("config", "user.email", "wave-close-tests@example.com")
         git("config", "user.name", "wave-close tests")
         (repo / ".gitignore").write_text("state/\n", encoding="utf-8")
         (repo / "docs").mkdir()

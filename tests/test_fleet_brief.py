@@ -21,7 +21,7 @@ def _repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "brief@example.invalid")
+    _git(repo, "config", "user.email", "brief@example.com")
     _git(repo, "config", "user.name", "brief tests")
     (repo / "product.md").write_text(
         "# product\n\n## Never\n\n- Never build a fleet feature no downstream job asked for.\n\n"

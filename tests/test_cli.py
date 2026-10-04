@@ -263,6 +263,15 @@ class TestCmdInit:
         out = capsys.readouterr().out
         assert str(instance_path) in out
 
+    def test_existing_home_gets_missing_local_operator_seeds(
+            self, isolated_home):
+        fleet.template_settings_path().write_text(_TEMPLATE_JSON, encoding="utf-8")
+        assert fleet.cmd_init(fleet.build_parser().parse_args(["init"])) == 0
+        assert (isolated_home / "supervisor/GOALS.md").is_file()
+        assert (isolated_home / "supervisor/JOURNAL.md").is_file()
+        assert (isolated_home / "docs/lanes/BRIEF-TEMPLATE.md").is_file()
+        assert (isolated_home / "knowledge/projects/README.md").is_file()
+
     def test_missing_template_raises_clear_error(self, isolated_home):
         # isolated_home starts empty -- no worker-settings.template.json.
         with pytest.raises(fleet.FleetCliError):

@@ -115,7 +115,7 @@ def test_do_wakes_stale_idle_holder_with_owned_working_lane(
     assert result["verdict"] == f"WAKE {BODY}"
     assert result["sent"] is True
     assert [(call.name, call.message) for call in calls] == [
-        ("supervisor", "@supervisor/briefs/wake.md")]
+        ("supervisor", f"@{home / 'supervisor/briefs/wake.md'}")]
 
 
 @pytest.mark.parametrize("holder_status,archived", [("dead", False),
@@ -511,7 +511,7 @@ def test_do_wake_sends_exact_brief_once(home, monkeypatch, capsys):
                                snapshot_fn=snapshot, roster_fn=roster(row(SID))) == 0
     assert len(calls) == 1
     assert calls[0].name == 'supervisor'
-    assert calls[0].message == '@supervisor/briefs/wake.md'
+    assert calls[0].message == f'@{home / "supervisor/briefs/wake.md"}'
     assert json.loads(capsys.readouterr().out)['sent'] is True
 
 

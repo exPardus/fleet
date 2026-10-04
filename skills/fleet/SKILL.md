@@ -29,10 +29,10 @@ narration of tool calls, no praise, no hedging, no essays. One line per finding.
 A journal checkpoint is at most three model-written lines plus computed state.
 Inter-agent messages default to at most 120 words. Final worker receipts are at
 most 200 words with verdict, head, tests, blockers, next action, and artifact
-paths. Put full evidence in artifacts; never paste reports, JSON, test logs, or
-full roster dumps between agents. Quote only the shortest decisive error. The
-current admission, routing, and measurement policy is
-[`docs/operator/codex-quota-policy.md`](../../docs/operator/codex-quota-policy.md).
+paths. Put full evidence in local artifacts; never paste reports, JSON, test
+logs, or full roster dumps between agents. Quote only the shortest decisive
+error. Tracked files are generic; operator data is local to the selected fleet
+home and never committed.
 
 ## You are the interface
 
@@ -88,7 +88,7 @@ the selected fleet home:
 
 ## Startup
 
-1. If `$(fleet home)/docs/OPERATOR-GATES.md` exists, read it and ask the operator about every open decision before dispatching or changing work.
+1. Read the local interface board and pending decision tasks; ask the operator about every open decision before dispatching or changing work.
 2. Run `fleet status`, `fleet sup-status`, and `fleet autoclean`.
 3. Read `$(fleet home)/knowledge/INDEX.md` and the relevant project note before touching a project.
 4. If the active campaign has no live supervisor, run `fleet sup-spawn --task @<brief>`; the interface never runs `sup-boot`.
@@ -235,4 +235,8 @@ When approaching a context band, checkpoint, notify the interface with `sup-noti
 
 ## Safety
 
-Use `env -u CLAUDE_CODE_SESSION_ID` when operating on another home. Confirm `fleet home --fleet-home <path>` resolves to the intended initialized home before other commands. Keep reports at `docs/lanes/<name>.md` on the lane branch and journals at `state/journals/<name>.md`.
+Use `env -u CLAUDE_CODE_SESSION_ID` when operating on another home. Confirm
+`fleet home --fleet-home <path>` resolves to the intended initialized home
+before other commands. Keep reports at local, gitignored
+`docs/lanes/<name>.md` and journals at `state/journals/<name>.md`; neither is
+public source.

@@ -211,7 +211,7 @@ class TestTheDoctrineCitationsNameARatifiedClause:
             # meant that re-pointing the citations at a later ruling (2026-07-30
             # replaced this clause once already) went RED for the wrong reason
             # and taught the next editor to loosen the assertion instead.
-            assert re.search(r"RATIFIED by \w+, \d{4}-\d{2}-\d{2}", _norm(body)), (
+            assert re.search(r"RATIFIED by [^,]+, \d{4}-\d{2}-\d{2}", _norm(body)), (
                 f"implementation census:{line} cites claim-nonce §{number}, which names "
                 f"no ratification date in the form 'RATIFIED by <who>, "
                 f"<YYYY-MM-DD>'")

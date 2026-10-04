@@ -4,9 +4,9 @@ The document for a surface states what that surface is for and how to use it.
 Code is the behavioural authority. Update the owning document when described
 behaviour changes; otherwise report `Docs: n/a -- <reason>`.
 
-Start with `docs/SPEC.md`. Milestones are in §18. Current operator decisions
-are recorded in `docs/OPERATOR-GATES.md`; `docs/operator/` contains working
-digests and recipes.
+Start with `docs/SPEC.md`. Milestones are in §18. Tracked files contain only
+generic product, design, and implementation material. Operator data is local
+to each fleet home under ignored runtime paths and must never be committed.
 
 Rules:
 
@@ -17,8 +17,9 @@ Rules:
 - Hook commands in `worker-settings.json` use forward slashes.
 - Do not launch background processes with Git-Bash `&`; use detached Popen
   flags or `Start-Process`.
-- `state/`, `logs/`, and `mailbox/` are runtime directories; `knowledge/` is
-  tracked.
+- `state/`, `logs/`, `mailbox/`, `supervisor/`, `docs/lanes/`,
+  `knowledge/projects/`, and `knowledge/lessons.md` are local operator data.
+  Generic knowledge indexes and playbooks remain tracked.
 - Tests use pytest. Integration tests use a worker in a temporary directory.
 - Every task brief names its model; use the assigned model and effort.
 - Views (statusline and `/fleet:*`) never take `fleet.lock`, probe, write, or

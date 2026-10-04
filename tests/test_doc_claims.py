@@ -183,7 +183,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # on. Deliberately NOT every *.md in the tree -- `docs/specs/**` has its own
 # receipt harness (`tools/verify_receipts.py`), and the INTERNAL campaign docs
 # (`PLAN.md`, `PLAN-PROGRESS.md`, ...) are working ledgers whose stale numbers
-# are history rather than defects. These FIVE are the files whose job is to be
+# are history rather than defects. These five are the files whose job is to be
 # true for a stranger.
 #
 # `NEXT-SESSION.md` was named in that list until 2026-08-09 and is NOT an
@@ -761,13 +761,19 @@ def test_the_check_count_population_is_derived_and_split_correctly():
     # absent: dated history. Fixing a quoted argument FABRICATES -- ratified
     # 2026-08-05. `docs/OPERATOR-GATES.md:24` quotes both `29 checks` and
     # `23 checks` inside an argument whose own prose says "the truth is 28".
-    for rel in ("docs/PRIOR-ART.md", "docs/specs/native-substrate.md",
-                "knowledge/projects/claude-fleet.md"):
-        assert rel in tracked and rel not in docs, rel
+    # Operational records were scrubbed from the public tree. Their stable
+    # paths are now local and ignored rather than tracked historical inputs.
+    for rel in ("docs/OPERATOR-GATES.md", "knowledge/lessons.md",
+                "supervisor/JOURNAL.md", "docs/lanes/example.md",
+                "docs/PLAN.md", "docs/PLAN-PROGRESS.md"):
+        assert rel not in tracked, rel
 
-    # the exemption is by PATTERN, not by enumeration: although public-history
-    # scrubbing removes lane reports, a future local report is exempt without
-    # anyone editing a list.
+    # the exemption is by PATTERN, not by enumeration: a lane report written
+    # tomorrow is exempt without anyone editing a list -- which is the exact
+    # failure mode (a list scoped to what its author had in front of them)
+    # that this lane exists to remove.
+    assert not any(p.startswith("docs/lanes/") for p in tracked)
+    assert not any(p.startswith("docs/lanes/") for p in docs)
     assert "docs/lanes/some-future-lane.md".startswith(_HISTORICAL_PREFIXES)
 
     # neither empty nor everything

@@ -953,20 +953,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:10946) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:11842) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15170) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:10974) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:11870) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:15226) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3217) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:15044) -- describe the incident-specific absence.
+      * `_identity_abstention_note` (:15100) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:3896) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12092) -- do not grade a renamed-away path readable.
+      * `_doctor_check_registry` (:12120) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6371) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:16793) -- render the release explanation.
+      * `_print_snapshot_table` (:6399) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:16842) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3199,7 +3199,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15170`), because legacy upgrades also require a complete registry.
+    (`:15226`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -5533,8 +5533,35 @@ def _write_new_home_state(target: Path, template_text: str) -> bool:
         template_text, sys.executable, target, fleet_install=INSTALL_ROOT)
     (target / "state" / "worker-settings.json").write_text(
         rendered, encoding="utf-8")
+    _initialize_local_home_files(target)
     ensure_interface_state(target)
     return created
+
+
+def _write_local_seed(path: Path, text: str) -> None:
+    """Create one generic local-home seed without replacing operator data."""
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _initialize_local_home_files(target: Path) -> None:
+    """Create missing local-home seeds without replacing operator data."""
+    target = Path(target)
+    seeds = {
+        target / "supervisor" / "GOALS.md": _SUPERVISOR_GOALS_SEED,
+        target / "supervisor" / "JOURNAL.md": _SUPERVISOR_JOURNAL_SEED,
+        target / "supervisor" / "briefs" / "wake.md": _SUPERVISOR_WAKE_SEED,
+        target / "knowledge" / "INDEX.md": _KNOWLEDGE_INDEX_SEED,
+        target / "knowledge" / "projects" / "README.md": _PROJECT_NOTES_SEED,
+        target / "docs" / "lanes" / "README.md": _LANE_REPORTS_SEED,
+        target / "docs" / "lanes" / "BRIEF-TEMPLATE.md": _LANE_BRIEF_SEED,
+    }
+    for path, text in seeds.items():
+        _write_local_seed(path, text)
+    (target / "supervisor" / "journal-history").mkdir(
+        parents=True, exist_ok=True)
 
 
 def _record_home_on_this_machine(target: Path) -> tuple:
@@ -5673,6 +5700,7 @@ def cmd_init(args, *, create_in=None) -> int:
     instance_path = instance_settings_path()
     instance_path.parent.mkdir(parents=True, exist_ok=True)
     instance_path.write_text(rendered, encoding="utf-8")
+    _initialize_local_home_files(FLEET_HOME)
     ensure_interface_state(FLEET_HOME)
 
     print(f"fleet init: wrote {instance_path}")
@@ -9289,7 +9317,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9204` / `cmd_respawn:8619`, before
+    # resolution that runs from `cmd_kill:9232` / `cmd_respawn:8647`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -9320,9 +9348,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9204` / `cmd_respawn:8619`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9232` / `cmd_respawn:8647`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:8640-8647` spells out that design -- resolve under the lock.
+    # `cmd_respawn:8668-8675` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12940,36 +12968,13 @@ SUPERVISOR_BOOT_VERDICTS = tuple(SUPERVISOR_BOOT_RC) + ("handshake-written",
 # confusing that terminal disposition with an ordinary occupied-claim refusal.
 SUPERVISOR_BOOT_HANDOFF_REFUSED_RC = 5
 SUPERVISOR_BODY_MAX_LINES = 3
-# w90: the boot tail inlines bodies only for CHECKPOINT/PROPOSAL entries --
-# the kinds that actually carry campaign content -- never for terse bookkeeping
-# kinds (BOOT/SEIZED/RELEASED/...), regardless of position in the window.
-# Supervisor gate, 2026-09-16: inlining "whichever entry is newest" is wrong --
-# a boot's own freshly-written BOOT entry would then consume the one inline
-# slot and pointer every checkpoint behind it, exactly when a resuming body
-# most needs "continue the campaign from the journal tail" (skills/fleet
-# boot step 4) to work. `SUPERVISOR_BODY_MAX_LINES` caps a checkpoint's
-# NEWLINE count, not its byte size -- three lines can each be an arbitrarily
-# long paragraph (measured: wave-83's THROUGHPUT line alone is several
-# hundred bytes) -- so each inlined entry is also byte-capped here as a
-# backstop the line cap does not provide.
+# Inline only substantive journal bodies; cap bytes as well as line count.
 SUPERVISOR_BOOT_JOURNAL_TAIL = 5
 SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS = frozenset({"CHECKPOINT", "PROPOSAL"})
 SUPERVISOR_BOOT_INLINE_MIN = 2
 SUPERVISOR_LATEST_ENTRY_MAX_CHARS = 2000
-# Total inline budget for the tail section: 4x the per-entry cap. A 5-entry
-# window holds at most 5 substantive entries, so this bounds the section at
-# roughly "the newest 2 substantive entries, guaranteed, plus up to 2 more if
-# they fit" rather than "inline everything" -- which matters because GOALS.md
-# alone measures 7,056 bytes (docs/lanes/w90-report.md) and an unbounded tail
-# would crowd the 20,000 whole-bundle cap instead of leaving headroom under it.
+# Guarantee two substantive entries, then enforce the total inline budget.
 SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS = 4 * SUPERVISOR_LATEST_ENTRY_MAX_CHARS
-# w90 (docs/lanes/w90-report.md): measured real bundle (this repo's own
-# supervisor/GOALS.md + JOURNAL.md + knowledge/INDEX.md, 2026-09-16) at 12,271
-# bytes before this lane's journal-tail cut and ~9.9KB after it, with 0-3 live
-# workers (the reap rule's own ceiling) adding at most a few hundred more
-# bytes. 20,000 gives about 2x headroom for GOALS.md growth or a full 3-worker
-# roster without leaving the cap effectively unbounded; the untested 40,000
-# predecessor was never exercised by a test and left slack nobody had measured.
 SUPERVISOR_BUNDLE_MAX_CHARS = 20_000
 #: GOALS.md inline cap (then a pointer), so GOALS alone cannot trip the bundle backstop.
 SUPERVISOR_BOOT_GOALS_MAX_CHARS = 8_000
@@ -12986,6 +12991,53 @@ Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEG
 <!-- entries below -->
 """
 
+_SUPERVISOR_GOALS_SEED = """# Supervisor Goals
+
+SUPERVISOR-DORMANT
+
+This file is local to this fleet home. Replace this paragraph with the active
+campaign and remove `SUPERVISOR-DORMANT` when the supervisor should run.
+"""
+
+_SUPERVISOR_WAKE_SEED = """# Supervisor Wake
+DONE means: reconcile the local board and continue or checkpoint the active campaign.
+
+Read `supervisor/GOALS.md`, `supervisor/JOURNAL.md`, and
+`state/interface/board.md`, then act only within this fleet home.
+"""
+
+_KNOWLEDGE_INDEX_SEED = """# Knowledge Index
+
+Fleet ships generic playbooks. Project notes and operator lessons are local to
+this home under `knowledge/projects/` and `knowledge/lessons.md`.
+
+- `playbooks/campaign-template.md` — generic campaign structure.
+- `playbooks/spawn-etiquette.md` — generic worker-dispatch guidance.
+- `projects/README.md` — how to add local project notes.
+"""
+
+_PROJECT_NOTES_SEED = """# Local project notes
+
+Store project-specific facts in short Markdown files in this directory. This
+directory is ignored by Git because operator and project data is never part of
+the public Fleet source tree.
+"""
+
+_LANE_REPORTS_SEED = """# Local lane reports
+
+Lane reports and structured results are per-home operational receipts. Keep
+`<lane>.md` and `<lane>.json` here; Fleet reads them locally and never stages
+them in the public source repository.
+"""
+
+_LANE_BRIEF_SEED = """# Lane brief
+DONE means: the bounded change is implemented, verified, and reported locally.
+
+Write `docs/lanes/<lane>.md` and `docs/lanes/<lane>.json` in this fleet home.
+The JSON result contains exactly: `lane`, `base`, `files_changed`, `tests`,
+`claims`, and `blockers`.
+"""
+
 
 def supervisor_dir() -> Path:
     return FLEET_HOME / "supervisor"
@@ -12993,6 +13045,10 @@ def supervisor_dir() -> Path:
 
 def goals_path() -> Path:
     return supervisor_dir() / "GOALS.md"
+
+
+def supervisor_wake_brief_path() -> Path:
+    return supervisor_dir() / "briefs" / "wake.md"
 
 
 # Read operator-owned role/tier/model policy from GOALS.md over defaults.
@@ -14078,12 +14134,12 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3021, :3056,
-    :3086, :3125, :3162, :3224, :3304, :4293, :9307, :9469, :9733, :9962, :9998, :10240, :10241, :10330,
-    :10340, :10351, :10449, :10972, :14030, :17888, :17889, :17993, :18054, :19361, :21293`).
+    sites that already key on the union (`:3021, :3056, :3086, :3125, :3162,
+    :3224, :3304, :4293, :9335, :9497, :9761, :9990, :10026, :10268, :10269,
+    :10358, :10368, :10379, :10477, :11000, :14086, :17937, :17938, :18042, :18103, :19406, :21338`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :7919, :8493, :12418,
-    :20097. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :7947, :8521, :12446,
+    :20142. This makes union identity safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -14798,8 +14854,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:7919, :8493, :12418,
-    # :20097) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:7947, :8521, :12446,
+    # :20142) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -14807,7 +14863,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1033`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14004`).
+        # names this gate as its reason (`:14060`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -15163,7 +15219,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:10943`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:10971`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -16515,12 +16571,7 @@ def _wave_prepend_journal(path, line):
 
 
 def _wave_refresh_progress(repo, wave_id):
-    """Refresh only a mechanically recognizable current-wave marker.
-
-    Lane acceptance, priority advancement, and prose are model judgements;
-    this arm intentionally reports no refresh when there is no exact row to
-    update rather than manufacturing status from filenames.
-    """
+    """Count mechanically recognizable current-wave progress rows."""
     path = Path(repo) / "docs" / "PLAN-PROGRESS.md"
     if not path.exists() or wave_id == "UNMEASURED":
         return 0
@@ -16721,8 +16772,6 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         with open(repo / "supervisor" / "JOURNAL.md", "a", encoding="utf-8") as stream:
             stream.write(f"\nPUSH FAILURE wave {wave_id}: {attempts} attempts; "
                          f"retry window {WAVE_CLOSE_PUSH_WINDOW_SECONDS:.0f}s\n")
-        _wave_git(repo, "add", "supervisor/JOURNAL.md", run=run)
-        _wave_git(repo, "commit", "-m", f"fleet wave-close: checkpoint push failure wave {wave_id}", run=run)
         raise FleetCliError(f"wave-close: push failed after {attempts} attempts: {push_failures}")
 
     pruned = _wave_prune_landed_worktrees(repo, "HEAD", run=run)
@@ -18350,11 +18399,7 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
     sent, rc = False, 0
     if do and observation.get("verdict") == "WAKE":
         try:
-            # Native Codex bypasses cmd_send's task-argument reader, so resolve
-            # the operator-owned wake brief against the selected fleet home.
-            # The caller may invoke `fleet --fleet-home ... sup-guard` from any cwd.
-            wake_brief = supervisor_dir() / "briefs" / "wake.md"
-            message = _read_task_arg(f"@{wake_brief}")
+            message = _read_task_arg(f"@{supervisor_wake_brief_path()}")
             with redirect_stdout(io.StringIO()):
                 rc = _cmd_send_codex_supervisor(
                     observation["body_name"], message)
@@ -18409,7 +18454,7 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
                     with redirect_stdout(io.StringIO()):
                         rc = cmd_send(SimpleNamespace(
                             name=SUPERVISOR_BODY_NAME,
-                            message="@supervisor/briefs/wake.md", nonce=None))
+                            message=f"@{supervisor_wake_brief_path()}", nonce=None))
                     break
                 except TransientSendRefusal:
                     if attempt == 2:

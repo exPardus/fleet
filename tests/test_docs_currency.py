@@ -71,13 +71,12 @@ def has_done_after_title(text):
 
 
 def lane_documents(repo, cutoff=ADOPTION_BASE):
-    old = set(git(repo, "ls-tree", "-r", "--name-only", cutoff,
-                  "--", "docs/lanes").splitlines())
-    current = set(git(repo, "ls-files", "--cached", "--others", "--exclude-standard",
-                      "--", "docs/lanes").splitlines())
-    # All new lane documents, including reports, plus the live authoring template.
-    return [repo / p for p in sorted((current - old) | {"docs/lanes/BRIEF-TEMPLATE.md"})
-            if p.endswith(".md") and (repo / p).is_file()]
+    """Local lane reports, including ignored files but not generic seeds."""
+    root = repo / "docs" / "lanes"
+    if not root.is_dir():
+        return []
+    return [path for path in sorted(root.glob("*.md"))
+            if path.name not in {"README.md", "BRIEF-TEMPLATE.md"}]
 
 
 def dispatched_tasks(home):
@@ -155,7 +154,7 @@ def test_dispatched_tasks_have_valid_serves():
 
 def init_repo(tmp_path):
     git(tmp_path, "init", "-q")
-    git(tmp_path, "config", "user.email", "lint@example.invalid")
+    git(tmp_path, "config", "user.email", "lint@example.com")
     git(tmp_path, "config", "user.name", "Lint seed")
     return commit_file(tmp_path, "README.md", "baseline", "baseline")
 

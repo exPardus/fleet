@@ -5,6 +5,10 @@ takes a ROLE in the fleet. It is deliberately timeless: what is true today — w
 busy, which models are allowed, what the operator last ruled — lives in the interface
 handover, never here.
 
+Tracked files are generic public source. Operator data, handovers, goals,
+journals, project notes, and lane reports stay in the ignored local storage
+that `fleet init` creates in each home.
+
 ## The roles
 
 - **Interface**: the one session a human talks to. Rules, relays, dispatches, stops things.

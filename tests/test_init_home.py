@@ -425,6 +425,32 @@ class TestItCreatesAnInitializedHome:
         assert rendered["home"] != Path(ambient).resolve().as_posix()
         assert rendered["install"] == Path(fleet.INSTALL_ROOT).resolve().as_posix()
 
+    def test_it_creates_the_local_operator_data_plane(
+            self, monkeypatch, capsys, fresh):
+        target = fresh("new")
+        rc, out = _run(["init", "--home", str(target)], monkeypatch, capsys)
+        assert rc == 0, out.err
+        expected = {
+            "supervisor/GOALS.md", "supervisor/JOURNAL.md",
+            "supervisor/briefs/wake.md", "supervisor/journal-history",
+            "knowledge/INDEX.md", "knowledge/projects/README.md",
+            "docs/lanes/README.md", "docs/lanes/BRIEF-TEMPLATE.md",
+        }
+        assert all((target / rel).exists() for rel in expected)
+        assert "SUPERVISOR-DORMANT" in (target / "supervisor/GOALS.md").read_text(
+            encoding="utf-8")
+        assert "local" in (target / "docs/lanes/README.md").read_text(
+            encoding="utf-8").lower()
+
+    def test_rerun_never_replaces_local_operator_data(
+            self, monkeypatch, capsys, fresh):
+        target = fresh("new")
+        assert _run(["init", "--home", str(target)], monkeypatch, capsys)[0] == 0
+        owned = target / "supervisor/GOALS.md"
+        owned.write_text("# My private campaign\n", encoding="utf-8")
+        assert _run(["init", "--home", str(target)], monkeypatch, capsys)[0] == 0
+        assert owned.read_text(encoding="utf-8") == "# My private campaign\n"
+
     def test_the_ambient_home_is_untouched(self, monkeypatch, capsys, fresh,
                                            initialized):
         """`--home` must not write into the home §5 would have resolved. The

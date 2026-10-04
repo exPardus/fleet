@@ -157,9 +157,9 @@ The same hook machinery drives two more surfaces: the **Stop hook** records what
 This is the part competitors don't have. `knowledge/` is a **git-tracked** directory the manager reads at the start of every session and writes back to after every campaign:
 
 - `INDEX.md` — one-line pointers to everything (read first, cheap).
-- `lessons.md` — append-only postmortems. What broke, why, what to do differently.
-- `playbooks/` — reusable doctrine (e.g. the campaign template, spawn etiquette).
-- `projects/` — per-project quirks fleet has learned the hard way.
+- Tracked `INDEX.md` and `playbooks/` — generic reusable doctrine.
+- Local `lessons.md` — operator-owned postmortems.
+- Local `projects/` — per-project quirks learned during real campaigns.
 
 ```mermaid
 flowchart LR
@@ -168,15 +168,15 @@ flowchart LR
     W --> S
 ```
 
-The effect: the fleet gets better at running the fleet. A mistake made once becomes a lesson that prevents it next time — and because it's git-tracked, that experience is durable, reviewable, and shared across machines.
+The effect: the fleet gets better at running the fleet. Local experience stays
+durable within its home without publishing project or operator data; reusable
+doctrine moves into reviewed generic playbooks.
 
 ## Why you can trust it running unattended
 
-Fleet modifies itself. That only works because the project attacks its own work before shipping it: every spec and code change goes through an adversarial-review pass with **receipts** — real bugs caught behind green test suites, five-hostile-pass spec reviews, live-repro authority. It's all public.
-
-- Reviews with receipts: [`reviews/`](reviews/)
-- Accumulated postmortems: [`../knowledge/lessons.md`](../knowledge/lessons.md)
-- A good first read — a HIGH-severity double-launch bug found behind a passing suite: [`reviews/c2-review-adversarial.md`](reviews/c2-review-adversarial.md)
+Fleet modifies itself. Public behavior is guarded by executable tests and
+reproducible receipts in `docs/specs/`; user-specific reviews, campaign
+receipts, and postmortems remain local to the home that produced them.
 
 ---
 

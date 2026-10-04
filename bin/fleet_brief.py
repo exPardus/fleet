@@ -17,7 +17,7 @@ _PATH_RE = re.compile(
     r"/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:py|md|json|txt)")
 
 _STRUCTURED_RESULT = (
-    "docs/lanes/<lane>.json with exactly fields lane, base, files_changed, "
+    "local gitignored docs/lanes/<lane>.json with exactly fields lane, base, files_changed, "
     "tests, claims, blockers; test entries command, rc, passed, failed, "
     "skipped; claim entries claim and command"
 )

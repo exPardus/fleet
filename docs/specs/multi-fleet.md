@@ -1,7 +1,7 @@
 # Multi-fleet: independent fleets scoped per session, per repo, or per dir
 
 **Status:** **v8 — ratified ready-for-build by the operator 2026-07-30** (in-session, docket pass;
-docket entry ticked in `docs/OPERATOR-GATES.md` §Settled, *"Multi-fleet spec v8 — ratify
+docket entry ticked in `the local operator decision record` §Settled, *"Multi-fleet spec v8 — ratify
 ready-for-build, order round 8, or overturn?"*). The ruling, verbatim: *"**RATIFIED
 ready-for-build.** What was ratified: the §5 resolution order + verb-effect table; the two
 accepted residuals (pre-claim window 6.8–63s; wrong-home disruptive verbs proceed loudly rather
@@ -564,7 +564,7 @@ and one `# at <sha>` line moves it into the enforced set, four tests RED, which 
 RECORD measured. And it states the verb contrast **below the table** rather than inside a row,
 because the row readers resolve backticked tokens to verbs.
 
-> **PROPOSAL — RULED 2026-08-05 by the operator (`docs/OPERATOR-GATES.md`, first settled
+> **PROPOSAL — RULED 2026-08-05 by the operator (`the local operator decision record`, first settled
 > entry). Kept as the record of the questions, never deleted; each carries its answer.**
 > E1, E2 and E3 are ANSWERED and their consequences are landed in the table above. E4 is still
 > live. E5 was split out as its own **open** docket item and outlives this landing.

@@ -62,24 +62,15 @@ INDEX_NO_INDEX_MESSAGE = "no index -- run 'fleet index init'"
 
 
 class IndexConfigError(FleetCliError):
-    """The index configuration contains keys or values outside its fixed schema.
-    Reject unsupported settings so users cannot believe an unimplemented mode
-    is active."""
+    """The index configuration is outside its fixed schema."""
 
 
 class IndexPathError(FleetCliError):
-    """An index path escapes its root or fails the relative-path grammar.
-    _index_posix_rel rejects traversal and non-relative spellings;
-    _index_require_inside rejects filesystem escapes through links/junctions.
-    Callers obtain both guards together through _index_entry_paths."""
+    """An index path escapes its root or fails the relative-path grammar."""
 
 
 class IndexDigestTooLargeError(FleetCliError):
-    """The complete --context digest exceeds INDEX_DIGEST_REFUSE_CHARS.
-    Refuse instead of truncating: a partial symbol table hides real symbols.
-    Compose before the spawn registry commit so refusal leaves no phantom
-    worker. Raise outside the per-path catch, which demotes individual path
-    errors to warning-and-skip."""
+    """The complete --context digest exceeds its refusal threshold."""
 
 
 # --- paths ------------------------------------------------------------------
@@ -97,13 +88,7 @@ def index_config_path(root) -> Path:
 
 
 def _index_posix_rel(rel) -> str:
-    """Canonicalize a relative index path to forward-slash form on every OS.
-    Drop empty and dot segments, including leading separators; reject .. and
-    a remaining Windows drive or root. A drive-relative join can also replace
-    its left side. Parse Windows syntax on every platform because persisted
-    shard identities may cross platforms.
-    Canonicalization prevents alternate slash spellings creating two shards
-    for one file."""
+    """Canonicalize a safe relative index path to forward-slash form."""
     parts = [p for p in str(rel).replace("\\", "/").split("/") if p not in ("", ".")]
     if ".." in parts:
         raise IndexPathError(
@@ -121,16 +106,12 @@ def _index_posix_rel(rel) -> str:
 
 
 def shard_path_for_source(root, rel) -> Path:
-    """`.fleet-index/symbols/<source-path>.tsv` -- the shard mirrors the
-    source path, which is why the source path is not a column (§5)."""
+    """Return the path-mirrored shard for a source path."""
     return index_symbols_dir(root) / (_index_posix_rel(rel) + INDEX_SHARD_SUFFIX)
 
 
 def _index_require_inside(base, path, rel, what) -> None:
-    """Require path to resolve strictly inside base, excluding base itself.
-    Resolve both sides so links/junctions cannot escape and a linked root still
-    contains its files. A relative-path grammar alone cannot establish physical
-    containment."""
+    """Require path to resolve strictly inside base, excluding base itself."""
     try:
         real_base = Path(base).resolve()
         real = Path(path).resolve()
@@ -146,9 +127,7 @@ def _index_require_inside(base, path, rel, what) -> None:
 
 
 def _index_entry_paths(root, rel) -> tuple:
-    """Return (canonical rel, source, shard) with both containment guards.
-    Shared by read and write entry points so every caller-supplied path obeys
-    the same relative grammar and filesystem containment rules."""
+    """Return (canonical rel, source, shard) with containment guards."""
     root = Path(root)
     rel = _index_posix_rel(rel)
     source = root / rel
@@ -169,9 +148,7 @@ def source_rel_from_shard(root, shard_path) -> str:
 
 
 def source_lang(rel) -> str:
-    """The `lang` header column. `python`/`markdown` are the two parsed
-    languages (§6); everything else names its own suffix so a header-only
-    shard still says what it is."""
+    """Return the shard-header language for a source path."""
     suffix = Path(_index_posix_rel(rel)).suffix.lower()
     if suffix == ".py":
         return "python"
@@ -183,9 +160,7 @@ def source_lang(rel) -> str:
 # --- shard bytes ------------------------------------------------------------
 
 def _index_tsv_field(value) -> str:
-    """Escape tabs as literal \\t and strip line breaks for one TSV cell.
-    Normalize during parsing so fresh and cached rows are identical. Backslash
-    itself is not escaped: the TSV format does not promise reversible escaping."""
+    """Normalize one value for the shard's fixed TSV format."""
     return str(value).replace("\r", "").replace("\n", "").replace("\t", "\\t")
 
 
@@ -193,10 +168,7 @@ _INDEX_LINE_BREAK_RE = re.compile(r"\r\n|\r|\n")
 
 
 def _index_split_lines(text) -> list:
-    """Split CRLF, CR and LF, dropping a trailing empty element.
-    Match bytes.splitlines so header line counts and parser coordinates agree.
-    str.splitlines also treats control and Unicode separator characters as
-    line boundaries; splitting only LF misses CR-only files."""
+    """Split CRLF, CR and LF while dropping a trailing empty element."""
     lines = _INDEX_LINE_BREAK_RE.split(text)
     if lines and lines[-1] == "":
         lines.pop()
@@ -204,16 +176,13 @@ def _index_split_lines(text) -> list:
 
 
 def _index_row_key(row):
-    """Order rows by line, end, then name for both cached and fresh results.
-    The name tie-break stabilizes multiple symbols sharing one source span."""
+    """Return the stable source-order key for a shard row."""
     name, line, end = row[0], row[1], row[2]
     return (line, end, name)
 
 
 def render_shard(header: dict, rows) -> str:
-    """Render the header and TSV symbol rows in _index_row_key order.
-    Source order keeps edits localized; sorting here also guarantees stable
-    bytes for callers supplying unsorted rows."""
+    """Render a shard with symbol rows in stable source order."""
     out = ["#\t{}\t{}\t{}".format(header["sha"], header["lines"], header["lang"])]
     for name, line, end, kind, sig in sorted(rows, key=_index_row_key):
         out.append(f"{name}\t{line}\t{end}\t{kind}\t{sig}")
@@ -224,10 +193,7 @@ _INDEX_HEX = frozenset("0123456789abcdef")
 
 
 def read_shard(shard_path):
-    """Return (header, rows) for a readable shard, otherwise None.
-    Callers treat missing, corrupt or partially valid shards as stale and
-    reparse the source. A missing final newline detects a mid-row torn write;
-    truncation exactly at a row boundary is not detectable from these bytes."""
+    """Return (header, rows) for a valid readable shard, otherwise None."""
     try:
         raw = Path(shard_path).read_bytes()
     except OSError:
@@ -270,11 +236,7 @@ def _index_unlink_quiet(path) -> None:
 
 
 def write_shard_atomic(shard_path, header: dict, rows, sleep=None) -> bool:
-    """Write through a same-directory temporary file and atomic replace.
-    Return True on success, False on OSError, retaining the previous shard.
-    Reuse bounded replace retry for Windows sharing violations. A stale shard
-    is safe because readers verify its hash; an in-place torn write is not.
-    Non-OSError exceptions propagate after temporary-file cleanup."""
+    """Atomically replace a shard, retaining the old one on OSError."""
     shard_path = Path(shard_path)
     try:
         shard_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,9 +260,7 @@ def write_shard_atomic(shard_path, header: dict, rows, sleep=None) -> bool:
 # --- parsers (§6) -----------------------------------------------------------
 
 def header_for_bytes(raw, rel) -> dict:
-    """Return the truncated SHA-256, byte line count and language for one buffer.
-    Hash bytes so newline encodings and invalid UTF-8 still invalidate stale
-    shards. Use the same buffer for parsing to avoid mixed-version coordinates."""
+    """Return the hash, byte line count, and language for one buffer."""
     return {"sha": hashlib.sha256(raw).hexdigest()[:INDEX_SHA_HEX_LEN],
             "lines": len(raw.splitlines()),
             "lang": source_lang(rel)}
@@ -319,8 +279,7 @@ def _index_decode(raw):
 
 
 def _index_py_sig(node) -> str:
-    """Render a Python signature using ast.unparse.
-    Golden tests pin formatting because unparse has no output-stability promise."""
+    """Render a Python signature using ast.unparse."""
     try:
         sig = "(" + ast.unparse(node.args) + ")"
         if node.returns is not None:
@@ -331,10 +290,7 @@ def _index_py_sig(node) -> str:
 
 
 def _index_py_symbols(body, prefix, rows, module_level) -> None:
-    """§6's four Python symbol kinds. Deliberately not a full `ast.walk`:
-    a function nested inside a function is an implementation detail, not a
-    symbol a worker looks up, and indexing it would put unreachable names in
-    the lookup namespace."""
+    """Collect the four supported Python symbol kinds."""
     for node in body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             rows.append((prefix + node.name, node.lineno, node.end_lineno,
@@ -374,8 +330,7 @@ _MD_CLOSING_HASHES_RE = re.compile(r"\s+#+\s*$")
 
 
 def _index_parse_markdown(raw) -> list:
-    """Parse ATX headings and section ends, excluding fenced code.
-    Fence tracking prevents code comments from becoming phantom sections."""
+    """Parse ATX headings and section ends, excluding fenced code."""
     text = _index_decode(raw)
     if text is None:
         return []
@@ -408,10 +363,7 @@ def _index_parse_markdown(raw) -> list:
 
 
 def parse_source_symbols(source_path, lang=None, raw=None) -> list:
-    """Parse one source into _index_row_key-ordered rows, or [] on bad input.
-    Accept an existing raw buffer so hashing and parsing describe the same
-    version under concurrent writes. Unparseable, unreadable or undecodable
-    sources produce header-only shards and remain tracked for staleness."""
+    """Parse one source into ordered rows, or [] for bad input."""
     source_path = Path(source_path)
     if lang is None:
         lang = source_lang(source_path.name)
@@ -517,9 +469,7 @@ def load_index_config(root) -> dict:
 
 @functools.lru_cache(maxsize=256)
 def _index_glob_regex(pattern):
-    """Compile case-sensitive include/exclude patterns on every platform.
-    **/ is an optional directory prefix, ** crosses separators, and * / ? do
-    not. fnmatch cannot supply these rules or match root files with **/*.py."""
+    """Compile the index's platform-neutral glob dialect."""
     out, i, size = [], 0, len(pattern)
     while i < size:
         char = pattern[i]
@@ -557,9 +507,7 @@ INDEX_DIGEST_REFUSE_CHARS = 250_000
 
 
 def render_digest(rel, header: dict, rows) -> str:
-    """Render one file's complete symbol digest, without truncation.
-    compose_context_digests applies the aggregate warning/refusal thresholds;
-    q --outline's line cap does not apply to context injection."""
+    """Render one file's complete symbol digest without truncation."""
     out = [f"## {rel} ({header['lines']} lines, {header['lang']})"]
     for name, line, _end, kind, sig in rows:
         indent = "  " if kind == "method" else ""
@@ -571,16 +519,12 @@ def render_digest(rel, header: dict, rows) -> str:
 # --- index discovery (§11.1) ------------------------------------------------
 
 def _index_is_repo_boundary(directory) -> bool:
-    """Recognize a directory containing a .git entry, either file or directory.
-    Use in both upward discovery and downward enumeration so linked worktrees
-    and nested checkouts cannot borrow each other's indexes."""
+    """Recognize a directory containing a .git file or directory."""
     return (Path(directory) / ".git").exists()
 
 
 def _index_is_reparse_point(path) -> bool:
-    """Recognize symlinks and Windows junctions/mount points; True if unstattable.
-    islink alone misses junctions. Probe st_reparse_tag without an OS branch
-    so the walk refuses any entry it cannot safely inspect."""
+    """Recognize links/reparse points, including unstattable paths."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -589,10 +533,7 @@ def _index_is_reparse_point(path) -> bool:
 
 
 def find_index_root(start=None):
-    """Find the nearest .fleet-index at or above start, stopping at .git entries.
-    Accept a boundary directory's own index before stopping. A linked worktree
-    uses a .git file and must not fall through to its parent's index, whose
-    coordinates describe a different checkout."""
+    """Find the nearest index without crossing a repository boundary."""
     try:
         current = Path(start if start is not None else os.getcwd()).resolve()
     except OSError:
@@ -608,16 +549,7 @@ def find_index_root(start=None):
 # --- the verify-then-get primitive (§8/§11.3) -------------------------------
 
 def verified_shard_rows(root, rel, no_write=False, sleep=None) -> dict:
-    """Verify source bytes before serving any shard coordinates.
-    Reparse missing, stale or corrupt shards. Hash and parse one buffer so a
-    concurrent edit cannot combine one file version's header with another's rows.
-    Return status (ok/withheld/orphan), rows, refreshed, written, and note.
-    Only ok carries rows. no_write withholds a shard needing repair; it does
-    not relax verification. A failed atomic replace still returns verified
-    fresh rows as ok, leaving disk stale for the next reader. Pruning an orphan
-    counts as written. Source absence or unreadability yields orphan.
-    A shard truncated exactly at a row boundary cannot be detected by the
-    format alone; read_shard rejects malformed rows and missing final newlines."""
+    """Verify source bytes before returning shard rows, refreshing if allowed."""
     root = Path(root)
     rel, source, shard = _index_entry_paths(root, rel)
     result = {"rel": rel, "status": "ok", "header": None, "rows": [],
@@ -667,10 +599,7 @@ def _index_selects(rel, include, exclude) -> bool:
 
 
 def index_source_files(root, config=None) -> list:
-    """Yield selected source paths as sorted canonical relatives.
-    Do not descend nested repository boundaries or reparse points, including
-    Windows junctions. Reject linked files too. Test entries below root while
-    allowing root itself to be a checkout."""
+    """Return selected safe source paths as sorted canonical relatives."""
     root = Path(root)
     if config is None:
         config = load_index_config(root)
@@ -707,9 +636,7 @@ def index_shard_rels(root) -> list:
 
 
 def _index_prune_shard(root, rel) -> bool:
-    """Delete one contained shard, then its empty mirror directories.
-    Resolve paths before unlink/rmdir so a linked mirror directory cannot
-    redirect deletion outside the symbols tree."""
+    """Delete a contained shard and empty mirror directories."""
     shard = shard_path_for_source(root, rel)
     try:
         stop = index_symbols_dir(root).resolve()
@@ -771,9 +698,7 @@ def _index_refresh_one(root, rel, force, sleep, report) -> None:
 
 
 def build_index(root, force=False, sleep=None) -> dict:
-    """Rebuild the whole index: refresh every selected source file (skipping
-    the ones whose SHA-256 already matches unless `force`), then prune every
-    shard the selection no longer covers."""
+    """Refresh selected sources and prune shards no longer selected."""
     root = Path(root)
     config = load_index_config(root)
     selected = index_source_files(root, config)
@@ -792,9 +717,7 @@ def build_index(root, force=False, sleep=None) -> dict:
 
 
 def update_index(root, rels, force=False, sleep=None) -> dict:
-    """Refresh exactly the named selected files.
-    Canonicalize the entire batch before comparison or writes: refuse a path
-    escape without partially applying a batch aimed at the wrong root."""
+    """Refresh exactly the named selected files as one validated batch."""
     root = Path(root)
     rels = [_index_posix_rel(rel) for rel in rels]
     selected = set(index_source_files(root))
@@ -818,9 +741,7 @@ def update_index(root, rels, force=False, sleep=None) -> dict:
 
 
 def index_status(root) -> dict:
-    """Counts plus the stale/orphan/unindexed shard lists. READ-ONLY: status
-    reports staleness, it never repairs it, so an operator can see the true
-    state of an index without the act of looking changing it."""
+    """Return read-only counts and stale/orphan/unindexed lists."""
     root = Path(root)
     selected = index_source_files(root)
     selected_set = set(selected)
@@ -861,19 +782,14 @@ INDEX_TEACH_LINES = (
 
 
 def index_teach_verbs() -> tuple:
-    """Every `fleet <verb>` the teach lines name, DERIVED from the constant.
-
-    Derived, not listed: a fifth teach line naming a new verb must not be able
-    to slip past the §11.8 gate below because someone forgot to extend a
-    hand-written tuple."""
+    """Derive every advertised `fleet <verb>` from the teach text."""
     return tuple(sorted(set(
         re.findall(r"`fleet ([a-z][a-z0-9-]*)", INDEX_TEACH_LINES))))
 
 
 @functools.lru_cache(maxsize=1)
 def registered_cli_verbs() -> frozenset:
-    """Return the subcommands registered by build_parser, cached per module.
-    Tests may invalidate the cache through registered_cli_verbs.cache_clear()."""
+    """Return the subcommands registered by build_parser."""
     parser = build_parser()
     for action in parser._actions:
         if action.dest == "command" and action.choices:
@@ -882,10 +798,7 @@ def registered_cli_verbs() -> frozenset:
 
 
 def index_teach_lines(cwd) -> str:
-    """Return index instructions only when cwd itself has an index directory.
-    Also require every advertised verb to exist in the parser. Teaching an
-    unavailable command wastes a worker turn. Do not walk upward: the dispatch
-    target must opt in directly, and a plain .fleet-index file is not an index."""
+    """Return instructions when cwd opts in and all named verbs exist."""
     try:
         if not index_dir(cwd).is_dir():
             return ""
@@ -898,10 +811,7 @@ def index_teach_lines(cwd) -> str:
 
 
 def parse_context_arg(value) -> list:
-    """Split comma-separated --context paths, strip and dedupe exact spellings.
-    Preserve order; None or empty input yields []. Canonical dedupe belongs in
-    compose_context_digests, where path errors can warn-and-skip instead of
-    failing argument parsing."""
+    """Split, trim, and order-dedupe comma-separated context paths."""
     if not value:
         return []
     out = []
@@ -913,17 +823,7 @@ def parse_context_arg(value) -> list:
 
 
 def compose_context_digests(cwd, context, sleep=None) -> tuple:
-    """Return (digest_text, warnings) for --context injection.
-    Resolve paths against the worker cwd and require its own index directory.
-    Read every row through verified_shard_rows. Unknown, excluded, escaping or
-    unreadable paths warn and skip; missing index warns and injects nothing.
-    Canonicalize and dedupe before selection, verification and size accounting,
-    warning on folded spellings. Catch FleetCliError, ValueError and OSError
-    per path; unexpected renderer bugs remain loud.
-    Render complete digests in input order. Warn above INDEX_DIGEST_WARN_CHARS
-    and refuse above INDEX_DIGEST_REFUSE_CHARS, never truncate a symbol table.
-    Measure the full total and raise outside the per-path catch so an oversized
-    request cannot be demoted to a successful warning-and-skip."""
+    """Compose verified context digests plus path and size warnings."""
     root = Path(cwd)
     warnings = []
     if not context:
@@ -1577,5 +1477,4 @@ def cmd_q(args) -> int:
     if args.outline is not None:
         return _cmd_q_outline(root, args)
     return _cmd_q_query(root, args)
-
 

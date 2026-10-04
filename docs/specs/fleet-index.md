@@ -1,19 +1,19 @@
 # fleet-index — cutting duplicate exploration cost
 
-**Status:** ready-for-gate (M1+M2; M3 stays DRAFT). Author-flipped 2026-07-24 per the operator's full-M1+M2 build order (record of record: the `knowledge/lessons.md` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`); the corresponding `docs/OPERATOR-GATES.md` settled row is still owed — §16); ratification is the operator's — an author never promotes its own spec.
+**Status:** ready-for-gate (M1+M2; M3 stays DRAFT). Author-flipped 2026-07-24 per the operator's full-M1+M2 build order (record of record: the `local operator lessons` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`); the corresponding `the local operator decision record` settled row is still owed — §16); ratification is the operator's — an author never promotes its own spec.
 **Code citations:** every `bin/fleet.py` and `bin/hooks/stop_outcome.py` citation below is derived against merge-base `3ccb2d5` (`git merge-base main spec/fleet-q`, re-derived 2026-07-24); `bin/fleet.py` there is 11,288 lines. Line numbers rot, so each citation names the symbol it points at — re-grep the symbol before trusting the number. **Prose citations are not receipts** — the pinned `# at <sha>` blocks below are, and they are re-executed by `tools/verify_receipts.py` against that commit's materialised tree (root `CLAUDE.md`). This document was `UNENFORCED` while it specced unbuilt behaviour; it moved to the enforced set on 2026-07-27, when M1 and M2's worker-facing surface shipped and there was finally something to re-run.
 **Owner:** the operator
 **Design doc:** `docs/superpowers/specs/2026-07-22-fleet-index-design.md`
-**Adversarial review:** `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md` (10 defects — 2 CRITICAL, 5 HIGH, 2 MED, 1 LOW). Disposition in §13.
-**Economics evidence:** `docs/mf-oracle-m1-evidence.md` (2026-07-23 M-F dogfood read-duplication harvest). §1 is grounded on it.
-**Operator decisions folded:** `docs/OPERATOR-GATES.md` fleet-index sub-decisions (a) gitignored-only bundle and (b) tokens-primary acceptance (both 2026-07-23); full M1+M2 build ordered 2026-07-24 on the value case stated in §1.
+**Adversarial review:** `a local review record` (10 defects — 2 CRITICAL, 5 HIGH, 2 MED, 1 LOW). Disposition in §13.
+**Economics evidence:** `a local campaign record` (2026-07-23 M-F dogfood read-duplication harvest). §1 is grounded on it.
+**Operator decisions folded:** `the local operator decision record` fleet-index sub-decisions (a) gitignored-only bundle and (b) tokens-primary acceptance (both 2026-07-23); full M1+M2 build ordered 2026-07-24 on the value case stated in §1.
 **Parent spec:** `docs/SPEC.md` v3 (§16 invariants).
 
 ---
 
 ## 1. Problem
 
-An earlier draft of this section opened: *"Fleet's dominant recurring cost is workers re-reading the same code."* That claim has since been measured, and **for parallel fleet workers it is refuted** by the 2026-07-23 M-F dogfood harvest (`docs/mf-oracle-m1-evidence.md` — 3 workers, 27 transcripts, reads deduped across fork copies, token totals deduped by requestId):
+An earlier draft of this section opened: *"Fleet's dominant recurring cost is workers re-reading the same code."* That claim has since been measured, and **for parallel fleet workers it is refuted** by the 2026-07-23 M-F dogfood harvest (`a local campaign record` — 3 workers, 27 transcripts, reads deduped across fork copies, token totals deduped by requestId):
 
 - Cross-worker duplicated Read payload: **≤41k tokens = 2.5% of the campaign's fresh input.**
 - All duplicated Read payload (cross-worker ∪ within-lineage rebuild, no double count): 55.7k–94.8k tokens = 3.5–5.9% of fresh input, and ~0.27% of total input processed.
@@ -234,7 +234,7 @@ It is deliberately **not** in `parse_context_arg`, and the reason is a trap wort
 
 Staleness is per shard: compare the source file's SHA-256 against the shard header.
 
-**`.fleet-index/` is always ignored.** `init` writes the ignore entry unconditionally, and committing `.fleet-index/` is **documented-unsupported** (operator sub-decision (a), 2026-07-23, council round 2 — `docs/OPERATOR-GATES.md`). An earlier draft of this section offered a second, `tracked` mode whose refuse-on-stale behaviour defended a query path that did not exist in M1, and whose dirty-worktree hazard existed only because tracked mode did. Staleness detection is mode-independent, so re-adding a `tracked` mode later is an additive config key — out of scope for M1 and M2.
+**`.fleet-index/` is always ignored.** `init` writes the ignore entry unconditionally, and committing `.fleet-index/` is **documented-unsupported** (operator sub-decision (a), 2026-07-23, council round 2 — `the local operator decision record`). An earlier draft of this section offered a second, `tracked` mode whose refuse-on-stale behaviour defended a query path that did not exist in M1, and whose dirty-worktree hazard existed only because tracked mode did. Staleness detection is mode-independent, so re-adding a `tracked` mode later is an additive config key — out of scope for M1 and M2.
 
 **The entry goes to `$GIT_COMMON_DIR/info/exclude`, not to `.gitignore`** (fix wave 2, 2026-07-27, correcting both this paragraph and §13 finding 2b). `.gitignore` is a **tracked** file, and the paragraph below mandates `fleet index init --path <worktree>` for every campaign worktree — so writing there dirtied a tracked file in every worktree fleet creates, and `git worktree remove` then refused it with *"contains modified or untracked files"*. §13 finding 2b disposed that hazard as unreachable once tracked mode was cut; it is reachable, it was measured against real git, and this is the repair. `info/exclude` is git's own per-clone ignore list: untracked by construction, so nothing is dirtied, and `info/` is one of git's COMMON paths, so a linked worktree's entry lands in the parent clone's `.git/info/exclude` and covers every worktree of that repository at once — exactly the scope of the claim being made. A project that is not a checkout at all falls back to `.gitignore`: there is no tracked file to dirty outside a repository, and a later `git init` then starts out already ignoring the index. `init` prints which file it wrote.
 
@@ -282,7 +282,7 @@ That consequence is now **settled the other way, and deliberately**. The first a
 
 ## 10. Graveyard answer — IDEA-FORGE §5 entry 5
 
-ROADMAP is superseded history, not live law — retired per the settled "Two roadmaps" gate (2026-07-23, `docs/OPERATOR-GATES.md`). Its graveyard discipline — check the graveyard before proposing anything adjacent to a dead idea — is applied here on its merits. This has a direct ancestor: *"Knowledge-Aware Context Assembly at Spawn/Respawn (3.0) — right moat, wrong build."*
+ROADMAP is superseded history, not live law — retired per the settled "Two roadmaps" gate (2026-07-23, `the local operator decision record`). Its graveyard discipline — check the graveyard before proposing anything adjacent to a dead idea — is applied here on its merits. This has a direct ancestor: *"Knowledge-Aware Context Assembly at Spawn/Respawn (3.0) — right moat, wrong build."*
 
 | Cause of death | Answer |
 |---|---|
@@ -423,13 +423,13 @@ $ sed -n '/^  ARM B, CONTROL/,/^    PROBE-EXECUTED/p' docs/specs/receipts/fleet-
 
    **Why the control was not optional.** Without arm B, arm A proves only that the worker ran a command, not that the grant is why — `dontask` being quietly more permissive than doctrine believes was a live possibility. Arm B rules it out, and incidentally re-confirms the documented failure mode: under `dontask` an ungranted `Bash` call is denied outright with a clear message rather than hanging on an unanswerable prompt.
 
-   **This receipt was `# volatile` and is no longer, and the reason is worth keeping.** As first landed it read a **live absolute path** — `/c/projects/claude-fleet/supervisor/JOURNAL.md` — and declared itself volatile because "the transcript lives outside this repo". Two of the three clauses in that reason were false, and the third was the real defect:
+   **This receipt was `# volatile` and is no longer, and the reason is worth keeping.** As first landed it read a live operator journal and declared itself volatile. The receipt had three defects:
 
-   - The fleet home is the **main worktree of this same repository**, not a different one, and `supervisor/JOURNAL.md` is git-tracked. Both halves of "a different repository, machine-local, gitignored runtime" were wrong.
+   - A user's `supervisor/JOURNAL.md` is local, gitignored runtime data and cannot ground a public source receipt.
    - The cited text was nonetheless **never committed** — present only as an uncommitted modification to that file. So the receipt reproduced *by accident*, was one `git stash` from evaporating, and its `# at <sha>` pin constrained nothing, because a block reading an absolute path never touches the materialised tree the pin names.
    - It was also machine-enforced far less than it looked: a volatile block is a WARN in `tools/verify_receipts.py` and is **not executed at all** by `tests/test_receipts.py` (`skip_volatile=True`, which is what keeps that suite hermetic). Measured at the time: corrupting the treatment arm to `PROBE-OK-9999` produced `VERDICT: pass -- 0 failure(s), 1 warning(s)` and left the suite green.
 
-   The fix is **not** to commit the excerpt into `supervisor/JOURNAL.md`. That file is the supervisor's append-only working file — every `sup-checkpoint` appends to it, every incarnation appends more — so a spec receipt reading it would still rest on content that churns by design, and a branch committing into it conflicts with `main` on every future merge, at the end of a file both sides append to. Instead the excerpt is committed as **its own immutable artifact**, `docs/specs/receipts/fleet-index-11.7-grant-experiment.txt`, and this receipt is re-pinned repo-relative and non-volatile against it. It is now inside the tree its `# at` names, it is executed by both the CLI and `tests/test_receipts.py`, and changing it is a reviewable diff.
+   The fix is **not** to commit the excerpt into `supervisor/JOURNAL.md`. That file is the supervisor's append-only local working file, so a public spec receipt reading it would rest on content that churns by design. Instead the generic experiment excerpt is committed as **its own immutable artifact**, `docs/specs/receipts/fleet-index-11.7-grant-experiment.txt`, and this receipt is re-pinned repo-relative and non-volatile against it. It is now inside the tree its `# at` names, it is executed by both the CLI and `tests/test_receipts.py`, and changing it is a reviewable diff.
 
    **What that does and does not buy.** It makes the *citation* verifiable — which is the property the receipt convention is actually about. It does not make the *experiment* re-runnable: one machine, one moment, one `claude --version`, exactly as before. A committed excerpt is a durable record of evidence, not a reproduction of it, and this document should not be read as claiming otherwise.
 
@@ -515,7 +515,7 @@ M2 is accepted or reverted on measurement, under the tokens-primary doctrine (op
 - **Primary metric:** `input_tokens` from Stop-hook outcome records, on a fixed task run as **≥3 paired A/B runs** — arm A: indexed project, teach lines present; arm B: same task, no index. Success = arm A's median total input tokens lower.
 - **Adoption check (diagnostic, volatile):** the §12 `tools/` transcript diagnostic additionally counts `fleet q` invocations per session. It is sunset-marked and decides nothing by itself — except one thing: **zero `fleet q` calls across all A-arm runs voids the token comparison** (whatever moved, it wasn't `q`) and is itself a revert trigger.
 - **Ordering gate: SATISFIED 2026-07-27.** Adoption counts only after §11.7's execution receipt exists — the live proof that a default-spawned `dontask` `--bg` worker can execute a granted command via the template grant alone. That receipt is now landed in §11.7 item 1, so **runs recorded from 2026-07-27 onward count toward both prongs; anything earlier is void.** The gate was never about a date, it was about the confound: zero adoption under an unproven grant would fire the revert against a permission bug rather than against the tool. That confound is now measured away, with one residual named in §11.7 — the experiment proved the grant *shape*, not the literal `Bash(fleet q:*)` string, so an A-arm run showing zero `fleet q` calls must still rule out a plain typo in the template before it counts as non-adoption.
-- **Revert criterion** (counting only runs recorded on or after 2026-07-27, when §11.7's grant-execution receipt landed — both prongs): zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `knowledge/lessons.md` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
+- **Revert criterion** (counting only runs recorded on or after 2026-07-27, when §11.7's grant-execution receipt landed — both prongs): zero adoption across ≥3 A-arm runs, **or** no median input-token reduction across ≥3 pairs → revert M2's worker-facing surface: remove the preamble teach lines and the template `permissions` entry (one more `fleet init` propagation), and record the revert as a dated `local operator lessons` entry. The `fleet q` subcommand itself may stay as manager-side tooling — it costs nothing per worker once the teach lines and grant are gone.
 
 ## 12. Testing and acceptance
 
@@ -535,7 +535,7 @@ Per SPEC §17, pytest for unit tests.
 - Header width: a measured `sha256[:8]` collision pair with an identical line count, asserted distinguishable; and an 8-hex shard asserted unreadable, which is the whole migration.
 - `fleet q` (M2): golden tests for the three query forms and their **short-circuit order** (an exact hit suppresses tail matching; ambiguity within a tier still exits 1 under `--src` — §11.2); matching-semantics goldens that run unchanged on win32 and POSIX: exact/tail byte-wise case-sensitive, glob via `fnmatchcase` (a `beta.*` glob matches `Beta.run` on no platform), and `<path>:<line>-<end>` output uses forward slashes on Windows (§11.2); `--src` slice byte-exact against the source file; the 400-line `--src`/`--outline` cap with its `[truncated N lines — narrow the query]` trailer and unchanged exit code (§11.4); stale/corrupt/missing shard refreshed before answering; a mid-swap read failure treated as stale (§11.5); `--outline` failure rows — unknown path exits 1 with a candidate list, header-only shard exits 0 empty, stale shard takes the stale contract (§11.5); `--no-refresh` withholds and writes nothing (assert directory mtimes untouched); orphan-shard suppression and pruning; exit-code contract 0/1/2/3 including ambiguous `--src`; index-root walk-up from a subdirectory, **stopping at a `.git` boundary — a nested worktree without its own index exits 3, never resolves the parent's** (§11.1); truncation via `--limit` still exits 0 with a stderr count.
 
-**Acceptance for M1 — tokens-primary** (operator sub-decision (b), 2026-07-23, `docs/OPERATOR-GATES.md`). The metric is the `input_tokens` delta already recorded per turn by the Stop-hook outcome record (usage parsed at `bin/hooks/stop_outcome.py:255-258`, written into the record at `:344-346`) — zero new parsing of the unversioned transcript format, and the token delta is what M3's go/no-go economically turns on. The criterion is:
+**Acceptance for M1 — tokens-primary** (operator sub-decision (b), 2026-07-23, `the local operator decision record`). The metric is the `input_tokens` delta already recorded per turn by the Stop-hook outcome record (usage parsed at `bin/hooks/stop_outcome.py:255-258`, written into the record at `:344-346`) — zero new parsing of the unversioned transcript format, and the token delta is what M3's go/no-go economically turns on. The criterion is:
 
 1. On a fixed task run as **≥3 paired A/B runs** — each pair once with `--context`, once without (a single pair is swamped by run-to-run variance) — the `--context` arm's median total input tokens are lower.
 2. `fleet index build` is byte-reproducible: two runs on an unchanged tree produce identical shards.
@@ -548,7 +548,7 @@ Result (1) is the input to M3's go/no-go: without a measured saving from targete
 
 ## 13. Review disposition
 
-All 10 findings from `docs/reviews/IDX-ADVERSARIAL-2026-07-22.md`. Manager spot-checked every code citation against `bin/fleet.py` before accepting.
+All 10 findings from `a local review record`. Manager spot-checked every code citation against `bin/fleet.py` before accepting.
 
 | # | Finding | Sev | Disposition |
 |---|---|---|---|
@@ -570,7 +570,7 @@ Not adopted: nothing. All findings were accepted; the CRITICALs forced the restr
 
 ## 14. Invariants touched
 
-Citing `docs/SPEC.md` §16. (The invariants-touched discipline originated in ROADMAP, which is superseded history per the settled "Two roadmaps" gate, 2026-07-23, `docs/OPERATOR-GATES.md` — the discipline is kept on its merits, the ROADMAP cite is not live law.)
+Citing `docs/SPEC.md` §16. (The invariants-touched discipline originated in ROADMAP, which is superseded history per the settled "Two roadmaps" gate, 2026-07-23, `the local operator decision record` — the discipline is kept on its merits, the ROADMAP cite is not live law.)
 
 | # | Invariant | Status |
 |---|---|---|
@@ -602,8 +602,8 @@ Edits this spec obligates in **other** documents. Enumerated so the gate can che
 3. Campaign worktree recipe / campaign template — add the manager-side `fleet index init --path <worktree>` step (§8).
 4. ~~`tests/test_receipts.py` — this file's `UNENFORCED` reason string still says "M1 ready-for-build"~~ — **done 2026-07-27.** The string did rot, exactly as predicted, the moment anything built. Resolved by removing the entry rather than rewording it: this document now carries pinned receipts, so it belongs in the enforced set with a `RECEIPT_FLOOR` entry, and the reason string has nothing left to rot.
 5. `docs/PLAN-PROGRESS.md` lines 147 and 156 — both fleet-index rows still say "design-approved / gate-row owed" and "ready-for-build (M1 only), operator-gated"; superseded by the 2026-07-24 full-M1+M2 order.
-6. `docs/NEXT-SESSION.md` items 4 and 8 — the "M1 go/no-go with the fresh evidence" decision item and the evidence note are resolved by the 2026-07-24 order (§1).
-7. `docs/OPERATOR-GATES.md` — settled row recording the 2026-07-24 full-M1+M2 build order (until it lands, the `knowledge/lessons.md` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`) is the record of record — header).
+6. `a historical local record` items 4 and 8 — the "M1 go/no-go with the fresh evidence" decision item and the evidence note are resolved by the 2026-07-24 order (§1).
+7. `the local operator decision record` — settled row recording the 2026-07-24 full-M1+M2 build order (until it lands, the `local operator lessons` day-3 entry ("2026-07-24 — operator morning queue cleared + autonomous day-3 opened", on `main`) is the record of record — header).
 8. Root `CLAUDE.md` — "pytest for unit/hook tests (SPEC §12)": the testing tiers now live at SPEC §17.
 
 ## 17. Changelog

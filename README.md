@@ -32,9 +32,10 @@ rebases and checks a lane before a model reads it, `fleet wave-close` runs the
 full suite from a clean clone, computes throughput, pushes and reports. Models
 decide. Scripts do.
 
-State lives on disk in a **fleet home** inside the repository (`state/`,
-`supervisor/`, `knowledge/`), so any fresh session can pick the role back up
-with no conversation history.
+State lives on disk in ignored local storage inside a **fleet home**
+(`state/`, `supervisor/`, local `knowledge/` notes and `docs/lanes/` receipts),
+so any fresh session can pick the role back up with no conversation history.
+Tracked files remain generic public source and contain no operator data.
 
 ## Install
 
@@ -78,8 +79,9 @@ Then, inside Claude Code in that repo, say what you want built. The skill's
 you, spawns a supervisor with `fleet sup-spawn`, and relays what lands. To
 resume in a fresh session later, say "continue as the interface".
 
-Runtime directories (`state/`, `logs/`, `mailbox/`) are meant to be
-gitignored; `fleet init` tells you if they are not.
+Runtime directories (`state/`, `logs/`, `mailbox/`, `supervisor/`,
+`docs/lanes/`, and `knowledge/projects/`) are gitignored. `fleet init` seeds
+their generic starting files without replacing existing local content.
 
 ## Everyday commands
 
@@ -103,8 +105,8 @@ on inside Claude Code. Full list with one line each: the manual.
 For a fleet that runs on a server while you are away, a **keeper** systemd
 timer watches every home, pages your interface session through tmux when a
 human is needed, and wakes an idle supervisor when it only needs a turn. It
-never dispatches. Templates and the recipe are under
-[`docs/operator/`](docs/operator/). Off by default.
+never dispatches. Host-specific timer configuration is local operator data and
+is not shipped in the public source tree. Off by default.
 
 ## Contributing and status
 
@@ -112,6 +114,6 @@ Fleet is used daily to build [a real product](docs/CHANGELOG.md) and to build
 itself, in that order of priority: fleet features are added only when a
 downstream job hits a wall. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
 rules that bind changes here, `docs/SPEC.md` for the design record, and
-`docs/OPERATOR-GATES.md` for decisions that are still open.
+the selected fleet home's local interface board for decisions that are open.
 
 MIT licensed.
