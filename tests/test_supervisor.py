@@ -4100,64 +4100,10 @@ class TestDispatchPathsAreDocumented:
         assert "§6.1" in section12
 
 
-class TestOperatorGatesFile:
-    """The operator asked (2026-07-21) that ratification decisions be put to
-    them BEFORE a session starts any work. That used to be enforced by the
-    SessionStart hook, which injected the open gates into every session --
-    including every session in every unrelated project on the machine, which
-    is why the hook is gone (D7, docs/specs/terminal-surface.md, 2026-07-22).
-
-    The ask now lands one step later: step 1 of the `fleet` skill's startup
-    ritual reads this file, so a session that has chosen to manage the fleet
-    still meets the gates before doing anything. Nothing machine-parses the
-    file any more, so what survives here is the FORMAT pin -- a reader (human
-    or model) following the ritual needs the open/settled distinction to be
-    unambiguous, and a drift that blurs it is invisible from any one gate."""
-
-    def test_the_shipped_gates_file_parses(self):
-        """Every OPEN gate must be phrased as a question.
-
-        This used to additionally assert `open_gates` was non-empty, which
-        encoded the assumption that the docket is never fully cleared. On
-        2026-07-27 the operator cleared all eight gates in one pass and the
-        assertion went RED on a correct file -- a cleared docket is the
-        SUCCESS state of this file, not a malformed one. What is worth
-        pinning is the open/settled distinction and the question form, so
-        that is all this asserts now; `test_settled_gates_are_recorded`
-        below covers the other direction, so an empty file still fails."""
-        repo = Path(__file__).resolve().parents[1]
-        text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
-        open_gates = [ln for ln in text.splitlines() if ln.strip().startswith("- [ ]")]
-        for ln in open_gates:
-            assert ln.strip().endswith("?"), f"a gate must be a question: {ln[:80]}"
-
-    def test_settled_gates_are_recorded(self):
-        """The file must still be a decision RECORD. Without this, the
-        relaxation above would let a file with no gates at all pass -- the
-        failure mode where someone deletes settled gates as clutter, which
-        the format section explicitly forbids."""
-        repo = Path(__file__).resolve().parents[1]
-        text = (repo / "docs" / "OPERATOR-GATES.md").read_text(encoding="utf-8")
-        settled = [ln for ln in text.splitlines() if ln.strip().startswith("- [x]")]
-        assert settled, "the gates file records no settled decisions at all"
-        for ln in settled:
-            # "Answer" not "Answer:" -- a real entry reads "Answer, both
-            # halves:", and a test that forces the punctuation would be
-            # editing the operator's prose to suit itself.
-            assert "Answer" in ln, f"a settled gate must record its answer: {ln[:80]}"
-            assert re.search(r"\*\(20\d\d-\d\d-\d\d", ln), (
-                f"a settled gate must carry its decision date: {ln[:80]}")
-
-    def test_the_skill_startup_routes_the_operator_to_the_gates(self):
-        """The startup section must name the operator gate file."""
-        repo = Path(__file__).resolve().parents[1]
-        skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
-        ritual = skill.split("## Startup", 1)[1].split("\n## ", 1)[0]
-        assert "OPERATOR-GATES.md" in ritual
-
-
-def test_committed_journal_board_has_at_most_three_checkpoints():
-    """Pin the checked-in board; runtime rolling is owned by the build lane."""
-    board = Path(__file__).resolve().parents[1] / "supervisor/JOURNAL.md"
-    headers = re.findall(r"^## .* CHECKPOINT\b.*$", board.read_text(encoding="utf-8"), re.M)
-    assert len(headers) <= 3, f"{len(headers)} checkpoints: roll older entries into journal-history"
+def test_public_tree_has_no_operator_gate_or_supervisor_journal():
+    """Per-home decisions and journals are local runtime data."""
+    repo = Path(__file__).resolve().parents[1]
+    assert not (repo / "docs" / "OPERATOR-GATES.md").exists()
+    assert not (repo / "supervisor" / "JOURNAL.md").exists()
+    skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
+    assert "local interface board and pending decision tasks" in skill

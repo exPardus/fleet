@@ -113,12 +113,12 @@
 **Interfaces:**
 - Produces: `dispatch_kind=codex-app-server`; genuine thread/turn fields; native routes for spawn/status/send/wait/peek/result/interrupt/kill/resume/respawn.
 
-- [ ] Write failing transition-table tests for active/waiting/idle/not-loaded/system-error/limit states and tests for preclaim/bind, exact cwd, lost responses, busy steer, idle wake, supported interrupt, result/usage, and no duplicate body.
-- [ ] Route by `dispatch_kind`: existing `mcx` behavior stays byte-compatible; native rows use app-server; mixed-invalid rows refuse.
-- [ ] Implement spawn sequence exactly: preclaim under `fleet.lock`; unlock; create thread; conditionally bind under lock; unlock; start one turn; conditionally commit under lock.
-- [ ] Implement busy steer only with matching `expectedTurnId`; retain mail on mismatch/non-steerable.
-- [ ] Implement interrupt terminal proof, result from completed public items, public token totals, and no inferred USD.
-- [ ] Run native + existing mcx tests on 3.10/3.12; commit as `feat(codex): add native worker lifecycle`.
+- [x] Write failing transition-table tests for active/waiting/idle/not-loaded/system-error/limit states and tests for preclaim/bind, exact cwd, lost responses, busy steer, idle wake, supported interrupt, result/usage, and no duplicate body.
+- [x] Route by `dispatch_kind`: existing `mcx` behavior stays byte-compatible; native rows use app-server; mixed-invalid rows refuse.
+- [x] Implement spawn sequence exactly: preclaim under `fleet.lock`; unlock; create thread; conditionally bind under lock; unlock; start one turn; conditionally commit under lock.
+- [x] Implement busy steer only with matching `expectedTurnId`; retain mail on mismatch/non-steerable.
+- [x] Implement interrupt terminal proof, result from completed public items, public token totals, and no inferred USD.
+- [x] Run native + existing mcx tests on 3.10/3.12; commit as `feat(codex): add native worker lifecycle`.
 
 ### Task 6: Implement provider-safe Codex supervisor
 
@@ -262,11 +262,10 @@ stays durably reserved and later reconciliation observes it without replay.
 
 **Files:**
 - Modify: `docs/SPEC.md`
-- Modify: `docs/PLAN-PROGRESS.md`
 - Modify: `.claude-plugin/plugin.json`
 - Modify: `skills/fleet/SKILL.md`
 - Create: `tests/test_codex_live.py`
-- Create: `docs/lanes/codex-native-live-gate.md`
+- Create locally: `docs/lanes/codex-native-live-gate.md`
 - Modify: `tests/test_doc_claims.py`
 - Modify: `tests/test_docs_currency.py`
 - Modify: `tests/test_receipts.py`
@@ -284,8 +283,7 @@ stays durably reserved and later reconciliation observes it without replay.
 ### Task 12: Verify and gate default enablement
 
 **Files:**
-- Modify: `docs/PLAN-PROGRESS.md`
-- Create: `docs/lanes/codex-native-final.md`
+- Create locally: `docs/lanes/codex-native-final.md`
 
 **Interfaces:**
 - Produces: acceptance decision; native default only when every matrix row passes; mcx remains.
@@ -295,4 +293,5 @@ stays durably reserved and later reconciliation observes it without replay.
 - [ ] Review spec §14 row by row: P1–P5, H1–H5, W1–W7, S1–S5, I1–I2, A1–A2, M1–M2, R1, C1–C2, F1.
 - [ ] Enable native default only if every row has evidence; otherwise leave it opt-in and name blockers.
 - [ ] Keep explicit mcx fallback and all legacy code; removal requires its own operator ruling/change.
-- [ ] Commit the evidence record as `docs(codex): record native enablement gate`.
+- [ ] Keep the evidence record in local per-home storage and commit only the
+  generic contract changes.

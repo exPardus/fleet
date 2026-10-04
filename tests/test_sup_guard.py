@@ -115,7 +115,7 @@ def test_do_wakes_stale_idle_holder_with_owned_working_lane(
     assert result["verdict"] == f"WAKE {BODY}"
     assert result["sent"] is True
     assert [(call.name, call.message) for call in calls] == [
-        ("supervisor", "@supervisor/briefs/wake.md")]
+        ("supervisor", f"@{home / 'supervisor/briefs/wake.md'}")]
 
 
 @pytest.mark.parametrize("holder_status,archived", [("dead", False),
@@ -264,6 +264,118 @@ def test_released_body_live_under_retired_sid_never_dispatches(
         "PAGE live supervisor body without a safe claim\n")
 
 
+def test_released_claim_with_only_dead_supervisors_and_idle_lanes_dispatches(
+        home, monkeypatch, capsys):
+    """A released claim plus dead supervisor rows and idle lanes has no live
+    body to page about; the interface should dispatch a fresh supervisor."""
+    claim = fleet.read_incarnation()
+    claim.update(state="released", released_by_sid=SID)
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][BODY]["status"] = "dead"
+    lane = fleet.new_worker_record("lane-sid", str(home), "done", "bypass")
+    lane["status"] = "idle"
+    data["workers"]["idle-lane"] = lane
+    fleet.save_registry(data)
+    run_guard(monkeypatch, snapshot(state="released"))
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_released_claim_ignores_live_supervisor_from_another_fleet_home(
+        home, monkeypatch, capsys):
+    """Replay the live 2026-10-04 shape without cross-home interference.
+
+    The daemon roster is machine-global.  A supervisor-shaped row from another
+    fleet home must not keep this home's released claim in PAGE forever; the
+    released claim's own SID union is still checked independently above.
+    """
+    claim = fleet.read_incarnation()
+    claim.update(
+        state="released",
+        released_by_sid="d5df5ca8-748e-4e2d-bc46-c87391c17e7f",
+    )
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][BODY].update(
+        session_id=claim["released_by_sid"],
+        retired_sids=[
+            "5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2",
+            "a3ca3705-4384-440e-9703-52e2358c196c",
+        ],
+        status="dead",
+    )
+    fleet.save_registry(data)
+    foreign_home = home.parent / "other-home"
+    foreign_home.mkdir()
+    fleet.homes_list_path().write_text(
+        f"{home}\n{foreign_home}\n", encoding="utf-8")
+    foreign = {
+        "cwd": str(foreign_home),
+        "id": "60496272",
+        "kind": "background",
+        "name": "sup|inc-20261001T144601Z-1fb3|successor",
+        "pid": 3601537,
+        "sessionId": "60496272-c1aa-482f-8630-ed3ca4dfa3ca",
+        "startedAt": 1790880629368,
+        "state": "done",
+        "status": "idle",
+    }
+    run_guard(monkeypatch, snapshot(state="released"), [foreign])
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_released_claim_keeps_live_supervisor_in_home_subdirectory(
+        home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(state="released", released_by_sid=SID)
+    fleet.write_incarnation(claim)
+    live = row("sid-subdir", name=BODY)
+    live["cwd"] = str(home / "nested" / "work")
+    run_guard(monkeypatch, snapshot(state="released"), [live])
+    assert capsys.readouterr().out == (
+        "PAGE live supervisor body without a safe claim\n")
+
+
+def test_released_claim_keeps_live_supervisor_in_home_worktree(
+        home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(state="released", released_by_sid=SID)
+    fleet.write_incarnation(claim)
+    (home / ".git").mkdir()
+    worktree = home.parent / "fleet-worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(
+        f"gitdir: {home / '.git' / 'worktrees' / 'fleet-worktree'}\n",
+        encoding="utf-8")
+    live = row("sid-worktree", name=BODY)
+    live["cwd"] = str(worktree)
+    run_guard(monkeypatch, snapshot(state="released"), [live])
+    assert capsys.readouterr().out == (
+        "PAGE live supervisor body without a safe claim\n")
+
+
+def test_released_claim_sid_with_live_same_home_body_still_pages(
+        home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(
+        state="released",
+        released_by_sid="d5df5ca8-748e-4e2d-bc46-c87391c17e7f",
+    )
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][BODY].update(
+        session_id=claim["released_by_sid"],
+        retired_sids=[],
+        status="dead",
+    )
+    fleet.save_registry(data)
+    live = row(claim["released_by_sid"], name=BODY, state="done")
+    live["cwd"] = str(home)
+    run_guard(monkeypatch, snapshot(state="released"), [live])
+    assert capsys.readouterr().out == (
+        "PAGE live supervisor body without a safe claim\n")
+
+
 @pytest.mark.parametrize("status", ["idle", "busy"])
 def test_do_ok_has_no_action(home, monkeypatch, capsys, status):
     def forbidden(*args, **kwargs):
@@ -399,7 +511,7 @@ def test_do_wake_sends_exact_brief_once(home, monkeypatch, capsys):
                                snapshot_fn=snapshot, roster_fn=roster(row(SID))) == 0
     assert len(calls) == 1
     assert calls[0].name == 'supervisor'
-    assert calls[0].message == '@supervisor/briefs/wake.md'
+    assert calls[0].message == f'@{home / "supervisor/briefs/wake.md"}'
     assert json.loads(capsys.readouterr().out)['sent'] is True
 
 

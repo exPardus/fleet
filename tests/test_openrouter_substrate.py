@@ -22,7 +22,7 @@ import pytest
 
 import fleet
 
-FAKE_KEY_VALUE = "sk-or-v1-w93-canary-do-not-leak-2f9c8a"
+FAKE_KEY_VALUE = "test-openrouter-canary-do-not-leak-2f9c8a"
 
 
 @pytest.fixture

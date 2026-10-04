@@ -118,7 +118,7 @@ def child_env(sandbox, **over):
     `Path.home()` is `os.path.expanduser("~")`, and on POSIX a MISSING `HOME`
     falls back to `pwd.getpwuid(os.getuid()).pw_dir`, i.e. straight back to the
     operator's real home. MEASURED on this host (`docs/lanes/w60-homeseam.md`
-    §4): `HOME` deleted from the child env -> `/home/<user>/.claude/
+    §4): `HOME` deleted from the child env -> `/home/user/.claude/
     fleet-homes.list`, identical to inheriting it. An EMPTY `HOME` is a third
     wrong answer: `posixpath.expanduser` takes the empty string at its word and
     yields `/.claude/fleet-homes.list`. `test_subprocess_home_seam.py` pins all

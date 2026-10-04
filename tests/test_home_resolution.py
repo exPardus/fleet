@@ -866,7 +866,9 @@ class TestTheFlagLookupDisagreement:
         `spawn`, `sup-checkpoint`, `sup-handoff-complete`, `sup-spawn`,
         `wait`), so the sweep requires that every `--yes`-carrying verb was
         actually driven and that the rest of the parser's verbs are accounted
-        for either as driven or as unreachable."""
+        for either as driven or as unreachable. `watch` is accounted separately:
+        its repeatable `--fleet-home` selects homes to observe and deliberately
+        bypasses single-home disagreement resolution."""
         parser = fleet.build_parser()
         subs = next(a.choices for a in parser._actions
                     if hasattr(a, "choices") and isinstance(a.choices, dict))
@@ -874,8 +876,9 @@ class TestTheFlagLookupDisagreement:
                      if any(getattr(a, "dest", None) == "yes"
                             for a in s._actions)}
         driven, unreachable = set(), set()
+        multi_home = {"watch"}
         for verb in sorted(subs):
-            if verb in fleet.TERMINUS_EXEMPT_VERBS:
+            if verb in fleet.TERMINUS_EXEMPT_VERBS or verb in multi_home:
                 continue
             tail = _shortest_parsing_argv(parser, verb)
             if tail is None:
@@ -885,7 +888,7 @@ class TestTheFlagLookupDisagreement:
             assert ("--yes" in err) is (verb in wants_yes), verb
             driven.add(verb)
         assert wants_yes <= driven, f"never exercised: {wants_yes - driven}"
-        assert driven | unreachable | set(fleet.TERMINUS_EXEMPT_VERBS) \
+        assert driven | unreachable | set(fleet.TERMINUS_EXEMPT_VERBS) | multi_home \
             == set(subs)
 
 

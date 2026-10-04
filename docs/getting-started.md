@@ -47,8 +47,10 @@ fleet init
 
 `fleet init` creates the repository's **fleet home**: `state/fleet.json` (the
 worker registry) and `state/worker-settings.json` (the hook wiring, rendered
-with this machine's Python path). It registers the calling terminal as the
-home's interface when run inside tmux, and prints the startup ritual.
+with this machine's Python path). It also seeds missing local goals, journals,
+briefs, knowledge-project notes, and lane-report paths without replacing any
+existing operator data. It registers the calling terminal as the home's
+interface when run inside tmux, and prints the startup ritual.
 
 Add the runtime directories to `.gitignore` if they are not already:
 
@@ -57,7 +59,15 @@ state/
 logs/
 mailbox/
 .mcx/
+supervisor/
+docs/lanes/
+knowledge/projects/
+local operator lessons
 ```
+
+The Fleet source checkout already carries these rules. In another repository,
+copy them into that repository's ignore configuration. Tracked files stay
+generic; operator data remains local to the home.
 
 Then:
 
@@ -109,11 +119,11 @@ band on their own.
 
 ## Unattended, on a server
 
-The keeper is a systemd user timer that runs `bin/fleet_keeper.py --once` for
-every home you name. It pages the interface's tmux pane when a human is
-needed, wakes an idle supervisor with `fleet send` when it only needs a turn,
-and never dispatches. Templates: `docs/operator/systemd/`. Recipe:
-`docs/operator/keeper-wake.md`. If your shell exports a long-lived
+The keeper can run `bin/fleet_keeper.py --once` for every home you name. It
+pages the interface's tmux pane when a human is needed, wakes an idle
+supervisor with `fleet send` when it only needs a turn, and never dispatches.
+Store host-specific service units and recipes in local operator storage, not
+in the public repository. If your shell exports a long-lived
 `CLAUDE_CODE_OAUTH_TOKEN`, launch interface sessions with
 `env -u CLAUDE_CODE_OAUTH_TOKEN claude` or Remote Control will refuse.
 

@@ -16,6 +16,7 @@ Each pin fails at base 04ef7b9 and passes after the fix.
 import argparse
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -133,6 +134,17 @@ class TestIdleRowsAreNotLiveLanes:
         large = fleet._render_boot_bundle([], _pm_snapshot(idle=400), [], run=_board_run)
         assert len(large) - len(small) < 20, (len(small), len(large))
 
+    def test_running_mcx_lane_counts_toward_dispatch_gate(self, tmp_path,
+                                                          monkeypatch):
+        """Codex/mcx work is one live lane, never an implicit zero."""
+        monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+        row = dict(_row("mcx-running", "working"), substrate="codex",
+                   dispatch_kind="mcx", mcx_id="00000001")
+        gates = fleet._supervisor_dispatch_gates(
+            {"ok": True, "workers": [row]}, run=_board_run)
+        assert "live_lane_count=1" in gates, gates
+        assert not any("UNMEASURED" in line for line in gates), gates
+
 
 # --- 2. native Codex rows can be killed and archived ---------------------
 
@@ -150,6 +162,16 @@ class _FakeHost:
 
     def call(self, operation, timeout):
         self.calls.append(operation)
+        method = operation.get("payload", {}).get("method")
+        if method == "thread/read":
+            return SimpleNamespace(result={"thread": {
+                "id": THREAD_ID, "cwd": str(Path("/tmp/lane").resolve()),
+                "status": {"type": "idle", "activeFlags": []},
+                "turns": [{
+                    "id": TURN_ID, "status": "interrupted",
+                    "itemsView": "full", "items": [],
+                }],
+            }}, generation=self.generation)
         return SimpleNamespace(result={}, generation=self.generation)
 
     def commit(self, operation_id):
@@ -189,9 +211,10 @@ class TestNativeCodexKill:
 
         assert fleet.cmd_kill(argparse.Namespace(name="cx-native", yes=True, nonce=None)) == 0
 
-        [op] = host.calls
+        op, proof = host.calls
         assert op["payload"] == {"method": "turn/interrupt", "params": {
             "threadId": THREAD_ID, "turnId": TURN_ID}}
+        assert proof["payload"]["method"] == "thread/read"
         assert host.commits == [op["operation_id"]]
         assert fleet.load_registry()["workers"]["cx-native"]["status"] == "dead"
 
@@ -206,7 +229,7 @@ class TestNativeCodexKill:
         assert row["status"] == "dead" and "generation" in row["dead_reason"]
         assert host.calls == []
 
-    def test_unverified_interrupt_still_marks_dead_and_exits_1(self, home, monkeypatch):
+    def test_unverified_interrupt_stays_uncertain_and_exits_1(self, home, monkeypatch):
         host = _FakeHost()
 
         def refuse(operation, timeout):
@@ -217,7 +240,10 @@ class TestNativeCodexKill:
 
         assert fleet.cmd_kill(argparse.Namespace(name="cx-native", yes=True, nonce=None)) == 1
         row = fleet.load_registry()["workers"]["cx-native"]
-        assert row["status"] == "dead" and "unverified" in row["dead_reason"]
+        assert row["status"] == "dead-suspected"
+        assert row["adapter_state"] == "uncertain"
+        assert row["pending_operation"]["kind"] == "kill/turn-interrupt"
+        assert "unverified" in row["dead_reason"]
 
     def test_kill_in_the_bound_window_is_refused_as_launch_in_flight(self, home, monkeypatch):
         # Spawn binds the thread, then runs turn/start, then commits only while

@@ -1,7 +1,7 @@
 # Three-tier command: interface / supervisor / workers — SPEC DRAFT
 
 **Status: spec-of-record — ratified by the operator 2026-07-23** (in-session docket; record
-`knowledge/lessons.md#2026-07-23-three-tier-ratified`, ticked in `docs/OPERATOR-GATES.md`; ratified
+`local operator lessons#2026-07-23-three-tier-ratified`, ticked in `the local operator decision record`; ratified
 at `c73ab84` after 5 waves, 3 dual-lens gate rounds + 2 confirmation passes, final break-lens merge
 verdict "fit for operator ratification"; the three claim-nonce build-slice prerequisites disclosed
 at ratification gate the build, not this status). This document re-drafts the withdrawn PROPOSAL (its full prior text is
@@ -9,7 +9,7 @@ recoverable from git history at `235421e`^) on top of two things that did not ex
 was frozen: `docs/specs/claim-nonce.md` (**spec-of-record, ratified by the operator 2026-07-23**, gate
 question decided **option (b)**) and the re-pinned `docs/specs/native-substrate.md` (2.1.212 transient
 daemon, 2.1.216 daemon-wedge). It answers the 2026-07-17 dual-lens adjudication's binding items **4–10**
-(`docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md`) and folds in the operator's 2026-07-23
+(`a local review record`) and folds in the operator's 2026-07-23
 requirements (swap band, tier-model configurability, worker-model policy, event-driven beats) plus the
 manager's same-day refinement (tier-based, provider-agnostic resolution).
 
@@ -94,7 +94,7 @@ draft builds the three tiers on that fixed foundation.
 ### 3.1 Roles bind to abstract tiers, never to model ids
 
 The operator's binding requirement: *tier models by role, configurable, never hardcoded ids*
-(`knowledge/lessons.md#2026-07-23-three-tier-inputs`), refined the same day to **tier-based**: roles
+(`local operator lessons#2026-07-23-three-tier-inputs`), refined the same day to **tier-based**: roles
 bind to abstract tiers (`top` / `second` / `third`); a resolver maps tier → concrete model at
 dispatch time from what the active provider currently offers. Concrete ids (Fable 5, Opus 4.8) are
 **illustrative of today's Anthropic resolution only**, never normative.
@@ -177,7 +177,7 @@ $ grep -c "CLAUDE_CONFIG_DIR\|ANTHROPIC_\|--provider\|provider" bin/fleet.py
 
 Fleet workers do **not** read their endpoint/auth/model-map from the spawn-time environment — they
 inherit it from the **background daemon**, fixed at daemon-boot, and one daemon serves one backend
-(`docs/longcat-fleet-usage.md`, verified 2026-07-21: a `--bg` worker spawned with correct LongCat env
+(`a historical local record`, verified 2026-07-21: a `--bg` worker spawned with correct LongCat env
 still failed `model_not_found` because a pre-existing Anthropic daemon owned it). The working
 mechanism for a non-Anthropic provider is an **isolated `CLAUDE_CONFIG_DIR` namespace** → a separate
 daemon whose env carries that provider's base URL, auth, and tier→model map
@@ -191,7 +191,7 @@ This fixes where each piece lives:
   (receipt §3.2), so it neither sets nor reads the table — it only emits a tier alias and lets the
   namespace's daemon resolve it.
 - **Role → tier alias** (interface=highest, supervisor=second, worker=third) is the fleet-level policy.
-  It belongs in `supervisor/GOALS.md` — the git-tracked, human-editable, operator-owned policy file the
+  It belongs in `supervisor/GOALS.md` — the local, human-editable, operator-owned policy file the
   supervisor already reads at boot — as a small role→tier table, **not** as a constant in a code path.
   A machine-read of that table by `sup-spawn`/`spawn` to auto-select `--model` is
   **[PARTLY BUILT — the `sup-spawn` arm shipped; the `spawn` arm is still `[UNBUILT]`]**:
@@ -218,6 +218,16 @@ This fixes where each piece lives:
   own scope (a `[UNBUILT]` that the boundary of this section argues against, not for) — recorded here so
   the tension is resolved on the page rather than left for the reader to notice.
 
+The policy comment may also set `forbid-default: true`. When that flag is set, `spawn`,
+`sup-spawn`, and supervisor handoff dispatch refuse an unresolved role instead of silently
+selecting the Anthropic namespace default; an explicit `--model` remains an operator choice. A
+blank or whitespace-only `--model` is normalised to omitted before this check, so it cannot bypass
+the guard.
+A `tier-model:` line outside the `<!-- fleet-tier-policy ... -->` block is treated as a
+malformed policy and is refused at those same spawn boundaries, with its line number named. The
+opening and closing markers may share one line; an opening marker without a later `-->` is an
+unterminated policy and is refused at those boundaries.
+
 ### 3.4 Worker-model policy: Opus or Sonnet, never Haiku
 
 Operator, binding: workers are the supervisor's call, **Opus and Sonnet only**; **Haiku is never a
@@ -238,6 +248,9 @@ the top tier's usage limit is hit, returning to the top tier once the reset hori
 **Tier order (policy, in `supervisor/GOALS.md`, never a code constant):** `[top, second]`. Today's
 Anthropic resolution: `[Fable 5, Opus 4.8]`. A chain of length 1 is legal (no fallback); the chain is
 per-namespace, so a single-model provider (§3.3) collapses it to one entry and the mechanism is inert.
+At dispatch, fleet walks the chain in order and uses the first tier with an operator-provided alias;
+an unmapped preferred tier therefore falls through to the next mapped tier, while an entirely
+unmapped chain leaves `--model` omitted.
 
 #### 3.5.1 Why a fallback is necessarily a NEW session — the constraint that shapes everything else
 
@@ -500,7 +513,7 @@ in-flight plan *and* landing back on the exhausted tier. That is strictly worse 
 it is **withdrawn as a remedy**: a bare respawn is a context-reset lever, never a fallback. The other
 route — a fresh spawn at the fallback tier — is `sup-spawn` itself, whose per-launch name cannot collide
 with the parked predecessor's record. *(Amended 2026-07-24 by operator ruling — sup-spawn choreography,
-see docs/proposals/sup-spawn-choreography.md: this passage previously said the fresh spawn "collides
+see a local proposal record: this passage previously said the fresh spawn "collides
 with the reserved name (§10.3), because the parked predecessor's record still holds it". Under the
 ruling no record is ever named `supervisor`; every `sup-spawn` launch mints a fresh
 `sup|<launch-id>|boot` name. The `existing`-key check below remains the general name-uniqueness gate;
@@ -520,7 +533,7 @@ the shipped verb, so they now read as a description of it rather than a constrai
   tier must be settable at dispatch, not inherited. (`dispatch_bg` already accepts `model` — §10.1 — so
   this is a parser-and-pass-through, not new plumbing.)
 - **No name-yield is required.** *(Amended 2026-07-24 by operator ruling — sup-spawn choreography, see
-  docs/proposals/sup-spawn-choreography.md: this bullet previously required the parked predecessor's
+  a local proposal record: this bullet previously required the parked predecessor's
   record to "yield the reserved name before the successor takes it", with two admissible shapes —
   replace-in-place or rename-to-husk. Both are moot: the fallback successor is dispatched under its own
   fresh `sup|<launch-id>|boot` name, no record is ever named `supervisor`, and the parked predecessor's
@@ -662,7 +675,7 @@ $ sed -n '3595,3599p' bin/fleet.py
 **The G9 hazard is real and this is where item 4 lands in the design:** if a beat is delivered by a
 scheduler that runs `fleet send supervisor "beat"` *(Amended 2026-07-24 by operator ruling — sup-spawn
 choreography: `supervisor` is the logical name per the §5.1 amendment note; see
-docs/proposals/sup-spawn-choreography.md)*, and the roster is transiently suspicious, `send`
+a local proposal record)*, and the roster is transiently suspicious, `send`
 raises `FleetCliError`, exits non-zero, and **the scheduler ignores the exit code** — the beat is
 silently dropped with no record. This is the single strongest reason the beat is **not** a scheduled
 `send` in v1 (§5): v1 beats are interface-originated `fleet send` turns whose failure the human sees
@@ -690,7 +703,7 @@ In v1 the only beat is the interface session steering the supervisor: `fleet sen
 is synchronous and human-visible (the interface session sees the `FleetCliError`), and it burns a model
 turn **only when the human intends one**. No scheduler, no run-stamp, no silent drop. This is the whole
 v1 beat surface. *(Amended 2026-07-24 by operator ruling — sup-spawn choreography, see
-docs/proposals/sup-spawn-choreography.md: `supervisor` in send/kill/respawn target position is a
+a local proposal record: `supervisor` in send/kill/respawn target position is a
 **logical name**, resolved at verb time via `supervisor/INCARNATION` to the current claim-holder's
 registry record. The physical record is pipe-named — `sup|<launch-id>|boot` at gen-0,
 `sup|<inc>|successor` after a handoff — and is never named `supervisor`. The beat contract's spelling
@@ -752,7 +765,7 @@ dispatching my decisions in paraphrase"* (claim-nonce §1.2) — is not removed 
 a tier**: a fork-resumed *interface* body carrying campaign context can re-derive and issue
 `fleet send supervisor …` steers *(Amended 2026-07-24 by operator ruling — sup-spawn choreography:
 `supervisor` is the logical name per the §5.1 amendment note; see
-docs/proposals/sup-spawn-choreography.md)*, and the supervisor cannot tell two interface bodies apart (no claim,
+a local proposal record)*, and the supervisor cannot tell two interface bodies apart (no claim,
 no nonce, `send` accepts either). The exposure is worst in the scenario the tiers exist for — the
 supervisor running unattended while the human is away, so no human notices the second interface body.
 
@@ -988,7 +1001,7 @@ supervisor record is **exempt from both the archive TTL pass and the daemon-husk
 **B1 fix (CRITICAL — the exemption must not be keyed on a static name).** The first-generation
 supervisor is spawned by `sup-spawn` under a per-launch pipe-delimited name, `sup|<launch-id>|boot`
 *(Amended 2026-07-24 by operator ruling — sup-spawn choreography, see
-docs/proposals/sup-spawn-choreography.md: this line previously said gen-0 is spawned "under the name
+a local proposal record: this line previously said gen-0 is spawned "under the name
 `supervisor` (§10.3)"; no record is ever named `supervisor`, which only strengthens this section's
 conclusion — a static-name exemption would now protect nothing at all)*, and the operator's model
 respawns and hands it off "constantly" (§1), and the shipped handoff dispatches its successor under a
@@ -1015,7 +1028,7 @@ supervisor claim-holder*, under any name, not on a static registry name.**
 made this gate a no-op — `_archive_eligible` gate 3 already refuses every roster-live record — and
 failed to close this section's own disaster case, an idle/roster-gone claim-holder crossing the 24h
 TTL. Built as holder-alone in `5a8860b`; the divergence was disclosed in
-`docs/proposals/GOALS-tier-chain-proposal.md` rather than edited unilaterally by the build.)*
+`a local proposal record` rather than edited unilaterally by the build.)*
 Concretely: read `read_incarnation()`; protect the registry record whose sid is the
 claim's restamped `session_id` (claim-nonce restamps `session_id` on every validated `sup-*` write, so
 the claim tracks the acting body). Two directions, both mandatory:
@@ -1065,7 +1078,7 @@ rule.
 un-re-derivable, nag-visible — that stops the beat from burning turns while a decision is open.
 
 A background supervisor must route operator-only decisions (destructive ops, HALT ratification, GOALS
-edits, spec promotion — everything in `docs/OPERATOR-GATES.md`) to the interface tier and **park**,
+edits, spec promotion — everything in `the local operator decision record`) to the interface tier and **park**,
 never self-approve. No such routing surface exists today:
 
 ```
@@ -1223,7 +1236,7 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
 - **Registry record:** the supervisor becomes a worker record under its per-launch pipe name
   `sup|<launch-id>|boot`, which is what makes it visible to `fleet status` — and what makes it
   archive/husk-eligible unless §7.2's exemption is built. *(Amended 2026-07-24 by operator ruling —
-  sup-spawn choreography, see docs/proposals/sup-spawn-choreography.md: previously "a worker record
+  sup-spawn choreography, see a local proposal record: previously "a worker record
   named `supervisor`". No record is ever named `supervisor`; the literal name survives only as the
   logical send/kill/respawn target resolved via the claim — §5.1 amendment note.)*
   Its `spawned_by` is the interface session's sid (or null if launched by a human shell); its
@@ -1242,7 +1255,7 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
   refusal keys on the **name** and exempts only a **supervisor-shaped** value, `sup-spawn` must dispatch
   the supervisor body under a name the shipped `_is_supervisor_shaped` predicate accepts, or the
   supervisor would be refused its own claim. *(Amended 2026-07-24 by operator ruling — sup-spawn
-  choreography, see docs/proposals/sup-spawn-choreography.md: this line previously read "today only the
+  choreography, see a local proposal record: this line previously read "today only the
   handoff-successor shape `sup|<inc>|successor`". The predicate has since been widened to the whole
   family `^sup\|[^|]+\|[a-z][a-z0-9-]*$` (build commit 49e2b89), and the ruling fixes gen-0's name as
   `sup|<launch-id>|boot` — the name/shape reconciliation this paragraph demanded is resolved.)* The
@@ -1269,7 +1282,7 @@ def validate_name(name: str, existing=()) -> None:
 [BUILT `31e139e`] (receipt §A2.2) — a `RESERVED = {SUPERVISOR_BODY_NAME}` set checked in `validate_name`
 (shipped as `RESERVED_NAMES`): `spawn`/`respawn`
 of the name `supervisor` by the ordinary worker path is **refused**. *(Amended 2026-07-24 by operator
-ruling — sup-spawn choreography, see docs/proposals/sup-spawn-choreography.md: previously "the name is
+ruling — sup-spawn choreography, see a local proposal record: previously "the name is
 minted only by `sup-spawn`". No verb mints a record by this name — `sup-spawn` dispatches
 `sup|<launch-id>|boot`, whose `|` the ordinary path's `NAME_RE` already forbids. The reservation stays:
 `supervisor` is the supervisor's **logical** name — the send/kill/respawn resolution target, §5.1
@@ -1282,7 +1295,7 @@ already calls, the reservation is mechanical, not advisory.
 ### 10.4 `respawn supervisor` / `kill supervisor` — each stop-shaped verb owes a tombstone
 
 > **STATUS: `[BUILT]` 2026-07-24** (branch `build/sup-tombstone`), from the council-ruled decision
-> record `docs/proposals/sup-tombstone-choreography.md` (both dockets 4–0, pending operator
+> record `a local proposal record` (both dockets 4–0, pending operator
 > ratification). Contracts pinned by `tests/test_sup_tombstone.py` (§7's 12 unit tests + fault
 > injections F1–F5, of which **F1/F2 are ratification-blocking**) and
 > `tests/integration/test_sup_tombstone_live.py` (the one end-to-end graceful kill).
@@ -1385,8 +1398,8 @@ is the ordering that keeps the window shut.
 
 > ### AMENDED 2026-08-05 by operator ruling — the numbers below are SUPERSEDED, the mechanism is not
 >
-> **Operator ruling, 2026-08-05** (`docs/OPERATOR-GATES.md` §Settled, *"Context ceilings — raise
-> them?"*; `knowledge/lessons.md#2026-08-05-ceilings-raised`), by direct directive, no gate preceded
+> **Operator ruling, 2026-08-05** (`the local operator decision record` §Settled, *"Context ceilings — raise
+> them?"*; `local operator lessons#2026-08-05-ceilings-raised`), by direct directive, no gate preceded
 > it. It amends §11.3 and §11.4 **on the numbers only**:
 >
 > | | soft trigger | hard top | was |
@@ -1575,8 +1588,8 @@ and is corrected here — see `docs/lanes/w58-docs.md`)*; (4) only if the handof
 `sup-release`, after which the keeper pages `work:fleet` and the **interface** relaunches without waiting
 for the operator. **No threshold, no verb enumeration, no ceiling arm below is changed by this.** Sources:
 `state/tasks/20260909-succession-ruling.md` with its `## AMENDMENT`,
-`knowledge/lessons.md#2026-09-09-keeper-revives`, `docs/specs/graceful-succession.md` §1.2's amendment
-box, `docs/operator/server-interface-profile.md`.)*
+`local operator lessons#2026-09-09-keeper-revives`, `docs/specs/graceful-succession.md` §1.2's amendment
+box, `a local operator runbook`.)*
 
 *(**AMENDED 2026-09-12 by the context-observability build.** `sup-checkpoint` and
 `sup-heartbeat` measure the calling body's own transcript while holding their existing lock and
@@ -1622,7 +1635,7 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   > refusal would silence the human's control channel.** An occupancy ceiling keyed on *"any caller above
   > `H`"* fires on the **interface session** too: the interface issues `fleet send supervisor …` (the v1
   > beat, §5.1; *Amended 2026-07-24 by operator ruling — sup-spawn choreography: logical name per the
-  > §5.1 amendment note, see docs/proposals/sup-spawn-choreography.md*), it is the tier the operator's
+  > §5.1 amendment note, see a local proposal record*), it is the tier the operator's
   > model deliberately keeps long-lived (*"saves its context
   > for talking, interpreting, and long-term ideas"*, §1), and it is **outside fleet's launch surface**
   > (§3.1) — fleet cannot hand it off, respawn it, or reset it. A caller-agnostic refusal would therefore
@@ -1719,7 +1732,7 @@ human's control channel (ND1).
 
 > **ND4(c)'s PREMISE IS FALSIFIED — RE-GROUNDING ORDERED 2026-07-30 AND NOT YET DONE. (c) is a LIVE
 > HOLE and the code is unchanged.** The identity clause (c) rests on was replaced by the operator on
-> 2026-07-30 (`docs/OPERATOR-GATES.md`; the clause is `docs/specs/claim-nonce.md` §18) and the
+> 2026-07-30 (`the local operator decision record`; the clause is `docs/specs/claim-nonce.md` §18) and the
 > re-grounding of this bullet was ratified as owed work in the same ruling. It could not be executed
 > without amending a *different* ratified binding, so it is filed as an open decision. **The
 > paragraph and receipt above stand as the record of what was ratified on 2026-07-23 and why**; the
@@ -1792,33 +1805,11 @@ control — small worker counts, fresh contexts — of a piece with the supervis
 
 ### 11.5 Reconciliation with the third-docket cap doctrine — SETTLED (operator ruling, 2026-07-23)
 
-The third docket established a standing doctrine that appears, on its face, to collide with §11.3's
-fleet-enforced ceiling: **"no fleet-enforced token or USD ceilings — for workers or managers"**, with the
-plan's own usage limits as the cap for every session alike, fleet's limit-park/resume as the recovery
-path, and cost/token *counting* demoted to a flag, default off
-(`docs/OPERATOR-GATES.md` §Settled, M-F budget envelope tick; `knowledge/lessons.md#2026-07-23-operator-decisions-caps`).
-
-**This is decided, not pending** — and the decision is witnessed in-tree, not by this document. The
-manager's reading was put to the operator and **confirmed**; the ruling is recorded as the **third
-addendum** to `docs/archive/lessons-history.md#2026-07-23-three-tier-inputs` (the same anchor whose earlier text
-said the operator *"rules on it at ratification"* — this addendum is that ruling):
-
-```
-# live: a claim about the working tree's recorded operator decisions, not about this spec's pinned commit
-$ grep -c "Third addendum (2026-07-23, operator ruling on the cap-doctrine reading)" docs/archive/lessons-history.md
-1
-```
-
-> **Third addendum (2026-07-23, operator ruling on the cap-doctrine reading):** confirmed — **cost/spend
-> ceilings are gone unless the counting flag puts them back** (flag default off; enabling it may re-arm
-> spend caps). The context band (150–200k, supervisors AND workers) is a freshness mechanism, not a
-> budget, and its enforcement stays. **Resolves the `[OPERATOR RULES AT RATIFICATION]` flag before
-> ratification.**
-
-*(Wave-4 note, recorded because the process is the point: wave 3 wrote this section SETTLED while the
-addendum existed only on `main`, so for one wave this spec was the sole witness to a ruling that binds
-it — correctly caught as ND5/W1. The ruling was genuine and has since merged; the citation above is now
-self-verifying, which is what it should have been before the framing changed.)*
+The standing public doctrine is: no fleet-enforced token or USD ceilings for
+workers or managers. The provider plan's own usage limits are the cap;
+limit-park/resume is the recovery path; optional cost/token counting remains a
+measurement rather than a second budget authority. Context bands remain a
+freshness and coherence mechanism, not a spend cap.
 
 So the doctrine reads, as settled: a token/USD ceiling answers *"has this session cost too much?"* — and
 the plan's own usage limit already answers that, for everyone, so fleet adds no second budget authority.
@@ -1901,11 +1892,11 @@ them** — listed for the build slice / a doc-sync pass:
   adapter and the predicate are deleted; autoclean.md's own AMENDMENT is now the authority and this
   document is the one that needed folding, in the opposite direction]** and the supervisor
   archive/husk exemption (§7.2).
-- **`docs/OPERATOR-GATES.md`** — the three-tier build slice is itself an open gate (`M-F shape and
+- **`the local operator decision record`** — the three-tier build slice is itself an open gate (`M-F shape and
   budget`); this spec's own design gate is the next step.
-- **`knowledge/lessons.md#2026-07-23-three-tier-inputs`** — the manager's tier-based / provider-agnostic
+- **`local operator lessons#2026-07-23-three-tier-inputs`** — the manager's tier-based / provider-agnostic
   refinement is recorded as an addendum (done alongside this draft, per manager instruction).
-- **`docs/longcat-fleet-usage.md`** — the reference for §3.3's provider resolution. It gains a supervisor
+- **`a historical local record`** — the reference for §3.3's provider resolution. It gains a supervisor
   row only if a namespace-aware tier-resolution pre-flight is ever built as **separate scope** — which
   §3.3 argues *against* for v1 (it would need the provider-env read fleet disclaims) and §13 records as a
   non-goal. Listed as a conditional consequence of a decision already made the other way, **not** a live

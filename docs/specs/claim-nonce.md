@@ -4,12 +4,12 @@
 **option (b), a knowingly-bypassable gate**, chosen with §7's accounting read as the price. The
 corrected verb taxonomy (§7) is therefore binding for the build slice, and the three MINOR residuals
 from the final break gate (`a0bd194`) close in that slice before any code ships. Decision record:
-`docs/OPERATOR-GATES.md` §Settled + `knowledge/lessons.md#2026-07-23-operator-decisions`. (History:
+`the local operator decision record` §Settled + `local operator lessons#2026-07-23-operator-decisions`. (History:
 drafted as `me-nonce`, v5 pin-resolution 2026-07-21; the author never promoted it — ratification was
 the operator's act, recorded and committed by the interface session.)
 
-**Mandate:** `docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md` §Sequencing item 2 (the slice), and
-`docs/reviews/ME-NONCE-ADJUDICATION-2026-07-21.md` binding re-draft items 1–12 (this wave).
+**Mandate:** `a local review record` §Sequencing item 2 (the slice), and
+`a local review record` binding re-draft items 1–12 (this wave).
 
 **Gate history.**
 
@@ -67,7 +67,7 @@ receipt** (item 3); every other item is adopted.
 
 ### 1.1 The root cause
 
-`docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md:10`, verbatim:
+`a local review record`, verbatim:
 
 > **The root cause, named identically by both lenses working independently:** fleet identifies
 > actors by session id, and every steering primitive the draft relies on (fork-steer — the only way
@@ -99,7 +99,7 @@ Each anchor re-opened and verified; the spec-lens gate re-verified all three as 
 > in paraphrase. [...] Claim-protocol gap exposed: both bodies share incarnation id + sid --
 > sup-claim cannot discriminate bodies of one lineage
 
-Corroborated at `knowledge/lessons.md:601`:
+Corroborated at `local operator lessons:601`:
 
 > The sup-claim CANNOT see this — both bodies share incarnation id + sid; a per-body nonce is the
 > fix candidate (logged in three-tier-command.md).
@@ -130,7 +130,7 @@ entry `## 2026-07-17T13:45:26Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d
 > Host restart overnight (~10h gap): same sid resumed, heartbeat refreshed (NOTE claim wart: sup-boot
 > REFUSES its own holder when heartbeat stale -- self-recognition missing, feeds nonce spec + lessons).
 
-The recovery lever and the observed verdict are recorded at `knowledge/lessons.md:627`, **not** in
+The recovery lever and the observed verdict are recorded at `local operator lessons:627`, **not** in
 the journal entry:
 
 > **Claim-protocol wart found live:** `sup-boot` REFUSES its own holder when the heartbeat is stale
@@ -149,7 +149,7 @@ load-bearing for §6.1 and is analysed there.
 > refuse->freeze (roster-gone+fresh-heartbeat, G9 heuristic blind to authorized stop); operator
 > pre-ratified seize, INCARNATION cleared as delegate, fresh claim taken.
 
-And `knowledge/lessons.md:627`, second clause:
+And `local operator lessons:627`, second clause:
 
 > Also: `sup-boot` freeze heuristic cannot distinguish an operator-authorized `claude stop` from a
 > daemon restart (both = roster-gone + fresh-heartbeat) → froze on a legitimate succession; the
@@ -174,7 +174,7 @@ actor the design must worry about — an over-helpful agent, especially one unde
 |---|---|
 | Read `supervisor/INCARNATION`, `supervisor/HANDSHAKE`, all of `state/` | §4.1, §4.8 — plain files, atomic-written, lock-free-readable by design |
 | Read the holder's sid and incarnation id from a **read-only, unauthenticated view** | §4.8 (`sup-status --json` dumps the claim dict verbatim); §4.2 (`sup-status` human line prints the sid) |
-| Read the holder's sid and incarnation id from a **git-tracked** file | `supervisor/JOURNAL.md` header format, §4.7 |
+| Read the holder's sid and incarnation id from a **local operator** file | `supervisor/JOURNAL.md` header format, §4.7 |
 | Set any environment variable, including `CLAUDE_CODE_SESSION_ID` | §4.3 — `current_caller_session()` is one `os.environ.get` |
 | Pass `--sid` to every gated verb | §4.3 |
 | Read every session transcript on the box | §5.5 |
@@ -716,8 +716,8 @@ $ sed -n '6969,6971p' bin/fleet.py
 ```
 
 The seed is written **only when the file is absent**, so amending `_SUPERVISOR_JOURNAL_SEED` @6835
-fixes future journals only. `supervisor/JOURNAL.md` exists and is git-tracked, and would still
-advertise seven kinds after `RELEASED` ships unless its line 6 is edited too.
+fixes future journals only. An existing local `supervisor/JOURNAL.md` is preserved by `fleet init`
+and would still advertise seven kinds after `RELEASED` ships unless its line 6 is edited too.
 
 So the five: `SUPERVISOR_JOURNAL_KINDS` @6825, `_SUPERVISOR_JOURNAL_SEED`'s kinds line @6835,
 `--kind`'s `choices` @7727, `SKILL.md:38`, and **the live `supervisor/JOURNAL.md:6`**.
@@ -726,8 +726,8 @@ So the five: `SUPERVISOR_JOURNAL_KINDS` @6825, `_SUPERVISOR_JOURNAL_SEED`'s kind
 **`_SUPERVISOR_ENTRY_RE` is `$`-anchored.** A header with any extra trailing token fails `.match()`
 and is silently absorbed as body text of the *preceding* entry (`parse_supervisor_journal`
 @6935-6943) — an invisible corruption of an append-only record. **The journal header format does not
-change and no secret ever appears in it**; `supervisor/JOURNAL.md` is git-tracked, which forbids it
-independently.
+change and no secret ever appears in it**; `supervisor/JOURNAL.md` is local operator data and must
+not become a secret store.
 
 ### 4.8 Doctor checks, and the views that publish the claim
 
@@ -1079,35 +1079,25 @@ by heartbeat freshness is armed only in the hour after a human last typed a comm
 during exactly the quiet stretches when an unattended second body does damage. Incident 1's phantom
 steers spanned ~100 minutes — longer than the window.
 
-**(f) `supervisor/*.tmp` is gitignored — CLOSED by the build slice, 2026-07-23.** As drafted this
-subsection recorded a shipped-code defect: neither `supervisor/INCARNATION.tmp` nor
-`supervisor/HANDSHAKE.tmp` was ignored, and §4.1's `.gitignore` receipt must not be read as covering
-them. §13 filed it as a prerequisite. The build slice closed it with one glob line, and **the
-receipt below is the same receipt, re-executed after the fix** — its exit codes inverted, which is
-exactly the coupling the original block predicted:
+**(f) Supervisor temporary files are gitignored.** The whole `supervisor/`
+tree is per-home operator data, so temporary claim and handshake files inherit
+the same public-source boundary as their final names:
 
 ```
 # at 091d5fa
 # live: `git check-ignore` asks git about the WORKING repo's ignore rules; an
 # live: exported tree has no `.git` to answer with, so this one cannot be pinned.
-$ git check-ignore -v supervisor/INCARNATION.tmp
-.gitignore:16:supervisor/*.tmp	supervisor/INCARNATION.tmp
+$ git check-ignore -q supervisor/INCARNATION.tmp
 $ echo "exit $?"
 exit 0
 
-$ git check-ignore -v supervisor/HANDSHAKE.tmp
-.gitignore:16:supervisor/*.tmp	supervisor/HANDSHAKE.tmp
+$ git check-ignore -q supervisor/HANDSHAKE.tmp
 $ echo "exit $?"
 exit 0
 ```
 
-*(This is the document's only `# live` block, and it is the one receipt in this spec that is a claim
-about the working repo rather than about `091d5fa` — `# live` says which tree the receipt is about,
-not that it is unchecked. It is still executed and diffed on every run. Note what it now pins: not
-merely that the two files are ignored, but that **one glob rule** does it. A future edit that
-replaced the glob with two literals would keep both files ignored and still turn this receipt red,
-which is correct — the glob is the part that covers the third supervisor store nobody has written
-yet.)*
+`# live` marks this as a claim about the working public tree; the receipt is
+still executed and diffed on every run.
 
 **HANDSHAKE is not the lesser target**: §6.4 puts `handoff_token_hash` *and* the successor's
 `nonce_hash` into it. v2 named only the INCARNATION half in both §4.13(f) and §13 while §8's
@@ -1433,7 +1423,7 @@ session transcript:
 # at 091d5fa (existence and count only; no transcript contents were read)
 # volatile: a live box mints sessions continuously; the count and the mtime drift by the minute
 $ ls -ld ~/.claude/projects && find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l
-drwxr-xr-x 1 Techn 197609 0 Jul 21 20:54 /c/Users/Techn/.claude/projects
+drwxr-xr-x 1 Techn 197609 0 Jul 21 20:54 /c/Users/user/.claude/projects
 762
 ```
 
@@ -1587,11 +1577,11 @@ printed exactly once, on the minting verb's own stdout, and nowhere else.** T15 
 
 Two further rules in the same family:
 
-- **The nonce and the hashes never appear in `supervisor/JOURNAL.md`** (git-tracked; §4.7's anchored
+- **The nonce and the hashes never appear in `supervisor/JOURNAL.md`** (local operator data; §4.7's anchored
   regex would corrupt the record even if they did), in `state/events.jsonl`, in any task file, or in
   any error message.
 - **The holder's raw `session_id` continues to be published** by the human line at `7248` and by the
-  git-tracked journal header. That is unchanged and, under §5.1, no longer a secret in any sense —
+  local journal header. That is unchanged and, under §5.1, no longer a secret in any sense —
   precisely because this spec stops keying anything on it. It is recorded here because v1's escapes
   *were* keyed on it and a future reader must not re-introduce one.
 
@@ -2071,10 +2061,10 @@ what this spec relies on, and it is unaffected.
 >    answered. Nothing was narrowed pending that answer.
 >
 > **RE-GROUNDED 2026-07-28 — four-councilor council, Verdict A, unanimous 4/4
-> (`docs/decisions/W9-section7-council-synthesis.md`, added to `main` in `d034827`; not present on
+> (`a local decision record`, added to `main` in `d034827`; not present on
 > this branch, which predates it). STATUS: RATIFIED by the operator, 2026-07-30**, in-session operator
 > docket — *"RATIFIED as ruled, WITH the `:2174` repair as a CONDITION of Verdict A"*
-> (`docs/OPERATOR-GATES.md`, the §7-envelope gate). The re-grounding was originally taken by the
+> (`the local operator decision record`, the §7-envelope gate). The re-grounding was originally taken by the
 > interface tier under the operator's standing directive 7 while the operator was away and shipped
 > PROVISIONAL for two days; **that provisional status is now discharged.** The condition is
 > satisfied: the taxonomy row moved in the same edit that landed the re-grounding, and it moved
@@ -2189,7 +2179,7 @@ callers. The honest accounting:
   scheduled task was retired on 2026-07-27; both replacement drivers (the supervisor's watchtower
   beat, the interface's startup ritual) are sessions WITH a sid, so the clause it keyed on is simply
   no longer true of any caller. Replaced, per the four-councilor ruling of 2026-07-28
-  (`docs/decisions/W9-section7-council-synthesis.md`, Verdict A, unanimous 4/4), by a ground about
+  (`a local decision record`, Verdict A, unanimous 4/4), by a ground about
   the sweep's **effect** rather than its caller's environment:
 
   > **`autoclean` is exempt because it is a convergent janitorial sweep with no dispatch, steer, or
@@ -2204,7 +2194,7 @@ callers. The honest accounting:
   **configuration** and a configuration change falsified it in one day. This is a claim about
   **effect**, falsifiable only by deliberately widening what the sweep does — which is what rider 2
   below reserves to the operator. **STATUS: RATIFIED by the operator, 2026-07-30** (in-session operator
-  docket; the gate is ticked and moved to `## Settled` in `docs/OPERATOR-GATES.md`). It shipped
+  docket; the gate is ticked and moved to `## Settled` in `the local operator decision record`). It shipped
   PROVISIONAL for two days because the interface tier took it under the operator's standing directive
   7 while the operator was away; the ratification discharges that, **with the `:2174` taxonomy repair
   as its stated condition** — satisfied below. Two binding riders ride the re-grounding:
@@ -2302,7 +2292,7 @@ def cmd_release(args) -> int:
 | **Refuses under native** | `attach` (@3688 always raises) |
 
 **`autoclean` MOVED OUT OF THE MUTATING-LIFECYCLE ROW ON 2026-07-28**, by the four-councilor §7
-ruling recorded in `docs/decisions/W9-section7-council-synthesis.md` (Verdict A, unanimous 4/4, and
+ruling recorded in `a local decision record` (Verdict A, unanimous 4/4, and
 its wave-10 postscript). **RATIFIED by the operator, 2026-07-30 — and this row is the CONDITION the
 ratification named**, not a follow-up to it: the operator ratified Verdict A *"WITH the `:2174`
 repair as a CONDITION"*, `:2174` being where this row sat when the contradiction was surfaced. It
@@ -2337,12 +2327,12 @@ which is where v1's error lived.
 
 > **STATUS: PROVISIONAL — RATIFICATION-WITHHELD.** This subsection is a worker's
 > PROPOSAL, acted on during the 2026-07-24 autonomous run (council 4–0 for
-> candidate (a), recorded in `docs/AUTONOMOUS-2026-07-24.md` G-C). The §7
+> candidate (a), recorded in `a local campaign record` G-C). The §7
 > taxonomy is OPERATOR-owned; only the operator ratifies. Nothing here is spec-of-record
 > until then, and no line in this subsection is a receipt — it asserts an intent,
 > not a reproduced fact.
 
-The three-tier switch-over (`docs/AUTONOMOUS-2026-07-24.md` G-B) found two ratified
+The three-tier switch-over (`a local campaign record` G-B) found two ratified
 specs in conflict at one seam: the claimless **interface** tier cannot run
 `fleet send supervisor`, because the §7 gate arms on any sid-bearing caller under a
 fresh claim without a nonce — and the interface holds no nonce **by design**, while
@@ -2386,7 +2376,7 @@ because `three-tier-command.md` is itself still `PROPOSAL — RESTRUCTURE REQUIR
 > taxonomy is OPERATOR-owned. This subsection records a shipped **narrowing of a
 > disarm condition** (the gate refuses strictly more than before; it never refuses
 > less), ruled binding-and-first by the 2026-07-26 council supervisor in
-> `docs/AUTONOMOUS-2026-07-26.md` §R3, which states it as *"~10 lines, fail-closed,
+> `a local campaign record` §R3, which states it as *"~10 lines, fail-closed,
 > no protocol change"* and ticks no box in `OPERATOR-GATES.md`. Written here because
 > a guard whose arming conditions are not in the spec is exactly the defect R3's
 > closing section names.
@@ -2493,7 +2483,7 @@ key set carries no `nonce_hash`, `pending_nonce_hash` or `prior_pending_hash`, s
 `_nonce_presentation` returns `None` for every caller and every value — there is no
 generation to present because there is no claim to prove continuity *on*. The refusal
 therefore does **not** offer `--nonce`; naming a remedy that always fails is the defect
-`docs/AUTONOMOUS-2026-07-26.md` R2 forbids. What it names instead is what actually ends
+`a local campaign record` R2 forbids. What it names instead is what actually ends
 the wedge: the releasing body exiting (`cmd_sup_release` already instructs it to), and
 failing that, the operator stopping that session by the sid the refusal prints. §7's
 structural no-sid bypass is disclosed as always.
@@ -2570,14 +2560,14 @@ below.
 | `docs/SPEC.md` §15 destructive guard | the lineage arm of `_worker_is_foreign` | this slice |
 | `docs/SPEC.md` §14 / `terminal-surface.md` | **unchanged in doctrine**, but `cmd_sup_status` becomes a filtered projection (§5.8) — still no lock, no probe, no write | this slice |
 | **`supervisor_status_line`** @7503-7530 | a released-claim branch ahead of the heartbeat read (§6.3). Without it a clean `sup-release` reports as corruption in **`fleet doctor` and `sup-status`**. v2's table omitted this function entirely | this slice |
-| **`supervisor/JOURNAL.md:6`** | the live, git-tracked kinds line — never regenerated (§4.7), so `RELEASED` must be added there as well as to the seed | this slice |
+| **`supervisor/JOURNAL.md:6`** | the live local kinds line — initialized once and never overwritten (§4.7), so `RELEASED` must be added there as well as to the seed | this slice |
 | `_doctor_check_supervisor_handoff` | a NOTE for orphaned `state/supervisor-handoff-*.md` (§5.9) | this slice |
 | `cmd_sup_boot` | out-of-band compaction of `state/supervisor-nonce-rejections.jsonl` under the `fleet_lock` it already holds (§5.9). **The only sweep site this spec authorizes** — `fleet clean` is not one, per §4.13(g). *Superseded for handoff task files by AMENDMENT A2 below (2026-07-24), which adds three more sites and is UNRATIFIED* | this slice |
 | **`skills/fleet/SKILL.md`** | `:37` publishes `Exit 0=hold/handshake-written, 2=refuse, 3=freeze` — amended for the new code (§4.13(b)); `:38` publishes the `--kind` list (§4.7) | this slice |
 | **`skills/fleet/supervisor.md`** | the boot verdict table (`:13`, `:18`), the handoff sequence with its required `--expect-sid` (`:59`), the successor protocol (`:65`), and the *release-then-stop* doctrine plus the human-facing manual lever (§5.7, §6.3) | this slice |
 | **`_render_successor_task`** @7257-7274 | the successor's generated protocol (§4.6, §6.4) — amended in the same commit or the handoff fails only during a real handoff | this slice |
 | `bin/fleet.py` exception + `main()` | a `FleetCliError` subclass and a `main()` branch ahead of the generic handler, for the distinct exit code (§4.13(b)) | this slice |
-| `.gitignore` | `supervisor/*.tmp` — covers **both** `INCARNATION.tmp` and `HANDSHAKE.tmp` (§4.13(f)) | ~~not this slice~~ **this slice** — reassigned by the operator's build backlog (`docs/NEXT-SESSION.md` §Residuals 1(b)); §4.13(f)'s `# live` receipt re-executed post-fix |
+| `.gitignore` | `supervisor/*.tmp` — covers **both** `INCARNATION.tmp` and `HANDSHAKE.tmp` (§4.13(f)) | ~~not this slice~~ **this slice** — reassigned by the operator's build backlog (`a historical local record` §Residuals 1(b)); §4.13(f)'s `# live` receipt re-executed post-fix |
 | `docs/README.md` | the specs index already lists `claim-nonce.md`; the v1 commit also restored three specs the index had been missing (`native-substrate.md`, `autoclean.md`, `three-tier-command.md`). Recorded here because the v1 table omitted it | done |
 | `docs/specs/native-substrate.md` | **unchanged, including every `[PENDING OPERATOR RATIFICATION]` row** | — |
 | `docs/specs/three-tier-command.md` | **unchanged; stays `PROPOSAL — RESTRUCTURE REQUIRED`** | three-tier slice |
@@ -2883,7 +2873,7 @@ would have been handed.
    here while §8's row already said `supervisor/*.tmp`; §13 is what a separate slice gets handed, so
    the narrow version is the one that would have shipped.)* **Disposition:** the build slice took it
    rather than handing a one-line `.gitignore` edit to a separate slice, on the operator's build
-   backlog (`docs/NEXT-SESSION.md` §Residuals item 1(b)) which assigns it here. §4.13(f)'s `# live`
+   backlog (`a historical local record` §Residuals item 1(b)) which assigns it here. §4.13(f)'s `# live`
    receipt is re-executed post-fix and now pins the glob.
 
 **Withdrawn from this list: the "published exit-code contract mismatch."** There is no mismatch at
@@ -2896,7 +2886,7 @@ the code has no 4) and this document propagated it instead of checking it. Corre
 separate slice is not handed a defect that does not exist.
 
 Also outside any branch, manager-owned: `docs/specs/autoclean.md:48` (path-only task ownership, now
-false) and `docs/NEXT-SESSION.md:23` (lists both M-D-gate defects as still outstanding).
+false) and `a historical local record:23` (lists both M-D-gate defects as still outstanding).
 
 ---
 
@@ -3033,12 +3023,12 @@ not taken.
 
 ## 15. Pointers
 
-- This wave's authority: `docs/reviews/ME-NONCE-ADJUDICATION-2026-07-21.md` (items 1–12);
+- This wave's authority: `a local review record` (items 1–12);
   `ME-NONCE-DESIGN-REVIEW-BREAK-2026-07-21.md` §7 (the restructuring), §8 (what survives);
   `ME-NONCE-DESIGN-REVIEW-SPEC-2026-07-21.md` (fix list S1–S24).
-- The slice's authority: `docs/reviews/THREE-TIER-ADJUDICATION-2026-07-17.md` (binding list items 1–3,
+- The slice's authority: `a local review record` (binding list items 1–3,
   §Sequencing item 2).
-- Incidents: `supervisor/JOURNAL.md:94`, `:114`, `:146`; `knowledge/lessons.md:601`, `:625`, `:627`.
+- Incidents: `supervisor/JOURNAL.md:94`, `:114`, `:146`; `local operator lessons:601`, `:625`, `:627`.
 - Substrate (read-only input, status unchanged): `docs/specs/native-substrate.md:43`, `:146`,
   `:208-213`, `:233`, `:268-274`.
 
@@ -3277,7 +3267,7 @@ land on a legitimate supervisor wearing a worker's registry identity. Symmetrica
 
 > *(**Dated note, 2026-08-05.** Every *"200k ceiling"* in this document names the supervisor's hard
 > dispatch ceiling **as it stood when each section was written**. The operator raised it to **400k**
-> on 2026-08-05 — `docs/OPERATOR-GATES.md` §Settled, three-tier §11's amendment note. **Nothing else
+> on 2026-08-05 — `the local operator decision record` §Settled, three-tier §11's amendment note. **Nothing else
 > about the ceiling moved**: not ND4(c)'s falsified premise, not the LIVE hole §18.4 prices, not the
 > three candidates, not which bodies are subject. Only the threshold. The old number is left in place
 > throughout rather than swept, because these sections are the record of what specific branches did
@@ -3386,7 +3376,7 @@ decidable and the file says so instead of implying totality.
 > itself here. Everything below is the 2026-07-27 text, unchanged.
 >
 > **RATIFIED by the operator, 2026-07-27**, in-session operator docket. The ruling is recorded verbatim in
-> `docs/OPERATOR-GATES.md` (the identity-invariant gate), where the same clause is rendered with bold
+> `the local operator decision record` (the identity-invariant gate), where the same clause is rendered with bold
 > where this section uses capitals.
 >
 > **This section is not an amendment and is not the amending author's.** §16 above stays exactly as
@@ -3425,50 +3415,14 @@ authored it, and because it was verified by driving rather than by argument.
   gate's limit is **coverage** — it is absent where the registry cannot be read (§16.3) — and
   coverage is extended elsewhere. This clause is not a licence to delete a refusal.
 
-### 17.3 What it supersedes, enumerated by grep and not by inspection
+### 17.3 What it supersedes
 
 The superseded form is *"an identity inference derived from the environment may never be the sole
-basis of a refusal; the nonce and the claim refuse, inference may only inform and announce."* Its
-provenance is why it needed ratifying rather than adopting: it originates in a **supervisor's own
-task brief** (`supervisor/JOURNAL.md` G-J), and before this section it appeared in `docs/specs/**`
-**only** inside the unratified §16 amendment — while three sites in `bin/fleet.py` cited it in
-prescriptive voice. That is a supervisor instruction wearing the clothes of doctrine.
-
-Every place the superseded form was asserted, at the commit the ruling landed on:
-
-```
-# at 0e8d7ca
-$ grep -rniE "sole basis|basis of a refusal" --include=*.py --include=*.md . | cut -d: -f1,2 | sed 's|^\./||' | LC_ALL=C sort
-REVIEW-INPUT-IDENTITY.md:198
-REVIEW-INPUT-IDENTITY.md:202
-bin/fleet.py:12556
-bin/fleet.py:2145
-bin/fleet.py:2520
-docs/AUTONOMOUS-2026-07-26.md:540
-docs/specs/claim-nonce.md:3025
-supervisor/JOURNAL.md:807
-supervisor/JOURNAL.md:841
-tests/test_identity_registry.py:299
-tests/test_identity_registry.py:31
-tests/test_identity_registry.py:524
-```
-
-The enumeration is a receipt rather than a list because a list produced by inspection has been wrong
-five times in this repo's history and every one of them took one grep to catch. It is deliberately
-wrap-tolerant: `tests/test_identity_registry.py:31` carries only the tail of a sentence that begins
-on line 30, and a pattern anchored on the whole phrase misses it.
-
-Of the twelve, **six are corrected** — the three prescriptive citations in `bin/fleet.py`
-(`:2145`, `:2520`, `:12556`) and the three in `tests/test_identity_registry.py` (`:31`, `:299`,
-`:524`). Two of those six (`bin/fleet.py:2520`, `tests/test_identity_registry.py:299`) were already
-stating the *permitted* half of the clause correctly; they are re-worded to **cite** §17 rather than
-to restate an unratified rule in their own words.
-
-**Six are left exactly as written.** `docs/AUTONOMOUS-2026-07-26.md`, `REVIEW-INPUT-IDENTITY.md` and
-`supervisor/JOURNAL.md` (four hits) are dated records of what was believed and argued at the time,
-and editing a record to agree with a later ruling falsifies it. `claim-nonce.md:3025` — §16.4 item 3
-— is the *question*, and it keeps its wording for the same reason; it gains a RESOLVED marker
-pointing here.
+basis of a refusal; the nonce and the claim refuse, inference may only inform and announce."*
+Operational deliberation and campaign evidence are intentionally local, so this public design
+document records the resulting rule rather than reproducing a user's task brief or journal. The
+enforced citations live in `bin/fleet.py` and `tests/test_identity_registry.py`; the doctrine test
+described below derives those sites from the current source tree.
 
 ### 17.4 Where the code cites this section, and what keeps the citation honest
 
@@ -3509,8 +3463,8 @@ because it is the record of where the citations pointed and why.)*
 
 ## 18. RATIFIED — the daemon SUBSTITUTES the environment; the registry sid union is the only sound identity channel
 
-> **RATIFIED by the operator, 2026-07-30**, in-session operator docket (`docs/OPERATOR-GATES.md`, the
-> identity-clause gate; `knowledge/lessons.md#2026-07-30-operator-docket`). It **replaces the scope
+> **RATIFIED by the operator, 2026-07-30**, in-session operator docket (`the local operator decision record`, the
+> identity-clause gate; `local operator lessons#2026-07-30-operator-docket`). It **replaces the scope
 > half of §17**, which stays in place as the record of the 2026-07-27 ruling.
 >
 > **This section is not an amendment and is not its author's own.** The clause below is the

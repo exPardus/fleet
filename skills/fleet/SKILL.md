@@ -29,10 +29,10 @@ narration of tool calls, no praise, no hedging, no essays. One line per finding.
 A journal checkpoint is at most three model-written lines plus computed state.
 Inter-agent messages default to at most 120 words. Final worker receipts are at
 most 200 words with verdict, head, tests, blockers, next action, and artifact
-paths. Put full evidence in artifacts; never paste reports, JSON, test logs, or
-full roster dumps between agents. Quote only the shortest decisive error. The
-current admission, routing, and measurement policy is
-[`docs/operator/codex-quota-policy.md`](../../docs/operator/codex-quota-policy.md).
+paths. Put full evidence in local artifacts; never paste reports, JSON, test
+logs, or full roster dumps between agents. Quote only the shortest decisive
+error. Tracked files are generic; operator data is local to the selected fleet
+home and never committed.
 
 ## You are the interface
 
@@ -83,11 +83,12 @@ the selected fleet home:
 - Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity. `supervisor limited` means wait for the recorded roster horizon; do not wake or spawn around that limit. The keeper pages it once until that horizon.
 - `bin/fleet_keeper.py --once --fleet-home <PATH> ...` accepts repeatable homes; it observes, wakes, and pages each independently, prefixes every page/wake line with that home's statusline tag, and stores dedup state under that home's `state/keeper/last-page.json`.
 - Treat a `SUPERVISOR:` line as a graceful generation handoff: acknowledge it, read `fleet sup-status --json`, record the transfer, and use the guard before any stillborn-successor dispatch.
+- Use `fleet watch` with `run_in_background` for interface watching; do not maintain a hand-written polling loop. Use `fleet relay-ack` to acknowledge and mirror handled mail.
 - Relay every `THROUGHPUT` line and offer one idea per wave; record the relay in the interface log.
 
 ## Startup
 
-1. Read `$(fleet home)/docs/OPERATOR-GATES.md`; ask the operator about every open decision before dispatching or changing work.
+1. Read the local interface board and pending decision tasks; ask the operator about every open decision before dispatching or changing work.
 2. Run `fleet status`, `fleet sup-status`, and `fleet autoclean`.
 3. Read `$(fleet home)/knowledge/INDEX.md` and the relevant project note before touching a project.
 4. If the active campaign has no live supervisor, run `fleet sup-spawn --task @<brief>`; the interface never runs `sup-boot`.
@@ -113,10 +114,14 @@ the selected fleet home:
 
 ## Codex lanes
 
-Dispatch a codex lane with `fleet spawn --model codex:<model>`. Fleet runs `mcx` for
-you and routes `status`, `peek`, `result`, `send`, `interrupt`, `kill`, `respawn`
-and wave accounting through it; do not drive `mcx` by hand for a lane fleet
-dispatched.
+Dispatch a codex lane with `fleet spawn --model codex:<model> [--effort low|medium|high|xhigh]`.
+Fleet runs `mcx` for you and routes `status`, `peek`, `result`, `send`, `interrupt`,
+`kill`, `respawn` and wave accounting through it; do not drive `mcx` by hand for a
+lane fleet dispatched. Fleet maps permission modes to mcx approval modes as
+`bypass` → `unrestricted`, `accept` → `auto`, and `dontask`/`plan`/`omit` →
+`never`. The selected approval and effort are persisted on the registry row and
+reused by respawn/steer; a caller's `MCX_APPROVAL` cannot weaken Fleet's mode.
+`status` and `peek` show the approval mode.
 
 - Run one observer per lane; break its loop when `mcx result` returns anything other than 2 (`2` live, `0` done, `1` stopped or unknown).
 - Re-arm the observer after every `mcx steer`; steering RESTARTS the run.
@@ -145,7 +150,9 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
 - `fleet kill NAME [--yes]`: interrupt a worker and mark it dead.
-- `fleet clean [--dead-only|--tombstones] [--yes]`: remove eligible dead records and their disposable artifacts.
+- `fleet clean [--dead-only|--tombstones] [--yes]`: remove eligible dead records;
+  newly found evidence is first moved to `logs/archive/<name>/` (the path is
+  printed), and a failed move refuses deletion so the row remains recoverable.
 - `fleet archive [NAME] [--ttl-hours HOURS] [--dry-run]`: tombstone terminal native workers past the TTL, or preview eligibility.
 - `fleet autoclean [--ttl-hours HOURS] [--expire-tombstones-hours HOURS] [--dry-run]`: run archive, daemon-husk, and optional tombstone-expiry maintenance.
 - `fleet index init [--path PATH]`: create and build a project symbol index.
@@ -160,6 +167,8 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-checkpoint BODY [--kind CHECKPOINT|PROPOSAL] [--nonce VALUE]`: append a supervisor journal checkpoint and refresh its heartbeat; its header reports the caller's context occupancy and band verdict.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
+- `fleet watch [--fleet-home PATH ...] [--mcx-dir DIR ...] [--mem-floor-mb MB] [--disk-floor-gb GB] [--interval S] [--timeout S]`: wait for the first mail, fleet/mcx lane transition, low-memory, or low-disk event; exits 3 on timeout.
+- `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
@@ -226,4 +235,8 @@ When approaching a context band, checkpoint, notify the interface with `sup-noti
 
 ## Safety
 
-Use `env -u CLAUDE_CODE_SESSION_ID` when operating on another home. Confirm `fleet home --fleet-home <path>` resolves to the intended initialized home before other commands. Keep reports at `docs/lanes/<name>.md` on the lane branch and journals at `state/journals/<name>.md`.
+Use `env -u CLAUDE_CODE_SESSION_ID` when operating on another home. Confirm
+`fleet home --fleet-home <path>` resolves to the intended initialized home
+before other commands. Keep reports at local, gitignored
+`docs/lanes/<name>.md` and journals at `state/journals/<name>.md`; neither is
+public source.

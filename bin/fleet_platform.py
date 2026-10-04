@@ -28,6 +28,10 @@ class _WindowsPlatform:
     is_windows = True
     is_linux = False
 
+    def memory_available_mb(self) -> int:
+        """Windows has no portable MemAvailable implementation in Fleet."""
+        raise UnsupportedPlatformError("available memory is unsupported on Windows")
+
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Append bytes with one FILE_APPEND_DATA-only WriteFile call.
         Windows CRT O_APPEND performs seek and write separately, risking lost records
@@ -65,6 +69,20 @@ class _PosixPlatform:
 
     is_windows = False
     is_linux = sys.platform.startswith("linux")
+
+    def memory_available_mb(self) -> int:
+        """Read Linux MemAvailable; other POSIX platforms are explicit gaps."""
+        if not self.is_linux:
+            raise UnsupportedPlatformError(
+                "available memory is unsupported on this POSIX platform")
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+        except (FileNotFoundError, OSError, ValueError, IndexError, UnicodeError):
+            raise UnsupportedPlatformError(
+                "Linux MemAvailable is unavailable") from None
+        raise UnsupportedPlatformError("Linux MemAvailable is unavailable")
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Append bytes with one O_APPEND write, atomically seeking to EOF on POSIX.

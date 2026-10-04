@@ -5,15 +5,20 @@ mailbox/
 __pycache__/
 *.pyc
 .superpowers/
-supervisor/INCARNATION
-supervisor/HANDSHAKE
-# `_write_json_atomic` writes `<name>.tmp` beside its target before os.replace,
-# and supervisor/ is git-tracked -- so every INCARNATION and HANDSHAKE write
-# opens a window in which a runtime file with claim state in it is an untracked
-# add. HANDSHAKE.tmp is not the lesser half: claim-nonce §6.4 puts
-# `handoff_token_hash` and the successor's `nonce_hash` into HANDSHAKE.
-# Glob, not two literals, so a third supervisor JSON store inherits the rule.
-supervisor/*.tmp
+
+# Per-home operator data is local runtime state; tracked files stay generic.
+supervisor/
+knowledge/lessons.md
+knowledge/projects/
+docs/lanes/
+docs/operator/
+docs/reviews/
+docs/archive/
+docs/proposals/
+docs/decisions/
+docs/OPERATOR-GATES.md
+docs/PLAN.md
+docs/PLAN-PROGRESS.md
 
 # Scratch state from the `remember` tool: session-scoped notes plus a pid file.
 # Arrived as an untracked add on `feat/worker-providers`; nothing in this repo reads it.

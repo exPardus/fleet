@@ -37,7 +37,7 @@ def _repo_with_lane(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "tests@example.invalid")
+    _git(repo, "config", "user.email", "tests@example.com")
     _git(repo, "config", "user.name", "land tests")
     (repo / "README.md").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "README.md")

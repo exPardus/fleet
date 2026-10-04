@@ -126,6 +126,22 @@ def test_current_and_retired_session_safety_vetoes(home, protected_sid, protecti
     assert not eligible(record, roster)
 
 
+def test_landed_lane_ignores_an_idle_retired_daemon_spare(home):
+    """A pre-warm spare for a retired sid must not strand a landed lane."""
+    record = seed(lane_state="landed", retired_sids=[RETIRED])
+    spare = entry(RETIRED, status="idle", pid=4242)
+    assert fleet._reap_eligible("finished", record, [entry(status="idle"), spare], None) == (
+        True, "lane-landed")
+
+
+def test_landed_lane_still_protects_a_genuinely_working_session(home):
+    record = seed(lane_state="landed", retired_sids=[RETIRED])
+    working = entry(status="working", pid=4242)
+    spare = entry(RETIRED, status="idle", pid=4343)
+    assert fleet._reap_eligible("finished", record, [working, spare], None) == (
+        False, "roster-live")
+
+
 def test_predecessor_supervisor_reaps_but_current_claim_is_protected(home):
     claim()
     old = seed("sup|inc-old|successor")
@@ -146,6 +162,17 @@ def test_reap_uses_autoclean_archive_writer_and_counts_once(home):
     events = [json.loads(line) for line in fleet.events_path().read_text().splitlines()]
     assert any(event["kind"] == "autoclean_run" for event in events)
     assert fleet._supervisor_reap(run=run, which=lambda _: "claude")[0] == 0
+
+
+def test_reap_archives_landed_lane_with_retired_idle_spare(home):
+    seed(lane_state="landed", retired_sids=[RETIRED])
+    calls = []
+    run = runner([entry(status="idle"), entry(RETIRED, status="idle", pid=4242)], calls)
+    count, error = fleet._supervisor_reap(run=run, which=lambda _: "claude")
+    assert count == 1 and error is None
+    assert fleet.load_registry()["workers"]["finished"]["archived_at"]
+    removed = {argv[2] for argv in calls if argv[1] == "rm"}
+    assert RETIRED[:8] in removed
 
 
 @pytest.mark.parametrize("protection", ["mail", "claimed", "holder", "pid"])

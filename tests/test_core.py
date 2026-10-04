@@ -776,6 +776,11 @@ class TestComposePrompt:
         assert "state/journals/probe-1.md" in prompt.replace("\\", "/")
         assert "do the thing" in prompt
 
+    def test_preamble_forbids_ask_user_question_in_headless_workers(self, isolated_home):
+        prompt, _claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "do the thing", "sid-1")
+        assert "AskUserQuestion" in prompt
+        assert "never" in prompt.lower()
+
     def test_empty_mailbox_is_noop(self, isolated_home):
         prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         # The preamble explains the <MANAGER MESSAGE> convention (in backticks);

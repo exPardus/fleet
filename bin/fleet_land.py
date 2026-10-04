@@ -220,7 +220,10 @@ def _tracked(repo: Path, worktree: Path, rel: str) -> bool:
 def _commit_dirty(repo: Path, worktree: Path, lane: str, files: list[str],
                   report_rel: str, result_rel: str) -> None:
     dirty = _status_paths(repo, worktree)
-    allowed = set(files) | {report_rel, result_rel}
+    # Reports are local per-home receipts under a gitignored path. Validate
+    # them before this point, but never stage them into the public source tree.
+    local_reports = {report_rel, result_rel}
+    allowed = set(files) | local_reports
     unexpected = sorted(set(dirty) - allowed)
     if unexpected:
         raise FleetCliError(
@@ -228,12 +231,12 @@ def _commit_dirty(repo: Path, worktree: Path, lane: str, files: list[str],
     if not dirty:
         return
     stage = []
-    for rel in sorted(allowed):
+    for rel in sorted(set(files)):
         path = worktree / Path(rel)
         if path.exists() or _tracked(repo, worktree, rel):
             stage.append(rel)
     if not stage:
-        raise FleetCliError(f"land: lane {lane!r} is dirty but has nothing stageable")
+        return
     _git(repo, "add", "--", *stage, cwd=worktree)
     staged = _status_paths(repo, worktree)
     staged_unexpected = sorted(set(staged) - allowed)

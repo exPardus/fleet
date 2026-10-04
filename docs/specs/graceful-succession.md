@@ -55,7 +55,7 @@ re-litigated** — only its status is corrected. See §4.11.)*
 **Reads as binding:** `docs/specs/claim-nonce.md` (§5.8–5.9, §6.1, §6.3, §6.4, §6.6, §7, §7.2, §17),
 `docs/specs/three-tier-command.md` §10.1/§10.4/§11, `docs/specs/terminal-surface.md` (D1–D7 and D4's
 REQUIREMENT/CURRENT-STATE split), `docs/specs/native-substrate.md` contract G11,
-`knowledge/lessons.md#2026-07-27-evening-outage`, `docs/OPERATOR-GATES.md` (evening docket), and
+`local operator lessons#2026-07-27-evening-outage`, `the local operator decision record` (evening docket), and
 `skills/fleet/supervisor.md`.
 
 ---
@@ -83,7 +83,7 @@ sat unpushed the whole time.
 > **A retraction this document is built on, stated before anything cites the stillbirths.** An earlier
 > draft of this spec described those successors as *"registry row `working`, **0 turns, no
 > transcript**"* and *"none ever took a turn"*, and used that as the proof of D-GS1. **It is false and
-> it has been retracted on `main`** (`knowledge/lessons.md`, *"retract the falsification"*): *"**'0
+> it has been retracted on `main`** (`local operator lessons`, *"retract the falsification"*): *"**'0
 > turns' is a registry accounting defect, not a fact about the session.**" Transcripts exist — 82 KB
 > each, 26–27 messages, Stop hooks fired clean.* The successors **did** take turns; they were denied
 > at the permission layer and died in 25–33 s. Root cause, confirmed 17/17 mode↔outcome by
@@ -95,7 +95,7 @@ sat unpushed the whole time.
 
 **The dark window was then measured against the Windows event log (6008 / 41 / 6005) rather than read
 off worker staleness.** The numbers are the operator's, recorded at `9f3bfa8` in
-`knowledge/lessons.md#2026-07-27-evening-outage`:
+`local operator lessons#2026-07-27-evening-outage`:
 
 | window | span |
 |---|---|
@@ -178,9 +178,9 @@ nothing for this spec to build.
 >   page to a fleet-aware session that is already the human's proxy. **This spec's `sup-recover` is
 >   unbuilt and unaffected; §5.8's safety argument is amended in place, not here.**
 > - Sources: `state/tasks/20260909-succession-ruling.md` (with its `## AMENDMENT`),
->   `knowledge/lessons.md#2026-09-09-keeper-revives`,
+>   `local operator lessons#2026-09-09-keeper-revives`,
 >   `docs/superpowers/specs/2026-09-08-server-persistent-fleet-design.md` (its own 2026-09-09
->   amendment section), `docs/operator/server-interface-profile.md`.
+>   amendment section), `a local operator runbook`.
 
 **What this costs the design, stated plainly.** Nothing in this document shortens window B. A fleet
 that is dark because the box was dark has no reader, and **a pull signal with no reader is not a
@@ -587,7 +587,7 @@ freeze exists for.
 
 > *(**Dated note, 2026-08-05.** This document calls the first wall *"the 200k context ceiling"*
 > throughout, which is what it was called when the shape was ratified on 2026-07-27 and quoted here.
-> The operator raised that ceiling to **400k** on 2026-08-05 (`docs/OPERATOR-GATES.md` §Settled;
+> The operator raised that ceiling to **400k** on 2026-08-05 (`the local operator decision record` §Settled;
 > three-tier §11's amendment note). **The wall is the same wall and every claim about it in this
 > document still holds** — it is loud, self-aware, `sup-context` measures it, `_ceiling_refuses_dispatch`
 > refuses it at five sites, and it ends in a `sup-release`. Only its height moved. The quoted ratified
@@ -723,7 +723,7 @@ detector built on what a degrading actor believes about itself degrades with it.
 
 ### 4.11 FINDING 2 of 2 — nothing RECORDS the fact, and the ratified wording says a supervisor does
 
-**The ratified element, quoted exactly** (`docs/OPERATOR-GATES.md`, 2026-07-27 evening docket):
+**The ratified element, quoted exactly** (`the local operator decision record`, 2026-07-27 evening docket):
 
 > (1) a supervisor that can no longer dispatch **records** a **machine-readable** succession-needed
 > fact with its cause — both walls count, the 200k context ceiling *and* a plan usage-limit park,
@@ -874,7 +874,7 @@ dispatch** (F4 doctrine: never hold `fleet.lock` across a subprocess).
 > one of the two walls the ratified shape names.**
 >
 > **`claim-nonce` §7 is OPERATOR-OWNED and the question is on the operator docket right now:**
-> `docs/decisions/W9-section7-exemption.md`, Route B (raised with the `fleet autoclean` half as one
+> `a local decision record`, Route B (raised with the `fleet autoclean` half as one
 > decision, because both ask *when the fleet's recovery machinery is itself gated by the guard it
 > exists to recover from, which side gives*).
 >
@@ -921,7 +921,7 @@ dispatch** (F4 doctrine: never hold `fleet.lock` across a subprocess).
 >   `seize` is the §5.9 residual that produces two bodies believing they hold the claim, so it must be
 >   the path taken only when no live session answers.
 >
-> **The arm NUMBERS are frozen.** `docs/decisions/W9-section7-exemption.md` — the parked operator
+> **The arm NUMBERS are frozen.** `a local decision record` — the parked operator
 > docket entry — cites arms 3, 5, 6 and 8 **by number**. Renumbering would silently rot an operator
 > decision that is waiting to be answered, so the missing state above is added as a **fall-through**
 > rather than as an arm 10, and the evaluation order is stated over the existing numbers.
@@ -1022,7 +1022,7 @@ SUP-RECOVER-DISPATCHED <name> sid=<sid>
 > §1.**
 >
 > **`0 turns` is not a fact about a session.** It is a registry accounting artifact
-> (`knowledge/lessons.md`), and the sentence told the operator to key on the very artifact that made
+> (`local operator lessons`), and the sentence told the operator to key on the very artifact that made
 > three days of stillbirths unreadable. Worse, it is a detector that **cannot fire on this verb's own
 > path** — measured, not assumed: `_dispatch_supervisor_body` stamps `session_id`, `status =
 > "working"` **and `turns = 1`** in one locked commit before the verb returns (R15). A `sup-recover`
@@ -1103,7 +1103,7 @@ nothing is owed, `sup-recover` refuses and names the other verb (§5.4 fall-thro
 > **An earlier draft of this table called the handoff route "PREFERRED". That was wrong and the
 > correction is load-bearing.** `sup-handoff-begin` under its shipped default has been **stillborn on
 > every attempt** — three during this incident, **eight across the two days** the corpus counts
-> (`skills/fleet/SKILL.md`, `knowledge/lessons.md`) — and **three supervisors in a row have now
+> (`skills/fleet/SKILL.md`, `local operator lessons`) — and **three supervisors in a row have now
 > released at the ceiling rather than hand off**, because `sup-spawn` is the route that demonstrably
 > works. *(This spec previously said "three" throughout, which was this incident's count read as the
 > total. The eight is the corpus figure and it is the one that matters for the word "unrepaired".)* The
@@ -1169,7 +1169,7 @@ races the successor — the two-bodies hole arriving by a new door.
 > the earlier concern that a released claim might still carry a minted token is closed (§10.2 A2).
 > **This narrows where the refusal bites; it does not weaken it** — and it does not touch the separate,
 > parked question of whether the refusal should stay at all, which the operator docket carries
-> alongside the §7 question (`docs/decisions/W9-section7-exemption.md`, Route B, second half). The
+> alongside the §7 question (`a local decision record`, Route B, second half). The
 > break lens's point there stands and is not re-argued here: **repairing the handoff makes this
 > refusal MORE frequent, not less.**
 
@@ -1883,56 +1883,11 @@ uninitialised probe home), and a receipt that cannot reproduce is worse than a p
 
 ---
 
-### 9.4 Receipts added 2026-09-09 by lane `w59-proven` — pinned at `1294920`, NOT at `cebae4f`
+### 9.4 Structural handoff receipt
 
-**These are pinned at a different commit from R1–R14 above, deliberately.** They are claims about the
-handoff RECORD as it stood when the succession landed, and `supervisor/JOURNAL.md` is append-only and
-git-tracked, so a later pin would keep answering a different question. None is `# volatile` and none is
-`# live`: every one is a `grep` over a file in the repo.
-
-**What could NOT be made a receipt, stated rather than forced.** The live artifacts that carry the
-succession — `supervisor/INCARNATION`, `fleet sup-status --json`, `state/events.jsonl`,
-`~/.claude/daemon.lock`, `fleet doctor`'s output — live in `state/` (gitignored) or outside the repo
-entirely, so no materialised tree contains them and `# volatile` would only WARN and be skipped by
-`tests/test_receipts.py`. **A one-time live event on one host is not receiptable by this harness**, and
-the honest form for it is a dated, attributed prose claim. The journal IS in the tree, so the COUNTS
-below are receiptable and the live-state readings are not.
-
-**W1 — the handoff record, counted. Not eight attempts: twenty-six begins and fifteen completions.**
-
-```
-# at 1294920
-$ grep -c '^## .* HANDOFF-BEGIN ' supervisor/JOURNAL.md
-26
-$ grep -c '^## .* HANDOFF-COMPLETE ' supervisor/JOURNAL.md
-15
-$ grep -c '^## .* HANDOFF-ABORT ' supervisor/JOURNAL.md
-3
-```
-
-**W2 — every completion since the `dontask` fix (`87cbf9a`, 2026-07-27T19:10Z). Six, and the first
-five are on the retired Windows host.**
-
-```
-# at 1294920
-$ grep '^## 2026-0[89]-.* HANDOFF-COMPLETE ' supervisor/JOURNAL.md | cut -c4-23
-2026-08-05T16:48:54Z
-2026-08-05T17:32:10Z
-2026-08-05T19:33:26Z
-2026-08-09T19:03:01Z
-2026-08-09T22:54:36Z
-2026-09-09T17:49:36Z
-```
-
-**W3 — the host split. Twenty-five of the twenty-six dispatches wrote their task file under `C:/`.**
-
-```
-# at 1294920
-$ grep -c 'task=C:/projects/claude-fleet/state/supervisor-handoff-' supervisor/JOURNAL.md
-25
-$ grep -c 'task=/home/user/projects/fleet/state/supervisor-handoff-' supervisor/JOURNAL.md
-1
-```
+Operational handoff counts and journals are per-home operator data and are not
+public receipts. The public spec retains only structural evidence about the
+generic implementation.
 
 **W4 — `claimed_via: "handoff"` has exactly ONE creator, and it is `cmd_sup_handoff_complete`.**
 `:16130` is the fresh claim, `:16179` the seize/limit-transfer arm, `:17428` a copy into the released
@@ -2004,7 +1959,7 @@ operator owes** (which I may not make).
 
 | # | What is owed | Owner | Why I could not settle it |
 |---|---|---|---|
-| **A1** | **The §7.2 disarm table is now incomplete about shipped code.** The tombstone merge (`0cda9f6`, now in base) adds a third disarm — releaser tombstoned — and the ratified table says *"releaser roster-**LIVE** → **ARMED, unconditionally**"*. The tombstone slice reported this and correctly refused to edit it. **This spec is built on that code, so it inherits the debt and restates it rather than assuming it discharged.** | **operator** — §7 is operator-owned; **the supervisor may not ratify a narrowing of an operator-owned section** | Not mine to ratify. `docs/OPERATOR-GATES.md` already records *"an in-fleet disarm path is owed"*, so this discharges scheduled work rather than inventing a narrowing — the shape still needs the tick. |
+| **A1** | **The §7.2 disarm table is now incomplete about shipped code.** The tombstone merge (`0cda9f6`, now in base) adds a third disarm — releaser tombstoned — and the ratified table says *"releaser roster-**LIVE** → **ARMED, unconditionally**"*. The tombstone slice reported this and correctly refused to edit it. **This spec is built on that code, so it inherits the debt and restates it rather than assuming it discharged.** | **operator** — §7 is operator-owned; **the supervisor may not ratify a narrowing of an operator-owned section** | Not mine to ratify. `the local operator decision record` already records *"an in-fleet disarm path is owed"*, so this discharges scheduled work rather than inventing a narrowing — the shape still needs the tick. |
 | **A2** | ~~**`claim-nonce` §6.3's post-release key set does not say what happens to `handoff_pending` and `handoff_token_hash`.**~~ **DOWNGRADED — the hazard was measured and cannot occur; only the doc gap survives.** §6.3 enumerates seven keys kept and six removed and these two are in neither list, so the **documentation** gap is real. The **hazard** this row escalated — *"a released claim still carrying a minted token"* — **cannot happen in shipped code** (R17): `cmd_sup_release` does not mutate the claim, it **builds a fresh dict** of six keys (`incarnation_id`, `lineage_id`, `claimed_via`, `released_at`, `released_by_sid`, `state`) plus an optional `reason`, and hands that to `write_incarnation`. **Every key not in that literal is dropped on every release, unconditionally, including both handoff keys.** So `sup-recover`'s §5.7 refusal can never fire on a released claim, and no superseded successor can validate against a token that is not there. | ~~operator~~ **doc-sync** | **Closed as an escalation by measurement.** What remains is that §6.3's key set does not *say* this, so a future edit could regress it with nothing to catch it. That is a doc-sync item and a test obligation (§8), not a question for the operator. **This row escalated a question shipped code answers in six lines, and I should have grepped before escalating.** |
 | **A8** | **D-GS1 deviates from the ratified word *"records"*** — the ratified shape says *"a supervisor that can no longer dispatch **records** a machine-readable succession-needed fact with its cause"*; this spec's answer is that **nothing records it and there is no writer** (§4.11). **Moved here from §10.1 O1**, where it was misfiled as a design choice of mine. | **operator** — it is their wording | The technical argument is sound and I stand behind it (§4.1), but *"is this deviation acceptable"* is not a question a supervisor may answer about an operator's ratified element. **Stated as a finding (§4.11), designed as specified, and flagged rather than smoothed over.** Falsifier named: a consumer that needs the fact when no reader is running. |
 | **A3** | **A ~~25th~~ 26th doctor check that can FAIL changes `fleet doctor`'s exit-code contract for a new class of condition,** and `docs/SPEC.md` §13 records the roster and a check count. **Three documents now disagree about that count**: this spec said 24, `docs/SPEC.md` says **23**, and the measured value at `cebae4f` is **25** (R23). SPEC.md's number was wrong before this branch existed, so it is not this slice's regression — but it is now three-way, and the new row makes it 26. | operator / doc-sync | Adding a FAIL-capable row is a policy change about what makes doctor red, and the count is a ratified number. **The count itself is now measured rather than asserted (R23); what is owed is the ratification and SPEC.md's correction, not the arithmetic.** |
@@ -2022,7 +1977,7 @@ operator owes** (which I may not make).
   and which a subsequent entry declared **falsified** — **was correct.** `handoff-autopsy` re-derived it
   by measurement: 7/7 successors dispatched under `bypass` booted and completed; 10/10 under `dontask`
   were stillborn, showing two `permission-rule` denials and dying in 25–33 s. **17/17, no exceptions.**
-  The falsification was a confounded probe and is retracted (`knowledge/lessons.md`); the fix lands in
+  The falsification was a confounded probe and is retracted (`local operator lessons`); the fix lands in
   `fix/stillborn-handoff` (`SUCCESSOR_DEFAULT_MODE = "bypass"`, plus the sid stamp and the `peek`
   correction). **Recorded here rather than deleted**, because the retraction of a falsification is
   exactly the kind of fact a later reader needs and a tidied table would hide.

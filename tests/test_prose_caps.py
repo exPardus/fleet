@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import fleet
 import fleet_sources
 
 
@@ -22,23 +23,6 @@ def _line_count(path: Path) -> int:
 def _files(root: Path):
     return sorted(path for path in root.rglob("*")
                   if path.is_file() and "__pycache__" not in path.parts)
-
-
-def _loaded_entries(path: Path):
-    lines = path.read_text(encoding="utf-8").splitlines()
-    if path.name == "INDEX.md":
-        return [[line] for line in lines if line.startswith("- ")]
-    entries, current = [], []
-    for line in lines:
-        if line.startswith("## "):
-            if current:
-                entries.append(current)
-            current = [line]
-        elif current:
-            current.append(line)
-    if current:
-        entries.append(current)
-    return entries
 
 
 def test_claude_md_cap():
@@ -60,10 +44,10 @@ def test_supervisor_brief_cap(path):
 
 
 def test_loaded_knowledge_cap_and_entry_caps():
-    loaded = [ROOT / "knowledge/INDEX.md", ROOT / "knowledge/lessons.md"]
-    assert sum(_line_count(path) for path in loaded) <= 400
-    for path in loaded:
-        assert all(len(entry) <= 12 for entry in _loaded_entries(path)), path
+    lines = fleet._KNOWLEDGE_INDEX_SEED.splitlines()
+    assert len(lines) <= 20
+    assert all(len(entry) <= 12
+               for entry in [[line] for line in lines if line.startswith("- ")])
 
 
 @pytest.mark.xfail(strict=False, reason=(
@@ -163,10 +147,9 @@ def _prose_lines(path):
     return sorted(set(out))
 
 
-@pytest.mark.xfail(strict=False,
-                   reason="operator must apply docs/operator/goals-trim-proposal.md")
-def test_supervisor_goals_cap():
-    assert _line_count(ROOT / "supervisor/GOALS.md") <= 80
+def test_local_supervisor_seed_caps():
+    assert len(fleet._SUPERVISOR_GOALS_SEED.splitlines()) <= 80
+    assert len(fleet._SUPERVISOR_WAKE_SEED.splitlines()) <= 60
 
 
 @pytest.mark.parametrize("filename", fleet_sources.IMPLEMENTATION_FILES)

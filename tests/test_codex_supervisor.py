@@ -946,6 +946,41 @@ def test_native_handoff_transfers_before_start_and_stales_predecessor(
              "payload": {"method": "turn/steer", "params": {}}}, timeout=1)
 
 
+def test_native_handoff_uses_persisted_model_for_tier_policy(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    (supervisor_home / "supervisor" / "GOALS.md").write_text(
+        "<!-- fleet-tier-policy\n"
+        "forbid-default: true\n"
+        "supervisor-tier-chain: top\n"
+        "-->\n", encoding="utf-8")
+    binding = fleet._codex_supervisor_binding()
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    # The persisted codex:gpt-5.6-luna model is explicit provider policy even
+    # when handoff omits --model; the native path must not be rejected first.
+    assert fleet.cmd_sup_handoff_begin(SimpleNamespace(
+        model=None, permission_mode="bypass", sid=None, nonce=None,
+        expect_inc=binding.incarnation_id)) == 0
+
+
+def test_claude_handoff_still_refuses_unresolved_tier_policy(
+        supervisor_home):
+    (supervisor_home / "supervisor" / "GOALS.md").write_text(
+        "<!-- fleet-tier-policy\n"
+        "forbid-default: true\n"
+        "supervisor-tier-chain: top\n"
+        "-->\n", encoding="utf-8")
+    fleet.write_incarnation({
+        "incarnation_id": "inc-claude", "state": "held",
+        "provider": "claude", "session_id": "sid-claude",
+    })
+    with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model=None, permission_mode="bypass", sid=None, nonce=None))
+
+
 def test_native_host_restart_reconciles_same_ids_without_new_body_or_turn(
         supervisor_home, monkeypatch):
     name, _inc = _seed_native_supervisor(supervisor_home)

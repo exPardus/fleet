@@ -23,10 +23,11 @@ def _repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "tests@example.invalid")
+    _git(repo, "config", "user.email", "tests@example.com")
     _git(repo, "config", "user.name", "land tests")
     (repo / "README.md").write_text("base\n", encoding="utf-8")
-    _git(repo, "add", "README.md")
+    (repo / ".gitignore").write_text("docs/lanes/\n", encoding="utf-8")
+    _git(repo, "add", "README.md", ".gitignore")
     _git(repo, "commit", "-qm", "base")
     _git(repo, "branch", "-M", "main")
     lane = tmp_path / "lane"
@@ -78,6 +79,7 @@ def test_land_commits_allowed_dirty_paths_rebases_and_is_idempotent(
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
     first_tip = _git(lane, "rev-parse", "HEAD").stdout.strip()
     assert not _git(lane, "status", "--porcelain").stdout
+    assert not _git(lane, "ls-files", "docs/lanes").stdout
     out = capsys.readouterr().out
     assert "verdict: GREEN" in out
     # `wave-close` only attributes a lane through the `merge(<lane>):`
@@ -128,7 +130,7 @@ def test_check_commands_docs_currency_catches_a_lane_report_missing_done(tmp_pat
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     _git(worktree, "init", "-q")
-    _git(worktree, "config", "user.email", "land-tests@example.invalid")
+    _git(worktree, "config", "user.email", "land-tests@example.com")
     _git(worktree, "config", "user.name", "land tests")
     (worktree / "README.md").write_text("base\n", encoding="utf-8")
     _git(worktree, "add", "README.md")
@@ -206,7 +208,7 @@ def test_home_gate_config_wins_over_lane_config_from_a_subdirectory(tmp_path, mo
     home = tmp_path / "home"
     home.mkdir()
     _git(home, "init", "-q")
-    _git(home, "config", "user.email", "gates@example.invalid")
+    _git(home, "config", "user.email", "gates@example.com")
     _git(home, "config", "user.name", "gate tests")
     (home / "README.md").write_text("home\n", encoding="utf-8")
     _git(home, "add", "README.md")
@@ -231,7 +233,7 @@ def test_linked_lane_worktree_cannot_override_home_gate_config(tmp_path, monkeyp
     home = tmp_path / "home"
     home.mkdir()
     _git(home, "init", "-q")
-    _git(home, "config", "user.email", "gates@example.invalid")
+    _git(home, "config", "user.email", "gates@example.com")
     _git(home, "config", "user.name", "gate tests")
     (home / "README.md").write_text("home\n", encoding="utf-8")
     _git(home, "add", "README.md")

@@ -282,6 +282,62 @@ class TestSupervisorShapedLifecycleChoreography:
         assert rc == 0
         assert fleet.load_registry()["workers"][SUP_PIPE]["status"] == "interrupted"
 
+    def test_interrupt_then_respawn_wakes_same_supervisor_incarnation(
+            self, native_home, monkeypatch):
+        """An interrupted holder cannot receive the release steer used by the
+        ordinary supervisor replacement choreography. Respawn must instead
+        issue the existing same-incarnation wake and preserve the claim."""
+        claim = _held_claim(sid=SID)
+        _seed_pipe_worker(sid=SID, status="working")
+        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
+        assert fleet.cmd_interrupt(SimpleNamespace(name="supervisor", nonce=None)) == 0
+
+        calls = []
+        monkeypatch.setattr(
+            fleet, "dispatch_bg",
+            lambda *a, **kw: calls.append((a, kw)) or {
+                "session_id": NEW_SID, "short_id": NEW_SID[:8],
+            },
+        )
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        args = SimpleNamespace(name="supervisor", task=None, force=False, yes=True,
+                               nonce=None, max_budget_usd=None,
+                               setting_sources=None, token_ceiling=None,
+                               model=None, permission_mode=None)
+        rc = fleet.cmd_respawn(args, run=_fake_run_factory(),
+                               which=lambda _: "claude", sleep=lambda _: None)
+
+        assert rc == 0
+        row = fleet.load_registry()["workers"][SUP_PIPE]
+        assert row["status"] == "working"
+        assert row["session_id"] == NEW_SID
+        assert row["retired_sids"] == [SID]
+        assert fleet.read_incarnation()["incarnation_id"] == claim["incarnation_id"]
+        assert calls and "SAME incarnation" in calls[0][0][2]
+
+    def test_interrupted_respawn_rejects_task_override_on_same_incarnation_wake(
+            self, native_home, monkeypatch):
+        """A task override cannot silently bypass the wake payload path."""
+        _held_claim(sid=SID)
+        _seed_pipe_worker(sid=SID, status="working")
+        monkeypatch.setattr(fleet, "_stop_native_session", lambda *a, **k: True)
+        assert fleet.cmd_interrupt(SimpleNamespace(name="supervisor", nonce=None)) == 0
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda **_: (True, []))
+        monkeypatch.setattr(
+            fleet, "dispatch_bg", lambda *a, **k: pytest.fail("wake must refuse"))
+        args = SimpleNamespace(name="supervisor", task="new campaign", force=False,
+                               yes=True, nonce=None, max_budget_usd=None,
+                               setting_sources=None, token_ceiling=None,
+                               model=None, permission_mode=None)
+        with pytest.raises(fleet.FleetCliError, match="task override.*same-incarnation"):
+            fleet.cmd_respawn(args, run=_fake_run_factory(),
+                              which=lambda _: "claude", sleep=lambda _: None)
+        workers = fleet.load_registry()["workers"]
+        assert list(workers) == [SUP_PIPE]
+        row = workers[SUP_PIPE]
+        assert row["status"] == "interrupted"
+        assert row["session_id"] == SID
+
     def test_respawn_force_of_a_husk_relaunches_with_the_boot_ritual(
             self, native_home, monkeypatch):
         """No claim held: the husk respawn path (CRIT-1 site :4836).

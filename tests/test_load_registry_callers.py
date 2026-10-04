@@ -186,6 +186,12 @@ ALLOWED = {
     # halves below, which do.
     "_cmd_send_codex", "_cmd_interrupt_codex",
     "_cmd_kill_codex", "_cmd_respawn_codex",
+    # Native Codex worker mutations use the same lock/write discipline. The
+    # reserve/clear/freeze helpers are called only from those mutating verbs;
+    # every load is lexically inside fleet_lock and paired with a save/event.
+    "_reserve_codex_worker_operation", "_clear_codex_worker_operation",
+    "_freeze_codex_worker_operation", "_cmd_send_codex_native",
+    "_resume_one_limited_codex", "_cmd_respawn_codex_native",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
     "_cmd_kill_codex_native",
     # w105: the native Codex worker and supervisor paths (codex-native-
