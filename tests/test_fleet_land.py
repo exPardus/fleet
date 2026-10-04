@@ -155,6 +155,102 @@ def test_check_commands_docs_currency_catches_a_lane_report_missing_done(tmp_pat
     assert checks["docs-currency"] != 0
 
 
+def test_foreign_home_config_disables_fleet_only_land_gates(tmp_path, monkeypatch):
+    """A configured foreign home must not require fleet-repo gate scripts."""
+    worktree = tmp_path / "foreign"
+    worktree.mkdir()
+    (worktree / "supervisor").mkdir()
+    (worktree / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"interpreters": ["3.12"], "gates": []}), encoding="utf-8")
+    monkeypatch.chdir(worktree)
+
+    checks = fleet_land._check_commands(worktree, [])
+
+    assert checks == []
+
+
+def test_builtin_gate_selection_runs_only_the_selected_gate(tmp_path, monkeypatch):
+    worktree = tmp_path / "foreign"
+    worktree.mkdir()
+    (worktree / "supervisor").mkdir()
+    (worktree / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": ["docs-currency"]}), encoding="utf-8")
+    monkeypatch.chdir(worktree)
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label:
+                        seen.append((label, command)) or 0)
+
+    checks = fleet_land._check_commands(worktree, [])
+
+    assert checks == [("docs-currency", 0)]
+    assert seen[0][0] == "docs-currency"
+    assert "test_docs_currency.py" in seen[0][1]
+
+
+@pytest.mark.parametrize(("command", "expected"), [("true", 0), ("false", 1)])
+def test_custom_gate_command_reports_pass_or_fail(tmp_path, command, expected,
+                                                 monkeypatch):
+    worktree = tmp_path / "foreign"
+    worktree.mkdir()
+    (worktree / "supervisor").mkdir()
+    (worktree / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": [{"name": "project-lint", "command": command}]}),
+        encoding="utf-8")
+    monkeypatch.chdir(worktree)
+
+    assert fleet_land._check_commands(worktree, []) == [("project-lint", expected)]
+
+
+def test_home_gate_config_wins_over_lane_config_from_a_subdirectory(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    _git(home, "init", "-q")
+    _git(home, "config", "user.email", "gates@example.invalid")
+    _git(home, "config", "user.name", "gate tests")
+    (home / "README.md").write_text("home\n", encoding="utf-8")
+    _git(home, "add", "README.md")
+    _git(home, "commit", "-qm", "home")
+    (home / "supervisor").mkdir()
+    (home / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": [{"name": "home-gate", "command": "true"}]}),
+        encoding="utf-8")
+    lane = tmp_path / "lane"
+    _git(home, "worktree", "add", "-qb", "w1/gates", str(lane), "HEAD")
+    (lane / "supervisor").mkdir()
+    (lane / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": []}), encoding="utf-8")
+    subdir = home / "nested"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
+
+    assert fleet_land._land_gates(lane) == [("home-gate", "true")]
+
+
+def test_linked_lane_worktree_cannot_override_home_gate_config(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    _git(home, "init", "-q")
+    _git(home, "config", "user.email", "gates@example.invalid")
+    _git(home, "config", "user.name", "gate tests")
+    (home / "README.md").write_text("home\n", encoding="utf-8")
+    _git(home, "add", "README.md")
+    _git(home, "commit", "-qm", "home")
+    (home / "supervisor").mkdir()
+    (home / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": [{"name": "required", "command": "true"}]}),
+        encoding="utf-8")
+    lane = tmp_path / "lane"
+    _git(home, "worktree", "add", "-qb", "w1/gates", str(lane), "HEAD")
+    (lane / "supervisor").mkdir()
+    (lane / "supervisor" / "wave-close.json").write_text(
+        json.dumps({"gates": []}), encoding="utf-8")
+    monkeypatch.delenv("FLEET_HOME", raising=False)
+    monkeypatch.chdir(lane)
+
+    assert fleet_land._land_gates(lane) == [("required", "true")]
+
+
 def test_result_requires_a_command_for_every_claim(tmp_path):
     report = tmp_path / "docs" / "lanes"
     report.mkdir(parents=True)

@@ -334,6 +334,11 @@ class Host:
                         operation_id = request["operation_id"]
                         record = self.journal.load(operation_id)
                         if record.get("generation") != self.generation:
+                            if record.get("state") in {"accepted", "uncertain"}:
+                                raise ValueError(
+                                    "operation acceptance is uncertain; reconcile "
+                                    "before retry (operation belongs to another "
+                                    "host generation)")
                             raise ValueError("operation belongs to another host generation")
                         if record.get("payload_digest") != request.get("payload_digest"):
                             raise ValueError("operation payload digest conflicts with journal")
