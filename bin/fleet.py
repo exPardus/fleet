@@ -343,17 +343,28 @@ def watch_cursor_path(home=None) -> Path:
 
 def _watch_read_cursor(home) -> tuple[dict, bool]:
     path = watch_cursor_path(home)
+    empty = {"mail": [], "lanes": {}, "mcx": {},
+             "lanes_valid": False, "mcx_valid": False}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError, UnicodeError):
-        return ({"mail": [], "lanes": {}, "mcx": {}}, False)
+        return empty, False
     if not isinstance(value, dict):
-        return ({"mail": [], "lanes": {}, "mcx": {}}, False)
+        return empty, False
     mail = value.get("mail") if isinstance(value.get("mail"), list) else []
     lanes = value.get("lanes") if isinstance(value.get("lanes"), dict) else {}
     mcx = value.get("mcx") if isinstance(value.get("mcx"), dict) else {}
+    # Cursors written before validity markers existed can safely infer a
+    # baseline only from a non-empty snapshot; an empty map is ambiguous.
+    lanes_valid = value.get("lanes_valid")
+    if not isinstance(lanes_valid, bool):
+        lanes_valid = bool(lanes)
+    mcx_valid = value.get("mcx_valid")
+    if not isinstance(mcx_valid, bool):
+        mcx_valid = bool(mcx)
     return ({"mail": [str(x) for x in mail], "lanes": dict(lanes),
-             "mcx": dict(mcx)}, True)
+             "mcx": dict(mcx), "lanes_valid": lanes_valid,
+             "mcx_valid": mcx_valid}, True)
 
 
 def _watch_write_cursor(home, cursor: dict) -> None:
@@ -451,20 +462,21 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
     run = subprocess.run if run is None else run
     which = shutil.which if which is None else which
     interval = float(getattr(args, "interval", 60))
-    if interval <= 0:
-        raise FleetCliError("watch interval must be greater than 0 seconds")
+    if not math.isfinite(interval) or interval <= 0:
+        raise FleetCliError("watch interval must be finite and greater than 0 seconds")
     timeout = getattr(args, "timeout", None)
-    timeout = None if timeout is None else max(0.0, float(timeout))
+    if timeout is not None:
+        timeout = float(timeout)
+        if not math.isfinite(timeout) or timeout < 0:
+            raise FleetCliError("watch timeout must be finite and non-negative")
     mem_floor = int(getattr(args, "mem_floor_mb", 1500))
     disk_floor = float(getattr(args, "disk_floor_gb", 4))
     cursors = {}
-    fresh = {}
     for home in homes:
-        cursor, existed = _watch_read_cursor(home)
+        cursor, _ = _watch_read_cursor(home)
         cursors[home] = cursor
-        fresh[home] = not existed
-    lane_initial = dict(fresh)
-    mcx_initial = dict(fresh)
+    lane_initial = dict((home, not cursors[home]["lanes_valid"]) for home in homes)
+    mcx_initial = dict((home, not cursors[home]["mcx_valid"]) for home in homes)
     dirty = dict((home, False) for home in homes)
     memory_supported = True
     try:
@@ -490,6 +502,7 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
                 continue
             if lane_initial[home]:
                 cursor["lanes"] = current
+                cursor["lanes_valid"] = True
                 lane_initial[home] = False
                 dirty[home] = True
             else:
@@ -508,6 +521,7 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
                 cursor = cursors[home]
                 if mcx_initial[home]:
                     cursor["mcx"] = mcx
+                    cursor["mcx_valid"] = True
                     mcx_initial[home] = False
                     dirty[home] = True
                 else:
@@ -20635,9 +20649,21 @@ def _watch_interval_arg(value: str) -> float:
         interval = float(value)
     except ValueError:
         raise argparse.ArgumentTypeError("interval must be a number") from None
-    if interval <= 0:
-        raise argparse.ArgumentTypeError("interval must be greater than 0 seconds")
+    if not math.isfinite(interval) or interval <= 0:
+        raise argparse.ArgumentTypeError(
+            "interval must be finite and greater than 0 seconds")
     return interval
+
+
+def _watch_timeout_arg(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("timeout must be a number") from None
+    if not math.isfinite(timeout) or timeout < 0:
+        raise argparse.ArgumentTypeError(
+            "timeout must be finite and non-negative")
+    return timeout
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20953,7 +20979,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--mem-floor-mb", type=int, default=1500)
     p_watch.add_argument("--disk-floor-gb", type=float, default=4)
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
-    p_watch.add_argument("--timeout", type=float, default=None)
+    p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
     p_relay = sub.add_parser(
         "relay-ack", help="append an interface relay and acknowledge one mail file")
