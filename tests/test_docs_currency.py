@@ -71,11 +71,19 @@ def has_done_after_title(text):
 
 
 def lane_documents(repo, cutoff=ADOPTION_BASE):
-    """Local lane reports, including ignored files but not generic seeds."""
+    """Current lane reports, excluding ignored per-home operator files."""
     root = repo / "docs" / "lanes"
     if not root.is_dir():
         return []
-    return [path for path in sorted(root.glob("*.md"))
+    try:
+        names = git(repo, "ls-files", "--cached", "--others",
+                    "--exclude-standard", "--", "docs/lanes").splitlines()
+        candidates = [repo / name for name in names]
+    except (OSError, subprocess.CalledProcessError):
+        # The focused helper tests use an uninitialised temporary directory;
+        # retain their filesystem-only population there.
+        candidates = list(root.glob("*.md"))
+    return [path for path in sorted(candidates)
             if path.name not in {"README.md", "BRIEF-TEMPLATE.md"}]
 
 
@@ -133,14 +141,7 @@ def test_branch_docs_currency():
 
 
 def test_new_lane_documents_have_done():
-    # ``docs/lanes`` is ignored per-home runtime data.  Do not let whatever
-    # reports happen to be present in the checkout change the public suite;
-    # the landing gate opts in by exporting its controlling FLEET_HOME.
-    configured = os.environ.get("FLEET_HOME")
-    if not configured:
-        return
-    home = Path(configured)
-    bad = [str(p) for p in lane_documents(home)
+    bad = [str(p.relative_to(REPO)) for p in lane_documents(REPO)
            if not has_done_after_title(p.read_text(encoding="utf-8"))]
     assert not bad, f"Missing DONE means immediately after title: {bad}"
 
