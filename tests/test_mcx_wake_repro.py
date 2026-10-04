@@ -103,3 +103,32 @@ def test_sweep_refuses_mcx_identity_changed_during_probe(tmp_path, monkeypatch):
     assert "lane_done_pending" not in after
     assert "lane_done_notified" not in after
     assert after == expected
+
+
+def test_sweep_refuses_same_mcx_id_new_turn_during_probe(tmp_path, monkeypatch):
+    """A same-id steer must not turn an old idle observation into a wake."""
+    _setup_home(tmp_path, monkeypatch)
+    data = fleet.load_registry()
+    data["workers"]["lane"]["status"] = "idle"
+    fleet.save_registry(data)
+    before = fleet.load_registry()["workers"]["lane"]
+    expected = dict(before)
+    expected.update({"status": "working", "last_dispatch_at": "new-turn"})
+
+    def mutate_during_probe(*_args, **_kwargs):
+        data = fleet.load_registry()
+        data["workers"]["lane"].update(
+            {"status": "working", "last_dispatch_at": "new-turn"})
+        fleet.save_registry(data)
+        return "idle"
+
+    monkeypatch.setattr(fleet, "_mcx_probe", mutate_during_probe)
+    sends = []
+    monkeypatch.setattr(
+        fleet, "_cmd_send_native",
+        lambda name, message: sends.append((name, message)) or 0,
+    )
+
+    assert fleet.sweep_lane_done(run=subprocess.run) == []
+    assert sends == []
+    assert fleet.load_registry()["workers"]["lane"] == expected

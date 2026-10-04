@@ -21814,6 +21814,8 @@ def _lane_done_turn_key(name: str, rec: dict) -> list:
 
 def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                      expected_mcx_id: str | None = None,
+                     expected_status: str | None = None,
+                     expected_last_dispatch_at: str | None = None,
                      run=subprocess.run, sleep=time.sleep) -> bool:
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
@@ -21830,6 +21832,12 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         if expected_sid is not None and sid != expected_sid:
             return False
         if expected_mcx_id is not None and rec.get("mcx_id") != expected_mcx_id:
+            return False
+        if (expected_status is not None
+                and rec.get("status") != expected_status):
+            return False
+        if (expected_last_dispatch_at is not None
+                and rec.get("last_dispatch_at") != expected_last_dispatch_at):
             return False
         claim = read_incarnation()
         if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
@@ -21886,14 +21894,21 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
             raise FleetCliError(f"{name}: completion mail send failed ({rc})")
     except Exception:
         _settle_lane_done(name, sid, turn_key,
-                          expected_mcx_id=expected_mcx_id, delivered=False)
+                          expected_mcx_id=expected_mcx_id,
+                          expected_status=expected_status,
+                          expected_last_dispatch_at=expected_last_dispatch_at,
+                          delivered=False)
         raise
     _settle_lane_done(name, sid, turn_key,
-                      expected_mcx_id=expected_mcx_id, delivered=True)
+                      expected_mcx_id=expected_mcx_id,
+                      expected_status=expected_status,
+                      expected_last_dispatch_at=expected_last_dispatch_at,
+                      delivered=True)
     return True
 
 
 def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
+                      expected_status=None, expected_last_dispatch_at=None,
                       delivered: bool) -> None:
     with fleet_lock():
         data = read_registry_no_repair()
@@ -21903,6 +21918,12 @@ def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
             return
         if (expected_mcx_id is not None
                 and current.get("mcx_id") != expected_mcx_id):
+            return
+        if (expected_status is not None
+                and current.get("status") != expected_status):
+            return
+        if (expected_last_dispatch_at is not None
+                and current.get("last_dispatch_at") != expected_last_dispatch_at):
             return
         pending = current.get("lane_done_pending")
         if isinstance(pending, dict) and pending.get("key") == turn_key:
@@ -21937,6 +21958,9 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
             native = {}
     delivered = []
     for n, rec in lanes.items():
+        expected_mcx_id = None
+        expected_status = None
+        expected_last_dispatch_at = None
         if n in native:
             status = recompute_worker_native(n, rec, entries).get("status")
         elif _is_codex_record(rec):
@@ -21946,6 +21970,9 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
                 # native lanes so the keeper's sweep wakes the owning
                 # supervisor even when no explicit `status`/`wait` command ran
                 # after mcx finished.
+                expected_mcx_id = rec.get("mcx_id")
+                expected_status = rec.get("status")
+                expected_last_dispatch_at = rec.get("last_dispatch_at")
                 status = recompute_worker_codex(n, rec, run=run).get("status")
             else:
                 # Native Codex rows have their own provider observation path;
@@ -21960,9 +21987,9 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
                     n, "idle",
                     expected_sid=rec.get("session_id")
                     or rec.get("codex_thread_id"),
-                    expected_mcx_id=(rec.get("mcx_id")
-                                     if _codex_record_route(rec) == "mcx"
-                                     else None),
+                    expected_mcx_id=expected_mcx_id,
+                    expected_status=expected_status,
+                    expected_last_dispatch_at=expected_last_dispatch_at,
                     run=run, sleep=sleep):
                 delivered.append(n)
         except Exception:
