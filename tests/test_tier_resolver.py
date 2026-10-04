@@ -57,6 +57,24 @@ class TestParsing:
         assert pol["supervisor_chain"] == ["top", "second"]
         assert pol["_source"] == "goals"
 
+    def test_one_line_block_closes_before_following_stray(self, goals_home):
+        _write_goals(goals_home,
+                     "<!-- fleet-tier-policy -->\n"
+                     "tier-model: top=opus\n")
+        pol = fleet.read_tier_policy()
+        assert pol["_stray_tier_model_lines"] == [2]
+        with pytest.raises(fleet.FleetCliError, match="line 2"):
+            fleet._enforce_tier_policy("supervisor", None, pol)
+
+    def test_unterminated_block_is_refused(self, goals_home):
+        _write_goals(goals_home,
+                     "<!-- fleet-tier-policy\n"
+                     "supervisor-tier-chain: top\n")
+        pol = fleet.read_tier_policy()
+        assert pol["_unterminated_tier_policy"] == 1
+        with pytest.raises(fleet.FleetCliError, match="unterminated"):
+            fleet._enforce_tier_policy("supervisor", None, pol)
+
     def test_reads_a_length_one_chain(self, goals_home):
         # §3.5: a chain of length 1 is legal (no fallback -- single-model provider).
         _write_goals(goals_home,
@@ -91,6 +109,19 @@ class TestParsing:
         with pytest.raises(fleet.FleetCliError, match="outside"):
             fleet._enforce_tier_policy("supervisor", None, pol)
 
+    def test_stray_tier_model_after_policy_block_is_recorded(self, goals_home):
+        _write_goals(
+            goals_home,
+            "<!-- fleet-tier-policy\n"
+            "forbid-default: true\n"
+            "-->\n"
+            "tier-model: top=opus\n",
+        )
+        pol = fleet.read_tier_policy()
+        assert pol["_stray_tier_model_lines"] == [4]
+        with pytest.raises(fleet.FleetCliError, match="line 4"):
+            fleet._enforce_tier_policy("supervisor", None, pol)
+
     def test_forbid_default_rejects_unresolved_role(self, goals_home):
         _write_goals(goals_home,
                      "<!-- fleet-tier-policy\n"
@@ -102,6 +133,18 @@ class TestParsing:
         assert pol["forbid_default"] is True
         with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
             fleet._enforce_tier_policy("supervisor", None, pol)
+
+    def test_blank_model_is_treated_as_omitted(self, goals_home):
+        _write_goals(
+            goals_home,
+            "<!-- fleet-tier-policy\n"
+            "forbid-default: true\n"
+            "supervisor-tier-chain: top\n"
+            "-->\n",
+        )
+        pol = fleet.read_tier_policy()
+        with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+            fleet._enforce_tier_policy("supervisor", "  \t", pol)
 
     def test_sup_spawn_refuses_stray_policy_before_dispatch(self, goals_home,
                                                              monkeypatch):
@@ -118,6 +161,50 @@ class TestParsing:
                                force_band=False)
         with pytest.raises(fleet.FleetCliError, match="outside"):
             fleet.cmd_sup_spawn(args)
+
+    @staticmethod
+    def _forbid_default_goals(home):
+        _write_goals(home,
+                     "<!-- fleet-tier-policy\n"
+                     "forbid-default: true\n"
+                     "supervisor-tier-chain: top\n"
+                     "-->\n")
+
+    def test_spawn_blank_model_is_refused_by_command_policy(self, goals_home,
+                                                             monkeypatch):
+        self._forbid_default_goals(goals_home)
+        worker_dir = goals_home / "project"
+        worker_dir.mkdir()
+        (goals_home / "state").mkdir()
+        (goals_home / "state" / "worker-settings.json").write_text("{}")
+        monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
+        args = SimpleNamespace(name="worker", dir=str(worker_dir), task="do work",
+                               mode="dontask", model="", category=None,
+                               setting_sources=None, token_ceiling=None,
+                               max_budget_usd=None, nonce=None, force_band=False,
+                               codex_adapter="mcx", effort="medium", context=None)
+        with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+            fleet.cmd_spawn(args)
+
+    def test_sup_spawn_blank_model_is_refused_by_command_policy(self, goals_home,
+                                                                 monkeypatch):
+        self._forbid_default_goals(goals_home)
+        (goals_home / "state").mkdir()
+        (goals_home / "state" / "worker-settings.json").write_text("{}")
+        monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
+        args = SimpleNamespace(task="campaign", model="", permission_mode=None,
+                               codex_adapter=None, setting_sources=None, nonce=None,
+                               force_band=False)
+        with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+            fleet.cmd_sup_spawn(args)
+
+    def test_handoff_blank_model_is_refused_by_command_policy(self, goals_home,
+                                                               monkeypatch):
+        self._forbid_default_goals(goals_home)
+        monkeypatch.setattr(fleet, "_claim_uses_native_codex", lambda: False)
+        args = SimpleNamespace(sid="sid-old", model="", permission_mode=None)
+        with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+            fleet.cmd_sup_handoff_begin(args)
 
 
 class TestResolve:

@@ -5799,7 +5799,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     if not cwd.is_dir():
         raise FleetCliError(f"--dir does not exist or is not a directory: {args.dir}")
 
-    _enforce_tier_policy("worker", getattr(args, "model", None))
+    # Empty values from a quoted `--model ""` are equivalent to omission;
+    # normalise before policy enforcement and before recording/dispatching.
+    args.model = _normalise_model(getattr(args, "model", None))
+    _enforce_tier_policy("worker", args.model)
 
     # Warn at dispatch about hard denials, which may leave a worker waiting for
     # permission. This is advisory: a valid restricted task must remain launchable,
@@ -13146,6 +13149,14 @@ _TIER_POLICY_BLOCK_OPEN = "<!-- fleet-tier-policy"
 _TIER_POLICY_BLOCK_CLOSE = "-->"
 
 
+def _normalise_model(model):
+    """Treat an empty CLI model value as an omitted model."""
+    if isinstance(model, str):
+        model = model.strip()
+        return model or None
+    return model
+
+
 def _parse_tier_policy_block(text: str) -> dict:
     """Parse the `fleet-tier-policy` HTML-comment block out of GOALS.md prose
     (invisible in rendered markdown, greppable in source). Recognised keys:
@@ -13155,6 +13166,7 @@ def _parse_tier_policy_block(text: str) -> dict:
     actually found; the caller merges over defaults."""
     lines = text.splitlines()
     inside = False
+    block_open_line = None
     found = {}
     stray = []
     for line_number, raw in enumerate(lines, 1):
@@ -13163,10 +13175,14 @@ def _parse_tier_policy_block(text: str) -> dict:
             if re.match(r"^tier-model\s*:", line):
                 stray.append(line_number)
             if line.startswith(_TIER_POLICY_BLOCK_OPEN):
-                inside = True
+                opening_tail = line[len(_TIER_POLICY_BLOCK_OPEN):]
+                if _TIER_POLICY_BLOCK_CLOSE not in opening_tail:
+                    inside = True
+                    block_open_line = line_number
             continue
         if line.startswith(_TIER_POLICY_BLOCK_CLOSE):
-            break
+            inside = False
+            continue
         if ":" not in line:
             continue
         key, _, value = line.partition(":")
@@ -13192,6 +13208,8 @@ def _parse_tier_policy_block(text: str) -> dict:
                 found["forbid_default"] = True
             elif value.lower() in {"false", "no", "off", "0"}:
                 found["forbid_default"] = False
+    if inside:
+        found["_unterminated_tier_policy"] = block_open_line
     found["_stray_tier_model_lines"] = stray
     return found
 
@@ -13205,6 +13223,7 @@ def read_tier_policy() -> dict:
               "worker_tiers": list(_TIER_POLICY_DEFAULTS["worker_tiers"]),
               "tier_model": dict(_TIER_POLICY_DEFAULTS["tier_model"]),
               "forbid_default": _TIER_POLICY_DEFAULTS["forbid_default"],
+              "_unterminated_tier_policy": None,
               "_stray_tier_model_lines": [],
               "_source": "default"}
     try:
@@ -13227,7 +13246,14 @@ def _enforce_tier_policy(role: str, explicit_model=None, policy: dict = None):
     ``openrouter:`` or ``codex:``) is already an operator choice, while an
     omitted model under ``forbid-default`` would silently select Anthropic.
     """
+    explicit_model = _normalise_model(explicit_model)
     policy = policy or read_tier_policy()
+    unterminated = policy.get("_unterminated_tier_policy")
+    if unterminated:
+        raise FleetCliError(
+            "tier policy: <!-- fleet-tier-policy --> block is unterminated "
+            f"(opened on line {unterminated}); refusing {role} spawn until "
+            "GOALS.md is fixed")
     stray = policy.get("_stray_tier_model_lines") or []
     if stray:
         lines = ", ".join(str(line) for line in stray)
@@ -18992,7 +19018,10 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
-    _enforce_tier_policy("supervisor", getattr(args, "model", None))
+    # Empty values from a quoted `--model ""` are equivalent to omission;
+    # normalise before policy enforcement and before recording/dispatching.
+    args.model = _normalise_model(getattr(args, "model", None))
+    _enforce_tier_policy("supervisor", args.model)
 
     campaign = _read_task_arg(args.task)
     mode = getattr(args, "permission_mode", None) or SUP_SPAWN_DEFAULT_MODE
@@ -19287,6 +19316,7 @@ def _dispatch_supervisor_body(campaign, mode, model, *, setting_sources=None,
     """Pre-claim, dispatch, stamp or roll back one gen-0 supervisor body.
     Shared by sup-spawn and supervisor respawn. Gate, ceiling and instance
     settings preflight belong to the calling verb and are not repeated here."""
+    model = _normalise_model(model)
     _warn_missing_bypass_ack(mode)
     policy = _enforce_tier_policy("supervisor", model)
     model = model or resolve_model_for_role("supervisor", policy)
@@ -19902,6 +19932,9 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     Render explicit and default permissions through mode_flags. The default
     is SUCCESSOR_DEFAULT_MODE: a headless supervisor must be able to run its
     bootstrap Bash command without an interactive permission prompt."""
+    # Empty values from a quoted `--model ""` are equivalent to omission;
+    # normalise before either handoff policy branch evaluates the model.
+    args.model = _normalise_model(getattr(args, "model", None))
     if _claim_uses_native_codex():
         # Native claims persist their provider model in the registry.  Resolve
         # that model before enforcing forbid-default: omitting --model is safe

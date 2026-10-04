@@ -220,9 +220,13 @@ This fixes where each piece lives:
 
 The policy comment may also set `forbid-default: true`. When that flag is set, `spawn`,
 `sup-spawn`, and supervisor handoff dispatch refuse an unresolved role instead of silently
-selecting the Anthropic namespace default; an explicit `--model` remains an operator choice.
+selecting the Anthropic namespace default; an explicit `--model` remains an operator choice. A
+blank or whitespace-only `--model` is normalised to omitted before this check, so it cannot bypass
+the guard.
 A `tier-model:` line outside the `<!-- fleet-tier-policy ... -->` block is treated as a
-malformed policy and is refused at those same spawn boundaries, with its line number named.
+malformed policy and is refused at those same spawn boundaries, with its line number named. The
+opening and closing markers may share one line; an opening marker without a later `-->` is an
+unterminated policy and is refused at those boundaries.
 
 ### 3.4 Worker-model policy: Opus or Sonnet, never Haiku
 
