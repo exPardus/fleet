@@ -113,12 +113,12 @@
 **Interfaces:**
 - Produces: `dispatch_kind=codex-app-server`; genuine thread/turn fields; native routes for spawn/status/send/wait/peek/result/interrupt/kill/resume/respawn.
 
-- [ ] Write failing transition-table tests for active/waiting/idle/not-loaded/system-error/limit states and tests for preclaim/bind, exact cwd, lost responses, busy steer, idle wake, supported interrupt, result/usage, and no duplicate body.
-- [ ] Route by `dispatch_kind`: existing `mcx` behavior stays byte-compatible; native rows use app-server; mixed-invalid rows refuse.
-- [ ] Implement spawn sequence exactly: preclaim under `fleet.lock`; unlock; create thread; conditionally bind under lock; unlock; start one turn; conditionally commit under lock.
-- [ ] Implement busy steer only with matching `expectedTurnId`; retain mail on mismatch/non-steerable.
-- [ ] Implement interrupt terminal proof, result from completed public items, public token totals, and no inferred USD.
-- [ ] Run native + existing mcx tests on 3.10/3.12; commit as `feat(codex): add native worker lifecycle`.
+- [x] Write failing transition-table tests for active/waiting/idle/not-loaded/system-error/limit states and tests for preclaim/bind, exact cwd, lost responses, busy steer, idle wake, supported interrupt, result/usage, and no duplicate body.
+- [x] Route by `dispatch_kind`: existing `mcx` behavior stays byte-compatible; native rows use app-server; mixed-invalid rows refuse.
+- [x] Implement spawn sequence exactly: preclaim under `fleet.lock`; unlock; create thread; conditionally bind under lock; unlock; start one turn; conditionally commit under lock.
+- [x] Implement busy steer only with matching `expectedTurnId`; retain mail on mismatch/non-steerable.
+- [x] Implement interrupt terminal proof, result from completed public items, public token totals, and no inferred USD.
+- [x] Run native + existing mcx tests on 3.10/3.12; commit as `feat(codex): add native worker lifecycle`.
 
 ### Task 6: Implement provider-safe Codex supervisor
 

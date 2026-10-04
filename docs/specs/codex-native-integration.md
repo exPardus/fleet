@@ -1,6 +1,7 @@
 # Native Codex fleet integration design
 
-**Status:** Option A approved; implementation is staged behind acceptance gates.
+**Status:** Option A approved. Native worker lifecycle verbs are implemented;
+default enablement remains staged behind the full live acceptance gates.
 **Evidence baseline:** fleet `6fa06c9`; installed `codex-cli 0.155.1`; v2 JSON Schema generated locally with `codex app-server generate-json-schema`.  
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -311,16 +312,25 @@ Zero, multiple, wrong-cwd, or conflicting observations become
 
 ### 8.2 State, send, and wake
 
+**Implemented 2026-10-04:** ordinary native worker `status` and `wait` validate
+the exact recorded thread, newest recorded turn, canonical cwd, and host
+generation through the existing exact-home host. Host loss or conflicting
+public evidence maps to `dead-suspected`, never to a proved death. File-only
+views remain file-only. Busy `send` uses one
+`turn/steer(expectedTurnId=...)`; idle `send` starts one new turn on the same
+thread. Each mutation is reserved durably before IPC, and an uncertain response
+keeps that reservation and retained mail instead of retrying.
+
 | Public observation | Fleet verdict |
 | --- | --- |
 | active, no wait flags, matching turn | `working` |
 | active + `waitingOnApproval` | `waiting` with approval metadata |
 | active + `waitingOnUserInput` | `waiting` with input metadata |
 | idle + persisted terminal current turn | terminal mapping, usually `idle` |
-| `notLoaded` | reconnect/resume; never dead by itself |
+| `notLoaded` | `dead-suspected`; explicit recovery is required, never inferred death |
 | system error, loss, schema mismatch, wrong cwd, conflicting turn | `dead-suspected`/PAGE |
 | limit error + authoritative future reset | `limited` |
-| limit error without authoritative recovery evidence | `limited-suspected`/PAGE |
+| limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
 
 Send to a matching active steerable turn calls
 `turn/steer(expectedTurnId=codex_turn_id)`. Active mismatch or
@@ -329,6 +339,17 @@ claims mail and calls one `turn/start`; failure restores/leaves the claim
 recoverable. Mail deletes only after accepted public observation.
 
 ### 8.3 Interrupt and terminal operations
+
+**Implemented 2026-10-04:** worker `interrupt` issues one supported request and
+then requires an exact same-turn terminal read before committing the terminal
+state. A lost response remains `dead-suspected` with an unresolved operation;
+it is not retried. A live-host `kill` uses the same proof rule; only proof that
+the recorded host incarnation itself is gone can bypass the turn read.
+`respawn` requires old-turn terminal proof, creates a new
+provider-minted thread, records the retired thread/turn/proof tuple, and carries
+the durable brief, journal, and pending mail. `resume-limited` reads public
+rate-limit state, records an authoritative future reset when supplied, and
+starts one same-thread turn only after explicit allowance or an elapsed reset.
 
 Interrupt uses only `turn/interrupt` with recorded real IDs. Fleet commits
 `interrupted` only after event/read proves that same turn terminal. Timeout,
@@ -342,6 +363,13 @@ idle matching thread. `respawn` creates a new real thread only after the old
 one is terminal, retaining the Fleet name but never provider identity.
 
 ### 8.4 Results and usage
+
+**Implemented 2026-10-04:** worker `peek` and `result` are file-only views of
+the bounded exact-turn public-evidence file. `result` exposes text only when
+thread, turn, item ID, text, untruncated marker, terminal status, and token
+totals form one complete matching record; it takes no lock, performs no RPC,
+and writes nothing. `wait` uses the same durable exact-turn item for its
+terminal summary. No worker path derives USD from token counts.
 
 Persist `turn/completed` and `item/completed`, then reconcile paged history
 before exposing result. Store final assistant message and token totals with real
