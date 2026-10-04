@@ -389,9 +389,11 @@ def _watch_lane_observation(home) -> tuple[dict[str, str], bool]:
     workers = data.get("workers") if isinstance(data, dict) else None
     if not isinstance(workers, dict):
         return {}, False
+    if any(not isinstance(row, dict) for row in workers.values()):
+        return {}, False
     return ({str(name): str(row.get("status", "?"))
              for name, row in workers.items()
-             if isinstance(row, dict) and not row.get("archived_at")}, True)
+             if not row.get("archived_at")}, True)
 
 
 def _watch_lane_states(home) -> dict[str, str]:
@@ -433,11 +435,17 @@ def _watch_mcx_observation(mcx_dirs, run=None,
             return {}, False
         if getattr(proc, "returncode", 1) != 0:
             return {}, False
-        for line in (getattr(proc, "stdout", "") or "").splitlines():
+        output = getattr(proc, "stdout", "") or ""
+        if not isinstance(output, str):
+            return {}, False
+        for line in output.splitlines():
             fields = line.split("\t")
             if len(fields) < 2:
                 fields = line.split(None, 1)
-            if len(fields) >= 2 and fields[0] != "ID":
+            if (len(fields) < 2 or not fields[0].strip()
+                    or not fields[1].strip()):
+                return {}, False
+            if fields[0] != "ID":
                 states[fields[0]] = fields[1]
     return states, True
 

@@ -263,3 +263,43 @@ def test_watch_rejects_nonfinite_interval_and_timeout(tmp_path, value):
         fleet.build_parser().parse_args(
             ["watch", "--fleet-home", str(home), "--timeout", value]
         )
+
+
+@pytest.mark.parametrize("row", [None, ["working"]])
+def test_watch_rejects_schema_invalid_registry_rows(tmp_path, capsys, row):
+    home = _home(tmp_path)
+    cursor_path = home / "state" / "interface" / "watch-cursor.json"
+    cursor_path.write_text(json.dumps({
+        "mail": [], "lanes": {"lane-a": "working"}, "mcx": {},
+        "lanes_valid": True, "mcx_valid": True,
+    }))
+    (home / "state" / "fleet.json").write_text(
+        json.dumps({"workers": {"lane-a": row}}), encoding="utf-8"
+    )
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args) == 3
+    assert capsys.readouterr().out == ""
+    assert json.loads(cursor_path.read_text())["lanes"] == {"lane-a": "working"}
+
+
+def test_watch_rejects_malformed_mcx_line(tmp_path, capsys, monkeypatch):
+    home = _home(tmp_path)
+    cursor_path = home / "state" / "interface" / "watch-cursor.json"
+    cursor_path.write_text(json.dumps({
+        "mail": [], "lanes": {"lane-a": "working"}, "mcx": {"abcd": "running"},
+        "lanes_valid": True, "mcx_valid": True,
+    }))
+    monkeypatch.setattr(fleet.shutil, "which", lambda _name: "/fake/mcx")
+
+    class Proc:
+        returncode = 0
+        stdout = "malformed-line\n"
+
+    args = fleet.build_parser().parse_args(
+        ["watch", "--fleet-home", str(home), "--mcx-dir", str(tmp_path / ".mcx"), "--timeout", "0"]
+    )
+    assert fleet.cmd_watch(args, run=lambda *a, **k: Proc()) == 3
+    assert capsys.readouterr().out == ""
+    assert json.loads(cursor_path.read_text())["mcx"] == {"abcd": "running"}
