@@ -1009,20 +1009,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11240) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12146) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15568) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11253) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12159) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:15581) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3335) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
       * `_read_registry_readonly` (:4014) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12396) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:15442) -- describe the incident-specific absence.
+      * `_doctor_check_registry` (:12409) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:15455) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6635) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17222) -- render the release explanation.
+      * `_print_snapshot_table` (:6641) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:17235) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3317,7 +3317,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15568`), because legacy upgrades also require a complete registry.
+    (`:15581`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1089`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -6605,6 +6605,8 @@ def cmd_status(args) -> int:
                 n, "idle", expected_sid=sid,
                 expected_mcx_id=(rec.get("mcx_id")
                                  if _codex_record_route(rec) == "mcx" else None),
+                expected_status=rec.get("status"),
+                expected_last_dispatch_at=rec.get("last_dispatch_at"),
             )
         except Exception:
             pass  # A status observation must remain usable if delivery fails.
@@ -7351,14 +7353,18 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                     completed_codex.append(
                         (n, rec.get("session_id") or rec.get("codex_thread_id"),
                          rec.get("mcx_id")
-                         if _codex_record_route(rec) == "mcx" else None))
+                         if _codex_record_route(rec) == "mcx" else None,
+                         persisted.get("status"),
+                         persisted.get("last_dispatch_at")))
             # Save only actual changes; waiting on archived records must preserve file bytes.
             if changed:
                 save_registry(data)
-        for n, sid, mcx_id in completed_codex:
+        for n, sid, mcx_id, expected_status, expected_last_dispatch_at in completed_codex:
             try:
                 notify_lane_done(n, "idle", expected_sid=sid,
-                                 expected_mcx_id=mcx_id)
+                                 expected_mcx_id=mcx_id,
+                                 expected_status=expected_status,
+                                 expected_last_dispatch_at=expected_last_dispatch_at)
             except Exception:
                 pass
 
@@ -9590,7 +9596,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9498` / `cmd_respawn:8913`, before
+    # resolution that runs from `cmd_kill:9511` / `cmd_respawn:8926`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -9621,9 +9627,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9498` / `cmd_respawn:8913`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9511` / `cmd_respawn:8926`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:8934-8936` spells out that design -- resolve under the lock.
+    # `cmd_respawn:8947-8949` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -14483,9 +14489,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3139, :3174, :3204, :3243, :3280,
-    :3342, :3422, :4411, :9601, :9763, :10027, :10256, :10292, :10534, :10535, :10624, :10634, :10645, :10743, :11266, :14427, :18320, :18321, :18425, :18486, :19807, :21781`).
+    :3342, :3422, :4411, :9614, :9776, :10040, :10269, :10305, :10547, :10548, :10637, :10647, :10658, :10756, :11279, :14440, :18333, :18334, :18438, :18499, :19820, :21794`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8203, :8787, :12723, :20546. This makes union identity
+    OWN prior sid alone: :8216, :8800, :12736, :20559. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15203,8 +15209,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8203, :8787, :12723,
-    # :20546) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8216, :8800, :12736,
+    # :20559) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15212,7 +15218,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1089`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14401`).
+        # names this gate as its reason (`:14414`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -15568,7 +15574,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11237`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11250`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -21919,20 +21925,25 @@ def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
         if (expected_mcx_id is not None
                 and current.get("mcx_id") != expected_mcx_id):
             return
-        if (expected_status is not None
-                and current.get("status") != expected_status):
-            return
-        if (expected_last_dispatch_at is not None
-                and current.get("last_dispatch_at") != expected_last_dispatch_at):
-            return
         pending = current.get("lane_done_pending")
-        if isinstance(pending, dict) and pending.get("key") == turn_key:
+        owns_pending = (isinstance(pending, dict)
+                        and pending.get("key") == turn_key)
+        status_matches = (expected_status is None
+                          or current.get("status") == expected_status)
+        dispatch_matches = (expected_last_dispatch_at is None
+                            or current.get("last_dispatch_at") == expected_last_dispatch_at)
+        if owns_pending:
             current.pop("lane_done_pending", None)
-        elif not delivered:
+        if not status_matches or not dispatch_matches:
+            if owns_pending:
+                save_registry(data)
+            return
+        if not owns_pending and not delivered:
             return
         if delivered and _lane_done_turn_key(name, current) == turn_key:
             current["lane_done_notified"] = turn_key
-        save_registry(data)
+        if owns_pending or delivered:
+            save_registry(data)
 
 
 def sweep_lane_done(roster_fn=None, *, run=subprocess.run,

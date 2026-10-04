@@ -132,3 +132,61 @@ def test_sweep_refuses_same_mcx_id_new_turn_during_probe(tmp_path, monkeypatch):
     assert fleet.sweep_lane_done(run=subprocess.run) == []
     assert sends == []
     assert fleet.load_registry()["workers"]["lane"] == expected
+
+
+def test_cmd_status_rejects_same_mcx_id_new_turn_before_notify(tmp_path, monkeypatch):
+    """Status must pin turn fields through its observation-to-notify gap."""
+    _setup_home(tmp_path, monkeypatch)
+    calls = []
+    original = fleet.notify_lane_done
+
+    def mutate_then_notify(name, status, **kwargs):
+        calls.append(kwargs)
+        data = fleet.load_registry()
+        data["workers"]["lane"].update(
+            {"status": "working", "last_dispatch_at": "new-turn"})
+        fleet.save_registry(data)
+        return original(name, status, **kwargs)
+
+    monkeypatch.setattr(fleet, "notify_lane_done", mutate_then_notify)
+    sends = []
+    monkeypatch.setattr(
+        fleet, "_cmd_send_native",
+        lambda name, message: sends.append((name, message)) or 0,
+    )
+
+    args = fleet.build_parser().parse_args(["status", "lane", "--json"])
+    assert fleet.cmd_status(args) == 0
+    assert calls and calls[0]["expected_status"] == "idle"
+    assert "expected_last_dispatch_at" in calls[0]
+    assert sends == []
+    assert fleet.load_registry()["workers"]["lane"]["status"] == "working"
+
+
+def test_cmd_wait_rejects_same_mcx_id_new_turn_before_notify(tmp_path, monkeypatch):
+    """Wait must pin turn fields through its persistence-to-notify gap."""
+    _setup_home(tmp_path, monkeypatch)
+    calls = []
+    original = fleet.notify_lane_done
+
+    def mutate_then_notify(name, status, **kwargs):
+        calls.append(kwargs)
+        data = fleet.load_registry()
+        data["workers"]["lane"].update(
+            {"status": "working", "last_dispatch_at": "new-turn"})
+        fleet.save_registry(data)
+        return original(name, status, **kwargs)
+
+    monkeypatch.setattr(fleet, "notify_lane_done", mutate_then_notify)
+    sends = []
+    monkeypatch.setattr(
+        fleet, "_cmd_send_native",
+        lambda name, message: sends.append((name, message)) or 0,
+    )
+
+    args = fleet.build_parser().parse_args(["wait", "lane"])
+    assert fleet.cmd_wait(args, sleep=lambda _: None, clock=lambda: 0.0) == 0
+    assert calls and calls[0]["expected_status"] == "idle"
+    assert "expected_last_dispatch_at" in calls[0]
+    assert sends == []
+    assert fleet.load_registry()["workers"]["lane"]["status"] == "working"

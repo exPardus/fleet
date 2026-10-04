@@ -104,6 +104,28 @@ def test_failed_send_clears_marker_and_next_observation_retries(home, monkeypatc
     assert calls == [(PARENT, "LANE-DONE lane idle none")] * 2
 
 
+def test_status_change_during_send_clears_pending_marker(home, monkeypatch):
+    """A concurrent turn change must not strand the old pending marker."""
+    before = fleet.load_registry()["workers"]["lane"]
+    expected_dispatch = before.get("last_dispatch_at")
+
+    def send(name, message):
+        data = fleet.load_registry()
+        data["workers"]["lane"]["status"] = "idle"
+        fleet.save_registry(data)
+        return 0
+
+    monkeypatch.setattr(fleet, "_cmd_send_native", send)
+    assert fleet.notify_lane_done(
+        "lane", "idle", expected_sid=LANE_SID,
+        expected_status="working", expected_last_dispatch_at=expected_dispatch,
+        run=lambda *a, **k: SimpleNamespace(returncode=1, stdout=""),
+    )
+    rec = fleet.load_registry()["workers"]["lane"]
+    assert "lane_done_pending" not in rec
+    assert "lane_done_notified" not in rec
+
+
 @pytest.mark.parametrize("change", ["absent", "dead", "released", "mismatch"])
 def test_no_delivery_without_current_live_claim(home, monkeypatch, change):
     data = fleet.load_registry()
