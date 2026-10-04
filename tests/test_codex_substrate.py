@@ -45,11 +45,25 @@ root = Path(os.environ["MCX_DIR"])
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 
 capture = os.environ.get("MCX_CAPTURE")
+captured_approval = os.environ.get("MCX_APPROVAL")
+captured_effort = os.environ.get("MCX_EFFORT")
+if cmd == "steer" and len(sys.argv) > 2:
+    saved_job = root / sys.argv[2]
+    for setting, fallback in (("approval", captured_approval),
+                              ("effort", captured_effort)):
+        try:
+            value = (saved_job / setting).read_text(encoding="utf-8").strip()
+        except OSError:
+            value = fallback
+        if setting == "approval":
+            captured_approval = value
+        else:
+            captured_effort = value
 if capture:
     with Path(capture).open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"argv": sys.argv,
-                                 "approval": os.environ.get("MCX_APPROVAL"),
-                                 "effort": os.environ.get("MCX_EFFORT")}) + "\n")
+                                 "approval": captured_approval,
+                                 "effort": captured_effort}) + "\n")
 
 
 def fail(msg):
@@ -67,6 +81,10 @@ if cmd == "spawn":
     job.mkdir()
     (job / "state").write_text("running", encoding="utf-8")
     (job / "model").write_text(model, encoding="utf-8")
+    (job / "approval").write_text(os.environ.get("MCX_APPROVAL", "never"),
+                                  encoding="utf-8")
+    (job / "effort").write_text(os.environ.get("MCX_EFFORT", "medium"),
+                                 encoding="utf-8")
     (job / "prompt").write_text(prompt, encoding="utf-8")
     (job / "log").write_text(f"log line one for {wid}\nlog line two\n",
                              encoding="utf-8")
@@ -375,6 +393,25 @@ class TestSend:
         steer_call = next(item for item in entries if item["argv"][1] == "steer")
         assert steer_call["approval"] == "auto"
         assert steer_call["effort"] == "xhigh"
+
+    @pytest.mark.parametrize("setting, value", [
+        ("approval", "unrestricted"),
+        ("effort", "low"),
+    ])
+    def test_steer_refuses_when_saved_mcx_setting_differs_from_row(
+            self, codex_home, setting, value):
+        worktree, rec = _spawn(codex_home, mode="accept", effort="xhigh")
+        _set_state(worktree, rec["mcx_id"], "done")
+        (_job(worktree, rec["mcx_id"]) / setting).write_text(
+            value, encoding="utf-8")
+
+        with pytest.raises(fleet.FleetCliError,
+                           match=rf"saved mcx {setting} .* differs"):
+            fleet.cmd_send(SimpleNamespace(
+                name="cx1", message="must not steer", nonce=None,
+                force_band=False))
+        assert (_job(worktree, rec["mcx_id"]) / "state").read_text(
+            encoding="utf-8") == "done"
 
     def test_send_to_a_running_lane_refuses_without_queueing(self, codex_home):
         worktree, rec = _spawn(codex_home)  # stub state: running

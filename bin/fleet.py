@@ -2561,6 +2561,32 @@ def _mcx_record_env(record) -> dict:
     return {"approval": approval, "effort": effort}
 
 
+def _mcx_reconcile_saved_settings(name: str, record: dict) -> None:
+    """Refuse a steer when mcx's saved launch settings drifted from Fleet.
+
+    The mcx launcher reads these files when it restarts a job.  Environment
+    variables passed to ``mcx steer`` are therefore not authoritative for the
+    restarted Codex process.
+    """
+    expected = _mcx_record_env(record)
+    mcx_id = record.get("mcx_id")
+    if not mcx_id:
+        raise FleetCliError(f"{name}: no mcx worker id recorded -- refusing to steer")
+    job = _mcx_dir(record) / mcx_id
+    for setting, wanted in expected.items():
+        path = job / setting
+        try:
+            saved = path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError) as exc:
+            raise FleetCliError(
+                f"{name}: could not read saved mcx {setting} at {path} -- "
+                "refusing to steer") from exc
+        if saved != wanted:
+            raise FleetCliError(
+                f"{name}: saved mcx {setting} {saved!r} differs from Fleet "
+                f"row {wanted!r} -- refusing to steer")
+
+
 def _mcx_run(record, args, run=subprocess.run, which=shutil.which,
              input_text=None, timeout=MCX_VERB_TIMEOUT_SECONDS):
     """Run one mcx verb against the record's job directory."""
@@ -7872,6 +7898,7 @@ def _cmd_send_codex(name: str, message: str,
         raise FleetCliError(
             f"{name}: worker is dead -- run `fleet respawn {name}` first")
 
+    _mcx_reconcile_saved_settings(name, rec)
     proc = _mcx_run(rec, ["steer", rec["mcx_id"], "-"],
                     run=run, which=which, input_text=message)
     if proc.returncode != 0:

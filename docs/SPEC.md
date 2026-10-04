@@ -213,9 +213,11 @@ The mapped value is written as `mcx_approval` on the registry row and wins over 
 inherited `MCX_APPROVAL` environment variable; a caller cannot weaken Fleet's
 selected restriction. `--effort` is passed as mcx `-r` and persisted as
 `mcx_effort` (default `medium`). Respawn and steer reuse both persisted values;
-`fleet status` and `fleet peek` show the approval mode so a sandboxed lane is
-visible. Legacy rows without these fields derive approval from their saved Fleet
-mode and use medium effort.
+before a steer, Fleet verifies mcx's saved `approval` and `effort` files still
+match the row and refuses on drift, because mcx reloads those files for the
+restarted run. `fleet status` and `fleet peek` show the approval mode so a
+sandboxed lane is visible. Legacy rows without these fields derive approval
+from their saved Fleet mode and use medium effort.
 
 **Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).
 
