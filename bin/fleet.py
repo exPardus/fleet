@@ -1972,6 +1972,45 @@ def _codex_permission_profile(mode: str) -> dict:
         raise FleetCliError(f"unsupported Codex permission mode: {mode!r}") from exc
 
 
+def _validate_codex_managed_requirements(result, profile: dict) -> dict | None:
+    """Refuse an explicit Fleet policy excluded by public managed requirements."""
+    if not isinstance(result, dict) or set(result) - {"requirements"}:
+        raise FleetCliError("Codex configRequirements/read response is malformed")
+    requirements = result.get("requirements")
+    if requirements is None:
+        return None
+    if not isinstance(requirements, dict):
+        raise FleetCliError("Codex managed requirements are malformed")
+    checks = (
+        ("allowedApprovalPolicies", profile.get("approvalPolicy"), "approval policy"),
+        ("allowedSandboxModes", profile.get("sandbox"), "sandbox mode"),
+    )
+    for field, requested, label in checks:
+        allowed = requirements.get(field)
+        if allowed is None or requested is None:
+            continue
+        if (not isinstance(allowed, list)
+                or any(not isinstance(value, str) for value in allowed)):
+            raise FleetCliError(f"Codex managed {label} requirements are malformed")
+        if requested not in allowed:
+            raise FleetCliError(
+                f"Codex managed policy disallows requested {label} {requested!r}")
+    # Persist only the policy inputs Fleet actually interpreted. Other public
+    # requirement fields remain provider-owned and are not silently enforced.
+    return {
+        field: requirements.get(field)
+        for field, _requested, _label in checks
+        if requirements.get(field) is not None
+    }
+
+
+def _codex_managed_requirements(client, profile: dict) -> dict | None:
+    """Read the public policy gate; test doubles predating the surface inherit none."""
+    reader = getattr(client, "config_requirements", None)
+    result = reader(timeout=10) if callable(reader) else {"requirements": None}
+    return _validate_codex_managed_requirements(result, profile)
+
+
 def _codex_native_client(home):
     """Connect to the exact-home host without a module import side effect."""
     from fleet_codex import CodexHostClient
@@ -1982,6 +2021,31 @@ def _codex_existing_client(home):
     """Attach to an existing exact-home host without starting or reconciling it."""
     from fleet_codex import connect_existing
     return connect_existing(Path(home).resolve())
+
+
+def _codex_wait_summaries(record: dict) -> list[dict]:
+    """Read bounded durable wait metadata without starting or probing a host."""
+    if _codex_record_route(record) != "native":
+        return []
+    thread_id = record.get("codex_thread_id")
+    turn_id = record.get("codex_turn_id")
+    if not isinstance(thread_id, str) or not isinstance(turn_id, str):
+        return []
+    try:
+        from fleet_codex import read_pending_requests
+        waits = read_pending_requests(
+            FLEET_HOME, thread_id, turn_id,
+            current_generation=record.get("codex_host_generation"))
+    except (FleetCliError, OSError, ValueError) as exc:
+        return [{"state": "unreadable", "detail": str(exc)[:160]}]
+    return [{
+        "request_id": wait.get("request_id"),
+        "kind": wait.get("method"),
+        "state": wait.get("state"),
+        "item_id": wait.get("item_id"),
+        "offered_decisions": wait.get("offered_decisions", []),
+        "stale": wait.get("stale") is True,
+    } for wait in waits]
 
 
 def _provider_codex_id(value, label):
@@ -3738,6 +3802,13 @@ def recompute_worker_codex(name: str, record: dict,
             updated["adapter_state"] = "uncertain"
             return updated
         status, adapter_state = _codex_worker_status(observed)
+        waits = _codex_wait_summaries(record)
+        current_waits = [wait for wait in waits if not wait.get("stale")]
+        if any(wait.get("state") in {"unknown", "unreadable"}
+               for wait in current_waits):
+            status, adapter_state = "dead-suspected", "uncertain"
+        elif observed["provider_status"] == "active" and current_waits:
+            status, adapter_state = "working", "waiting"
         updated["status"] = status
         updated["adapter_state"] = adapter_state
         updated["provider_status"] = observed["provider_status"]
@@ -3745,7 +3816,7 @@ def recompute_worker_codex(name: str, record: dict,
         error_code = observed.get("error_code")
         if error_code is not None:
             updated["codex_error_code"] = error_code
-        if observed["active_flags"]:
+        if observed["active_flags"] or current_waits:
             updated["waiting_for_permission"] = True
         if status == "limited":
             updated["limit_kind"] = error_code
@@ -3844,6 +3915,11 @@ def _worker_flags(record: dict) -> list:
     # session paused on a permission prompt.
     if record.get("waiting_for_permission"):
         flags.append("waiting-permission")
+    for wait in record.get("codex_waits") or ():
+        state = wait.get("state") if isinstance(wait, dict) else "unreadable"
+        request_id = wait.get("request_id") if isinstance(wait, dict) else "?"
+        suffix = ":stale" if isinstance(wait, dict) and wait.get("stale") else ""
+        flags.append(f"codex-wait:{request_id}:{state}{suffix}")
     # Kernel 10 (F12=M24): surface the fleet-side token-ceiling refusal in
     # `fleet status`, mirroring how over_budget shows up as its own status.
     if status == "over_ceiling":
@@ -4981,6 +5057,8 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # The separate supervisor snapshot states which body holds the claim.
             "tier": "supervisor" if _is_supervisor_shaped(name) else "worker",
         }
+        if _codex_record_route(rec) == "native":
+            row["codex_waits"] = _codex_wait_summaries(rec)
         if _codex_record_route(rec) == "mcx":
             row["mcx_approval"] = rec.get("mcx_approval") or _mcx_approval(
                 rec.get("mode") or "dontask")
@@ -6119,7 +6197,7 @@ def _validate_codex_thread_effective(thread_result, requested_model, profile):
     sandbox = thread_result.get("sandbox")
     expected_approval = profile["approvalPolicy"]
     expected_sandbox = profile["sandbox"]
-    known_approvals = {"never", "on-request", "on-failure", "untrusted"}
+    known_approvals = {"never", "on-request", "untrusted"}
     known_sandboxes = {
         "danger-full-access": "dangerFullAccess",
         "workspace-write": "workspaceWrite",
@@ -6178,11 +6256,13 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
         prior_task = task_file_path(name).read_bytes()
     except OSError:
         prior_task = None
+    managed_requirements = None
     try:
         write_brief(name, task)
         tasks_dir().mkdir(parents=True, exist_ok=True)
         task_file_path(name).write_text(prompt, encoding="utf-8")
         client = _codex_native_client(FLEET_HOME)
+        managed_requirements = _codex_managed_requirements(client, profile)
     except BaseException as exc:
         _rollback_codex_preclaim(
             name, record, prior_brief, prior_task)
@@ -6232,6 +6312,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
                     "approvalsReviewer": thread_result.get("approvalsReviewer"),
                     "sandbox": thread_result.get("sandbox"),
                 },
+                "permission_requirements": managed_requirements,
                 "last_operation_id": turn_operation_id,
             })
             save_registry(data)
@@ -6665,6 +6746,11 @@ def _print_snapshot_table(snap: dict, name=None) -> None:
             flags.append("archived")
         if w.get("mcx_approval"):
             flags.append(f"mcx-approval:{w['mcx_approval']}")
+        for wait in w.get("codex_waits") or ():
+            state = wait.get("state") if isinstance(wait, dict) else "unreadable"
+            request_id = wait.get("request_id") if isinstance(wait, dict) else "?"
+            suffix = ":stale" if isinstance(wait, dict) and wait.get("stale") else ""
+            flags.append(f"codex-wait:{request_id}:{state}{suffix}")
         # Show nonzero recorded denial counts; the count makes no claim about a rule.
         denied = w.get("permission_denials")
         if isinstance(denied, int) and not isinstance(denied, bool) and denied > 0:
@@ -6720,7 +6806,10 @@ def _print_status_table(data: dict, names) -> None:
         mail = _pending_mail_count(evidence_sid) if evidence_sid else 0
         attach_age = _attach_age_seconds(rec)
         attach_s = f"{attach_age / 3600:.1f}h" if attach_age is not None else "-"
-        flag_list = _worker_flags(rec)
+        rendered_rec = dict(rec)
+        if _codex_record_route(rec) == "native":
+            rendered_rec["codex_waits"] = _codex_wait_summaries(rec)
+        flag_list = _worker_flags(rendered_rec)
         if is_native(rec):
             # Native dispatch has no USD cost signal; render a dash.
             cost_s = f"{'-':>9}"
@@ -7857,6 +7946,48 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
                 _clear_supervisor_park(claim)
                 write_incarnation(claim)
     return result
+
+
+def _parse_codex_response_decision(raw: str):
+    """Accept a simple literal or an explicit JSON response object."""
+    value = _read_task_arg(raw) if raw.startswith("@") else raw
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = value
+    if parsed is None or isinstance(parsed, (bool, int, float, list)):
+        raise FleetCliError(
+            "Codex response decision must be a literal choice or JSON object")
+    if not isinstance(parsed, (str, dict)):
+        raise FleetCliError("Codex response decision has an unsupported shape")
+    return parsed
+
+
+def cmd_codex_respond(args) -> int:
+    """Explicitly consume one current native-Codex blocking request."""
+    # This is provider direction, so it uses the existing gated `send` frame;
+    # both entry points expose the same continuity proof and effect class.
+    _supervisor_gate("send", nonce=getattr(args, "nonce", None))
+    name = _resolve_worker_target(args.name)
+    data = read_registry_no_repair()
+    record = data.get("workers", {}).get(name)
+    if not isinstance(record, dict):
+        raise FleetCliError(f"unknown worker: {name!r}")
+    refuse_if_archived(name, record, "codex-respond")
+    binding = _codex_worker_binding(name, record)
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError(
+            f"{name}: approval request belongs to a stale Codex host generation")
+    result = client.respond_approval(
+        args.request_id, binding.thread_id, binding.turn_id,
+        _parse_codex_response_decision(args.decision), timeout=10)
+    state = result.get("state")
+    if state not in {"responded", "resolved"}:
+        raise FleetCliError(
+            f"{name}: Codex approval response returned invalid state {state!r}")
+    print(f"{name}: Codex request {args.request_id} response consumed once ({state})")
+    return 0
 
 
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
@@ -9081,12 +9212,14 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         prior_task = None
     operation_id = f"worker-{name}-respawn-thread-{uuid.uuid4()}"
     _reserve_codex_worker_operation(binding, operation_id, "respawn/thread-start")
+    managed_requirements = None
     try:
         if task_override is not None:
             write_brief(name, task_override)
         tasks_dir().mkdir(parents=True, exist_ok=True)
         task_file_path(name).write_text(prompt, encoding="utf-8")
         client = _codex_native_client(FLEET_HOME)
+        managed_requirements = _codex_managed_requirements(client, profile)
     except BaseException:
         restore_mailbox_claim(mail_claim)
         restore_brief(name, prior_brief)
@@ -9154,6 +9287,12 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
                 "codex_thread_id": thread_id, "codex_turn_id": None,
                 "codex_host_generation": reply.generation,
                 "adapter_state": "bound", "status": "working",
+                "permission_effective": {
+                    "approvalPolicy": result.get("approvalPolicy"),
+                    "approvalsReviewer": result.get("approvalsReviewer"),
+                    "sandbox": result.get("sandbox"),
+                },
+                "permission_requirements": managed_requirements,
                 "retired_codex_threads": retired,
                 "last_operation_id": turn_operation_id,
                 "pending_operation": {
@@ -21271,6 +21410,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--force-band", action="store_true",
                         help="override the supervisor soft context-band refusal; never the hard ceiling")
 
+    p_codex_respond = sub.add_parser(
+        "codex-respond",
+        help="answer one current native Codex approval/input request exactly once")
+    p_codex_respond.add_argument("name")
+    p_codex_respond.add_argument("request_id")
+    p_codex_respond.add_argument(
+        "decision", help="literal offered choice, JSON object, or @file")
+    p_codex_respond.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -21743,6 +21891,8 @@ def main(argv=None) -> int:
             return cmd_wait(args)
         if args.command == "send":
             return cmd_send(args)
+        if args.command == "codex-respond":
+            return cmd_codex_respond(args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":

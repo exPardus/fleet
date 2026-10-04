@@ -300,6 +300,12 @@ retired thread is recorded with its exact turn and terminal status. Public
 rate-limit reads provide the recorded reset horizon. No path signals a Codex
 PID or manufactures USD usage.
 
+Native Codex blocking requests are durable, generation-bound status evidence.
+Only `codex-respond NAME REQUEST_ID DECISION` answers one, after validating the
+explicit offered decision against the exact current worker binding; stale,
+wrong, unknown, and already-consumed requests refuse without an implicit
+approval or blind retry.
+
 The wave-close row's per-home configuration also owns landing gates: a missing
 `supervisor/wave-close.json` preserves the fleet home's `docs-currency` and
 `receipts` gates, while a configured foreign home defaults to no fleet-specific

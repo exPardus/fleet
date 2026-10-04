@@ -397,6 +397,25 @@ evidence survives host replacement.
 
 ## 9. Permissions and blocking requests
 
+**Implemented 2026-10-04 for native workers:** every new worker thread,
+including a context-reset respawn, reads `configRequirements/read` before
+`thread/start`, refuses an explicitly requested approval or sandbox mode that
+managed requirements exclude, and records the effective approval, reviewer,
+and sandbox returned by the provider. App-server blocking requests are stored
+atomically under the exact home with their real request/thread and applicable
+turn/item identity plus host generation before status exposes them. They survive a host
+restart as visible generation-bound waits; a request from a replaced
+generation is stale and cannot be answered on the new connection.
+
+`fleet codex-respond NAME REQUEST_ID DECISION` is the only response path.
+`DECISION` is an offered literal, an explicit JSON response object, or `@file`;
+the host validates it against the stored request, marks the request consumed
+before writing the JSON-RPC response, and never retries an uncertain write.
+Repeated, resolved, wrong-home, wrong-thread, wrong-turn, stale-generation,
+and unknown-kind responses refuse. `serverRequest/resolved` closes the durable
+wait; user-input and elicitation values are not retained in response evidence.
+No mode supplies `acceptForSession` or user input implicitly.
+
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
 | --- | --- | --- | --- |
 | `bypass` | `never` | `danger-full-access` | explicit unrestricted mode, still subject to external policy |
