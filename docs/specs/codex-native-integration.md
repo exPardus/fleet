@@ -336,7 +336,13 @@ Send to a matching active steerable turn calls
 `turn/steer(expectedTurnId=codex_turn_id)`. Active mismatch or
 `activeTurnNotSteerable` leaves mail pending and starts no turn. Idle send
 claims mail and calls one `turn/start`; failure restores/leaves the claim
-recoverable. Mail deletes only after accepted public observation.
+recoverable. Mail deletes only after accepted public observation. Send and
+interrupt refuse a committed `dead-suspected`, unknown, waiting, or uncertain
+row and any unresolved operation before provider IPC. They read the existing
+host first and reserve a mutation only after the exact thread is actionable, so
+a down host creates no reservation. A known-local mailbox failure before the
+provider call releases its reservation; only a possibly accepted provider call
+freezes the row and keeps the reservation for reconciliation.
 
 ### 8.3 Interrupt and terminal operations
 

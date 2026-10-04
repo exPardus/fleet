@@ -673,6 +673,110 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     assert record["status"] == "working"
 
 
+@pytest.mark.parametrize("verb", ["send", "interrupt"])
+@pytest.mark.parametrize("updates,error", [
+    ({"status": "dead-suspected"}, "dead-suspected"),
+    ({"status": "unknown"}, "unknown"),
+    ({"pending_operation": {
+        "operation_id": "unresolved-op", "kind": "turn/start",
+        "at": "2026-09-20T00:00:00Z",
+    }}, "pending"),
+    ({"adapter_state": "uncertain"}, "uncertain"),
+    ({"adapter_state": "waiting"}, "waiting"),
+])
+def test_native_worker_mutations_refuse_non_actionable_rows_before_ipc(
+        native_home, monkeypatch, verb, updates, error):
+    _home, lane = native_home
+    record = _install_record(lane, **updates)
+    monkeypatch.setattr(
+        fleet, "_codex_existing_client",
+        lambda _home: pytest.fail("non-actionable row reached provider IPC"))
+
+    with pytest.raises(fleet.FleetCliError, match=error):
+        if verb == "send":
+            fleet._cmd_send_codex("cx-native", "must not be delivered")
+        else:
+            fleet._cmd_interrupt_codex("cx-native", record)
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored.get("pending_operation") == updates.get("pending_operation")
+
+
+@pytest.mark.parametrize("verb", ["send", "interrupt"])
+def test_native_worker_host_down_never_reserves_a_mutation(
+        native_home, monkeypatch, verb):
+    _home, lane = native_home
+    record = _install_record(lane)
+    from fleet_codex import HostUnavailable
+    reserve_calls = []
+    original_reserve = fleet._reserve_codex_worker_operation
+
+    def tracked_reserve(*args, **kwargs):
+        reserve_calls.append((args, kwargs))
+        return original_reserve(*args, **kwargs)
+
+    monkeypatch.setattr(fleet, "_reserve_codex_worker_operation", tracked_reserve)
+    monkeypatch.setattr(
+        fleet, "_codex_existing_client",
+        lambda _home: (_ for _ in ()).throw(HostUnavailable("host down")))
+
+    with pytest.raises(HostUnavailable, match="host down"):
+        if verb == "send":
+            fleet._cmd_send_codex("cx-native", "must not be delivered")
+        else:
+            fleet._cmd_interrupt_codex("cx-native", record)
+
+    assert reserve_calls == []
+    assert "pending_operation" not in fleet.load_registry()["workers"]["cx-native"]
+
+
+def test_native_worker_mailbox_io_failure_releases_mutation_reservation(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = WorkerVerbClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(
+        fleet, "append_mailbox",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("mailbox full")))
+
+    with pytest.raises(fleet.FleetCliError, match="mailbox"):
+        fleet._cmd_send_codex("cx-native", "continue safely")
+
+    assert [op["payload"]["method"] for op in client.operations] == ["thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert "pending_operation" not in stored
+    assert stored["status"] == "working"
+    assert stored["adapter_state"] == "active"
+
+
+def test_native_worker_snapshot_counts_mail_by_thread_id(native_home):
+    home, lane = native_home
+    _install_record(lane)
+    (home / "mailbox" / f"{THREAD_ID}.md").write_text(
+        "pending direction", encoding="utf-8")
+
+    snapshot = fleet.status_snapshot()
+
+    assert snapshot["workers"][0]["mail"] == 1
+    assert snapshot["totals"]["mail"] == 1
+
+
+def test_native_worker_live_status_counts_mail_by_thread_id(
+        native_home, capsys):
+    home, lane = native_home
+    record = _install_record(
+        lane, status="idle", adapter_state="idle", cost_usd=0.0,
+        last_activity=fleet.now_iso())
+    (home / "mailbox" / f"{THREAD_ID}.md").write_text(
+        "pending direction", encoding="utf-8")
+
+    fleet._print_status_table({"workers": {"cx-native": record}}, ["cx-native"])
+
+    row = capsys.readouterr().out.splitlines()[-1].split()
+    assert row[5] == "1"
+
+
 def test_native_worker_interrupt_requires_terminal_public_proof(
         native_home, monkeypatch):
     _home, lane = native_home

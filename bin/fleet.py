@@ -2128,8 +2128,39 @@ def _codex_worker_status(observed: dict) -> tuple[str, str]:
     return "dead", "idle"
 
 
+def _guard_codex_worker_operation(name: str, record: dict, action: str, *,
+                                  allowed_statuses: set,
+                                  allowed_adapter_states: set) -> None:
+    """Refuse a native mutation unless its committed row is actionable."""
+    pending = record.get("pending_operation")
+    if pending is not None:
+        raise FleetCliError(
+            f"{name}: native Codex operation is pending; reconcile it before "
+            f"{action}")
+    adapter_state = record.get("adapter_state")
+    if adapter_state == "uncertain":
+        raise FleetCliError(
+            f"{name}: native Codex operation state is uncertain; reconcile it "
+            f"before {action}")
+    status = record.get("status")
+    if status == "dead-suspected":
+        raise FleetCliError(
+            f"{name}: dead-suspected -- inspect and reconcile before {action}")
+    if status not in allowed_statuses:
+        label = status if isinstance(status, str) and status else "unknown"
+        raise FleetCliError(
+            f"{name}: status is {label}; refusing native Codex {action}")
+    if adapter_state not in allowed_adapter_states:
+        label = (adapter_state if isinstance(adapter_state, str) and adapter_state
+                 else "unknown")
+        raise FleetCliError(
+            f"{name}: native Codex adapter state is {label}; refusing {action}")
+
+
 def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
-                                    operation_id: str, kind: str) -> None:
+                                    operation_id: str, kind: str, *,
+                                    allowed_statuses: set | None = None,
+                                    allowed_adapter_states: set | None = None) -> None:
     """Durably serialize Fleet mutations for one exact worker incarnation."""
     with fleet_lock():
         data = load_registry()
@@ -2140,6 +2171,11 @@ def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
                 or record.get("codex_host_generation") != binding.host_generation):
             raise FleetCliError(
                 f"{binding.name}: native Codex worker changed concurrently")
+        if allowed_statuses is not None and allowed_adapter_states is not None:
+            _guard_codex_worker_operation(
+                binding.name, record, kind,
+                allowed_statuses=allowed_statuses,
+                allowed_adapter_states=allowed_adapter_states)
         pending = record.get("pending_operation")
         if pending is not None:
             raise FleetCliError(
@@ -4813,8 +4849,9 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         rec = data["workers"][name]
         if rec.get("archived_at") and not include_archived:
             continue
-        sid = rec.get("session_id") or ""
-        mail = _pending_mail_count(sid) if sid else 0
+        evidence_sid = _archive_evidence_sid(rec)
+        mail = _pending_mail_count(evidence_sid) if evidence_sid else 0
+        sid = rec.get("session_id")
         cost = _registry_cost(rec.get("cost_usd"))
         # Numeric totals need zero defaults; displayed cells need to disclose absent
         # measurements. Track which fields were substituted without changing totals.
@@ -6446,9 +6483,8 @@ def _print_status_table(data: dict, names) -> None:
             mins_s = f"{mins:.0f}"
         except (ValueError, TypeError, KeyError):
             mins_s = "?"
-        # An absent session_id means no mailbox.
-        sid = rec.get("session_id")
-        mail = _pending_mail_count(sid) if isinstance(sid, str) and sid else 0
+        evidence_sid = _archive_evidence_sid(rec)
+        mail = _pending_mail_count(evidence_sid) if evidence_sid else 0
         attach_age = _attach_age_seconds(rec)
         attach_s = f"{attach_age / 3600:.1f}h" if attach_age is not None else "-"
         flag_list = _worker_flags(rec)
@@ -7686,42 +7722,52 @@ def _cmd_send_codex_native(name: str, message: str, rec: dict, *,
                            allow_limited: bool = False) -> int:
     """Steer an active turn or start one successor turn on the same thread."""
     binding = _codex_worker_binding(name, rec)
-    operation_id = f"worker-send-{uuid.uuid4()}"
-    _reserve_codex_worker_operation(binding, operation_id, "observe-send")
-    try:
-        observed = _codex_worker_observe(binding, require_full=True)
-    except BaseException:
-        _clear_codex_worker_operation(binding, operation_id)
-        raise
+    allowed_statuses = {"working", "idle"}
+    if allow_limited:
+        allowed_statuses.add("limited")
+    allowed_adapter_states = {"active", "idle"}
+    _guard_codex_worker_operation(
+        name, rec, "send", allowed_statuses=allowed_statuses,
+        allowed_adapter_states=allowed_adapter_states)
+    observed = _codex_worker_observe(binding, require_full=True)
     provider = observed["provider_status"]
     if provider in {"notLoaded", "systemError"} or observed["active_flags"]:
-        _clear_codex_worker_operation(binding, operation_id)
         raise FleetCliError(
             f"{name}: native Codex worker is not steerable ({provider}); "
             "no turn was started")
     if provider not in {"active", "idle"}:
-        _clear_codex_worker_operation(binding, operation_id)
         raise FleetCliError(f"{name}: native Codex worker state is ambiguous")
     if (provider == "idle" and not allow_limited
             and observed.get("error_code") in _CODEX_LIMIT_ERRORS):
-        _clear_codex_worker_operation(binding, operation_id)
         raise FleetCliError(
             f"{name}: worker is limited -- use `fleet resume-limited {name}`")
 
-    append_mailbox(binding.thread_id, message)
+    operation_id = f"worker-send-{uuid.uuid4()}"
+    method = "turn/steer" if provider == "active" else "turn/start"
+    _reserve_codex_worker_operation(
+        binding, operation_id, method,
+        allowed_statuses=allowed_statuses,
+        allowed_adapter_states=allowed_adapter_states)
+    try:
+        append_mailbox(binding.thread_id, message)
+    except BaseException as exc:
+        _clear_codex_worker_operation(binding, operation_id)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{name}: native Codex mailbox write failed before provider "
+            "mutation; reservation released") from exc
     queued, claim_path = claim_mailbox(binding.thread_id)
     if not queued or claim_path is None:
         _clear_codex_worker_operation(binding, operation_id)
         raise FleetCliError(f"{name}: could not claim queued native Codex mail")
     inputs = [{"type": "text", "text": queued, "text_elements": []}]
     if provider == "active":
-        method = "turn/steer"
         params = {
             "threadId": binding.thread_id,
             "expectedTurnId": binding.turn_id, "input": inputs,
         }
     else:
-        method = "turn/start"
         params = {"threadId": binding.thread_id, "input": inputs}
     operation = {
         "operation_id": operation_id, "method": "rpc",
@@ -8158,23 +8204,33 @@ def _cmd_interrupt_codex(name: str, rec: dict,
     requires exact terminal proof; legacy mcx retains its historical stop
     semantics. Interrupted stays sticky until respawn."""
     if _codex_record_route(rec) == "native":
+        status = rec.get("status")
+        if status in {"dead", "interrupted", "idle"}:
+            print(f"{name}: no turn running -- nothing to interrupt")
+            return 0
+        if status == "limited":
+            raise FleetCliError(
+                f"{name}: limited park -- refusing to interrupt the native "
+                "Codex resume path")
+        allowed_statuses = {"working"}
+        allowed_adapter_states = {"active"}
+        _guard_codex_worker_operation(
+            name, rec, "interrupt", allowed_statuses=allowed_statuses,
+            allowed_adapter_states=allowed_adapter_states)
         binding = _codex_worker_binding(name, rec)
-        operation_id = f"worker-interrupt-{uuid.uuid4()}"
-        _reserve_codex_worker_operation(binding, operation_id, "turn/interrupt")
-        try:
-            observed = _codex_worker_observe(binding, require_full=True)
-        except BaseException:
-            _clear_codex_worker_operation(binding, operation_id)
-            raise
+        observed = _codex_worker_observe(binding, require_full=True)
         if observed["provider_status"] == "idle":
-            _clear_codex_worker_operation(binding, operation_id)
             print(f"{name}: no turn running -- nothing to interrupt")
             return 0
         if (observed["provider_status"] != "active"
                 or observed["active_flags"]):
-            _clear_codex_worker_operation(binding, operation_id)
             raise FleetCliError(
                 f"{name}: native Codex turn is not safely interruptible")
+        operation_id = f"worker-interrupt-{uuid.uuid4()}"
+        _reserve_codex_worker_operation(
+            binding, operation_id, "turn/interrupt",
+            allowed_statuses=allowed_statuses,
+            allowed_adapter_states=allowed_adapter_states)
         operation = {
             "operation_id": operation_id, "method": "rpc",
             "payload": {"method": "turn/interrupt", "params": {
