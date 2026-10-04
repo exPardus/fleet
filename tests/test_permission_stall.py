@@ -195,6 +195,16 @@ class TestTheFoundingIncidentIsDetected:
         assert "bypass" in message
         assert "never returns" in message
 
+    def test_status_names_ask_user_question_as_a_deadlock_cause(
+            self, founding_incident):
+        roster = [_roster_entry(cwd=str(founding_incident.cwd),
+                                waiting_for="AskUserQuestion")]
+        _n, _ok, message = fleet._doctor_check_permission_stalls(
+            founding_incident.workers,
+            which=lambda _n: "claude.cmd", run=_fake_run(roster))
+        assert "AskUserQuestion" in message
+        assert "cannot be answered" in message
+
     def test_cmd_doctor_prints_the_row_and_exits_nonzero(
             self, founding_incident, capsys):
         """End to end through the real `cmd_doctor`, not just the check

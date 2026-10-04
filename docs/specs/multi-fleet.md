@@ -718,6 +718,14 @@ term; (3) plane-naming lint; (4) arming pin extended to sid-less class. Operator
 | Plugin/skill | Pull-only (D7); ritual gains the install-vs-home split for step-1/step-3 reads. |
 | `fleet.lock`, registry, mailbox, claims | Home-relative; N single-writer domains; F26/M25 refusal transfers verbatim. |
 
+The native daemon roster is machine-global, so a home-scoped `sup-guard` keeps
+supervisor-shaped rows whose `cwd` is this home, a descendant, or a worktree
+sharing the home's git common directory. It excludes only rows positively inside
+another registered fleet home (or outside every fleet home); an unreadable homes
+list or ambiguous path remains PAGE-safe. A row whose SID is in this home's claim
+union is still considered directly, even if its `cwd` is anomalous: SID ownership
+remains the stronger collision signal.
+
 ## Invariants touched (SPEC §16 — all nine checked, six argued; tenth UNBUILT/M-F-owned, untouched)
 
 1 daemonless — preserved. 2 exit-0 hooks — preserved. 6 single-writer — preserved per home;

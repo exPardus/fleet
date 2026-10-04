@@ -224,8 +224,8 @@ def _write_claim(age_seconds):
 
 class TestTheCensus:
     def test_roster_live_sids_call_sites_are_this_exact_POPULATION(self, tree):
-        """The brief said 10, counted by grep. Grep sees 14 lines: 11 calls,
-        1 def, 2 docstring mentions. The AST cannot see the last three.
+        """The brief said 10, counted by grep. Grep sees 14 lines: 12 calls,
+        1 def, 1 docstring mention. The AST cannot see the last two.
 
         THIS PINS THE POPULATION, NOT THE COUNT, and the difference is a
         measured mutant. The first version asserted `len(calls) == 11` and
@@ -239,7 +239,7 @@ class TestTheCensus:
             +def _mutant_d_decoy(entries):
             +    return _roster_live_sids(entries)
 
-        Eleven calls before, eleven after, and `_wedged_release_gate` -- the
+        Twelve calls now, and `_wedged_release_gate` -- the
         one site the report calls "the trap" -- no longer reads Q1. A count
         assertion is defeated by ANY same-arity rearrangement; a scope
         multiset is not. Same shape as
@@ -249,7 +249,7 @@ class TestTheCensus:
         got = Counter(smap.get(ln, "<module>") for ln in calls)
         expected = Counter({
             "_cmd_respawn_native": 3,
-            "_cmd_respawn_supervisor": 1,
+            "_cmd_respawn_supervisor": 2,
             "_cmd_respawn_supervisor._any_live": 1,
             "cmd_clean": 1,
             "_archive_eligible": 1,
@@ -264,7 +264,7 @@ class TestTheCensus:
             f"A site that disappears from this map has stopped reading Q1 even "
             f"if the total is unchanged -- which is exactly the mutant this "
             f"assertion exists to catch.")
-        assert sum(expected.values()) == 11
+        assert sum(expected.values()) == 12
 
         # COUNT CONTROL, both limbs. A census whose good answer might be zero
         # must be shown to be able to report non-zero AND zero (wave 38).

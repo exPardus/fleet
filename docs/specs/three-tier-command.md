@@ -218,6 +218,12 @@ This fixes where each piece lives:
   own scope (a `[UNBUILT]` that the boundary of this section argues against, not for) — recorded here so
   the tension is resolved on the page rather than left for the reader to notice.
 
+The policy comment may also set `forbid-default: true`. When that flag is set, `spawn`,
+`sup-spawn`, and supervisor handoff dispatch refuse an unresolved role instead of silently
+selecting the Anthropic namespace default; an explicit `--model` remains an operator choice.
+A `tier-model:` line outside the `<!-- fleet-tier-policy ... -->` block is treated as a
+malformed policy and is refused at those same spawn boundaries, with its line number named.
+
 ### 3.4 Worker-model policy: Opus or Sonnet, never Haiku
 
 Operator, binding: workers are the supervisor's call, **Opus and Sonnet only**; **Haiku is never a
@@ -238,6 +244,9 @@ the top tier's usage limit is hit, returning to the top tier once the reset hori
 **Tier order (policy, in `supervisor/GOALS.md`, never a code constant):** `[top, second]`. Today's
 Anthropic resolution: `[Fable 5, Opus 4.8]`. A chain of length 1 is legal (no fallback); the chain is
 per-namespace, so a single-model provider (§3.3) collapses it to one entry and the mechanism is inert.
+At dispatch, fleet walks the chain in order and uses the first tier with an operator-provided alias;
+an unmapped preferred tier therefore falls through to the next mapped tier, while an entirely
+unmapped chain leaves `--model` omitted.
 
 #### 3.5.1 Why a fallback is necessarily a NEW session — the constraint that shapes everything else
 

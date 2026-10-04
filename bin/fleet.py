@@ -746,16 +746,16 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:9513) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:10408) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:13698) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:9587) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:10482) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:13810) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:2725) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:2726) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:13572) -- describe the incident-specific absence.
-      * `_read_registry_readonly` (:3379) -- expose that distinction to views.
-      * `_doctor_check_registry` (:10658) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:13684) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:3384) -- expose that distinction to views.
+      * `_doctor_check_registry` (:10732) -- do not grade a renamed-away path readable.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:5818) -- render the stale-ok status explanation.
@@ -1180,6 +1180,7 @@ def append_mailbox(sid: str, message: str) -> None:
 _PREAMBLE_TEMPLATE = """You are fleet worker `{name}` in `{cwd}`.
 Manager messages arrive mid-task marked `<MANAGER MESSAGE>`; treat them as user instructions.
 Maintain a journal at `{journal_target}` (create it early; update it at each milestone): goal, done, in-progress, blockers, next steps. It must be enough for a fresh session to continue.
+This is a headless worker: never call `AskUserQuestion` or wait for an interactive answer. At a fork, decide and record the choice in the journal, or stop with the question in your result.
 End every turn with a compact result summary: changed, verified, blocked.
 Do not leave servers or watchers running past the end of the turn without recording their PIDs in the journal.
 """
@@ -2749,7 +2750,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:13698`), because legacy upgrades also require a complete registry.
+    (`:13810`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:826`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -3383,7 +3384,11 @@ def _permission_stall_line(name: str, rec: dict, elapsed, waiting_for) -> str:
     age = "age unknown" if elapsed is None else f"{elapsed / 60:.0f}m"
     detail = f"waitingFor: {waiting_for}" if waiting_for else "no waitingFor reported"
     cwd = rec.get("cwd")
-    if not isinstance(cwd, str) or not cwd:
+    if isinstance(waiting_for, str) and "askuserquestion" in waiting_for.lower().replace("_", ""):
+        cause = ("the pending `AskUserQuestion` cannot be answered by a headless "
+                 "worker; it will not receive a reply until the turn is interrupted "
+                 "and respawned")
+    elif not isinstance(cwd, str) or not cwd:
         cause = "worker record carries no cwd -- inspect its settings by hand"
     else:
         # Built through Path so the separators match the platform the operator
@@ -5208,6 +5213,8 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     cwd = Path(args.dir)
     if not cwd.is_dir():
         raise FleetCliError(f"--dir does not exist or is not a directory: {args.dir}")
+
+    _enforce_tier_policy("worker", getattr(args, "model", None))
 
     # Warn at dispatch about hard denials, which may leave a worker waiting for
     # permission. This is advisory: a valid restricted task must remain launchable,
@@ -8193,7 +8200,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:8041` / `cmd_respawn:7678`, before
+    # resolution that runs from `cmd_kill:8048` / `cmd_respawn:7685`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -8224,9 +8231,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:8041` / `cmd_respawn:7678`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:8048` / `cmd_respawn:7685`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:7699-7706` spells out that design -- resolve under the lock.
+    # `cmd_respawn:7706-7713` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -8482,10 +8489,77 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     inc = claim.get("incarnation_id", "?") if claim else None
 
     # Resolve the full campaign before release/stop so an unreadable brief cannot strand the fleet.
-    task_override = _read_task_arg(args.task) if getattr(args, "task", None) else None
+    task_arg = getattr(args, "task", None)
+    if (task_arg and claim is not None
+            and rec.get("status") == "interrupted"):
+        raise FleetCliError(
+            f"{name}: --task override is not supported on the same-incarnation "
+            "wake path; rerun `fleet respawn supervisor` without --task, or "
+            "use `fleet sup-spawn --task <brief>` for a new campaign")
+    task_override = _read_task_arg(task_arg) if task_arg else None
     # Pass the stored campaign into the supervisor body renderer.
     campaign = (task_override if task_override is not None
                 else read_brief(name, rec))
+
+    # `interrupt` deliberately leaves a supervisor claim held while marking
+    # its body interrupted.  That body cannot receive the ordinary
+    # `sup-release` steer: `_cmd_send_native` correctly refuses every message
+    # to an interrupted worker, which used to make respawn point at itself.
+    # Reuse the same-incarnation wake path instead.  It mints a pending wake
+    # nonce, dispatches a fresh unforked turn, and lets `sup-boot` restamp the
+    # current sid while preserving the claim identity.
+    if claim is not None and rec.get("status") == "interrupted":
+        if not old_sid:
+            _supervisor_abort(
+                "wake-precondition",
+                f"interrupted supervisor {name} has no session id -- "
+                "there is no body identity to resume",
+                name, delivered=False)
+        _require_instance_settings()
+        roster_ok, entries = _fetch_agents_roster(which=which, run=run)
+        if not roster_ok:
+            raise FleetCliError(
+                f"{name}: could not fetch the native roster -- refusing respawn "
+                "until the interrupted body's liveness can be verified")
+        if old_sid in _roster_live_sids(entries):
+            raise FleetCliError(
+                f"{name}: interrupted body is still roster-live -- refusing "
+                "same-incarnation wake until its old session is gone")
+        prior_last_dispatch_at = rec.get("last_dispatch_at")
+        with fleet_lock():
+            data = load_registry()
+            current = data["workers"].get(name)
+            if (not isinstance(current, dict)
+                    or current.get("session_id") != old_sid
+                    or current.get("status") != "interrupted"):
+                raise FleetCliError(
+                    f"{name}: worker changed while preparing interrupted "
+                    "supervisor recovery; retry")
+            current["status"] = "working"
+            current["last_activity"] = now_iso()
+            current["last_dispatch_at"] = now_iso()
+            save_registry(data)
+        try:
+            try:
+                ceiling_file_path(old_sid).unlink()
+            except OSError:
+                pass
+            return _wake_supervisor_native(
+                name, old_sid, rec["cwd"], rec.get("mode") or SUP_SPAWN_DEFAULT_MODE,
+                rec.get("model"), rec.get("setting_sources"),
+                prior_last_dispatch_at, run=run, which=which, sleep=sleep)
+        except BaseException:
+            # `_wake_supervisor_native` rolls back its pre-claim to `idle`;
+            # preserve the explicit interrupted state when its dispatch fails.
+            with fleet_lock():
+                data = load_registry()
+                current = data["workers"].get(name)
+                if (isinstance(current, dict)
+                        and current.get("session_id") == old_sid
+                        and current.get("status") == "idle"):
+                    current["status"] = "interrupted"
+                    save_registry(data)
+            raise
 
     if claim is not None:
         if not old_sid:
@@ -11634,6 +11708,7 @@ _TIER_POLICY_DEFAULTS = {
     "supervisor_chain": ["top", "second"],   # §3.5 preference chain
     "worker_tiers": ["second", "third"],     # §3.4 (Opus/Sonnet, never Haiku)
     "tier_model": {},                        # §3.3(d): unset -> omit --model
+    "forbid_default": False,                 # operator forbids Anthropic fallback
 }
 _TIER_POLICY_BLOCK_OPEN = "<!-- fleet-tier-policy"
 _TIER_POLICY_BLOCK_CLOSE = "-->"
@@ -11649,9 +11724,12 @@ def _parse_tier_policy_block(text: str) -> dict:
     lines = text.splitlines()
     inside = False
     found = {}
-    for raw in lines:
+    stray = []
+    for line_number, raw in enumerate(lines, 1):
         line = raw.strip()
         if not inside:
+            if re.match(r"^tier-model\s*:", line):
+                stray.append(line_number)
             if line.startswith(_TIER_POLICY_BLOCK_OPEN):
                 inside = True
             continue
@@ -11677,6 +11755,12 @@ def _parse_tier_policy_block(text: str) -> dict:
                     mapping[tier] = alias
             if mapping:
                 found["tier_model"] = mapping
+        elif key == "forbid-default":
+            if value.lower() in {"true", "yes", "on", "1"}:
+                found["forbid_default"] = True
+            elif value.lower() in {"false", "no", "off", "0"}:
+                found["forbid_default"] = False
+    found["_stray_tier_model_lines"] = stray
     return found
 
 
@@ -11688,15 +11772,42 @@ def read_tier_policy() -> dict:
     policy = {"supervisor_chain": list(_TIER_POLICY_DEFAULTS["supervisor_chain"]),
               "worker_tiers": list(_TIER_POLICY_DEFAULTS["worker_tiers"]),
               "tier_model": dict(_TIER_POLICY_DEFAULTS["tier_model"]),
+              "forbid_default": _TIER_POLICY_DEFAULTS["forbid_default"],
+              "_stray_tier_model_lines": [],
               "_source": "default"}
     try:
         text = goals_path().read_text(encoding="utf-8")
     except (OSError, ValueError):
         return policy
     found = _parse_tier_policy_block(text)
-    if found:
+    if (found.get("_stray_tier_model_lines")
+            or any(key != "_stray_tier_model_lines" for key in found)):
         policy.update(found)
         policy["_source"] = "goals"
+    return policy
+
+
+def _enforce_tier_policy(role: str, explicit_model=None, policy: dict = None):
+    """Refuse spawn when GOALS contains a misplaced model map or forbids the
+    provider default but leaves the requested role unresolved.
+
+    The check is deliberately provider-agnostic: an explicit model (including
+    ``openrouter:`` or ``codex:``) is already an operator choice, while an
+    omitted model under ``forbid-default`` would silently select Anthropic.
+    """
+    policy = policy or read_tier_policy()
+    stray = policy.get("_stray_tier_model_lines") or []
+    if stray:
+        lines = ", ".join(str(line) for line in stray)
+        raise FleetCliError(
+            f"tier policy: tier-model is outside the <!-- fleet-tier-policy --> "
+            f"block (line {lines}); refusing {role} spawn until GOALS.md is fixed")
+    if (explicit_model is None and policy.get("forbid_default")
+            and resolve_model_for_role(role, policy) is None):
+        raise FleetCliError(
+            f"{role} spawn refused: tier policy forbids the Anthropic default, "
+            "but no model alias resolves for this role; set tier-model or pass "
+            "--model explicitly")
     return policy
 
 
@@ -11705,11 +11816,11 @@ def resolve_model_for_role(role: str, policy: dict = None):
     the honest provider-agnostic default). Resolves role -> the first tier it
     binds to -> the operator's tier->alias mapping:
 
-      supervisor -> supervisor_chain[0]   (the preferred tier, §3.5)
-      worker     -> worker_tiers[0]        (the supervisor overrides per-spawn)
+      supervisor -> first mapped supervisor_chain tier (preference order, §3.5)
+      worker     -> first mapped worker_tiers tier (the supervisor overrides per-spawn)
       interface  -> "top"                  (advisory: fleet never launches it, §3.1)
 
-    None when the tier has no operator-set alias -- fleet does not invent one."""
+    None when no chain tier has an operator-set alias -- fleet does not invent one."""
     if policy is None:
         policy = read_tier_policy()
     if role == "supervisor":
@@ -11722,7 +11833,8 @@ def resolve_model_for_role(role: str, policy: dict = None):
         tiers = []
     if not tiers:
         return None
-    return policy.get("tier_model", {}).get(tiers[0])
+    mapping = policy.get("tier_model", {})
+    return next((mapping[tier] for tier in tiers if mapping.get(tier)), None)
 
 
 def proposed_goals_tier_block() -> str:
@@ -12602,7 +12714,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:826`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:3367`) applies here too. An unreadable registry
+    rule for the view path (`:3372`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -13402,7 +13514,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:826`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:12532`).
+        # names this gate as its reason (`:12644`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -13758,7 +13870,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:9510`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:9584`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -16520,6 +16632,110 @@ def _sup_guard_live_rows(entries):
     return rows
 
 
+def _sup_guard_resolved_path(value):
+    try:
+        return Path(value).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _sup_guard_path_is_within(path, parent):
+    path = _sup_guard_resolved_path(path)
+    parent = _sup_guard_resolved_path(parent)
+    return bool(path is not None and parent is not None
+                and (path == parent or parent in path.parents))
+
+
+def _sup_guard_git_common_dir(path, *, scan_parents=True):
+    """Return a checkout's git common directory without invoking git."""
+    current = _sup_guard_resolved_path(path)
+    if current is None:
+        return None
+    if not current.is_dir():
+        current = current.parent
+    ancestors = (current, *current.parents) if scan_parents else (current,)
+    for ancestor in ancestors:
+        dot_git = ancestor / ".git"
+        try:
+            if dot_git.is_dir():
+                return dot_git.resolve()
+            if not dot_git.is_file():
+                continue
+            line = dot_git.read_text(encoding="utf-8").splitlines()[0].strip()
+        except (OSError, UnicodeError, IndexError):
+            return None
+        if not line.lower().startswith("gitdir:"):
+            return None
+        git_dir = _sup_guard_resolved_path(line[7:].strip())
+        if git_dir is None:
+            return None
+        commondir = git_dir / "commondir"
+        try:
+            if commondir.is_file():
+                relative = commondir.read_text(encoding="utf-8").strip()
+                if relative:
+                    return (git_dir / relative).resolve()
+        except (OSError, UnicodeError):
+            return None
+        if git_dir.parent.name == "worktrees":
+            return git_dir.parent.parent.resolve()
+        return git_dir.parent.resolve()
+    return None
+
+
+def _sup_guard_row_in_home(row, registry=None):
+    """Return whether a roster row belongs to the home being guarded.
+
+    `claude agents --json --all` is machine-global, so a supervisor-shaped
+    session from another registered fleet home must not look like a second body
+    here. Keep rows when the homes list is unreadable or path ownership is
+    ambiguous: PAGE is safer than dispatching a second body.
+    """
+    if not isinstance(row, dict) or not row.get("cwd"):
+        return True
+    sid = row.get("sessionId")
+    if isinstance(registry, dict) and isinstance(sid, str) and sid:
+        workers = registry.get("workers")
+        if isinstance(workers, dict) and any(
+                isinstance(record, dict) and sid in _record_sids(record)
+                for record in workers.values()):
+            return True
+    row_home = _sup_guard_resolved_path(row.get("cwd"))
+    current_home = _sup_guard_resolved_path(FLEET_HOME)
+    if row_home is None or current_home is None:
+        return True
+    if _sup_guard_path_is_within(row_home, current_home):
+        return True
+    row_common = _sup_guard_git_common_dir(row_home)
+    current_common = _sup_guard_git_common_dir(current_home, scan_parents=False)
+    if row_common is not None and current_common is not None \
+            and row_common == current_common:
+        return True
+    listed = read_homes_list()
+    if not listed.get("ok"):
+        return True
+    if listed.get("reason") == "absent" or listed.get("invalid_lines"):
+        return True
+    members = listed.get("members")
+    if not isinstance(members, list):
+        return True
+    for member in members:
+        member_path = _sup_guard_resolved_path(member)
+        if member_path is None:
+            continue
+        if _sup_guard_path_is_within(member_path, current_home):
+            continue
+        if _sup_guard_path_is_within(row_home, member_path):
+            return False
+        member_common = _sup_guard_git_common_dir(member_path, scan_parents=False)
+        if (row_common is not None and member_common is not None
+                and row_common == member_common):
+            return False
+    # A readable homes list that positively excludes this cwd means the row is
+    # not a fleet home at all; only that case may safely be ignored.
+    return False
+
+
 def _fork_took_over_rows(entries):
     """Live rows that also prove a fork TOOK OVER, not merely that it exists.
 
@@ -16579,7 +16795,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     else:
         sids = None
     body_name = _sup_guard_body_name(sids)
-    registry = _registry_records_or_none() if state == "held" else None
+    registry = _registry_records_or_none()
     body_record = ((registry.get("workers") or {}).get(body_name)
                    if isinstance(registry, dict) and body_name else None)
     idle_holder_with_working_lanes = bool(
@@ -16605,6 +16821,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     live_body_rows = [row for sid, rows in live_rows.items()
                       for row in rows
                       if isinstance(row.get("name"), str)
+                      and _sup_guard_row_in_home(row, registry=registry)
                       and (row.get("name") == SUPERVISOR_BODY_NAME
                            or _is_supervisor_shaped(row.get("name")))]
     return {
@@ -17350,6 +17567,8 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
         raise FleetCliError(_ceiling_refusal)
     _require_instance_settings()
 
+    _enforce_tier_policy("supervisor", getattr(args, "model", None))
+
     campaign = _read_task_arg(args.task)
     mode = getattr(args, "permission_mode", None) or SUP_SPAWN_DEFAULT_MODE
     if getattr(args, "codex_adapter", None) == "native":
@@ -17644,7 +17863,7 @@ def _dispatch_supervisor_body(campaign, mode, model, *, setting_sources=None,
     Shared by sup-spawn and supervisor respawn. Gate, ceiling and instance
     settings preflight belong to the calling verb and are not repeated here."""
     _warn_missing_bypass_ack(mode)
-    policy = read_tier_policy()
+    policy = _enforce_tier_policy("supervisor", model)
     model = model or resolve_model_for_role("supervisor", policy)
 
     launch_id = mint_incarnation_id()
@@ -18259,7 +18478,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     is SUCCESSOR_DEFAULT_MODE: a headless supervisor must be able to run its
     bootstrap Bash command without an interactive permission prompt."""
     if _claim_uses_native_codex():
+        # Native claims persist their provider model in the registry.  Resolve
+        # that model before enforcing forbid-default: omitting --model is safe
+        # here because the handoff remains on the already selected Codex model.
+        binding = _codex_supervisor_binding()
+        persisted_model = binding.record.get("model")
+        _enforce_tier_policy(
+            "supervisor", getattr(args, "model", None) or persisted_model)
         return _cmd_codex_sup_handoff_begin(args)
+    _enforce_tier_policy("supervisor", getattr(args, "model", None))
     _require_instance_settings()
     try:
         exe = resolve_claude_executable(which=which)
