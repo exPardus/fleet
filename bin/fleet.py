@@ -21965,18 +21965,18 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
             status = recompute_worker_native(n, rec, entries).get("status")
         elif _is_codex_record(rec):
             if _codex_record_route(rec) == "mcx":
-                # mcx has no Claude Stop hook: a completed job is observed only
-                # by probing its adapter.  Use the same completion bridge as
-                # native lanes so the keeper's sweep wakes the owning
-                # supervisor even when no explicit `status`/`wait` command ran
-                # after mcx finished.
+                # Probe mcx completion.
+
+
+
+
                 expected_mcx_id = rec.get("mcx_id")
                 expected_status = rec.get("status")
                 expected_last_dispatch_at = rec.get("last_dispatch_at")
                 status = recompute_worker_codex(n, rec, run=run).get("status")
             else:
-                # Native Codex rows have their own provider observation path;
-                # the mcx sweep must not accidentally probe that adapter.
+
+
                 status = rec.get("status")
         else:
             continue
