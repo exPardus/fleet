@@ -674,3 +674,19 @@ def test_a_done_row_with_a_live_pid_is_live(home, monkeypatch, capsys):
     run_guard(monkeypatch, snapshot(age=4000),
               [row(RETIRED, status="idle", pid=3531952, state="done")])
     assert capsys.readouterr().out == f"WAKE {BODY}\n"
+
+
+def test_wake_path_seeds_missing_brief_in_old_home(home):
+    brief = home / "supervisor/briefs/wake.md"
+    assert not brief.parent.exists()
+    text = fleet._read_task_arg(f"@{fleet.supervisor_wake_brief_path()}")
+    assert text == fleet._SUPERVISOR_WAKE_SEED
+    brief.write_text("operator wake\n")
+    assert fleet.supervisor_wake_brief_path().read_text() == "operator wake\n"
+
+
+def test_doctor_reports_missing_local_seeds(home):
+    name, ok, detail = fleet._doctor_check_local_seeds()
+    assert not ok and "supervisor/briefs/wake.md" in detail
+    fleet._initialize_local_home_files(home)
+    assert fleet._doctor_check_local_seeds()[1]

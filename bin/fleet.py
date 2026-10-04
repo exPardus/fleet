@@ -1009,20 +1009,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11221) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12117) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15495) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11226) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12132) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:15516) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3335) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
       * `_read_registry_readonly` (:4014) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12367) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:15369) -- describe the incident-specific absence.
+      * `_doctor_check_registry` (:12382) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:15390) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6626) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17111) -- render the release explanation.
+      * `_print_snapshot_table` (:6631) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:17132) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3317,7 +3317,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15495`), because legacy upgrades also require a complete registry.
+    (`:15516`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1089`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -5665,10 +5665,10 @@ def _write_local_seed(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _initialize_local_home_files(target: Path) -> None:
-    """Create missing local-home seeds without replacing operator data."""
+def _local_home_seeds(target: Path) -> dict:
+    """Map each generic local-home seed path to its built-in text."""
     target = Path(target)
-    seeds = {
+    return {
         target / "supervisor" / "GOALS.md": _SUPERVISOR_GOALS_SEED,
         target / "supervisor" / "JOURNAL.md": _SUPERVISOR_JOURNAL_SEED,
         target / "supervisor" / "briefs" / "wake.md": _SUPERVISOR_WAKE_SEED,
@@ -5677,7 +5677,12 @@ def _initialize_local_home_files(target: Path) -> None:
         target / "docs" / "lanes" / "README.md": _LANE_REPORTS_SEED,
         target / "docs" / "lanes" / "BRIEF-TEMPLATE.md": _LANE_BRIEF_SEED,
     }
-    for path, text in seeds.items():
+
+
+def _initialize_local_home_files(target: Path) -> None:
+    """Create missing local-home seeds without replacing operator data."""
+    target = Path(target)
+    for path, text in _local_home_seeds(target).items():
         _write_local_seed(path, text)
     (target / "supervisor" / "journal-history").mkdir(
         parents=True, exist_ok=True)
@@ -9564,7 +9569,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9479` / `cmd_respawn:8894`, before
+    # resolution that runs from `cmd_kill:9484` / `cmd_respawn:8899`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -9595,9 +9600,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9479` / `cmd_respawn:8894`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9484` / `cmd_respawn:8899`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:8915-8916` spells out that design -- resolve under the lock.
+    # `cmd_respawn:8920-8921` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -11663,6 +11668,16 @@ def _doctor_check_legacy_settings():
     return ("legacy-settings", True, "no legacy root worker-settings.json present")
 
 
+def _doctor_check_local_seeds():
+    missing = [str(p.relative_to(FLEET_HOME))
+               for p in _local_home_seeds(FLEET_HOME) if not p.exists()]
+    if missing:
+        return ("local-seeds", False,
+                "missing seeded local-storage files: " + ", ".join(missing)
+                + " -- run `fleet init` to create them")
+    return ("local-seeds", True, "seeded local-storage files present")
+
+
 _HOOK_SMOKE_SID = "fleet-doctor-smoke"
 
 
@@ -12442,6 +12457,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_instance_grants),
         functools.partial(_doctor_check_hook_registration),
         functools.partial(_doctor_check_legacy_settings),
+        functools.partial(_doctor_check_local_seeds),
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
         functools.partial(_doctor_check_stop_hook_smoke, run=run),
         functools.partial(_doctor_check_terminal_launcher, which=which),
@@ -13295,7 +13311,12 @@ def goals_path() -> Path:
 
 
 def supervisor_wake_brief_path() -> Path:
-    return supervisor_dir() / "briefs" / "wake.md"
+    path = supervisor_dir() / "briefs" / "wake.md"
+    try:
+        _write_local_seed(path, _SUPERVISOR_WAKE_SEED)
+    except OSError:
+        pass
+    return path
 
 
 # Read operator-owned role/tier/model policy from GOALS.md over defaults.
@@ -14405,9 +14426,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3139, :3174, :3204, :3243, :3280,
-    :3342, :3422, :4411, :9582, :9744, :10008, :10237, :10273, :10515, :10516, :10605, :10615, :10626, :10724, :11247, :14356, :18206, :18207, :18311, :18372, :19677, :21649`).
+    :3342, :3422, :4411, :9587, :9749, :10013, :10242, :10278, :10520, :10521, :10610, :10620, :10631, :10729, :11252, :14377, :18227, :18228, :18332, :18393, :19698, :21670`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8184, :8768, :12693, :20416. This makes union identity
+    OWN prior sid alone: :8189, :8773, :12709, :20437. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15123,8 +15144,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8184, :8768, :12693,
-    # :20416) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8189, :8773, :12709,
+    # :20437) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15132,7 +15153,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1089`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14330`).
+        # names this gate as its reason (`:14351`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -15488,7 +15509,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11218`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11223`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
