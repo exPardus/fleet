@@ -12882,11 +12882,13 @@ def render_native_name(category, name: str, hint: str) -> str:
     return f"{cat}|{name}|{clean}"
 
 
-def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid) -> str:
+def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid,
+                          *, inline_kind=None, inline_body="") -> str:
     """The prompt string that goes into argv for a `--bg` dispatch.
 
-    FRESH session (no resume_sid): keep the historical tiny pointer. The
-    transcript is empty, so the worker has to Read the task file and does.
+    FRESH session (no resume_sid): keep the historical tiny pointer unless an
+    explicit inline_kind is supplied by a resumed-only caller. The transcript
+    is empty, so the worker has to Read the task file and does.
 
     RESUMED session: inline the body instead. A fork carries the prior
     transcript, which already holds a `Read(task_path)` tool_use AND its
@@ -12903,6 +12905,27 @@ def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid) -> str:
     instruction, and it names the change explicitly.
     """
     pointer = f"Read {task_path.as_posix()} and follow it exactly."
+    # The steer and limit-resume paths need different framing, but both must
+    # be assembled here so dispatch_bg has one argv-prompt implementation.
+    # Keep the explicit kind validation that callers rely on: a typo must not
+    # silently restore the byte-identical pointer defect.
+    if inline_kind is not None:
+        lead = NATIVE_INLINE_LEAD.get(inline_kind)
+        if lead is None:
+            raise NativeDispatchError(
+                f"unknown inline_kind: {inline_kind!r} (expected one of "
+                f"{sorted(NATIVE_INLINE_LEAD)}) -- a dispatch that inlines "
+                f"must say which framing it means, since they contradict")
+        body = (inline_body or "").strip()
+        if len(body) > NATIVE_INLINE_STEER_MAX:
+            body = (body[:NATIVE_INLINE_STEER_MAX].rstrip()
+                    + "\n[truncated here -- the full text is in the file "
+                      "named below]")
+        block = f"<MANAGER MESSAGE>\n{body}\n</MANAGER MESSAGE>\n\n" if body else ""
+        return (
+            f"{block}{lead} {pointer} That file has been REWRITTEN since "
+            f"you last read it -- read it again rather than reusing an "
+            f"earlier copy.")
     if not resume_sid:
         return pointer
     body = prompt_body or ""
@@ -13065,26 +13088,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # Supervisor names already contain pipes; use them bare to preserve name parsing.
     rendered = (name if _is_supervisor_shaped(name)
                 else render_native_name(category, name, hint))
-    tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
-    # Inline resumed instructions so a previously read task-file pointer cannot
-    # look like an unchanged turn. inline_kind selects distinct steer/resume framing.
-    if inline_kind is not None:
-        lead = NATIVE_INLINE_LEAD.get(inline_kind)
-        if lead is None:
-            raise NativeDispatchError(
-                f"unknown inline_kind: {inline_kind!r} (expected one of "
-                f"{sorted(NATIVE_INLINE_LEAD)}) -- a dispatch that inlines "
-                f"must say which framing it means, since they contradict")
-        body = (inline_body or "").strip()
-        if len(body) > NATIVE_INLINE_STEER_MAX:
-            body = (body[:NATIVE_INLINE_STEER_MAX].rstrip()
-                    + "\n[truncated here -- the full text is in the file "
-                      "named below]")
-        block = f"<MANAGER MESSAGE>\n{body}\n</MANAGER MESSAGE>\n\n" if body else ""
-        tiny_prompt = (
-            f"{block}{lead} {tiny_prompt} That file has been REWRITTEN since "
-            f"you last read it -- read it again rather than reusing an "
-            f"earlier copy.")
+    # All argv prompt variants go through one helper. In particular, a
+    # --resume fork must carry the changed steer in this turn, not only in the
+    # task file that the resumed transcript may already have read.
+    tiny_prompt = _dispatch_argv_prompt(
+        task_path, prompt_body, resume_sid,
+        inline_kind=inline_kind, inline_body=inline_body)
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]

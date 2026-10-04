@@ -399,6 +399,20 @@ class TestDispatchBg:
         assert out != f"Read {task.as_posix()} and follow it exactly."
         assert big not in out
 
+    def test_dispatch_bg_resume_argv_carries_manager_message(self, native_home):
+        """Exercise the real dispatch builder, not only its prompt helper."""
+        calls = []
+        fleet.dispatch_bg(
+            "w1", "C:/proj", "rewritten task body", "accept",
+            resume_sid="old-sid", inline_kind="steer",
+            inline_body="STEER-TOKEN-42",
+            run=_fake_run_factory(calls=calls), which=lambda _: "claude",
+            sleep=lambda s: None, roster_fetch=_roster_with())
+        argv = calls[0][0]
+        assert argv[-1].startswith("<MANAGER MESSAGE>\n")
+        assert "STEER-TOKEN-42" in argv[-1]
+        assert "Read " in argv[-1]
+
     def test_argv_pre_authorizes_tasks_and_journals_dirs_via_add_dir(self, native_home):
         # T12 fix wave (finding 1): the task file lives under
         # FLEET_HOME/tasks, outside the worker's own --dir cwd -- without
