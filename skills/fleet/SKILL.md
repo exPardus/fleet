@@ -149,7 +149,9 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
 - `fleet kill NAME [--yes]`: interrupt a worker and mark it dead.
-- `fleet clean [--dead-only|--tombstones] [--yes]`: remove eligible dead records and their disposable artifacts.
+- `fleet clean [--dead-only|--tombstones] [--yes]`: remove eligible dead records;
+  newly found evidence is first moved to `logs/archive/<name>/` (the path is
+  printed), and a failed move refuses deletion so the row remains recoverable.
 - `fleet archive [NAME] [--ttl-hours HOURS] [--dry-run]`: tombstone terminal native workers past the TTL, or preview eligibility.
 - `fleet autoclean [--ttl-hours HOURS] [--expire-tombstones-hours HOURS] [--dry-run]`: run archive, daemon-husk, and optional tombstone-expiry maintenance.
 - `fleet index init [--path PATH]`: create and build a project symbol index.

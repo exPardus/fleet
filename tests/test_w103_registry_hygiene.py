@@ -133,6 +133,17 @@ class TestIdleRowsAreNotLiveLanes:
         large = fleet._render_boot_bundle([], _pm_snapshot(idle=400), [], run=_board_run)
         assert len(large) - len(small) < 20, (len(small), len(large))
 
+    def test_running_mcx_lane_counts_toward_dispatch_gate(self, tmp_path,
+                                                          monkeypatch):
+        """Codex/mcx work is one live lane, never an implicit zero."""
+        monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+        row = dict(_row("mcx-running", "working"), substrate="codex",
+                   dispatch_kind="mcx", mcx_id="00000001")
+        gates = fleet._supervisor_dispatch_gates(
+            {"ok": True, "workers": [row]}, run=_board_run)
+        assert "live_lane_count=1" in gates, gates
+        assert not any("UNMEASURED" in line for line in gates), gates
+
 
 # --- 2. native Codex rows can be killed and archived ---------------------
 

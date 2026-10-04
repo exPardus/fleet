@@ -8687,11 +8687,112 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
                                      sleep=sleep, clock=clock)
 
 
-def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
+def _restore_clean_moves(moved: list[tuple[Path, Path]]) -> None:
+    """Restore clean moves in reverse order after a failed archive attempt."""
+    for src, dest in reversed(moved):
+        if not dest.exists() or src.exists():
+            continue
+        try:
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(dest), str(src))
+        except OSError as exc:
+            print(f"fleet: could not roll back archive move {dest.name}: {exc}",
+                  file=sys.stderr)
+
+
+def _archive_clean_evidence(name: str, sid: str, retired_sids: list = (), *,
+                            moved_out: list | None = None,
+                            created_out: list | None = None) -> tuple[Path | None, list[Path]]:
+    """Move clean's evidence to a recoverable archive before deletion.
+
+    ``fleet clean`` is the irreversible registry/file-deletion verb, so a
+    failed move must keep the worker row and its source files intact.  The
+    normal archive mapping is shared for the brief/journal/task/outcome/mail
+    files; clean additionally carries logs, ceilings, and claimed mail.
+    """
+    sid = sid if isinstance(sid, str) and sid else None
+    retired = [s for s in (retired_sids if isinstance(retired_sids, (list, tuple)) else ())
+               if isinstance(s, str) and s]
+    sources = list(_archive_file_pairs(name, sid, retired))
+    stem = name_fs_stem(name)
+    for suffix in ("jsonl", "jsonl.1", "err", "err.1"):
+        sources.append((logs_dir() / f"{stem}.{suffix}", f"log.{suffix}"))
+    for s in ([sid] if sid else []) + retired:
+        sources.append((ceiling_file_path(s), f"ceiling-{s}"))
+        if mailbox_dir().exists():
+            sources.extend((p, f"mailbox-{p.name}")
+                           for p in mailbox_dir().glob(f"{s}.md.claimed.*"))
+
+    existing = [src for src, _dest in sources if src.exists()]
+    if not existing:
+        return None, []
+    # Clean owns deletion, so it always uses one stable destination per worker.
+    # A numeric collision suffix would split evidence across retries after a
+    # partial move; rollback below leaves this directory reusable instead.
+    dest_dir = archive_root() / stem
+    was_present = dest_dir.exists()
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"fleet: {name}: could not create archive directory: {exc}",
+              file=sys.stderr)
+        return None, existing
+    if created_out is not None:
+        created_out.append(not was_present)
+    moved = []
+    seen = set()
+    existing_set = set(existing)
+    try:
+        for src, dest_name in sources:
+            if src in seen:
+                continue
+            seen.add(src)
+            if src not in existing_set:
+                continue
+            if not src.exists():
+                raise OSError(f"evidence disappeared before move: {src.name}")
+            dest = dest_dir / dest_name
+            if dest.exists():
+                raise OSError(f"archive destination already exists: {dest.name}")
+            try:
+                _archive_move(src, dest, name)
+            except Exception:
+                if dest.exists() and not src.exists():
+                    moved.append((src, dest))
+                raise
+            if src.exists() or not dest.exists():
+                raise OSError(f"could not move evidence: {src.name}")
+            moved.append((src, dest))
+    except Exception as exc:
+        _restore_clean_moves(moved)
+        if created_out is not None and created_out and created_out[-1] and dest_dir.exists():
+            try:
+                dest_dir.rmdir()
+            except OSError:
+                pass
+            try:
+                if archive_root().exists() and not any(archive_root().iterdir()):
+                    archive_root().rmdir()
+            except OSError:
+                pass
+            created_out[-1] = False
+        print(f"fleet: {name}: could not archive evidence: {exc}", file=sys.stderr)
+        return None, existing
+    if moved_out is not None:
+        moved_out.extend(moved)
+    pending = [src for src in existing if src.exists()]
+    return dest_dir, pending
+
+
+def _remove_worker_files(name: str, sid: str, retired_sids: list = (), *,
+                         preserve_archive: bool = False,
+                         preserve_mailbox: bool = False) -> list:
     """Best-effort delete artifacts for a removed dead worker; return removed paths.
-    Include logs, journals, tasks, outcomes, current mailbox/claimed files,
-    retired-sid outcomes/ceilings and the worker's archive tree. Missing files
-    are harmless; only clean deletes the archived evidence tree."""
+    Include logs, journals, tasks, outcomes, current mailbox/claimed files
+    (unless ``preserve_mailbox`` is set), retired-sid outcomes/ceilings and the
+    worker's archive tree. Missing files are harmless; only clean deletes the
+    archived evidence tree. Clean preserves mailbox content after its final
+    lock-held archive rescan so a late delivery cannot be lost."""
     removed = []
     stem = name_fs_stem(name)
     # A row may carry a null or malformed sid (native Codex rows have none, and
@@ -8710,12 +8811,14 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
         # Remove abandoned boot bundles, which retain the minted nonce plaintext.
         boot_bundle_path(name),
     ]
-    if sid is not None:
+    if sid is not None and not preserve_mailbox:
         # Sweep sid-keyed mailbox, ceiling and outcome state with the other artifacts.
         candidates += [mailbox_dir() / f"{sid}.md", ceiling_file_path(sid),
                        outcome_path(sid)]
         if mailbox_dir().exists():
             candidates += list(mailbox_dir().glob(f"{sid}.md.claimed.*"))
+    if sid is not None and preserve_mailbox:
+        candidates += [ceiling_file_path(sid), outcome_path(sid)]
     candidates += [outcome_path(s) for s in retired_sids]
     candidates += [ceiling_file_path(s) for s in retired_sids]
     for path in candidates:
@@ -8727,7 +8830,7 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
         except OSError:
             pass
     archive_dir = archive_root() / stem
-    if archive_dir.exists():
+    if not preserve_archive and archive_dir.exists():
         try:
             shutil.rmtree(archive_dir)
             removed.append(archive_dir)
@@ -8735,7 +8838,7 @@ def _remove_worker_files(name: str, sid: str, retired_sids: list = ()) -> list:
             pass
     # Delete numeric collision-suffixed archive directories too. Anchor the name
     # pattern so cleaning w1 cannot sweep a differently named worker such as w10.
-    if archive_root().exists():
+    if not preserve_archive and archive_root().exists():
         suffix_re = re.compile(re.escape(stem) + r"\.\d+$")
         for p in sorted(archive_root().iterdir()):
             if p.is_dir() and suffix_re.match(p.name):
@@ -8881,30 +8984,94 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
               f"{claim.get('incarnation_id', '?')} -- {why}; deleting it would "
               f"re-arm the refusal that stops a successor booting (B6)")
 
-    # Acknowledge the exact foreign-worker deletion set outside the lock.
-    # Clean removes evidence/registry state; later husk cleanup may also remove the
-    # native session that events still identify, so sid recovery is not permanent.
+    # Confirm ownership before touching any evidence. A refused caller must leave
+    # both the row and every source artifact byte-for-byte unchanged.
     doomed = {n: rec for n, rec in doomed_now}
     if doomed:
-        # Name archived evidence explicitly when it is part of the deletion set.
         any_archived = any(rec.get("archived_at") is not None for rec in doomed.values())
         action = ("clean (delete logs + journal + archived history of)" if any_archived
                   else "clean (delete logs + journal of)")
         _confirm_destructive(action, sorted(doomed), doomed,
                              assume_yes=getattr(args, "yes", False), nonce=getattr(args, "nonce", None))
 
+    # Hold the registry lock across the archive and its final mailbox rescan.
+    # Mail delivery does not take this lock, so the rescan immediately before
+    # deletion is the safety boundary for late arrivals.
+    clean_archive_dirs = {}
+    clean_archive_failures = set()
+    moved_by_worker = {}
+    created_archive_dirs = {}
     changed = False
     with fleet_lock():
         data = load_registry()
+        stable = []
         for n, before_rec in doomed_now:
             current = data["workers"].get(n)
             if current != before_rec:
                 # Mutated concurrently since the first lock released --
                 # spare it, don't delete on a now-stale verdict.
                 continue
-            removed.append((n, current.get("session_id"), current.get("retired_sids", [])))
-            data["workers"].pop(n, None)
-            changed = True
+            stable.append((n, current))
+
+        # Every move in this clean run is transactional. If any worker fails,
+        # restore all successful workers too and leave every row in place.
+        for n, rec in stable:
+            moved = []
+            created = []
+            moved_by_worker[n] = moved
+            created_archive_dirs[n] = created
+            evidence_sid = _archive_evidence_sid(rec)
+            dest, pending = _archive_clean_evidence(
+                n, evidence_sid, rec.get("retired_sids", []),
+                moved_out=moved, created_out=created)
+            if pending:
+                clean_archive_failures.add(n)
+                print(f"fleet: {n}: clean refused -- could not archive "
+                      f"{', '.join(p.name for p in pending)}", file=sys.stderr)
+            elif dest is not None:
+                clean_archive_dirs[n] = dest
+
+        # A hook or another sender may have delivered mail after the first
+        # archive call. Re-scan each still-successful worker under the same lock
+        # and move any newly visible evidence into its existing destination.
+        for n, rec in stable:
+            if n in clean_archive_failures:
+                continue
+            moved = []
+            evidence_sid = _archive_evidence_sid(rec)
+            dest, pending = _archive_clean_evidence(
+                n, evidence_sid, rec.get("retired_sids", []),
+                moved_out=moved, created_out=created_archive_dirs[n])
+            moved_by_worker[n].extend(moved)
+            if pending:
+                clean_archive_failures.add(n)
+                print(f"fleet: {n}: clean refused -- could not archive "
+                      f"{', '.join(p.name for p in pending)}", file=sys.stderr)
+            elif dest is not None:
+                clean_archive_dirs[n] = dest
+
+        if clean_archive_failures:
+            for moved in moved_by_worker.values():
+                _restore_clean_moves(moved)
+            for n, flags in created_archive_dirs.items():
+                if any(flags):
+                    dest = archive_root() / name_fs_stem(n)
+                    try:
+                        dest.rmdir()
+                    except OSError:
+                        pass
+            try:
+                if archive_root().exists() and not any(archive_root().iterdir()):
+                    archive_root().rmdir()
+            except OSError:
+                pass
+            clean_archive_dirs.clear()
+        else:
+            for n, current in stable:
+                removed.append((n, current.get("session_id"),
+                                current.get("retired_sids", [])))
+                data["workers"].pop(n, None)
+                changed = True
 
         if changed:
             save_registry(data)
@@ -8912,12 +9079,19 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
             append_event("cleaned", n, session_id=sid)
 
     for n, sid, retired in removed:
-        _remove_worker_files(n, sid, retired_sids=retired)
+        archive_note = clean_archive_dirs.get(n)
+        _remove_worker_files(n, sid, retired_sids=retired,
+                             preserve_archive=archive_note is not None,
+                             preserve_mailbox=True)
         if isinstance(sid, str) and sid:
-            print(f"removed {n} (session {sid})")
+            suffix = (f" -- archived evidence at {archive_note}"
+                      if archive_note is not None else "")
+            print(f"removed {n} (session {sid}){suffix}")
         else:
+            suffix = (f" -- archived evidence at {archive_note}"
+                      if archive_note is not None else "")
             print(f"removed {n} (no session id recorded: {sid!r}; "
-                  f"sid-keyed files skipped)")
+                  f"sid-keyed files skipped){suffix}")
 
     if not removed and not spared:
         print("nothing to clean -- no dead workers")
@@ -9040,11 +9214,30 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
     return stopped
 
 
+def _terminal_lane_idle_spare(record: dict, sid: str, entry: dict) -> bool:
+    """Whether a retired sid is only an idle daemon pre-warm spare.
+
+    A landed/abandoned row's current sid is the authoritative lane body.  A
+    retired sid with a real PID and idle status can be a daemon spare left by
+    fork-steer; it must not strand the terminal row.  Busy/statusless entries
+    remain protected, including rows whose liveness is uncertain.
+    """
+    if not isinstance(record, dict) or record.get("lane_state") not in (
+            "landed", "abandoned"):
+        return False
+    retired = record.get("retired_sids")
+    if not isinstance(retired, list) or sid not in retired:
+        return False
+    return (isinstance(entry, dict) and entry.get("status") == "idle"
+            and entry.get("pid") not in (None, "", 0))
+
+
 def _reap_protection(name: str, record: dict, roster_entries: list, claim,
                      reap_caller_sid=None):
     """Return the shared whole-record veto for automatic reaping.
     Protect the caller, ambiguous/unreadable ownership, current claim/incarnation,
-    pending mail and any current/retired sid with a PID or nonidle roster status."""
+    pending mail and any current/retired sid with a PID or nonidle roster status,
+    except an idle PID-bearing retired spare on a terminal lane row."""
     sids = _record_sids(record)
     caller = reap_caller_sid or current_caller_session()
     if caller and caller in sids:
@@ -9070,6 +9263,8 @@ def _reap_protection(name: str, record: dict, roster_entries: list, claim,
         if _reap_mail_pending(member):
             return "unread-mail"
         entry = _roster_entry_for(roster_entries, member)
+        if _terminal_lane_idle_spare(record, member, entry):
+            continue
         if entry is not None and ("pid" in entry or
                 ("status" in entry and entry.get("status") != "idle")):
             return "roster-live"
@@ -9261,15 +9456,18 @@ def _archive_resume_pending(name: str, record: dict) -> bool:
 
 def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
                          roster_entries: list, run, which, reap: bool = False,
-                         reap_caller_sid=None, remove_sessions: bool = True) -> None:
+                         reap_caller_sid=None, remove_sessions: bool = True,
+                         lane_state=None) -> None:
     """Move evidence, then best-effort remove current and retired native sessions.
     Use the eligibility roster snapshot to skip every live sid, including retired
-    forks; current-sid eligibility alone cannot establish their safety. Codex
-    rows pass remove_sessions=False: they have no Claude session to remove."""
+    forks, except an idle PID-bearing spare on a terminal lane row; current-sid
+    eligibility alone cannot establish their safety. Codex rows pass
+    remove_sessions=False: they have no Claude session to remove."""
+    record = {"session_id": sid, "retired_sids": retired,
+              "lane_state": lane_state}
     if reap:
         # The same protection applies to crash-resumes, and BEFORE moving mail
         # out of its inbox. A post-commit arrival leaves the archive resumable.
-        record = {"session_id": sid, "retired_sids": retired}
         if _reap_protection(n, record, roster_entries, read_incarnation(), reap_caller_sid):
             return
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -9286,8 +9484,11 @@ def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
         return  # a delivery during file moves protects the entire sid union
     for s in ([sid] if sid else []) + retired:
         entry = _roster_entry_for(roster_entries, s)
+        terminal_spare = _terminal_lane_idle_spare(record, s, entry)
         live = entry is not None and ("pid" in entry or
                 ("status" in entry and (not reap or entry.get("status") != "idle")))
+        if terminal_spare:
+            live = False
         if reap and _reap_mail_pending(s):
             continue
         if live:
@@ -9539,7 +9740,8 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
         _archive_move_and_rm(n, sid, retired, _archive_dest_dir(n),
                              roster_entries, run, which, reap=reap,
                              reap_caller_sid=reap_caller_sid,
-                             remove_sessions=is_native(rec))
+                             remove_sessions=is_native(rec),
+                             lane_state=rec.get("lane_state"))
 
     # Resumes finish prior work; do not count or emit a second archived transition.
     for n in resume_names:
@@ -9551,7 +9753,8 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
         _archive_move_and_rm(n, sid, retired, archive_root() / name_fs_stem(n),
                              roster_entries, run, which, reap=reap,
                              reap_caller_sid=reap_caller_sid,
-                             remove_sessions=is_native(rec))
+                             remove_sessions=is_native(rec),
+                             lane_state=rec.get("lane_state"))
 
     skipped_count = len(names) - archived_count
     stats = getattr(args, "reap_stats", None)
@@ -9843,8 +10046,9 @@ SUPERVISOR_REAP_RULE = (
     "Fleet automatically reaps at supervisor boot, handoff completion and release: "
     "landed or abandoned lanes with an idle session and no unread mail, "
     "daemon-confirmed dead rows, and predecessor supervisor bodies outside the "
-    "current claim, regardless of age; unread mail and any live PID always protect "
-    "a row. The calling body's SID union and rows with overlapping SID ownership "
+    "current claim, regardless of age; unread mail and any live PID protect a row "
+    "except an idle PID-bearing retired spare on a landed/abandoned row. The "
+    "calling body's SID union and rows with overlapping SID ownership "
     "are also protected. Record landing as lane_state=landed or abandoned in the registry "
     "(or a matching outcome kind); a result alone is not a landing. "
     "Before any dispatch, allow at most 3 live worker sessions total across Claude "
