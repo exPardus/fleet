@@ -16,7 +16,7 @@ the same commit. Host quirks and project facts go in the fleet home's ignored
 `knowledge/projects/<p>.md`, never in the public source tree. No described
 behaviour change uses the commit trailer `Docs: n/a -- <why>`.
 `tests/test_docs_currency.py` checks the last 20 non-merge
-commits after adoption base `708fa45` for direct `bin/*.py` edits with `docs/` or
+commits after adoption base `117bfa75` for direct `bin/*.py` edits with `docs/` or
 that trailer; ancestors are excluded so pre-rule history is not retroactively red.
 The same file pins DONE placement on local lane documents and post-cutoff
 runtime tasks. `fleet init` creates the ignored

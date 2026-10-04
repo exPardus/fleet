@@ -550,8 +550,10 @@ RATIFIED_BUT_UNBUILT = ()
 # home's Codex host through `CodexHostClient.ensure`, and may finalize a
 # releasing claim to `released`, which is terminal. The tier is operator-owned,
 # so it waits here under the fail-safe unknown-verb default (`destructive`).
+# `codex-respond` is provider-specific direction; keep the fail-safe unknown
+# tier until the operator adds it to the ratified §5 table.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
-                                     "lane-done", "sup-reconcile")
+                                     "lane-done", "sup-reconcile", "codex-respond")
 
 
 def _classified_verbs():

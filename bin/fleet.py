@@ -1009,20 +1009,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11253) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12159) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15581) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11388) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12294) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:15732) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3335) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:3397) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4014) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12409) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:15455) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4088) -- expose that distinction to views.
+      * `_doctor_check_registry` (:12544) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:15606) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6641) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17235) -- render the release explanation.
+      * `_print_snapshot_table` (:6720) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:17386) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1995,8 +1995,6 @@ def _validate_codex_managed_requirements(result, profile: dict) -> dict | None:
         if requested not in allowed:
             raise FleetCliError(
                 f"Codex managed policy disallows requested {label} {requested!r}")
-    # Persist only the policy inputs Fleet actually interpreted. Other public
-    # requirement fields remain provider-owned and are not silently enforced.
     return {
         field: requirements.get(field)
         for field, _requested, _label in checks
@@ -2005,7 +2003,7 @@ def _validate_codex_managed_requirements(result, profile: dict) -> dict | None:
 
 
 def _codex_managed_requirements(client, profile: dict) -> dict | None:
-    """Read the public policy gate; test doubles predating the surface inherit none."""
+    """Read managed policy requirements when the client exposes them."""
     reader = getattr(client, "config_requirements", None)
     result = reader(timeout=10) if callable(reader) else {"requirements": None}
     return _validate_codex_managed_requirements(result, profile)
@@ -2024,7 +2022,7 @@ def _codex_existing_client(home):
 
 
 def _codex_wait_summaries(record: dict) -> list[dict]:
-    """Read bounded durable wait metadata without starting or probing a host."""
+    """Read durable wait metadata without starting or probing a host."""
     if _codex_record_route(record) != "native":
         return []
     thread_id = record.get("codex_thread_id")
@@ -3381,7 +3379,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15581`), because legacy upgrades also require a complete registry.
+    (`:15732`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1089`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -7965,8 +7963,6 @@ def _parse_codex_response_decision(raw: str):
 
 def cmd_codex_respond(args) -> int:
     """Explicitly consume one current native-Codex blocking request."""
-    # This is provider direction, so it uses the existing gated `send` frame;
-    # both entry points expose the same continuity proof and effect class.
     _supervisor_gate("send", nonce=getattr(args, "nonce", None))
     name = _resolve_worker_target(args.name)
     data = read_registry_no_repair()
@@ -9735,7 +9731,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9511` / `cmd_respawn:8926`, before
+    # resolution that runs from `cmd_kill:9646` / `cmd_respawn:9053`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -9766,9 +9762,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9511` / `cmd_respawn:8926`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9646` / `cmd_respawn:9053`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:8947-8949` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9074-9083` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12974,19 +12970,12 @@ NATIVE_ATTACH_POLL_SECONDS = 2.0
 NATIVE_WEDGE_CLEANUP_TIMEOUT_SECONDS = 10
 DEFAULT_CATEGORY = "fleet"
 NATIVE_NAME_HINT_MAX = 40
-# Ceiling for inlining a rewritten task body into argv on a RESUMED dispatch
-# (see _dispatch_argv_prompt). Well under the 32,767-char Windows
-# command-line limit (SPEC §6 G8) and POSIX MAX_ARG_STRLEN (128 KiB for a
-# single argv entry), leaving ample headroom for exe + flags + paths.
 NATIVE_INLINE_PROMPT_MAX_BYTES = 8192
 
-# Inline the message so resumed turns carry changed instructions directly.
-# Cap its size for Win32 command-line limits; over-length messages still require
-# the worker to reread the payload file for the remainder.
+# Inline changed instructions; oversized bodies use a digest pointer.
 NATIVE_INLINE_STEER_MAX = 4000
 
-# Steer means replace instructions; resume-limited means continue parked work.
-# Keep distinct framing so a resumed worker does not abandon its task.
+# Distinct framing keeps steer and resume-limited semantics separate.
 NATIVE_INLINE_LEAD = {
     "steer": ("That message is a NEW instruction and it supersedes anything "
               "earlier in this session."),
@@ -12996,7 +12985,6 @@ NATIVE_INLINE_LEAD = {
                "further instruction for that same task."),
 }
 
-# Middle dot is the daemon's literal separator glyph.
 _BG_SHORT_ID_RE = re.compile(r"backgrounded\s*·\s*(\S+)\s*·")
 
 # Color-forcing environment variables can colorize piped background stdout.
@@ -13005,10 +12993,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 class NativeDispatchError(Exception):
-    """Dispatch failure carrying short_id when dispatch parsed one.
-    The handle allows fast-completion recovery from sid-keyed outcomes; it is
-    None for failures before an id is known.
-    """
+    """Dispatch failure optionally carrying the parsed short id."""
     def __init__(self, message, short_id=None):
         super().__init__(message)
         self.short_id = short_id
@@ -13023,31 +13008,8 @@ def render_native_name(category, name: str, hint: str) -> str:
 
 def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid,
                           *, inline_kind=None, inline_body="") -> str:
-    """The prompt string that goes into argv for a `--bg` dispatch.
-
-    FRESH session (no resume_sid): keep the historical tiny pointer unless an
-    explicit inline_kind is supplied by a resumed-only caller. The transcript
-    is empty, so the worker has to Read the task file and does.
-
-    RESUMED session: inline the body instead. A fork carries the prior
-    transcript, which already holds a `Read(task_path)` tool_use AND its
-    tool_result for this exact path -- the pointer is byte-identical every
-    dispatch, so the model can satisfy it from that cached result and never
-    re-read the rewritten file. That silently dropped the `<MANAGER
-    MESSAGE>`: `fleet send` on an idle worker incremented `turns` and
-    returned to idle having done nothing, while compose_prompt had already
-    drained (and audited) the mail. Delivery must not depend on the model
-    choosing to re-issue a tool call it believes it already made.
-
-    Oversized bodies fall back to a pointer carrying a content digest --
-    still volition-dependent, but at least not byte-identical to the cached
-    instruction, and it names the change explicitly.
-    """
+    """Build the argv prompt, inlining rewritten content for resumed turns."""
     pointer = f"Read {task_path.as_posix()} and follow it exactly."
-    # The steer and limit-resume paths need different framing, but both must
-    # be assembled here so dispatch_bg has one argv-prompt implementation.
-    # Keep the explicit kind validation that callers rely on: a typo must not
-    # silently restore the byte-identical pointer defect.
     if inline_kind is not None:
         lead = NATIVE_INLINE_LEAD.get(inline_kind)
         if lead is None:
@@ -13069,16 +13031,8 @@ def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid,
         return pointer
     body = prompt_body or ""
     if len(body.encode("utf-8")) <= NATIVE_INLINE_PROMPT_MAX_BYTES:
-        # The resumed transcript already carries the preamble, so lead with
-        # everything from the steer onward -- otherwise the new instruction
-        # sits behind a wall of text the worker has already seen.
-        #
-        # Line-anchored on purpose: the PREAMBLE itself mentions the marker
-        # inline ("Manager messages arrive mid-task marked `<MANAGER
-        # MESSAGE>`"), so a plain find() matches that documentation instead
-        # of the real block and slices the preamble mid-sentence -- caught
-        # live, the worker got a prompt starting "`; treat them as user
-        # instructions." compose_prompt emits the real block as its own line.
+        # The resumed transcript already carries the preamble; lead with the
+        # current manager block and use an anchored marker to avoid its prose.
         match = re.search(r"^<MANAGER MESSAGE>$", body, re.M)
         payload = body[match.start():] if match else body
         return (
@@ -13108,10 +13062,7 @@ def _roster_entry_for(entries, sid):
 
 
 def _roster_entry_has_life_signal(entry) -> bool:
-    """Whether status, pid or a reached terminal/blocked state proves attachment.
-    A handoff name join needs this additional evidence because a matching name
-    alone can identify a never-attached husk.
-    """
+    """Whether roster fields prove that a joined session attached."""
     if not isinstance(entry, dict):
         return False
     if "status" in entry or "pid" in entry:
@@ -13122,11 +13073,7 @@ def _roster_entry_has_life_signal(entry) -> bool:
 def _join_roster_by_short_id(short_id, roster_fetch, sleep,
                              verify_seconds=NATIVE_JOIN_VERIFY_SECONDS,
                              exclude_sids=frozenset(), clock=time.monotonic):
-    """Join the dispatch short-id prefix to a full sid, including completed entries.
-    Exclude pre-existing sids so prefix collisions cannot bind a foreign session.
-    A window with no successful roster fetch raises NativeDispatchError: unseen is not dead.
-    An observed roster without a match returns None. The clock is injectable.
-    """
+    """Join a fresh short-id prefix to its full roster sid."""
     deadline = clock() + verify_seconds
     verified_once = False
     while True:
@@ -14620,7 +14567,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1089`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4002`) applies here too. An unreadable registry
+    rule for the view path (`:4076`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -14691,10 +14638,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3139, :3174, :3204, :3243, :3280,
-    :3342, :3422, :4411, :9614, :9776, :10040, :10269, :10305, :10547, :10548, :10637, :10647, :10658, :10756, :11279, :14440, :18333, :18334, :18438, :18499, :19820, :21794`).
+    sites that already key on the union (`:3201, :3236, :3266, :3305, :3342,
+    :3404, :3484, :4485, :9749, :9911, :10175, :10404, :10440, :10682, :10683,
+    :10772, :10782, :10793, :10891, :11414, :14590, :18484, :18485, :18589, :18650, :19971, :21960`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8216, :8800, :12736, :20559. This makes union identity
+    OWN prior sid alone: :8343, :8927, :12871, :20714. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15412,8 +15360,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8216, :8800, :12736,
-    # :20559) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8343, :8927, :12871,
+    # :20714) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15421,7 +15369,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1089`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14414`).
+        # names this gate as its reason (`:14564`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -15777,7 +15725,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11250`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11385`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
