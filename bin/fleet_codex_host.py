@@ -468,10 +468,9 @@ class Host:
         approvals = getattr(self, "approvals", None)
         if (approvals is not None
                 and any(record.get("state") == "unknown"
-                        and record.get("thread_id") in (None, target)
                         for record in approvals.unresolved())):
             raise HostRejected(
-                "unknown blocking server request freezes this thread")
+                "unknown blocking server request freezes provider mutations")
         claim = read_interface_claim(self.home)
         if claim is None:
             return

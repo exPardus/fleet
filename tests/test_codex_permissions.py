@@ -276,6 +276,24 @@ def test_known_request_invalid_method_specific_required_field_is_frozen(
     assert record["offered_decisions"] == []
 
 
+@pytest.mark.parametrize("params", [None, [], "malformed", 7])
+def test_non_object_request_params_are_durably_frozen(tmp_path, params):
+    home = _home(tmp_path)
+    store = fleet_codex.CodexApprovalStore(home, "generation-1")
+
+    record = store.record_request({
+        "id": "request-1",
+        "method": "item/permissions/requestApproval",
+        "params": params,
+    })
+
+    assert record["state"] == "unknown"
+    assert record["thread_id"] is None
+    assert record["offered_decisions"] == []
+    restarted = fleet_codex.CodexApprovalStore(home, "generation-1")
+    assert restarted.records() == [record]
+
+
 def test_missing_permission_request_object_can_never_produce_empty_response():
     with pytest.raises(fleet_codex.HostRejected, match="no permissions object"):
         fleet_codex._approval_decision(

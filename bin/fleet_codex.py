@@ -977,25 +977,27 @@ class CodexApprovalStore:
         request_id = _server_request_id(message.get("id"))
         method = message.get("method")
         params = message.get("params")
-        if not isinstance(method, str) or not method or not isinstance(params, dict):
-            raise ValueError("server request is malformed")
-        thread_id = params.get("threadId")
-        turn_id = params.get("turnId")
-        item_id = params.get("itemId")
-        known = method in _BLOCKING_SERVER_REQUESTS
-        try:
-            thread_id = _public_uuid7(thread_id, "server request thread id")
-            if turn_id is not None:
-                turn_id = _public_uuid7(turn_id, "server request turn id")
-            if method != "mcpServer/elicitation/request" and turn_id is None:
-                raise ValueError("server request turn id is missing")
-            if method not in {"mcpServer/elicitation/request"}:
-                if not isinstance(item_id, str) or not item_id or len(item_id) > 160:
-                    raise ValueError("server request item id is invalid")
-            if known:
-                _validate_approval_request_params(method, params)
-        except ValueError:
-            known = False
+        params_map = params if isinstance(params, dict) else None
+        thread_id = params_map.get("threadId") if params_map is not None else None
+        turn_id = params_map.get("turnId") if params_map is not None else None
+        item_id = params_map.get("itemId") if params_map is not None else None
+        known = (isinstance(method, str) and bool(method)
+                 and method in _BLOCKING_SERVER_REQUESTS
+                 and params_map is not None)
+        if params_map is not None:
+            try:
+                thread_id = _public_uuid7(thread_id, "server request thread id")
+                if turn_id is not None:
+                    turn_id = _public_uuid7(turn_id, "server request turn id")
+                if method != "mcpServer/elicitation/request" and turn_id is None:
+                    raise ValueError("server request turn id is missing")
+                if method not in {"mcpServer/elicitation/request"}:
+                    if not isinstance(item_id, str) or not item_id or len(item_id) > 160:
+                        raise ValueError("server request item id is invalid")
+                if known:
+                    _validate_approval_request_params(method, params_map)
+            except ValueError:
+                known = False
         safe_params = _public_evidence(params)
         record = {
             "schema": 1, "home": str(self.home),
@@ -1003,7 +1005,7 @@ class CodexApprovalStore:
             "generation": self.generation, "request_id": request_id,
             "method": method, "thread_id": thread_id, "turn_id": turn_id,
             "item_id": item_id, "params": safe_params,
-            "offered_decisions": self._offered(method, params) if known else [],
+            "offered_decisions": self._offered(method, params_map) if known else [],
             "state": "pending" if known else "unknown",
             "created_at": time.time(),
         }
