@@ -18410,15 +18410,13 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     registry = _registry_records_or_none()
     body_record = ((registry.get("workers") or {}).get(body_name)
                    if isinstance(registry, dict) and body_name else None)
-    idle_holder_with_working_lanes = bool(
+    # An idle, unarchived holder row is a resumable native body between
+    # turns (no live pid): WAKE revives it, DISPATCH would fork a second
+    # generation over it. Working lanes are not required.
+    idle_resumable_holder = bool(
         isinstance(body_record, dict)
         and body_record.get("status") == "idle"
-        and not body_record.get("archived_at")
-        and any(isinstance(rec, dict) and not rec.get("archived_at")
-                and rec.get("status") == "working"
-                and not _is_supervisor_shaped(name)
-                and _lane_owned_by_claim(rec, claim, registry)
-                for name, rec in registry["workers"].items()))
+        and not body_record.get("archived_at"))
     # The fleet projection supplies transcript-detected parks; newer native
     # rosters may supply the same status/horizon directly, even without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
@@ -18453,7 +18451,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "handshake": handshake,
         "pending": pending,
         "body_name": body_name,
-        "idle_holder_with_working_lanes": idle_holder_with_working_lanes,
+        "idle_resumable_holder": idle_resumable_holder,
         "limited": bool(limited_rows),
         "limit_reset_at": max(horizons, default=None),
         "context_occupancy": claim.get("context_occupancy") if isinstance(claim, dict) else None,
@@ -18564,7 +18562,7 @@ def _sup_guard_decide(observation):
         return "PAGE", "fresh heartbeat but body is not roster-live", detail
     if any(row not in matching for row in obs.get("live_body_rows", [])):
         return "PAGE", "another live supervisor body is present", detail
-    if obs.get("idle_holder_with_working_lanes"):
+    if obs.get("idle_resumable_holder"):
         return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
     return "DISPATCH", "stale claim with no live body", detail
 
