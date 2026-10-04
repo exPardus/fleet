@@ -1009,20 +1009,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11115) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12011) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15390) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11240) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12146) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:15568) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3335) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_identity_abstention_note` (:15264) -- describe the incident-specific absence.
       * `_read_registry_readonly` (:4014) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12261) -- do not grade a renamed-away path readable.
+      * `_doctor_check_registry` (:12396) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:15442) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6520) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17006) -- render the release explanation.
+      * `_print_snapshot_table` (:6635) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:17222) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3317,7 +3317,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15390`), because legacy upgrades also require a complete registry.
+    (`:15568`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1089`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4862,7 +4862,10 @@ def _supervisor_tier_snapshot(now=None) -> dict:
     must not be interpreted as staleness.
     """
     out = {"goals_active": False, "state": "none",
-           "incarnation_id": None, "heartbeat_age_seconds": None}
+           "incarnation_id": None, "heartbeat_age_seconds": None,
+           "parked_at": None, "parked_reason": None,
+           "parked_wake_condition": None, "parked_age_seconds": None,
+           "parked_active": False, "parked_expired": False}
     try:
         out["goals_active"] = bool(supervisor_goals_active())
         claim = read_incarnation()
@@ -4870,6 +4873,7 @@ def _supervisor_tier_snapshot(now=None) -> dict:
             return out
         out["incarnation_id"] = claim.get("incarnation_id")
         out["state"] = "released" if claim.get("state") == "released" else "held"
+        out.update(_supervisor_park_info(claim, now=now))
         if now is None:
             now = datetime.now(timezone.utc)
         try:
@@ -5665,10 +5669,10 @@ def _write_local_seed(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _initialize_local_home_files(target: Path) -> None:
-    """Create missing local-home seeds without replacing operator data."""
+def _local_home_seeds(target: Path) -> dict:
+    """Map each generic local-home seed path to its built-in text."""
     target = Path(target)
-    seeds = {
+    return {
         target / "supervisor" / "GOALS.md": _SUPERVISOR_GOALS_SEED,
         target / "supervisor" / "JOURNAL.md": _SUPERVISOR_JOURNAL_SEED,
         target / "supervisor" / "briefs" / "wake.md": _SUPERVISOR_WAKE_SEED,
@@ -5677,7 +5681,12 @@ def _initialize_local_home_files(target: Path) -> None:
         target / "docs" / "lanes" / "README.md": _LANE_REPORTS_SEED,
         target / "docs" / "lanes" / "BRIEF-TEMPLATE.md": _LANE_BRIEF_SEED,
     }
-    for path, text in seeds.items():
+
+
+def _initialize_local_home_files(target: Path) -> None:
+    """Create missing local-home seeds without replacing operator data."""
+    target = Path(target)
+    for path, text in _local_home_seeds(target).items():
         _write_local_seed(path, text)
     (target / "supervisor" / "journal-history").mkdir(
         parents=True, exist_ok=True)
@@ -7822,9 +7831,19 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
 
     refuse_if_archived(args.name, before, "send")
     if _is_codex_record(before):
-        return _cmd_send_codex(args.name, message, run=run, which=which)
-    return _cmd_send_native(args.name, message,
-                            run=run, which=which, sleep=sleep)
+        result = _cmd_send_codex(args.name, message, run=run, which=which)
+    else:
+        result = _cmd_send_native(args.name, message,
+                                  run=run, which=which, sleep=sleep)
+    # A delivered supervisor wake/steer ends a PARKED marker.
+    if result == 0 and (args.name == SUPERVISOR_BODY_NAME
+                        or _is_supervisor_shaped(args.name)):
+        with fleet_lock():
+            claim = read_incarnation()
+            if isinstance(claim, dict) and claim.get("state") != "released":
+                _clear_supervisor_park(claim)
+                write_incarnation(claim)
+    return result
 
 
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
@@ -9564,7 +9583,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9373` / `cmd_respawn:8788`, before
+    # resolution that runs from `cmd_kill:9498` / `cmd_respawn:8913`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -9595,9 +9614,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9373` / `cmd_respawn:8788`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9498` / `cmd_respawn:8913`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:8809-8816` spells out that design -- resolve under the lock.
+    # `cmd_respawn:8934-8936` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -11663,6 +11682,16 @@ def _doctor_check_legacy_settings():
     return ("legacy-settings", True, "no legacy root worker-settings.json present")
 
 
+def _doctor_check_local_seeds():
+    missing = [str(p.relative_to(FLEET_HOME))
+               for p in _local_home_seeds(FLEET_HOME) if not p.exists()]
+    if missing:
+        return ("local-seeds", False,
+                "missing seeded local-storage files: " + ", ".join(missing)
+                + " -- run `fleet init` to create them")
+    return ("local-seeds", True, "seeded local-storage files present")
+
+
 _HOOK_SMOKE_SID = "fleet-doctor-smoke"
 
 
@@ -12442,6 +12471,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_instance_grants),
         functools.partial(_doctor_check_hook_registration),
         functools.partial(_doctor_check_legacy_settings),
+        functools.partial(_doctor_check_local_seeds),
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
         functools.partial(_doctor_check_stop_hook_smoke, run=run),
         functools.partial(_doctor_check_terminal_launcher, which=which),
@@ -13125,6 +13155,8 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 # write HANDSHAKE separately because only the claim holder may write the journal.
 
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
+# Bounded claim-local marker suppresses stalled-body pages without probing.
+SUPERVISOR_PARK_MAX_SECONDS = 24 * 3600.0
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
 
 # three-tier §10.4 T_release bounds the wait for a steered supervisor to release.
@@ -13201,7 +13233,7 @@ SUCCESSOR_DEFAULT_MODE = "bypass"
 SUP_SPAWN_DEFAULT_MODE = "bypass"
 
 SUPERVISOR_JOURNAL_KINDS = (
-    "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
+    "BOOT", "CHECKPOINT", "PROPOSAL", "PARKED", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
     "HANDOFF-BEGIN", "HANDOFF-COMPLETE", "HANDOFF-ABORT",
 )
 
@@ -13217,7 +13249,7 @@ SUPERVISOR_BOOT_HANDOFF_REFUSED_RC = 5
 SUPERVISOR_BODY_MAX_LINES = 3
 # Inline only substantive journal bodies; cap bytes as well as line count.
 SUPERVISOR_BOOT_JOURNAL_TAIL = 5
-SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS = frozenset({"CHECKPOINT", "PROPOSAL"})
+SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS = frozenset({"CHECKPOINT", "PROPOSAL", "PARKED"})
 SUPERVISOR_BOOT_INLINE_MIN = 2
 SUPERVISOR_LATEST_ENTRY_MAX_CHARS = 2000
 # Guarantee two substantive entries, then enforce the total inline budget.
@@ -13233,7 +13265,7 @@ holder, via `fleet sup-*` commands only. Never edit or delete entries.
 Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
 plus an optional trailing ` substrate=<substrate>` when the body's registry row
 records one (item 28, e.g. `substrate=openrouter/stealth/union-alpha`).
-Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
+Kinds: BOOT, CHECKPOINT, PROPOSAL, PARKED, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
 
 <!-- entries below -->
 """
@@ -13295,7 +13327,12 @@ def goals_path() -> Path:
 
 
 def supervisor_wake_brief_path() -> Path:
-    return supervisor_dir() / "briefs" / "wake.md"
+    path = supervisor_dir() / "briefs" / "wake.md"
+    try:
+        _write_local_seed(path, _SUPERVISOR_WAKE_SEED)
+    except OSError:
+        pass
+    return path
 
 
 # Read operator-owned role/tier/model policy from GOALS.md over defaults.
@@ -14161,7 +14198,7 @@ def _journal_roll_header_hint(line: str) -> bool:
         return False
     return bool(re.match(
         r"^## (?:\d{4}-\d{2}-\d{2}(?:T|\s)|\S+ "
-        r"(?:BOOT|CHECKPOINT|PROPOSAL|SEIZED|RELEASED|LIMIT-TRANSFER|"
+        r"(?:BOOT|CHECKPOINT|PROPOSAL|PARKED|SEIZED|RELEASED|LIMIT-TRANSFER|"
         r"HANDOFF-BEGIN|HANDOFF-COMPLETE|HANDOFF-ABORT)\b)", body))
 
 
@@ -14272,6 +14309,40 @@ def supervisor_journal_append(kind: str, inc: str, sid: str, body: str,
     entry = f"{header}\n\n{safe_body}\n"
     with open(path, "a", encoding="utf-8") as f:
         f.write(entry)
+
+
+def _supervisor_park_info(claim, now=None) -> dict:
+    """Project the file-only PARKED marker and expiry state."""
+    if not isinstance(claim, dict):
+        return {"parked_at": None, "parked_reason": None,
+                "parked_wake_condition": None, "parked_age_seconds": None,
+                "parked_active": False, "parked_expired": False}
+    parked_at = claim.get("parked_at")
+    reason = claim.get("parked_reason")
+    wake = claim.get("parked_wake_condition")
+    age = None
+    active = False
+    if isinstance(parked_at, str) and parked_at:
+        try:
+            if now is None:
+                now = datetime.now(timezone.utc)
+            age = (now - _parse_iso(parked_at)).total_seconds()
+            active = (isinstance(reason, str) and bool(reason.strip())
+                      and 0 <= age <= SUPERVISOR_PARK_MAX_SECONDS)
+        except (TypeError, ValueError):
+            pass
+    return {"parked_at": parked_at if isinstance(parked_at, str) else None,
+            "parked_reason": reason if isinstance(reason, str) else None,
+            "parked_wake_condition": wake if isinstance(wake, str) else None,
+            "parked_age_seconds": age,
+            "parked_active": active,
+            "parked_expired": bool(reason and parked_at and not active)}
+
+
+def _clear_supervisor_park(claim: dict) -> None:
+    """Clear an intentional park marker in-place before a normal wake/checkpoint."""
+    for key in ("parked_at", "parked_reason", "parked_wake_condition"):
+        claim.pop(key, None)
 
 
 def _roster_live_sids(entries: list) -> set:
@@ -14405,11 +14476,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3139, :3174, :3204, :3243, :3280,
-    :3342, :3422, :4411, :9476, :9638, :9902, :10131, :10167, :10409, :10410,
-    :10499, :10509, :10520, :10618, :11141, :14250, :18101, :18102, :18206, :18267, :19574, :21531`).
+    :3342, :3422, :4411, :9601, :9763, :10027, :10256, :10292, :10534, :10535, :10624, :10634, :10645, :10743, :11266, :14427, :18320, :18321, :18425, :18486, :19807, :21781`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8078, :8662, :12587,
-    :20313. This makes union identity safe; the age boundary distinguishes respawn.
+    OWN prior sid alone: :8203, :8787, :12723, :20546. This makes union identity
+    safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
     return bool(_releaser_live_sids(claim, live_sids, registry=registry))
@@ -14740,7 +14810,7 @@ def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> l
 def _select_boot_journal_inline_indices(tail: list) -> set:
     """Which indices of the boot journal tail window get their body inlined.
 
-    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL) entries
+    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL/PARKED) entries
     are eligible -- a terse bookkeeping entry (BOOT/SEIZED/...) is a pointer
     regardless of position, including when it is the newest entry in the
     window (a boot's own just-written BOOT entry must not crowd out the
@@ -14932,6 +15002,8 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
                 # Proven resume restamps and refreshes the same claim, without seizure or new incarnation.
                 if presented == "pending":
                     _acknowledge_pending(claim)
+                # Resume is an explicit wake; clear any intentional park.
+                _clear_supervisor_park(claim)
                 claim["session_id"] = caller_sid
                 claim["heartbeat_at"] = now_iso()
                 notices.append(_mint_pending_nonce(claim))
@@ -15124,8 +15196,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8078, :8662, :12587,
-    # :20313) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8203, :8787, :12723,
+    # :20546) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15133,7 +15205,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1089`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14224`).
+        # names this gate as its reason (`:14401`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -15489,7 +15561,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11112`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11237`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -15559,8 +15631,27 @@ def _cmd_codex_sup_checkpoint(args, body):
                 or claim.get("pending_operation") is not None):
             raise FleetCliError(
                 "native Codex supervisor claim changed before checkpoint")
+        kind = args.kind
+        wake_condition = getattr(args, "wake_condition", None)
+        if kind == "PARKED":
+            if not body.strip():
+                raise FleetCliError("sup-checkpoint --kind PARKED requires a reason in the body")
+            if wake_condition is not None and len(wake_condition.strip()) > 500:
+                raise FleetCliError("sup-checkpoint: --wake-condition is limited to 500 characters")
+            claim["parked_at"] = now_iso()
+            claim["parked_reason"] = body.strip()
+            if wake_condition and wake_condition.strip():
+                claim["parked_wake_condition"] = wake_condition.strip()
+            else:
+                claim.pop("parked_wake_condition", None)
+            journal_body = body.strip()
+            if wake_condition and wake_condition.strip():
+                journal_body += f"\nWake condition: {wake_condition.strip()}"
+        else:
+            _clear_supervisor_park(claim)
+            journal_body = body
         supervisor_journal_append(
-            args.kind, binding.incarnation_id, binding.authority.value, body,
+            kind, binding.incarnation_id, binding.authority.value, journal_body,
             substrate="codex")
         roll = roll_supervisor_journal()
         claim["heartbeat_at"] = now_iso()
@@ -15584,13 +15675,32 @@ def cmd_sup_checkpoint(args) -> int:
         raise FleetCliError(
             f"sup-checkpoint: REFUSED body has {len(body_lines)} lines; "
             f"maximum is {SUPERVISOR_BODY_MAX_LINES}")
+    if args.kind == "PARKED" and not body.strip():
+        raise FleetCliError("sup-checkpoint --kind PARKED requires a reason in the body")
+    wake_condition = getattr(args, "wake_condition", None)
+    if wake_condition is not None and len(wake_condition.strip()) > 500:
+        raise FleetCliError("sup-checkpoint: --wake-condition is limited to 500 characters")
     if _claim_uses_native_codex():
         return _cmd_codex_sup_checkpoint(args, body)
     with fleet_lock():
         claim, caller, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-checkpoint")
-        supervisor_journal_append(args.kind, claim["incarnation_id"], caller, body,
+        if args.kind == "PARKED":
+            claim["parked_at"] = now_iso()
+            claim["parked_reason"] = body.strip()
+            if wake_condition and wake_condition.strip():
+                claim["parked_wake_condition"] = wake_condition.strip()
+            else:
+                claim.pop("parked_wake_condition", None)
+            journal_body = body.strip()
+            if wake_condition and wake_condition.strip():
+                journal_body += f"\nWake condition: {wake_condition.strip()}"
+        else:
+            _clear_supervisor_park(claim)
+            journal_body = body
+        supervisor_journal_append(args.kind, claim["incarnation_id"], caller,
+                                  journal_body,
                                   substrate=_record_substrate_for_sid(caller))
         roll = roll_supervisor_journal()
         occupancy = _transcript_occupancy(find_transcript_path(None, caller))
@@ -17974,7 +18084,10 @@ def _project_claim(claim, now=None):
         "incarnation_id", "session_id", "claimed_at", "heartbeat_at", "claimed_via",
         "lineage_id", "nonce_seq", "state", "released_at", "released_by_sid", "reason",
         "context_occupancy", "context_verdict", "context_measured_at",
-        "provider", "current_turn_id", "host_generation")}
+        "provider", "current_turn_id", "host_generation",
+        "parked_at", "parked_reason", "parked_wake_condition")}
+    out.update({key: info for key, info in _supervisor_park_info(claim).items()
+                if key in ("parked_age_seconds", "parked_active", "parked_expired")})
     holder = claim.get("holder")
     out["holder"] = ({key: holder.get(key) for key in ("provider", "thread_id")}
                      if isinstance(holder, dict) else None)
@@ -18383,6 +18496,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     sup = snapshot.get("supervisor") if isinstance(snapshot, dict) else None
     sup = sup if isinstance(sup, dict) else {}
     claim = read_incarnation()
+    parked = _supervisor_park_info(claim)
     state = sup.get("state")
     if state not in ("none", "held", "released", "unknown"):
         state = "unknown"
@@ -18417,8 +18531,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         isinstance(body_record, dict)
         and body_record.get("status") == "idle"
         and not body_record.get("archived_at"))
-    # The fleet projection supplies transcript-detected parks; newer native
-    # rosters may supply the same status/horizon directly, even without a PID.
+    # Fleet and native projections may supply park status without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
                  and row.get("sessionId") in (sids or [])]
     projected = snapshot.get("workers") if isinstance(snapshot, dict) else None
@@ -18458,6 +18571,12 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "context_verdict": claim.get("context_verdict") if isinstance(claim, dict) else None,
         "heartbeat_age_seconds": sup.get("heartbeat_age_seconds"),
         "goals_active": bool(sup.get("goals_active")),
+        "parked_at": parked["parked_at"],
+        "parked_reason": parked["parked_reason"],
+        "parked_wake_condition": parked["parked_wake_condition"],
+        "parked_age_seconds": parked["parked_age_seconds"],
+        "parked_active": parked["parked_active"],
+        "parked_expired": parked["parked_expired"],
     }
 
 
@@ -18469,7 +18588,9 @@ def _sup_guard_decide(observation):
         ("state", "claim_sids", "registry_ok", "registry_reason",
          "roster_ok", "roster_reason",
          "heartbeat_age_seconds", "body_name", "pending",
-         "handshake_exists", "limit_reset_at")
+         "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
+         "parked_wake_condition", "parked_age_seconds", "parked_active",
+         "parked_expired")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -18492,18 +18613,18 @@ def _sup_guard_decide(observation):
     if obs.get("pending"):
         return "PAGE", "handoff in flight", detail
 
+    # PARKED wins over stale-body advice until its bounded marker expires.
+    if obs.get("state") == "held" and obs.get("parked_active"):
+        detail["quiet"] = True
+        return "PARKED", "supervisor parked by design", detail
+
     if obs.get("limited"):
         reason = "supervisor limited"
         if _limit_reset_passed({"limit_reset_at": obs.get("limit_reset_at")}):
             reason += "; reset horizon passed, interface must resume"
         return "PAGE", reason, detail
 
-    # An over-band body must not be given more work -- but only a LIVE one.
-    # The recorded verdict outlives the body that wrote it, so firing this arm
-    # on a stale claim would send a DEAD over-band supervisor to PAGE instead
-    # of the DISPATCH that replaces it, and an over-band body is the one most
-    # likely to die. A fresh heartbeat is the liveness the arm requires; a
-    # stale one falls through to the WAKE/DISPATCH arms unchanged.
+    # An over-band body gets no work while its heartbeat is fresh.
     _age = obs.get("heartbeat_age_seconds")
     if (obs.get("state") == "held"
             and obs.get("context_verdict") == "over-band"
@@ -18571,7 +18692,7 @@ def _sup_guard_line(verdict, reason, target=None):
     if verdict == "WAKE":
         target = " ".join(str(target or SUPERVISOR_BODY_NAME).split())
         return f"WAKE {target}"
-    if verdict in {"OK", "DISPATCH"}:
+    if verdict in {"OK", "DISPATCH", "PARKED"}:
         return verdict
     reason = " ".join(str(reason).split())
     return f"PAGE {reason}"
@@ -18623,6 +18744,10 @@ def _codex_sup_guard_observe():
         "turn_status": observed["turn_status"],
         "active_flags": observed["active_flags"],
     }
+    parked = _supervisor_park_info(claim)
+    detail.update({key: parked[key] for key in (
+        "parked_at", "parked_reason", "parked_wake_condition",
+        "parked_age_seconds", "parked_active", "parked_expired")})
     status = observed["provider_status"]
     if status in {"notLoaded", "systemError"}:
         return {**detail, "verdict": "PAGE",
@@ -18630,6 +18755,10 @@ def _codex_sup_guard_observe():
     if observed["active_flags"]:
         return {**detail, "verdict": "PAGE",
                 "reason": "native supervisor is waiting"}
+    if parked["parked_active"]:
+        detail["quiet"] = True
+        return {**detail, "verdict": "PARKED",
+                "reason": "supervisor parked by design"}
     try:
         age = (datetime.now(timezone.utc)
                - _parse_iso(claim["heartbeat_at"])).total_seconds()
@@ -21236,7 +21365,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_supckpt = sub.add_parser("sup-checkpoint", help="append a supervisor journal checkpoint (claim holder only) + refresh heartbeat")
     p_supckpt.add_argument("body", help="checkpoint text, or @file")
-    p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL"], default="CHECKPOINT")
+    p_supckpt.add_argument("--kind", choices=["CHECKPOINT", "PROPOSAL", "PARKED"], default="CHECKPOINT")
+    p_supckpt.add_argument("--wake-when", "--wake-condition", dest="wake_condition",
+                           help="optional condition that ends a PARKED checkpoint")
     p_supckpt.add_argument("--sid", help="override caller session id")
     p_supckpt.add_argument("--nonce", help=NONCE_ARG_HELP)
 
@@ -21652,7 +21783,6 @@ def _claim_holder_row_name(claim: dict, registry: dict):
 
 
 def _last_assistant_uuid(name: str, sid) -> str | None:
-    """The newest assistant entry's uuid in the lane's transcript, or None."""
     transcript = find_transcript_path(name, sid) if sid else None
     if transcript is None:
         return None
@@ -21669,7 +21799,6 @@ def _last_assistant_uuid(name: str, sid) -> str | None:
 
 
 def _lane_done_turn_key(name: str, rec: dict) -> list:
-    """One key per finished turn: dispatch pair plus newest assistant uuid (SPEC §8)."""
     sid = rec.get("session_id") or rec.get("codex_thread_id")
     key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
     tail = None if _is_codex_record(rec) else _last_assistant_uuid(name, sid)
@@ -21678,11 +21807,8 @@ def _lane_done_turn_key(name: str, rec: dict) -> list:
 
 def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                      run=subprocess.run, sleep=time.sleep) -> bool:
-    """Deliver one LANE-DONE per finished turn to the owning holder (SPEC §8)."""
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
-    # A successor may have been spawned by the current holder. Its Stop must
-    # never send LANE-DONE back to that holder (or wake itself in a loop).
     if _is_supervisor_shaped(name):
         return False
     if not isinstance(name, str) or not NAME_RE.fullmatch(name):
@@ -21709,7 +21835,6 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
         turn_key = _lane_done_turn_key(name, rec)
         if rec.get("lane_done_notified") == turn_key:
             return False
-        # Pending until the send returns: a killed send stays retryable.
         pending = rec.get("lane_done_pending")
         if isinstance(pending, dict) and pending.get("key") == turn_key:
             try:
@@ -21744,14 +21869,12 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                         rc = _cmd_send_native(parent_name, message)
                 break
             except TransientSendRefusal:
-                # A G9 roster refusal clears on the next fetch; retry once.
                 if attempt == 2:
                     raise
                 sleep(LANE_DONE_RETRY_SECONDS)
         if rc != 0:
             raise FleetCliError(f"{name}: completion mail send failed ({rc})")
     except Exception:
-        # Failed: clear only this turn's pending claim so it stays retryable.
         _settle_lane_done(name, sid, turn_key, delivered=False)
         raise
     _settle_lane_done(name, sid, turn_key, delivered=True)
@@ -21759,7 +21882,6 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
 
 
 def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
-    """Resolve this turn's pending LANE-DONE claim: delivered, or retryable."""
     with fleet_lock():
         data = read_registry_no_repair()
         current = data["workers"].get(name)
@@ -21771,8 +21893,6 @@ def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
             current.pop("lane_done_pending", None)
         elif not delivered:
             return
-        # A later Stop can observe a newer assistant entry while this send is
-        # in flight. Do not let the older send move the delivered cursor back.
         if delivered and _lane_done_turn_key(name, current) == turn_key:
             current["lane_done_notified"] = turn_key
         save_registry(data)
@@ -21780,7 +21900,6 @@ def _settle_lane_done(name, sid, turn_key, *, delivered: bool) -> None:
 
 def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
                     sleep=time.sleep) -> list:
-    """Backstop: deliver owned idle lanes' undelivered finishes; names sent (SPEC §8)."""
     roster_fn = roster_fn or _fetch_agents_roster
     claim = read_incarnation()
     if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
@@ -21816,13 +21935,12 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
                                 or rec.get("codex_thread_id"),
                                 run=run, sleep=sleep):
                 delivered.append(n)
-        except Exception:  # noqa: BLE001 -- one lane must not stop the sweep
+        except Exception:
             pass
     return delivered
 
 
 def cmd_lane_done(args) -> int:
-    """Stop-hook bridge; an unknown or retired sid has no delivery target."""
     data = read_registry_no_repair()
     for name, rec in data["workers"].items():
         if isinstance(rec, dict) and rec.get("session_id") == args.sid:
@@ -21872,7 +21990,6 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
         raise FleetCliError(f"{args.name}: roster entry for {sid} has no name")
     twins = [e for e in entries if is_live(e) and e.get("name") == native]
     if len(twins) > 1:
-        # SendMessage resolves by name and ListAgents shows no sid: refuse.
         others = [e.get("sessionId") for e in twins if e.get("sessionId") != sid]
         dups = [{"pid": e.get("pid"), "session_id": e.get("sessionId"),
                  "status": e.get("status"), "registry": e.get("sessionId") == sid}

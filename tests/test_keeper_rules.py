@@ -96,6 +96,14 @@ def test_quiet_guard_verdict_is_silent_despite_conflicting_keeper_readings():
     assert k.rule_supervisor_stalled(obs, NOW) is None
 
 
+def test_explicit_parked_guard_verdict_is_silent():
+    page = k.rule_supervisor_stalled(
+        _obs(supervisor_guard=_guard(verdict="PARKED",
+                                      reason="supervisor parked by design",
+                                      parked_active=True)), NOW)
+    assert page is None
+
+
 def test_guard_page_is_not_silenced_by_keeper_liveness_or_goals_readings():
     obs = _obs(supervisor_guard=_guard(), goals_active=False, agents_ok=False,
                heartbeat_age_seconds=1.0, claim_rows={LIVE_SID: "busy"})

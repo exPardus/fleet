@@ -1035,13 +1035,17 @@ class TestDisagreementThree:
 
     def test_the_snapshot_carries_no_process_liveness_field_at_all(
             self, isolated_home):
-        """INVERT-ON-BUILD. The projection a watcher reads has four keys and
-        none of them is about a process. There is nothing here for a correct
-        watcher to key on, which is why it keyed on the beat."""
+        """INVERT-ON-BUILD. The projection a watcher reads has claim and
+        intentional-park metadata, none of it process liveness. There is
+        nothing here for a correct watcher to key on, which is why it keyed on
+        the beat."""
         self._claim(isolated_home, 60)
         snap = fleet._supervisor_tier_snapshot()
         assert set(snap) == {"goals_active", "state", "incarnation_id",
-                             "heartbeat_age_seconds"}
+                             "heartbeat_age_seconds", "parked_at",
+                             "parked_reason", "parked_wake_condition",
+                             "parked_age_seconds", "parked_active",
+                             "parked_expired"}
         assert not [k for k in snap if "pid" in k or "live" in k or "alive" in k]
 
     def test_a_busy_supervisor_and_a_dead_one_are_the_same_snapshot(

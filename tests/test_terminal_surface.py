@@ -127,7 +127,10 @@ class TestStatusSnapshot:
         _write_registry(home, {})
         sup = fleet.status_snapshot()["supervisor"]
         assert set(sup) == {"goals_active", "state", "incarnation_id",
-                            "heartbeat_age_seconds"}
+                            "heartbeat_age_seconds", "parked_at",
+                            "parked_reason", "parked_wake_condition",
+                            "parked_age_seconds", "parked_active",
+                            "parked_expired"}
 
     def test_the_command_tier_is_projected_even_on_an_unreadable_registry(self, home):
         # The claim lives in a different file. A corrupt worker table must not

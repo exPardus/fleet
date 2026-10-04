@@ -587,7 +587,7 @@ class TestRespawnSuccess:
 class TestRespawnJournaling:
     def test_kind_list_unchanged(self):
         assert fleet.SUPERVISOR_JOURNAL_KINDS == (
-            "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED",
+            "BOOT", "CHECKPOINT", "PROPOSAL", "PARKED", "SEIZED", "RELEASED",
             "LIMIT-TRANSFER", "HANDOFF-BEGIN", "HANDOFF-COMPLETE",
             "HANDOFF-ABORT",
         )
