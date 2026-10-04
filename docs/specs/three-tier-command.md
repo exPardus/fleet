@@ -224,7 +224,9 @@ selecting the Anthropic namespace default; an explicit `--model` remains an oper
 blank or whitespace-only `--model` is normalised to omitted before this check, so it cannot bypass
 the guard.
 A `tier-model:` line outside the `<!-- fleet-tier-policy ... -->` block is treated as a
-malformed policy and is refused at those same spawn boundaries, with its line number named.
+malformed policy and is refused at those same spawn boundaries, with its line number named. The
+opening and closing markers may share one line; an opening marker without a later `-->` is an
+unterminated policy and is refused at those boundaries.
 
 ### 3.4 Worker-model policy: Opus or Sonnet, never Haiku
 

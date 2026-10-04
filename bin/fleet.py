@@ -13027,6 +13027,7 @@ def _parse_tier_policy_block(text: str) -> dict:
     actually found; the caller merges over defaults."""
     lines = text.splitlines()
     inside = False
+    block_open_line = None
     found = {}
     stray = []
     for line_number, raw in enumerate(lines, 1):
@@ -13035,7 +13036,10 @@ def _parse_tier_policy_block(text: str) -> dict:
             if re.match(r"^tier-model\s*:", line):
                 stray.append(line_number)
             if line.startswith(_TIER_POLICY_BLOCK_OPEN):
-                inside = True
+                opening_tail = line[len(_TIER_POLICY_BLOCK_OPEN):]
+                if _TIER_POLICY_BLOCK_CLOSE not in opening_tail:
+                    inside = True
+                    block_open_line = line_number
             continue
         if line.startswith(_TIER_POLICY_BLOCK_CLOSE):
             inside = False
@@ -13065,6 +13069,8 @@ def _parse_tier_policy_block(text: str) -> dict:
                 found["forbid_default"] = True
             elif value.lower() in {"false", "no", "off", "0"}:
                 found["forbid_default"] = False
+    if inside:
+        found["_unterminated_tier_policy"] = block_open_line
     found["_stray_tier_model_lines"] = stray
     return found
 
@@ -13078,6 +13084,7 @@ def read_tier_policy() -> dict:
               "worker_tiers": list(_TIER_POLICY_DEFAULTS["worker_tiers"]),
               "tier_model": dict(_TIER_POLICY_DEFAULTS["tier_model"]),
               "forbid_default": _TIER_POLICY_DEFAULTS["forbid_default"],
+              "_unterminated_tier_policy": None,
               "_stray_tier_model_lines": [],
               "_source": "default"}
     try:
@@ -13102,6 +13109,12 @@ def _enforce_tier_policy(role: str, explicit_model=None, policy: dict = None):
     """
     explicit_model = _normalise_model(explicit_model)
     policy = policy or read_tier_policy()
+    unterminated = policy.get("_unterminated_tier_policy")
+    if unterminated:
+        raise FleetCliError(
+            "tier policy: <!-- fleet-tier-policy --> block is unterminated "
+            f"(opened on line {unterminated}); refusing {role} spawn until "
+            "GOALS.md is fixed")
     stray = policy.get("_stray_tier_model_lines") or []
     if stray:
         lines = ", ".join(str(line) for line in stray)
