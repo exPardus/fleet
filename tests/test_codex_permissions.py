@@ -229,6 +229,59 @@ def test_each_reviewed_blocking_request_requires_an_explicit_valid_response(
         assert "Yes" not in json.dumps(record["response"])
 
 
+@pytest.mark.parametrize("method,required_field", [
+    ("item/commandExecution/requestApproval", "startedAtMs"),
+    ("item/fileChange/requestApproval", "startedAtMs"),
+    ("item/tool/requestUserInput", "isBlocking"),
+    ("item/tool/requestUserInput", "questions"),
+    ("mcpServer/elicitation/request", "serverName"),
+    ("item/permissions/requestApproval", "cwd"),
+    ("item/permissions/requestApproval", "permissions"),
+    ("item/permissions/requestApproval", "startedAtMs"),
+])
+def test_known_request_missing_method_specific_required_field_is_frozen(
+        tmp_path, method, required_field):
+    home = _home(tmp_path)
+    store = fleet_codex.CodexApprovalStore(home, "generation-1")
+    request = _request(method=method)
+    request["params"].pop(required_field)
+
+    record = store.record_request(request)
+
+    assert record["state"] == "unknown"
+    assert record["offered_decisions"] == []
+    assert "malformed" in record["reason"]
+
+
+@pytest.mark.parametrize("method,field,bad_value", [
+    ("item/commandExecution/requestApproval", "startedAtMs", True),
+    ("item/fileChange/requestApproval", "startedAtMs", "1"),
+    ("item/tool/requestUserInput", "isBlocking", 1),
+    ("item/tool/requestUserInput", "questions", {}),
+    ("mcpServer/elicitation/request", "serverName", None),
+    ("item/permissions/requestApproval", "cwd", []),
+    ("item/permissions/requestApproval", "permissions", None),
+    ("item/permissions/requestApproval", "startedAtMs", 1.0),
+])
+def test_known_request_invalid_method_specific_required_field_is_frozen(
+        tmp_path, method, field, bad_value):
+    home = _home(tmp_path)
+    store = fleet_codex.CodexApprovalStore(home, "generation-1")
+    request = _request(method=method)
+    request["params"][field] = bad_value
+
+    record = store.record_request(request)
+
+    assert record["state"] == "unknown"
+    assert record["offered_decisions"] == []
+
+
+def test_missing_permission_request_object_can_never_produce_empty_response():
+    with pytest.raises(fleet_codex.HostRejected, match="no permissions object"):
+        fleet_codex._approval_decision(
+            "item/permissions/requestApproval", {}, {})
+
+
 def test_unknown_request_kind_is_durably_frozen(tmp_path):
     home = _home(tmp_path)
     store = fleet_codex.CodexApprovalStore(home, "generation-1")

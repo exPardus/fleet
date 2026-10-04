@@ -740,6 +740,66 @@ def _approval_key(generation: str, request_id: str | int) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _validate_approval_request_params(method: str,
+                                      params: Mapping[str, Any]) -> None:
+    """Validate required fields that are specific to each reviewed request."""
+    def required_started_at() -> None:
+        started_at = params.get("startedAtMs")
+        if isinstance(started_at, bool) or not isinstance(started_at, int):
+            raise ValueError("approval request startedAtMs is invalid")
+
+    if method in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval"}:
+        required_started_at()
+        return
+
+    if method == "item/tool/requestUserInput":
+        if not isinstance(params.get("isBlocking"), bool):
+            raise ValueError("user input request isBlocking is invalid")
+        questions = params.get("questions")
+        if not isinstance(questions, list):
+            raise ValueError("user input request questions are invalid")
+        question_ids: set[str] = set()
+        for question in questions:
+            if not isinstance(question, dict):
+                raise ValueError("user input request question is invalid")
+            for field in ("header", "id", "question"):
+                if not isinstance(question.get(field), str):
+                    raise ValueError(f"user input request question {field} is invalid")
+            question_id = question["id"]
+            if not question_id or question_id in question_ids:
+                raise ValueError("user input request question id is invalid")
+            question_ids.add(question_id)
+            options = question.get("options")
+            if options is not None:
+                if not isinstance(options, list):
+                    raise ValueError("user input request options are invalid")
+                for option in options:
+                    if (not isinstance(option, dict)
+                            or not isinstance(option.get("label"), str)
+                            or not isinstance(option.get("description"), str)):
+                        raise ValueError("user input request option is invalid")
+            for field in ("isOther", "isSecret"):
+                if field in question and not isinstance(question[field], bool):
+                    raise ValueError(f"user input request question {field} is invalid")
+        return
+
+    if method == "mcpServer/elicitation/request":
+        server_name = params.get("serverName")
+        if not isinstance(server_name, str) or not server_name:
+            raise ValueError("MCP elicitation serverName is invalid")
+        return
+
+    if method == "item/permissions/requestApproval":
+        required_started_at()
+        if not isinstance(params.get("cwd"), str):
+            raise ValueError("permission request cwd is invalid")
+        if not isinstance(params.get("permissions"), dict):
+            raise ValueError("permission request permissions are invalid")
+        return
+
+
 def _approval_decision(method: str, decision: Any,
                        params: Mapping[str, Any]) -> dict[str, Any]:
     """Validate an explicit response without inventing any omitted choice."""
@@ -822,7 +882,11 @@ def _approval_decision(method: str, decision: Any,
         if not isinstance(decision, dict) or not set(decision).issubset(
                 {"permissions", "scope", "strictAutoReview"}):
             raise HostRejected("permission response is malformed")
-        if decision.get("permissions") != params.get("permissions"):
+        requested = params.get("permissions")
+        if not isinstance(requested, dict):
+            raise HostRejected("permission request has no permissions object")
+        if (not isinstance(decision.get("permissions"), dict)
+                or decision["permissions"] != requested):
             raise HostRejected("permission response must grant exactly the requested profile")
         if decision.get("scope", "turn") not in {"turn", "session"}:
             raise HostRejected("permission response scope is invalid")
@@ -928,6 +992,8 @@ class CodexApprovalStore:
             if method not in {"mcpServer/elicitation/request"}:
                 if not isinstance(item_id, str) or not item_id or len(item_id) > 160:
                     raise ValueError("server request item id is invalid")
+            if known:
+                _validate_approval_request_params(method, params)
         except ValueError:
             known = False
         safe_params = _public_evidence(params)
@@ -942,7 +1008,7 @@ class CodexApprovalStore:
             "created_at": time.time(),
         }
         if not known:
-            record["reason"] = "unknown or identity-incomplete server request kind"
+            record["reason"] = "unknown, malformed, or identity-incomplete server request kind"
         # Approval evidence is intentionally bounded below the fixed metadata cap.
         if len(json.dumps(record, ensure_ascii=False).encode("utf-8")) > 48 * 1024:
             record["params"] = {
