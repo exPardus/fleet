@@ -18695,8 +18695,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         isinstance(body_record, dict)
         and body_record.get("status") == "idle"
         and not body_record.get("archived_at"))
-    # The fleet projection supplies transcript-detected parks; newer native
-    # rosters may supply the same status/horizon directly, even without a PID.
+    # Fleet and native projections may supply park status without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
                  and row.get("sessionId") in (sids or [])]
     projected = snapshot.get("workers") if isinstance(snapshot, dict) else None
