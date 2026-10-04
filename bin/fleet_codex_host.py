@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from fleet_codex import (
+    CodexApprovalStore,
     CodexPublicEvidenceStore,
     IPC_PROTOCOL_VERSION,
     MAX_OPERATION_TIMEOUT_SECONDS,
@@ -95,6 +96,7 @@ class Host:
         self.listener: socket.socket | None = None
         self.journal = OperationJournal(self.home, self.generation)
         self.evidence = CodexPublicEvidenceStore(self.home)
+        self.approvals = CodexApprovalStore(self.home, self.generation)
 
     def metadata(self) -> dict[str, Any]:
         app_server_pid = self.client.process_id if self.client is not None else None
@@ -212,7 +214,12 @@ class Host:
         if self.client is None:
             return
         for message in self.client.notifications():
-            self.evidence.record(message)
+            if "id" in message:
+                self.approvals.record_request(message)
+            elif message.get("method") == "serverRequest/resolved":
+                self.approvals.resolve(message)
+            else:
+                self.evidence.record(message)
 
     def _verify_installed_schema(self) -> None:
         with tempfile.TemporaryDirectory(prefix="fleet-codex-schema-") as directory:
@@ -246,7 +253,8 @@ class Host:
                 return
             if (self.idle_timeout > 0
                     and time.monotonic() - self.last_activity > self.idle_timeout
-                    and not self.journal.has_unresolved()):
+                    and not self.journal.has_unresolved()
+                    and not self.approvals.has_unresolved()):
                 self._wake_shutdown("idle-timeout")
                 return
 
@@ -381,6 +389,50 @@ class Host:
                     self._drain_notifications()
                     result = self.evidence.read(
                         payload.get("thread_id"), payload.get("turn_id"))
+                elif method == "approval/list":
+                    if not isinstance(payload, dict):
+                        raise ValueError("approval list payload is malformed")
+                    thread_id = payload.get("thread_id")
+                    turn_id = payload.get("turn_id")
+                    result = self.approvals.unresolved(
+                        thread_id=thread_id, turn_id=turn_id)
+                elif method == "approval/respond":
+                    if not isinstance(payload, dict):
+                        raise ValueError("approval response payload is malformed")
+                    assert self.client is not None
+                    self._authorize_public_mutation(
+                        connection, "approval/respond", {"params": {
+                            "threadId": payload.get("thread_id")}})
+                    record, public_response = self.approvals.begin_response(
+                        payload.get("request_id"), payload.get("thread_id"),
+                        payload.get("turn_id"), payload.get("decision"))
+                    try:
+                        self.client.respond(record["request_id"], public_response)
+                    except BaseException as exc:
+                        self.approvals.mark_uncertain(
+                            record, f"provider response write uncertain: {type(exc).__name__}")
+                        raise ValueError(
+                            "approval response consumption is uncertain; it will not be retried") from exc
+                    current = self.approvals.mark_responded(record)
+                    # A response has no JSON-RPC acknowledgement. Observe the public
+                    # resolved notification when it is promptly available, but never
+                    # replay merely because the notification is delayed or lost.
+                    settle_deadline = min(deadline, time.monotonic() + 1.0)
+                    while (current.get("state") == "responded"
+                           and time.monotonic() < settle_deadline):
+                        self._drain_notifications()
+                        candidates = [item for item in self.approvals.records()
+                                      if item.get("key") == current.get("key")]
+                        current = candidates[0] if len(candidates) == 1 else current
+                        if current.get("state") != "responded":
+                            break
+                        time.sleep(0.01)
+                    result = {
+                        "request_id": current.get("request_id"),
+                        "thread_id": current.get("thread_id"),
+                        "turn_id": current.get("turn_id"),
+                        "state": current.get("state"),
+                    }
                 elif method == "host/shutdown":
                     result = {"stopping": True}
                     should_stop = True
@@ -411,6 +463,15 @@ class Host:
         requires the current process-bound claim for Interface calls.  The
         exact external Interface thread is always an observation target only.
         """
+        params = payload.get("params", {})
+        target = params.get("threadId") if isinstance(params, dict) else None
+        approvals = getattr(self, "approvals", None)
+        if (approvals is not None
+                and any(record.get("state") == "unknown"
+                        and record.get("thread_id") in (None, target)
+                        for record in approvals.unresolved())):
+            raise HostRejected(
+                "unknown blocking server request freezes this thread")
         claim = read_interface_claim(self.home)
         if claim is None:
             return
@@ -430,8 +491,6 @@ class Host:
                 raise HostRejected(
                     "Codex IPC peer does not hold the current Interface or "
                     "exact-home supervisor claim")
-        params = payload.get("params", {})
-        target = params.get("threadId") if isinstance(params, dict) else None
         if target == claim.get("thread_id"):
             raise HostRejected(
                 f"external Interface thread is observe-only; refusing {public_method}")
