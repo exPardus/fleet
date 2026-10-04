@@ -43,7 +43,7 @@ def native_home(tmp_path, monkeypatch):
 def _args(lane, **updates):
     values = dict(
         name="cx-native", dir=str(lane), task="implement the bounded change",
-        mode="accept", model="codex:gpt-5.6-luna", codex_adapter="native",
+        mode="accept", model="codex:gpt-5.6-luna",
         max_budget_usd=None, setting_sources=None, token_ceiling=None,
         category=None, nonce=None, force_band=False, context=None,
     )
@@ -368,13 +368,21 @@ def test_journal_commit_failure_freezes_the_bound_row(
     assert len(client.operations) == provider_calls
 
 
-def test_spawn_parser_keeps_mcx_default_and_allows_explicit_native():
+def test_spawn_parser_defaults_codex_models_to_native_and_allows_explicit_mcx():
     parser = fleet.build_parser()
     common = ["spawn", "cx", "--dir", "/tmp", "--task", "brief",
               "--model", "codex:gpt-5.6-luna"]
-    assert parser.parse_args(common).codex_adapter == "mcx"
-    assert parser.parse_args(common + ["--codex-adapter", "native"]).codex_adapter \
-        == "native"
+    assert parser.parse_args(common).codex_adapter == "native"
+    assert parser.parse_args(common + ["--codex-adapter", "mcx"]).codex_adapter \
+        == "mcx"
+
+
+def test_spawn_help_names_native_default_and_mcx_fallback():
+    help_text = fleet.build_parser()._subparsers._group_actions[0].choices[
+        "spawn"].format_help()
+
+    assert "default: native" in help_text
+    assert "--codex-adapter {native,mcx}" in help_text
 
 
 def test_wave_close_mixed_codex_row_never_reaches_mcx(tmp_path, monkeypatch):

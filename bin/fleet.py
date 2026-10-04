@@ -1009,20 +1009,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11388) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12294) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15732) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11386) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12325) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:15763) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3397) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
       * `_read_registry_readonly` (:4088) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12544) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:15606) -- describe the incident-specific absence.
+      * `_doctor_check_registry` (:12575) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:15637) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6720) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17386) -- render the release explanation.
+      * `_print_snapshot_table` (:6718) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:17417) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1865,7 +1865,7 @@ def _openrouter_substrate(model):
 
 
 # ---------------------------------------------------------------------------
-# Codex substrate (item 29): `--model codex:<model>` dispatch through mcx.
+# Codex compatibility substrate: explicit `--codex-adapter mcx` dispatch.
 #
 # mcx (/home/user/projects/multi-codex, on PATH) spawns and steers Codex CLI
 # workers: `mcx spawn -m MODEL "instructions"` prints an 8-char worker id and
@@ -3379,7 +3379,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15732`), because legacy upgrades also require a complete registry.
+    (`:15763`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1089`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -5978,11 +5978,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     assert_brief_carried(args.name, task, prompt)
 
     codex_slug = _codex_model_slug(args.model)
-    codex_adapter = getattr(args, "codex_adapter", "mcx")
+    codex_adapter = getattr(args, "codex_adapter", None) or "native"
     if codex_adapter not in {"mcx", "native"}:
         raise FleetCliError(f"unknown Codex adapter: {codex_adapter!r}")
-    if codex_slug is None and codex_adapter != "mcx":
-        raise FleetCliError("--codex-adapter requires a codex:<model> model")
     codex_operation_id = (
         f"worker-{args.name}-thread-{uuid.uuid4()}"
         if codex_slug is not None and codex_adapter == "native" else None)
@@ -9731,7 +9729,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9646` / `cmd_respawn:9053`, before
+    # resolution that runs from `cmd_kill:9644` / `cmd_respawn:9051`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -9762,9 +9760,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9646` / `cmd_respawn:9053`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:9644` / `cmd_respawn:9051`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9074-9083` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9072-9081` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -11955,12 +11953,45 @@ def _doctor_check_legacy_mix(workers: dict):
     Such records support retirement operations only; archived rows need no notice.
     """
     legacy = sorted(name for name, rec in workers.items()
-                    if not is_native(rec) and rec.get("archived_at") is None)
+                    if (not is_native(rec) and not _is_codex_record(rec)
+                        and rec.get("archived_at") is None))
     if legacy:
         return ("legacy-mix", True,
                 f"{len(legacy)} pre-pivot worker(s): {', '.join(legacy)} -- "
                 "unmanageable by this build; kill/clean/archive only")
     return ("legacy-mix", True, "no pre-pivot workers")
+
+
+def _doctor_check_codex_adapters(workers: dict, which=shutil.which):
+    """Census persisted Codex routes without probing or repairing either one."""
+    names_by_route = {"native": [], "mcx": [], "invalid": []}
+    for name, record in workers.items():
+        if (not _is_codex_record(record)
+                or record.get("archived_at") is not None):
+            continue
+        route = _codex_record_route(record)
+        names_by_route[route if route in names_by_route else "invalid"].append(name)
+
+    for names in names_by_route.values():
+        names.sort()
+    findings = []
+    if names_by_route["invalid"]:
+        findings.append(
+            "mixed/invalid row(s): " + ", ".join(names_by_route["invalid"]))
+    if names_by_route["native"] and which("codex") is None:
+        findings.append(
+            f"codex helper unavailable for {len(names_by_route['native'])} native row(s)")
+    if names_by_route["mcx"] and which("mcx") is None:
+        findings.append(
+            f"mcx helper unavailable for {len(names_by_route['mcx'])} mcx row(s)")
+
+    detail = (
+        f"native={len(names_by_route['native'])} "
+        f"mcx={len(names_by_route['mcx'])} "
+        f"invalid={len(names_by_route['invalid'])}")
+    if findings:
+        detail += " -- " + "; ".join(findings)
+    return ("codex-adapters", not findings, detail)
 
 
 def _doctor_check_dead_suspected(workers: dict):
@@ -12627,10 +12658,10 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_stale_attaches, workers),
         functools.partial(_doctor_check_limited_parks, workers),
         functools.partial(_doctor_check_legacy_mix, workers),
+        functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(_doctor_check_dead_suspected, workers),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
-        # Pair durable denials with live permission stalls; tzdata remains last.
         functools.partial(_doctor_check_permission_denials, workers),
         functools.partial(_doctor_check_orphaned_claims, workers=workers),
         functools.partial(_doctor_check_identity_witness, workers),
@@ -14639,10 +14670,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3201, :3236, :3266, :3305, :3342,
-    :3404, :3484, :4485, :9749, :9911, :10175, :10404, :10440, :10682, :10683,
-    :10772, :10782, :10793, :10891, :11414, :14590, :18484, :18485, :18589, :18650, :19971, :21960`).
+    :3404, :3484, :4485, :9747, :9909, :10173, :10402, :10438, :10680, :10681,
+    :10770, :10780, :10791, :10889, :11412, :14621, :18515, :18516, :18620, :18681, :20004, :21993`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8343, :8927, :12871, :20714. This makes union identity
+    OWN prior sid alone: :8341, :8925, :12902, :20747. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15360,8 +15391,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8343, :8927, :12871,
-    # :20714) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8341, :8925, :12902,
+    # :20747) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15369,7 +15400,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1089`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14564`).
+        # names this gate as its reason (`:14595`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -15725,7 +15756,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11385`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11383`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19477,7 +19508,9 @@ def cmd_sup_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep
 
     campaign = _read_task_arg(args.task)
     mode = getattr(args, "permission_mode", None) or SUP_SPAWN_DEFAULT_MODE
-    if getattr(args, "codex_adapter", None) == "native":
+    codex_adapter = getattr(args, "codex_adapter", None)
+    if codex_adapter == "native" or (
+            codex_adapter is None and _codex_model_slug(args.model) is not None):
         return _dispatch_codex_supervisor_body(
             campaign, mode, getattr(args, "model", None),
             setting_sources=getattr(args, "setting_sources", None))
@@ -21289,10 +21322,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
                          help="Codex reasoning effort when --model is codex:<model>")
     p_spawn.add_argument(
-        "--codex-adapter", choices=("mcx", "native"), default="mcx",
+        "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
-        help="Codex transport for codex:<model> (native remains explicit until "
-             "the live acceptance gate passes)")
+        help="Codex transport for codex:<model> (default: native; use mcx "
+             "for the legacy compatibility adapter)")
     p_spawn.add_argument("--max-budget-usd", type=float, default=None, dest="max_budget_usd")
     # Pass settings-source selection through to Claude so foreign hooks can be excluded.
     p_spawn.add_argument("--setting-sources", dest="setting_sources", default=None)
@@ -21527,8 +21560,8 @@ def build_parser() -> argparse.ArgumentParser:
                                  "--model, §3.3(d))")
     p_supspawn.add_argument(
         "--codex-adapter", choices=("native",), default=None,
-        help="explicitly use the public Codex app-server adapter; "
-             "omission preserves the existing supervisor dispatch route")
+        help="Codex supervisor transport (codex:<model> defaults to native; "
+             "omission with other models preserves the Claude route)")
     p_supspawn.add_argument("--permission-mode", dest="permission_mode",
                             choices=list(MODE_FLAGS),
                             help=f"fleet mode name (default: "
