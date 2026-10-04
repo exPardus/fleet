@@ -395,6 +395,17 @@ def test_guard_send_or_quiet_does_not_page(home, guard):
     assert "supervisor-stalled" not in _state(home)
 
 
+def test_parked_guard_verdict_is_accepted_without_a_page(home):
+    runner = Runner(guard={
+        "verdict": "PARKED", "reason": "supervisor parked by design",
+        "wake_when": "operator decision answered",
+    })
+    rc, _ = _main(home, runner)
+    assert rc == 0
+    assert runner.tmux("send-keys") == []
+    assert "supervisor-stalled" not in _state(home)
+
+
 @pytest.mark.parametrize("guard, guard_rc", [
     ("not json", 0),
     ("[]", 0),
