@@ -3,6 +3,7 @@ claim/seizure/handshake state machine, boot ritual, handoff, nag."""
 import json
 import os
 import re
+import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -4103,7 +4104,14 @@ class TestDispatchPathsAreDocumented:
 def test_public_tree_has_no_operator_gate_or_supervisor_journal():
     """Per-home decisions and journals are local runtime data."""
     repo = Path(__file__).resolve().parents[1]
-    assert not (repo / "docs" / "OPERATOR-GATES.md").exists()
-    assert not (repo / "supervisor" / "JOURNAL.md").exists()
+
+    def tracked(relative):
+        result = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", relative],
+            cwd=repo, capture_output=True, text=True, check=False)
+        return result.returncode == 0
+
+    assert not tracked("docs/OPERATOR-GATES.md")
+    assert not tracked("supervisor/JOURNAL.md")
     skill = (repo / "skills" / "fleet" / "SKILL.md").read_text(encoding="utf-8")
     assert "local interface board and pending decision tasks" in skill

@@ -23,7 +23,15 @@ BOUNDED_LIVE_RECEIPT = (
 
 
 def _local_receipt(path):
-    """Load an optional per-home acceptance receipt without requiring one."""
+    """Load an explicitly requested per-home acceptance receipt.
+
+    Acceptance receipts live under the ignored ``docs/lanes`` home storage.
+    Merely having one on disk must not turn a clean-clone test into a
+    host-specific test, so callers opt in when they deliberately want to
+    check the current home's evidence.
+    """
+    if os.environ.get("FLEET_CODEX_ACCEPTANCE_RECEIPTS") != "1":
+        pytest.skip("per-home Codex acceptance receipts are opt-in")
     if not path.is_file():
         pytest.skip("local Codex acceptance receipt is not present")
     return json.loads(path.read_text(encoding="utf-8"))

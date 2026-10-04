@@ -139,14 +139,20 @@ def test_new_lane_documents_have_done():
 
 
 def test_dispatched_tasks_have_done():
-    home = Path(os.environ.get("FLEET_HOME", str(REPO)))
+    configured = os.environ.get("FLEET_HOME")
+    if not configured:
+        return
+    home = Path(configured)
     bad = [str(p) for p in dispatched_tasks(home)
            if not has_done_after_title(p.read_text(encoding="utf-8"))]
     assert not bad, f"Dispatched task missing DONE means immediately after title: {bad}"
 
 
 def test_dispatched_tasks_have_valid_serves():
-    home = Path(os.environ.get("FLEET_HOME", str(REPO)))
+    configured = os.environ.get("FLEET_HOME")
+    if not configured:
+        return
+    home = Path(configured)
     bad = [str(path) for path in dispatched_tasks(home)
            if not valid_serves(path.read_text(encoding="utf-8"))]
     assert not bad, f"Dispatched task missing a valid Serves citation: {bad}"
