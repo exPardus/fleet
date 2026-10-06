@@ -301,7 +301,12 @@ usage and takes no lock, performs no RPC, and writes nothing. Busy `send` uses
 `turn/steer` with `expectedTurnId`; idle send and `resume-limited` start one
 turn on the same thread. Interrupt uses `turn/interrupt` and commits only after
 same-turn terminal proof. Ambiguous mutation responses are durably reserved
-and never retried. Respawn requires old-turn terminal proof before creating a
+and never retried. The queue-overflow sentinel has one non-replay recovery:
+the host replaces its failed stdio child and adopts the original spawn journal
+entry only from an operation-tagged empty thread with matching effective
+settings, or exactly one public turn beyond the bound history watermark;
+otherwise the row stays uncertain with a queue-bound/concurrency remedy.
+Respawn requires old-turn terminal proof before creating a
 fresh provider thread and carries the brief, journal, and queued mail; the
 retired thread is recorded with its exact turn and terminal status. Public
 rate-limit reads provide the recorded reset horizon. No path signals a Codex

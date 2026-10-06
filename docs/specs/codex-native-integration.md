@@ -275,10 +275,22 @@ The app-server notification queue is bounded at 8,192 events by default so a
 single busy home can multiplex several active lanes without the former 1,024-
 event burst failure. `FLEET_CODEX_EVENT_QUEUE_MAX` (or the compatibility
 spelling `FLEET_CODEX_MAX_EVENTS`) may select another positive bound, capped at
-65,536; no setting permits an unbounded queue. A native `fleet spawn` retries
-only the exact queue-overflow sentinel, at most three attempts with short
-backoff. Other transport failures, and a persistent overflow, remain a clear
-uncertain failure requiring reconciliation.
+65,536; no setting permits an unbounded queue. A queue overflow never makes a
+mutation replayable. The host marks the original operation uncertain, replaces
+only the failed stdio child, and attempts exact public reconciliation: a
+`thread/start` carries a provider-persisted `threadSource` derived from its
+operation ID, so recovery can list the exact-cwd app-server threads and load the
+one tagged empty thread under a separate durable `thread/resume` intent to
+recover its effective model and permission tuple; a `turn/start` reads the
+already-bound thread and requires exactly one turn beyond its recorded history
+watermark. The original journal entry is adopted only after those identities,
+cwd, effective settings, and turn counts agree. Missing, duplicate, malformed,
+or repeatedly overflowing evidence leaves the original intent uncertain and
+reports the `FLEET_CODEX_EVENT_QUEUE_MAX`/lane-concurrency remedy. Read-only
+requests may be repeated once after replacing the failed stdio child. If the
+client was already failed before a spawn request could be written, the protocol
+reports that fact explicitly; the replacement child then receives the first and
+only provider dispatch under the already-accepted journal intent.
 
 ### 7.2 Locks
 
@@ -303,8 +315,9 @@ public evidence for recovery and never overwrites newer state.
 1. Under `fleet.lock`, validate name/home/model/permissions, write the brief,
    and insert a preclaim with no provider ID; release the lock immediately.
 2. Ensure the host and record a prepared `thread/start` outside the lock.
-   Queue-bound transport failures are retried by `fleet spawn` under the
-   bounded policy in §7.1; no other error is replayed.
+   Its public `threadSource` is the operation-derived recovery correlation.
+   Queue-bound transport failures follow §7.1 reconciliation; the mutation is
+   never retried.
 3. Call `thread/start`; on a valid response, persist the genuine thread/cwd.
 4. Reacquire `fleet.lock` only to conditionally bind that same preclaim to the
    thread, then release it. Bind failure records an orphan empty thread and
@@ -312,12 +325,13 @@ public evidence for recovery and never overwrites newer state.
 5. Prepare and call `turn/start` once outside the lock; record the real turn;
    reacquire only to conditionally commit active state.
 
-Lost `thread/start` response never retries automatically because no reliable
-correlation exists. It can leave an empty orphan, not duplicate work. Lost
-`turn/start` response also never retries blindly. Recovery reads the bound
-thread and turns. Exactly one new genuine turn may be adopted only when it is
-strictly after the history watermark and the thread is exclusively Fleet-bound.
-Zero, multiple, wrong-cwd, or conflicting observations become
+Lost `thread/start` and `turn/start` responses never retry automatically.
+Queue-overflow recovery has the exact correlation described in §7.1; other
+transport loss still has no reliable `thread/start` correlation and leaves a
+possible empty orphan. Turn recovery reads the bound thread and turns. Exactly
+one new genuine turn may be adopted only when it is strictly after the history
+watermark and the thread is exclusively Fleet-bound. Zero, multiple, wrong-cwd,
+wrong-effective-settings, or conflicting observations become
 `uncertain`/`dead-suspected` and PAGE.
 
 ### 8.2 State, send, and wake

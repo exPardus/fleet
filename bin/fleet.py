@@ -6234,36 +6234,6 @@ def _commit_codex_journal(client, name, journal_operation_id,
             f"-- {exc}") from exc
 
 
-CODEX_SPAWN_QUEUE_RETRY_ATTEMPTS = 3
-CODEX_SPAWN_QUEUE_RETRY_BACKOFF_SECONDS = (0.10, 0.25)
-
-
-def _is_codex_event_queue_overflow(error: BaseException) -> bool:
-    """Keep spawn retry narrowly scoped to the app-server queue sentinel."""
-    try:
-        from fleet_codex_protocol import is_event_queue_overflow
-        return is_event_queue_overflow(error)
-    except (ImportError, AttributeError):
-        return "app-server event queue exceeded its bound" in str(error)
-
-
-def _codex_spawn_call_with_retry(name, phase, call, *, sleep=time.sleep):
-    """Retry one native-spawn provider call only on bounded queue overflow."""
-    for attempt in range(1, CODEX_SPAWN_QUEUE_RETRY_ATTEMPTS + 1):
-        try:
-            return call()
-        except BaseException as exc:
-            if not _is_codex_event_queue_overflow(exc):
-                raise
-            if attempt >= CODEX_SPAWN_QUEUE_RETRY_ATTEMPTS:
-                raise FleetCliError(
-                    f"{name}: native Codex {phase} hit the app-server event "
-                    f"queue bound after {attempt} attempts; increase "
-                    "FLEET_CODEX_EVENT_QUEUE_MAX (capped at 65536) or "
-                    "reduce concurrent lanes") from exc
-            sleep(CODEX_SPAWN_QUEUE_RETRY_BACKOFF_SECONDS[attempt - 1])
-
-
 def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep) -> int:
     """Bind a native Codex worker through two conditional registry commits."""
     name = args.name
@@ -6271,9 +6241,14 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
     profile = _codex_permission_profile(args.mode)
     expected_cwd = str(Path(cwd).resolve())
     requested_model = _codex_model_slug(args.model)
+    thread_source = "fleet-spawn-" + hashlib.sha256(
+        thread_operation_id.encode("utf-8")).hexdigest()
     thread_params = {
         "cwd": expected_cwd,
         "model": requested_model,
+        # A public, provider-persisted correlation marker lets the host find
+        # this exact thread after a queue overflow without replaying start.
+        "threadSource": thread_source,
     }
     thread_params.update({key: value for key, value in profile.items()
                           if value is not None})
@@ -6284,6 +6259,20 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
         "recovery": {
             "kind": "thread/start", "fleet_name": name,
             "canonical_cwd": expected_cwd,
+            "thread_source": thread_source,
+            "expected_effective": {
+                "model": requested_model,
+                "approval_policies": (
+                    [profile["approvalPolicy"]]
+                    if profile["approvalPolicy"] is not None
+                    else ["never", "on-request", "untrusted"]),
+                "sandbox_types": ({
+                    "danger-full-access": ["dangerFullAccess"],
+                    "workspace-write": ["workspaceWrite"],
+                    "read-only": ["readOnly"],
+                }.get(profile["sandbox"], [
+                    "dangerFullAccess", "workspaceWrite", "readOnly"])),
+            },
         },
     }
     prior_brief = brief_snapshot(name)
@@ -6296,12 +6285,8 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
         write_brief(name, task)
         tasks_dir().mkdir(parents=True, exist_ok=True)
         task_file_path(name).write_text(prompt, encoding="utf-8")
-        client = _codex_spawn_call_with_retry(
-            name, "host setup", lambda: _codex_native_client(FLEET_HOME),
-            sleep=sleep)
-        managed_requirements = _codex_spawn_call_with_retry(
-            name, "managed requirements",
-            lambda: _codex_managed_requirements(client, profile), sleep=sleep)
+        client = _codex_native_client(FLEET_HOME)
+        managed_requirements = _codex_managed_requirements(client, profile)
     except BaseException as exc:
         _rollback_codex_preclaim(
             name, record, prior_brief, prior_task)
@@ -6310,9 +6295,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
         raise FleetCliError(
             f"{name}: native Codex launch failed before provider acceptance -- {exc}") from exc
     try:
-        thread_observation = _codex_spawn_call_with_retry(
-            name, "thread/start", lambda: client.call(thread_operation, timeout=30),
-            sleep=sleep)
+        thread_observation = client.call(thread_operation, timeout=30)
         thread_result = thread_observation.result
         if not isinstance(thread_result, dict):
             raise FleetCliError("Codex thread/start returned no public result")
@@ -6390,18 +6373,18 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
         },
     }
     try:
-        turn_observation = _codex_spawn_call_with_retry(
-            name, "turn/start", lambda: client.call(turn_operation, timeout=30),
-            sleep=sleep)
+        turn_observation = client.call(turn_operation, timeout=30)
         turn_result = turn_observation.result
         if not isinstance(turn_result, dict) or not isinstance(
                 turn_result.get("turn"), dict):
             raise FleetCliError("Codex turn/start returned no public turn")
         turn = turn_result["turn"]
         turn_id = _provider_codex_id(turn.get("id"), "turn")
-        if turn.get("status") != "inProgress":
+        turn_status = turn.get("status")
+        if turn_status not in {
+                "inProgress", "completed", "failed", "interrupted"}:
             raise FleetCliError(
-                f"Codex turn/start returned unexpected status {turn.get('status')!r}")
+                f"Codex turn/start returned unexpected status {turn_status!r}")
     except BaseException as exc:
         _freeze_codex_preclaim(name, turn_operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -6420,7 +6403,12 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
             rec.update({
                 "adapter_state": "active",
                 "codex_turn_id": turn_id,
-                "status": "working",
+                "status": {
+                    "inProgress": "working",
+                    "completed": "idle",
+                    "failed": "dead-suspected",
+                    "interrupted": "interrupted",
+                }[turn_status],
                 "turns": 1,
                 "last_activity": now_iso(),
             })

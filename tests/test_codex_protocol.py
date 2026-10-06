@@ -58,6 +58,11 @@ for line in sys.stdin:
         send({{"id": "server-1", "method": "item/commandExecution/requestApproval",
               "params": {{"threadId": "t", "turnId": "u", "itemId": "i"}}}})
         send({{"id": message["id"], "result": {{"queued": True}}}})
+    elif method == "overflow":
+        send({{"method": "thread/status/changed", "params": {{"seq": 1}}}})
+        send({{"method": "turn/started", "params": {{"seq": 2}}}})
+        time.sleep(0.05)
+        send({{"id": message["id"], "result": {{"tooLate": True}}}})
     elif method == "malformed":
         sys.stdout.write("{{not-json\n")
         sys.stdout.flush()
@@ -239,3 +244,17 @@ def test_event_queue_overflow_marker_is_narrow_and_cause_aware():
     assert module.is_event_queue_overflow(error)
     assert not module.is_event_queue_overflow(
         module.ProtocolViolation("app-server stdout reached EOF"))
+
+
+def test_request_after_idle_queue_overflow_is_proved_not_sent(tmp_path):
+    module, client, _events = _start(tmp_path, max_events=1)
+    try:
+        with pytest.raises(module.ProtocolViolation, match="queue exceeded"):
+            client.request("overflow", {}, timeout=1)
+        next_id = client.next_request_id
+        with pytest.raises(module.RequestNotSent) as caught:
+            client.request("echo", {"must": "not be sent"}, timeout=1)
+        assert module.is_event_queue_overflow(caught.value)
+        assert client.next_request_id == next_id
+    finally:
+        client.close()

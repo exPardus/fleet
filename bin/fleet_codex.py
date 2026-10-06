@@ -1328,6 +1328,81 @@ class OperationJournal:
                 operation_id, {"observed"}, "committed", result=evidence)
         return record
 
+    def adopt_spawn_queue_overflow(
+            self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
+        """Adopt one spawn mutation from exact post-overflow public evidence.
+
+        This is deliberately narrower than a general ``uncertain -> observed``
+        transition.  The host must prove either the operation-tagged empty
+        thread and its effective settings, or exactly one turn beyond the
+        recorded history watermark.  Nothing here dispatches a provider
+        mutation or makes an ambiguous journal entry replayable.
+        """
+        record = self.load(operation_id)
+        recovery = record.get("recovery")
+        if (record.get("state") != "uncertain"
+                or record.get("method") != "rpc"
+                or not isinstance(recovery, dict)
+                or not isinstance(result, Mapping)):
+            raise HostRejected(
+                f"operation {operation_id} is not an uncertain spawn intent")
+        public_method = record.get("public_method")
+        kind = recovery.get("kind")
+        if public_method == "thread/start" and kind == "thread/start":
+            thread = result.get("thread")
+            expected = recovery.get("expected_effective")
+            if not isinstance(thread, Mapping) or not isinstance(expected, dict):
+                raise HostRejected(
+                    f"operation {operation_id} has incomplete thread evidence")
+            approval_policies = expected.get("approval_policies")
+            sandbox_types = expected.get("sandbox_types")
+            if (not isinstance(approval_policies, list)
+                    or not approval_policies
+                    or any(not isinstance(value, str)
+                           for value in approval_policies)
+                    or not isinstance(sandbox_types, list)
+                    or not sandbox_types
+                    or any(not isinstance(value, str)
+                           for value in sandbox_types)):
+                raise HostRejected(
+                    f"operation {operation_id} has malformed effective settings")
+            approval = result.get("approvalPolicy")
+            sandbox = result.get("sandbox")
+            sandbox_type = sandbox.get("type") if isinstance(sandbox, Mapping) else None
+            if (thread.get("id") != result.get("recoveredThreadId")
+                    or thread.get("cwd") != recovery.get("canonical_cwd")
+                    or result.get("cwd") != recovery.get("canonical_cwd")
+                    or thread.get("threadSource") != recovery.get("thread_source")
+                    or thread.get("turns") != []
+                    or result.get("model") != expected.get("model")
+                    or approval not in approval_policies
+                    or result.get("approvalsReviewer") != "user"
+                    or sandbox_type not in sandbox_types):
+                raise HostRejected(
+                    f"operation {operation_id} thread evidence does not match intent")
+        elif public_method == "turn/start" and kind == "turn/start":
+            turn = result.get("turn")
+            watermark = recovery.get("history_watermark")
+            if (not isinstance(turn, Mapping)
+                    or result.get("threadId") != recovery.get("thread_id")
+                    or result.get("canonicalCwd") != recovery.get("canonical_cwd")
+                    or result.get("historyWatermark") != watermark
+                    or not isinstance(watermark, int)
+                    or isinstance(watermark, bool)
+                    or watermark < 0
+                    or result.get("observedTurnCount") != watermark + 1
+                    or turn.get("status") not in {
+                        "inProgress", "completed", "failed", "interrupted"}):
+                raise HostRejected(
+                    f"operation {operation_id} turn evidence does not match intent")
+        else:
+            raise HostRejected(
+                f"operation {operation_id} is not a spawn thread/turn intent")
+        evidence = _public_evidence(dict(result))
+        evidence["adoptedFromQueueOverflow"] = True
+        return self._transition(
+            operation_id, {"uncertain"}, "observed", result=evidence)
+
     def uncertain(self, operation_id: str, reason: str) -> dict[str, Any]:
         return self._transition(
             operation_id, {"accepted", "prepared"}, "uncertain",

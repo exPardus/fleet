@@ -38,6 +38,10 @@ class TransportLost(FleetCliError):
     """The app-server stdio transport ended before an operation completed."""
 
 
+class RequestNotSent(FleetCliError):
+    """The transport was already unusable before this request was written."""
+
+
 @dataclass
 class _Pending:
     event: threading.Event
@@ -93,7 +97,7 @@ def resolve_max_events(value: int | None = None,
 
 
 def is_event_queue_overflow(error: BaseException) -> bool:
-    """Identify only the queue-bound failure eligible for spawn retry."""
+    """Identify only the queue-bound failure eligible for host recovery."""
     seen: set[int] = set()
     current: BaseException | None = error
     while current is not None and id(current) not in seen:
@@ -202,9 +206,12 @@ class AppServerClient:
         pending = _Pending(threading.Event())
         with self._state_lock:
             if self._fatal_error is not None:
-                raise self._fatal_error
+                raise RequestNotSent(
+                    "app-server request was not sent because the client had failed") \
+                    from self._fatal_error
             if self._closing:
-                raise TransportLost("app-server client is closed")
+                raise RequestNotSent(
+                    "app-server request was not sent because the client is closed")
             request_id = self._next_id
             self._next_id += 1
             self._pending[request_id] = pending
@@ -395,5 +402,6 @@ class AppServerClient:
 __all__ = [
     "AppServerClient", "DEFAULT_MAX_EVENTS", "EVENT_QUEUE_MAX_ENV",
     "EVENT_QUEUE_OVERFLOW_MESSAGE", "MAX_MAX_EVENTS", "ProtocolViolation",
-    "TransportLost", "is_event_queue_overflow", "resolve_max_events",
+    "RequestNotSent", "TransportLost", "is_event_queue_overflow",
+    "resolve_max_events",
 ]

@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -14,6 +15,103 @@ THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
 TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
 NEXT_THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9"
 NEXT_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
+
+
+QUEUE_RECOVERY_APP_SERVER = r'''#!__PYTHON__
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+state_path = Path(os.environ["FAKE_QUEUE_RECOVERY_STATE"])
+log_path = Path(os.environ["FAKE_QUEUE_RECOVERY_LOG"])
+
+def load():
+    return json.loads(state_path.read_text()) if state_path.exists() else {}
+
+def save(value):
+    state_path.write_text(json.dumps(value, sort_keys=True))
+
+def log(method):
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"method": method}) + "\n")
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+def public_thread(state):
+    thread = state["thread"]
+    turns = state.get("turns", [])
+    return {
+        "id": thread["id"], "cwd": thread["cwd"],
+        "threadSource": thread["threadSource"], "turns": turns,
+        "status": {"type": "active" if turns else "idle", "activeFlags": []},
+    }
+
+first = json.loads(sys.stdin.readline())
+send({"id": first["id"], "result": {
+    "serverInfo": {"name": "fake-codex", "version": "0.155.1"}}})
+if json.loads(sys.stdin.readline()) != {"method": "initialized"}:
+    raise SystemExit(31)
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    params = message.get("params", {})
+    log(method)
+    state = load()
+    if method == "configRequirements/read":
+        send({"id": message["id"], "result": {"requirements": None}})
+    elif method == "thread/start":
+        if os.environ.get("FAKE_QUEUE_RECOVERY_CREATE_THREAD", "1") == "1":
+            sandbox = {"danger-full-access": "dangerFullAccess",
+                       "workspace-write": "workspaceWrite",
+                       "read-only": "readOnly"}[params["sandbox"]]
+            state = {"thread": {
+                "id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7",
+                "cwd": params["cwd"], "threadSource": params["threadSource"],
+                "model": params["model"],
+                "approvalPolicy": params["approvalPolicy"],
+                "sandbox": {"type": sandbox},
+            }, "turns": []}
+            save(state)
+        # With a queue bound of one, the second notification makes the stdio
+        # response unknowable while the provider-side state above survives.
+        send({"method": "thread/status/changed", "params": {"seq": 1}})
+        send({"method": "thread/status/changed", "params": {"seq": 2}})
+        time.sleep(0.1)
+        send({"id": message["id"], "result": {}})
+    elif method == "thread/list":
+        data = [public_thread(state)] if "thread" in state else []
+        send({"id": message["id"], "result": {"data": data,
+                                                "nextCursor": None}})
+    elif method == "thread/resume":
+        thread = state["thread"]
+        send({"id": message["id"], "result": {
+            "thread": public_thread(state), "cwd": thread["cwd"],
+            "model": thread["model"],
+            "approvalPolicy": thread["approvalPolicy"],
+            "approvalsReviewer": "user", "sandbox": thread["sandbox"],
+        }})
+    elif method == "turn/start":
+        state["turns"] = [{
+            "id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8",
+            "status": "inProgress", "items": [], "itemsView": "full",
+        }]
+        save(state)
+        send({"method": "thread/status/changed", "params": {"seq": 3}})
+        send({"method": "turn/started", "params": {"seq": 4}})
+        time.sleep(0.1)
+        send({"id": message["id"], "result": {}})
+    elif method == "thread/read":
+        send({"id": message["id"], "result": {
+            "thread": public_thread(state)}})
+    else:
+        send({"id": message["id"], "error": {
+            "code": -32601, "message": "unsupported fake method"}})
+'''
 
 
 @pytest.fixture
@@ -195,60 +293,100 @@ def test_lost_thread_start_response_freezes_preclaim_without_retry(
     assert len(client.operations) == 1
 
 
-def test_native_spawn_retries_queue_overflow_then_commits(
+def _queue_recovery_client(home, tmp_path, *, create_thread=True):
+    import fleet_codex
+
+    app_server = tmp_path / "queue-recovery-app-server"
+    app_server.write_text(
+        QUEUE_RECOVERY_APP_SERVER.replace("__PYTHON__", sys.executable),
+        encoding="utf-8")
+    app_server.chmod(0o700)
+    state = tmp_path / "provider-state.json"
+    log = tmp_path / "provider-requests.jsonl"
+    env = dict(os.environ)
+    env.update({
+        "FAKE_QUEUE_RECOVERY_STATE": str(state),
+        "FAKE_QUEUE_RECOVERY_LOG": str(log),
+        "FAKE_QUEUE_RECOVERY_CREATE_THREAD": "1" if create_thread else "0",
+        "FLEET_CODEX_EVENT_QUEUE_MAX": "1",
+    })
+    client = fleet_codex.CodexHostClient.ensure(
+        home, app_server_command=[str(app_server)], env=env,
+        ready_timeout=20, idle_timeout=30)
+    return client, log
+
+
+def _stop_queue_recovery_client(client):
+    from test_codex_host_ipc import _shutdown
+
+    _shutdown(client)
+    client.wait_for_exit(2)
+
+
+def test_native_spawn_adopts_queue_overflows_through_production_journal(
         native_home, monkeypatch):
     home, lane = native_home
-    import fleet_codex_protocol
-    client = FakeClient(home, lane)
-    attempts = {"thread": 0}
-    original_call = client.call
+    client, log = _queue_recovery_client(home, home)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    try:
+        assert fleet.cmd_spawn(_args(lane)) == 0
+        record = fleet.load_registry()["workers"]["cx-native"]
+        assert record["adapter_state"] == "active"
+        assert record["codex_thread_id"] == THREAD_ID
+        assert record["codex_turn_id"] == TURN_ID
 
-    def call(operation, timeout):
-        if operation["payload"]["method"] == "thread/start":
-            attempts["thread"] += 1
-            if attempts["thread"] == 1:
-                raise fleet_codex_protocol.ProtocolViolation(
-                    fleet_codex_protocol.EVENT_QUEUE_OVERFLOW_MESSAGE)
-        return original_call(operation, timeout)
+        operations = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (home / "state" / "codex" / "operations").glob(
+                "worker-cx-native-*.json")
+        ]
+        assert len(operations) == 2
+        assert {item["state"] for item in operations} == {"committed"}
+        assert all(item["result"].get("adoptedFromQueueOverflow") is True
+                   for item in operations)
+        recovery_operations = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (home / "state" / "codex" / "operations").glob(
+                "queue-recovery-*.json")
+        ]
+        assert len(recovery_operations) == 1
+        assert recovery_operations[0]["state"] == "committed"
+        assert recovery_operations[0]["public_method"] == "thread/resume"
+        methods = [json.loads(line)["method"]
+                   for line in log.read_text(encoding="utf-8").splitlines()]
+        assert methods.count("thread/start") == 1
+        assert methods.count("turn/start") == 1
+        assert methods.count("thread/list") == 1
+        assert methods.count("thread/resume") == 1
+        assert methods.count("thread/read") == 1
+    finally:
+        _stop_queue_recovery_client(client)
 
-    client.call = call
-    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client,
-                        raising=False)
-    sleeps = []
 
-    assert fleet.cmd_spawn(_args(lane), sleep=sleeps.append) == 0
-    assert attempts["thread"] == 2
-    assert len(sleeps) == 1
-    assert fleet.load_registry()["workers"]["cx-native"]["adapter_state"] == "active"
-
-
-def test_native_spawn_persistent_queue_overflow_is_bounded_and_clear(
+def test_native_spawn_refuses_unprovable_queue_overflow_without_replay(
         native_home, monkeypatch):
     home, lane = native_home
-    import fleet_codex_protocol
-    client = FakeClient(home, lane)
-    original_call = client.call
-
-    def call(operation, timeout):
-        if operation["payload"]["method"] == "thread/start":
-            # Record each attempted operation just like the real client path.
-            client.operations.append(operation)
-            raise fleet_codex_protocol.ProtocolViolation(
-                fleet_codex_protocol.EVENT_QUEUE_OVERFLOW_MESSAGE)
-        return original_call(operation, timeout)
-
-    client.call = call
-    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client,
-                        raising=False)
-    sleeps = []
-
-    with pytest.raises(fleet.FleetCliError, match="queue bound after 3 attempts"):
-        fleet.cmd_spawn(_args(lane), sleep=sleeps.append)
-    assert len(client.operations) == 3
-    assert len(sleeps) == 2
-    record = fleet.load_registry()["workers"]["cx-native"]
-    assert record["adapter_state"] == "uncertain"
-    assert record["status"] == "dead-suspected"
+    client, log = _queue_recovery_client(home, home, create_thread=False)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    try:
+        with pytest.raises(
+                fleet.FleetCliError,
+                match="mutation was not replayed.*public recovery failed"):
+            fleet.cmd_spawn(_args(lane))
+        record = fleet.load_registry()["workers"]["cx-native"]
+        assert record["adapter_state"] == "uncertain"
+        assert record["status"] == "dead-suspected"
+        methods = [json.loads(line)["method"]
+                   for line in log.read_text(encoding="utf-8").splitlines()]
+        assert methods.count("thread/start") == 1
+        assert methods.count("thread/list") == 1
+        operation = next(
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (home / "state" / "codex" / "operations").glob(
+                "worker-cx-native-thread-*.json"))
+        assert operation["state"] == "uncertain"
+    finally:
+        _stop_queue_recovery_client(client)
 
 
 def test_wrong_provider_cwd_freezes_without_starting_a_turn(
