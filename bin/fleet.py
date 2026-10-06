@@ -2246,6 +2246,118 @@ def _codex_worker_status(observed: dict) -> tuple[str, str]:
     return "dead", "idle"
 
 
+def _resume_codex_worker_on_current_host(
+        binding: CodexWorkerBinding, client, *, require_full=False
+) -> tuple[dict, dict]:
+    """Resume one exact old-generation thread and adopt the new host.
+
+    A host generation is Fleet transport identity, not provider thread
+    identity.  ``thread/resume`` is therefore the only supported bridge: it
+    names the genuine provider thread, validates its immutable cwd/model/
+    permissions, then requires the recorded turn to remain newest before the
+    registry generation can move.  No turn is created or replayed here.
+    """
+    if client.generation == binding.host_generation:
+        return dict(binding.record), _codex_worker_observe(
+            binding, client=client, require_full=require_full)
+    if binding.record.get("pending_operation") is not None:
+        raise FleetCliError(
+            f"{binding.name}: native Codex operation is pending; reconcile it "
+            "before host restart recovery")
+    requested_model = _codex_model_slug(binding.record.get("model"))
+    if requested_model is None:
+        raise FleetCliError(
+            f"{binding.name}: native Codex row has no codex:<model>")
+    profile = _codex_permission_profile(binding.record.get("mode"))
+    operation_id = f"worker-{binding.name}-resume-{uuid.uuid4()}"
+    _reserve_codex_worker_operation(
+        binding, operation_id, "thread/resume")
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": binding.thread_id,
+        }},
+        "recovery": {
+            "kind": "worker/thread-resume", "fleet_name": binding.name,
+            "thread_id": binding.thread_id, "turn_id": binding.turn_id,
+            "previous_host_generation": binding.host_generation,
+            "canonical_cwd": binding.cwd,
+        },
+    }
+    try:
+        reply = client.call(operation, timeout=30)
+        result = reply.result
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if not isinstance(thread, dict):
+            raise FleetCliError("native Codex thread/resume returned no thread")
+        if (_provider_codex_id(
+                thread.get("id"), "resumed worker thread")
+                != binding.thread_id
+                or {thread.get("cwd"), result.get("cwd")} != {binding.cwd}):
+            raise FleetCliError(
+                f"{binding.name}: native Codex resumed the wrong worker thread")
+        _validate_codex_thread_effective(result, requested_model, profile)
+        rebound = CodexWorkerBinding(
+            name=binding.name, thread_id=binding.thread_id,
+            turn_id=binding.turn_id, host_generation=client.generation,
+            cwd=binding.cwd, record=binding.record)
+        observed = _codex_worker_observe(
+            rebound, client=client, require_full=require_full)
+        status, adapter_state = _codex_worker_status(observed)
+        if observed["provider_status"] not in {"active", "idle"}:
+            raise FleetCliError(
+                f"{binding.name}: resumed native Codex thread is not loaded")
+        client.commit(operation_id)
+    except BaseException as exc:
+        _freeze_codex_worker_operation(binding, operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{binding.name}: native Codex host restart reconciliation is "
+            "uncertain; no thread or turn was replayed") from exc
+
+    updated = None
+    with fleet_lock():
+        data = load_registry()
+        record = data["workers"].get(binding.name)
+        pending = record.get("pending_operation") \
+            if isinstance(record, dict) else None
+        if (isinstance(pending, dict)
+                and pending.get("operation_id") == operation_id
+                and record.get("codex_thread_id") == binding.thread_id
+                and record.get("codex_turn_id") == binding.turn_id
+                and record.get("codex_host_generation")
+                    == binding.host_generation):
+            record.pop("pending_operation", None)
+            record.pop("uncertain_reason", None)
+            record.update({
+                "codex_host_generation": client.generation,
+                "adapter_state": adapter_state,
+                "status": status,
+                "provider_status": observed["provider_status"],
+                "last_operation_id": operation_id,
+                "last_activity": now_iso(),
+            })
+            error_code = observed.get("error_code")
+            if error_code is not None:
+                record["codex_error_code"] = error_code
+            else:
+                record.pop("codex_error_code", None)
+            save_registry(data)
+            _append_event_quiet(
+                "codex_thread_resumed", binding.name,
+                codex_thread_id=binding.thread_id,
+                host_generation=client.generation)
+            updated = dict(record)
+    if updated is None:
+        _freeze_codex_worker_operation(binding, operation_id,
+                                       "record changed during host restart adoption")
+        raise FleetCliError(
+            f"{binding.name}: native Codex worker changed during host restart "
+            "adoption")
+    return updated, observed
+
+
 def _guard_codex_worker_operation(name: str, record: dict, action: str, *,
                                   allowed_statuses: set,
                                   allowed_adapter_states: set) -> None:
@@ -8109,10 +8221,29 @@ def _cmd_send_codex_native(name: str, message: str, rec: dict, *,
     if allow_limited:
         allowed_statuses.add("limited")
     allowed_adapter_states = {"active", "idle"}
+    restart_candidate = (
+        rec.get("pending_operation") is None
+        and rec.get("status") == "dead-suspected"
+        and rec.get("adapter_state") == "uncertain")
+    if not restart_candidate:
+        _guard_codex_worker_operation(
+            name, rec, "send", allowed_statuses=allowed_statuses,
+            allowed_adapter_states=allowed_adapter_states)
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        rec, observed = _resume_codex_worker_on_current_host(
+            binding, client, require_full=True)
+        binding = _codex_worker_binding(name, rec)
+    else:
+        if restart_candidate:
+            _guard_codex_worker_operation(
+                name, rec, "send", allowed_statuses=allowed_statuses,
+                allowed_adapter_states=allowed_adapter_states)
+        observed = _codex_worker_observe(
+            binding, client=client, require_full=True)
     _guard_codex_worker_operation(
         name, rec, "send", allowed_statuses=allowed_statuses,
         allowed_adapter_states=allowed_adapter_states)
-    observed = _codex_worker_observe(binding, require_full=True)
     provider = observed["provider_status"]
     if provider in {"notLoaded", "systemError"} or observed["active_flags"]:
         raise FleetCliError(
@@ -9176,7 +9307,14 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     """Create a fresh provider thread only after exact old-turn terminal proof."""
     name = args.name
     binding = _codex_worker_binding(name, before)
-    observed = _codex_worker_observe(binding, require_full=True)
+    client = _codex_native_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        before, observed = _resume_codex_worker_on_current_host(
+            binding, client, require_full=True)
+        binding = _codex_worker_binding(name, before)
+    else:
+        observed = _codex_worker_observe(
+            binding, client=client, require_full=True)
     if observed["provider_status"] == "active":
         if not getattr(args, "force", False):
             raise FleetCliError(

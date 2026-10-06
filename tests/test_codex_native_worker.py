@@ -437,8 +437,10 @@ class WorkerVerbClient:
     def __init__(self, lane, *, provider_status="active",
                  turn_status="inProgress", active_flags=None,
                  error_code=None, evidence=None, fail_method=None,
-                 rate_result=None):
+                 rate_result=None, generation=None):
         self.lane = str(lane)
+        if generation is not None:
+            self.generation = generation
         self.provider_status = provider_status
         self.turn_status = turn_status
         self.active_flags = list(active_flags or [])
@@ -495,6 +497,13 @@ class WorkerVerbClient:
         elif public == "thread/start":
             result = {
                 "thread": {"id": NEXT_THREAD_ID, "cwd": self.lane},
+                "cwd": self.lane, "model": "gpt-5.6-luna",
+                "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                "sandbox": {"type": "workspaceWrite"},
+            }
+        elif public == "thread/resume":
+            result = {
+                "thread": {"id": THREAD_ID, "cwd": self.lane},
                 "cwd": self.lane, "model": "gpt-5.6-luna",
                 "approvalPolicy": "on-request", "approvalsReviewer": "user",
                 "sandbox": {"type": "workspaceWrite"},
@@ -679,6 +688,48 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     record = fleet.load_registry()["workers"]["cx-native"]
     assert record["codex_turn_id"] == expected_turn
     assert record["status"] == "working"
+
+
+def test_native_worker_send_resumes_live_thread_after_host_generation_change(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    assert fleet._cmd_send_codex("cx-native", "continue after restart") == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "turn/steer"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == THREAD_ID
+    assert stored["codex_turn_id"] == TURN_ID
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert stored["status"] == "working"
+    assert stored["adapter_state"] == "active"
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_lost_restart_resume_freezes_without_replaying_turn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = WorkerVerbClient(
+        lane, generation="host-generation-2", fail_method="thread/resume")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="restart reconciliation"):
+        fleet._cmd_send_codex("cx-native", "must not be replayed")
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_host_generation"] == "host-generation-1"
+    assert stored["status"] == "dead-suspected"
+    assert stored["adapter_state"] == "uncertain"
+    assert stored["pending_operation"]["kind"] == "thread/resume"
 
 
 @pytest.mark.parametrize("verb", ["send", "interrupt"])
@@ -895,3 +946,34 @@ def test_native_worker_respawn_uses_fresh_thread_after_old_terminal_proof(
     prompt = fleet.task_file_path("cx-native").read_text(encoding="utf-8")
     assert "preserve the full worker brief" in prompt
     assert "checkpoint from the previous thread" in prompt
+
+
+def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "preserve the restart-safe brief")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed",
+        generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    args = SimpleNamespace(
+        name="cx-native", task=None, force=False, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+    assert fleet._cmd_respawn_codex(args, record) == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "thread/start", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == NEXT_THREAD_ID
+    assert stored["codex_turn_id"] == NEXT_TURN_ID
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert stored["retired_codex_threads"] == [{
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "terminal_status": "completed",
+    }]
+    assert "preserve the restart-safe brief" in \
+        fleet.task_file_path("cx-native").read_text(encoding="utf-8")

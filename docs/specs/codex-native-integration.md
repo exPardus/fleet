@@ -266,10 +266,13 @@ another host.
 
 The host starts `codex app-server --listen stdio://` with
 `CLAUDE_CODE_SESSION_ID` removed, performs `initialize`/`initialized`,
-verifies version/schema, then publishes ready. It supervises stdio/stderr,
-rejects invalid/oversized messages, and reports child exit. It stays alive
-while native rows, a Codex supervisor claim, or unresolved operations exist.
-Idle shutdown cannot occur during an accepted operation.
+verifies version/schema, then publishes ready. It supervises protocol stdio,
+bounds and redacts app-server stderr in memory, and rejects invalid/oversized
+messages. The detached host's own stdout/stderr are currently discarded and
+there is no durable host lifecycle log, so an unexpected predecessor exit can
+be unclassifiable after `host.json` is replaced. It stays alive while native
+rows, a Codex supervisor claim, or unresolved operations exist. Idle shutdown
+cannot occur during an accepted operation.
 
 ### 7.2 Locks
 
@@ -337,11 +340,17 @@ Send to a matching active steerable turn calls
 claims mail and calls one `turn/start`; failure restores/leaves the claim
 recoverable. Mail deletes only after accepted public observation. Send and
 interrupt refuse a committed `dead-suspected`, unknown, waiting, or uncertain
-row and any unresolved operation before provider IPC. They read the existing
-host first and reserve a mutation only after the exact thread is actionable, so
-a down host creates no reservation. A known-local mailbox failure before the
-provider call releases its reservation; only a possibly accepted provider call
-freezes the row and keeps the reservation for reconciliation.
+row and any unresolved operation before provider IPC, except that `send` may
+recover the exact `dead-suspected`/`uncertain` shape produced solely by a host
+generation change. When the existing host generation differs, `send` reserves
+one `thread/resume`, validates the real thread's ID, cwd, model, permission
+profile, and unchanged newest turn, and conditionally adopts the new generation
+before steering or waking. The resume creates no turn; a lost response or any
+identity conflict freezes the reservation and is never replayed. A down host
+with no replacement still creates no send reservation. A known-local mailbox
+failure before the provider call releases its reservation; only a possibly
+accepted provider call freezes the row and keeps the reservation for
+reconciliation.
 
 ### 8.3 Interrupt and terminal operations
 
@@ -355,6 +364,10 @@ provider-minted thread, records the retired thread/turn/proof tuple, and carries
 the durable brief, journal, and pending mail. `resume-limited` reads public
 rate-limit state, records an authoritative future reset when supplied, and
 starts one same-thread turn only after explicit allowance or an elapsed reset.
+If respawn finds a replacement host generation, it first performs the same
+exact-thread `thread/resume` and conditional generation adoption as send. The
+re-attached thread supplies the required terminal proof; respawn never treats
+host loss alone as proof and never creates the fresh thread before that proof.
 
 Interrupt uses only `turn/interrupt` with recorded real IDs. Fleet commits
 `interrupted` only after event/read proves that same turn terminal. Timeout,

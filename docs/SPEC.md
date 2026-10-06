@@ -299,13 +299,18 @@ probe-free. `peek` and `result` read only the bounded exact-turn
 public-evidence file; `result` requires complete durable item text and token
 usage and takes no lock, performs no RPC, and writes nothing. Busy `send` uses
 `turn/steer` with `expectedTurnId`; idle send and `resume-limited` start one
-turn on the same thread. Interrupt uses `turn/interrupt` and commits only after
-same-turn terminal proof. Ambiguous mutation responses are durably reserved
-and never retried. Respawn requires old-turn terminal proof before creating a
-fresh provider thread and carries the brief, journal, and queued mail; the
-retired thread is recorded with its exact turn and terminal status. Public
-rate-limit reads provide the recorded reset horizon. No path signals a Codex
-PID or manufactures USD usage.
+turn on the same thread. When a replacement host has a new generation, `send`
+and `respawn` first reserve one `thread/resume` for the exact recorded provider
+thread, validate its cwd/model/permission profile and unchanged newest turn,
+then conditionally adopt the new generation; reattachment creates no turn.
+Lost or conflicting resume evidence remains reserved and uncertain without a
+retry. Interrupt uses `turn/interrupt` and commits only after same-turn
+terminal proof. Other ambiguous mutation responses are likewise durably
+reserved and never retried. Respawn requires old-turn terminal proof before
+creating a fresh provider thread and carries the brief, journal, and queued
+mail; the retired thread is recorded with its exact turn and terminal status.
+Public rate-limit reads provide the recorded reset horizon. No path signals a
+Codex PID or manufactures USD usage.
 
 Native Codex blocking requests are durable, generation-bound status evidence.
 Only `codex-respond NAME REQUEST_ID DECISION` answers one, after validating the
