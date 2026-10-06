@@ -9641,6 +9641,81 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
     return 0
 
 
+def _prove_codex_bound_thread_empty(name: str, rec: dict, client) -> None:
+    """Require exact public proof that a bound launch created no turn.
+
+    A crash after ``turn/start`` is accepted but before its registry commit
+    leaves the same bound/no-turn row as a genuinely empty thread.  The row
+    alone therefore cannot authorize cleanup; only the complete public turn
+    history can distinguish those cases.
+    """
+    thread_id = _provider_codex_id(
+        rec.get("codex_thread_id"), "bound worker thread")
+    generation = rec.get("codex_host_generation")
+    if not isinstance(generation, str) or not generation:
+        raise FleetCliError(
+            f"{name}: bound native Codex row has no host generation; "
+            "refusing kill")
+    try:
+        expected_cwd = str(Path(rec.get("cwd")).resolve())
+    except (TypeError, OSError) as exc:
+        raise FleetCliError(
+            f"{name}: bound native Codex worker cwd is unavailable; "
+            "refusing kill") from exc
+    observation = client.call({
+        "operation_id": f"worker-kill-bound-read-{uuid.uuid4()}",
+        "method": "rpc",
+        "payload": {"method": "thread/read", "params": {
+            "threadId": thread_id, "includeTurns": True,
+        }},
+    }, timeout=10)
+    if observation.generation != generation:
+        raise FleetCliError(
+            f"{name}: bound native Codex host generation changed; "
+            "refusing kill")
+    result = observation.result
+    thread = result.get("thread") if isinstance(result, dict) else None
+    if not isinstance(thread, dict):
+        raise FleetCliError(
+            f"{name}: bound native Codex thread/read returned no thread; "
+            "refusing kill")
+    observed_thread_id = _provider_codex_id(
+        thread.get("id"), "observed bound worker thread")
+    if observed_thread_id != thread_id or thread.get("cwd") != expected_cwd:
+        raise FleetCliError(
+            f"{name}: bound native Codex thread identity changed; "
+            "refusing kill")
+    status = thread.get("status")
+    if not isinstance(status, dict):
+        raise FleetCliError(
+            f"{name}: bound native Codex thread status is malformed; "
+            "refusing kill")
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        raise FleetCliError(
+            f"{name}: bound native Codex turn history is incomplete; "
+            "refusing kill")
+    if turns:
+        newest = turns[-1]
+        newest_id = newest.get("id") if isinstance(newest, dict) else None
+        try:
+            newest_id = _provider_codex_id(
+                newest_id, "unrecorded bound worker turn")
+        except FleetCliError as exc:
+            raise FleetCliError(
+                f"{name}: bound native Codex turn history is malformed; "
+                "refusing kill because work may still be active") from exc
+        raise FleetCliError(
+            f"{name}: bound thread has unrecorded provider turn {newest_id} "
+            f"({len(turns)} total); refusing kill because work may still be "
+            "active. Reconcile or adopt that exact turn before retrying kill; "
+            "do not respawn this worker")
+    if status.get("type") != "idle" or status.get("activeFlags", []) != []:
+        raise FleetCliError(
+            f"{name}: bound native Codex thread is not provably idle and "
+            "empty; refusing kill")
+
+
 def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
     """Stop a native Codex lane through its exact-home host and mark it dead.
     The host owns the app-server child, so a host that is gone (no metadata,
@@ -9684,12 +9759,16 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
         elif client.generation != row_generation:
             reason = (f"codex host generation {row_generation} gone "
                       f"(current host is {client.generation})")
+        elif (rec.get("adapter_state") == "bound"
+              and rec.get("codex_turn_id") is None):
+            _prove_codex_bound_thread_empty(name, rec, client)
+            reason = "bound thread has no provider turns"
         elif (rec.get("status") == "working" and isinstance(thread_id, str)
               and isinstance(turn_id, str)):
             # A complete provider binding is required only when Fleet will
-            # interrupt and verify a live same-generation turn. Expired
-            # preclaim/bound rows intentionally lack one or both IDs; their
-            # unchanged-row cleanup paths must remain reachable.
+            # interrupt and verify a live same-generation turn. An expired
+            # preclaim lacks both IDs and remains cleanable; a bound row was
+            # proved empty above before this branch can be bypassed.
             binding = _codex_worker_binding(name, rec)
             operation_id = f"worker-kill-{uuid.uuid4()}"
             reserved_operation_id = operation_id

@@ -363,9 +363,12 @@ it is not retried. A live-host `kill` uses the same proof rule; only proof that
 the recorded host incarnation itself is gone can bypass the turn read. Kill
 refuses any pending native operation, including `thread/resume`, and revalidates
 the unchanged row at its terminal write; a concurrent reattachment can never be
-silently reported as killed. An expired launch preclaim or bound row is also
-cleared by that unchanged-row path; because those states have no complete turn
-binding, kill does not require or invent one before cleanup.
+silently reported as killed. An expired launch preclaim with no provider thread
+binding is cleared by that unchanged-row path. A bound row with no recorded turn
+first requires an exact same-generation `thread/read`: only an idle thread with
+zero turns is safe to clear. Any observed provider turn may be the accepted turn
+whose registry commit was lost, so kill refuses with that identity instead of
+allowing a later respawn to duplicate its work.
 `respawn` requires old-turn terminal proof, creates a new
 provider-minted thread, records the retired thread/turn/proof tuple, and carries
 the durable brief, journal, and pending mail. `resume-limited` reads public
