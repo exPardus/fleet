@@ -113,6 +113,38 @@ def test_parked_dead_holder_dispatches_when_owned_lane_finishes(
     assert capsys.readouterr().out == "DISPATCH\n"
 
 
+def test_limited_parked_holder_never_dispatches_for_a_finished_lane(
+        home, monkeypatch, capsys):
+    parked_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    claim = fleet.read_incarnation()
+    claim.update(
+        lineage_id="current-lineage",
+        parked_at=parked_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        parked_reason="waiting for lane",
+        parked_wake_condition="lane finishes",
+    )
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][BODY]["status"] = "limited"
+    lane = fleet.new_worker_record(
+        "lane-sid", str(home), "work", "bypass",
+        spawned_by_lineage="current-lineage", dispatch_kind="bg")
+    data["workers"]["lane"] = lane
+    fleet.save_registry(data)
+    fleet.append_outcome("lane", {
+        "ts": fleet.now_iso(), "session_id": "lane-sid", "kind": "result",
+        "result_text": "done",
+    })
+    snap = snapshot(age=4000)
+    snap["workers"] = [{
+        "name": BODY, "status": "limited",
+        "limit_reset_at": "2099-01-01T00:00:00Z",
+    }]
+
+    run_guard(monkeypatch, snap, [])
+    assert capsys.readouterr().out == "PAGE supervisor limited\n"
+
+
 def test_parked_guard_json_publishes_marker_fields(home, monkeypatch, capsys):
     claim = fleet.read_incarnation()
     claim.update(parked_at=fleet.now_iso(),

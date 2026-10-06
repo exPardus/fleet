@@ -18828,6 +18828,15 @@ def _sup_guard_decide(observation):
     if obs.get("pending"):
         return "PAGE", "handoff in flight", detail
 
+    # A usage-limit park dominates every ordinary wake/dispatch path. In
+    # particular, a lane finishing after PARKED must not dispatch a second
+    # supervisor before the recorded reset horizon.
+    if obs.get("limited"):
+        reason = "supervisor limited"
+        if _limit_reset_passed({"limit_reset_at": obs.get("limit_reset_at")}):
+            reason += "; reset horizon passed, interface must resume"
+        return "PAGE", reason, detail
+
     # PARKED normally wins over stale-body advice until its bounded marker
     # expires. A result written after the park is durable proof that an owned
     # lane reached the boundary the supervisor was waiting on. If the holder
@@ -18848,12 +18857,6 @@ def _sup_guard_decide(observation):
                     "parked lane finished with no live supervisor body"), detail
         detail["quiet"] = True
         return "PARKED", "supervisor parked by design", detail
-
-    if obs.get("limited"):
-        reason = "supervisor limited"
-        if _limit_reset_passed({"limit_reset_at": obs.get("limit_reset_at")}):
-            reason += "; reset horizon passed, interface must resume"
-        return "PAGE", reason, detail
 
     # An over-band body gets no work while its heartbeat is fresh.
     _age = obs.get("heartbeat_age_seconds")
