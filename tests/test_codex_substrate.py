@@ -1,4 +1,4 @@
-"""Item 29: `--model codex:<model>` lanes dispatched through mcx.
+"""Legacy adapter: explicit `--codex-adapter mcx` lanes stay on mcx.
 
 Every test runs OFFLINE against a stub `mcx` on a redirected PATH -- no Codex
 API call is possible (the weekly limit is exhausted until 2026-09-20T18:16Z)
@@ -12,8 +12,8 @@ directory, which the stub reproduces faithfully:
 - `mcx steer <id> -` reads the new prompt on stdin and restarts the run;
 - `mcx stop <id>` marks the job stopped.
 
-Each test fails against the current tree, where `codex:` is not a model prefix
-fleet understands.
+These compatibility tests deliberately request mcx so a native default cannot
+silently migrate an existing workflow.
 """
 import json
 import os
@@ -156,6 +156,7 @@ def _set_state(worktree, mcx_id, state):
 def _spawn_args(worktree, **kw):
     base = dict(name="cx1", dir=str(worktree), task="do codex things",
                 mode="accept", model="codex:gpt-5.6-luna",
+                codex_adapter="mcx",
                 max_budget_usd=None, setting_sources=None,
                 token_ceiling=None, category=None, nonce=None,
                 force_band=False, context=None)

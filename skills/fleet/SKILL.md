@@ -114,19 +114,20 @@ the selected fleet home:
 
 ## Codex lanes
 
-Dispatch a codex lane with `fleet spawn --model codex:<model> [--effort low|medium|high|xhigh]`.
-Fleet runs `mcx` for you and routes `status`, `peek`, `result`, `send`, `interrupt`,
-`kill`, `respawn` and wave accounting through it; do not drive `mcx` by hand for a
-lane fleet dispatched. Fleet maps permission modes to mcx approval modes as
+Dispatch a Codex lane with `fleet spawn --model codex:<model> [--effort low|medium|high|xhigh]`; new rows use the native app-server adapter. Use explicit `--codex-adapter mcx` only for the legacy compatibility route; persisted rows always keep their recorded adapter.
+Fleet routes `status`, `peek`, `result`, `send`, `interrupt`, `kill`, `respawn`,
+and wave accounting through that recorded adapter. Do not drive app-server or
+mcx by hand for a lane Fleet dispatched. On the explicit mcx route, Fleet maps
+permission modes to mcx approval modes as
 `bypass` → `unrestricted`, `accept` → `auto`, and `dontask`/`plan`/`omit` →
 `never`. The selected approval and effort are persisted on the registry row and
 reused by respawn/steer; a caller's `MCX_APPROVAL` cannot weaken Fleet's mode.
 `status` and `peek` show the approval mode.
 
-- Run one observer per lane; break its loop when `mcx result` returns anything other than 2 (`2` live, `0` done, `1` stopped or unknown).
-- Re-arm the observer after every `mcx steer`; steering RESTARTS the run.
+- For an explicit mcx lane, run one observer per lane; break its loop when `mcx result` returns anything other than 2 (`2` live, `0` done, `1` stopped or unknown).
+- For an explicit mcx lane, re-arm the observer after every `mcx steer`; steering RESTARTS the run.
 - Use `gpt-5.6-luna` by default; use Astra only by exception and run at most one Astra lane at a time.
-- A Codex worker cannot commit: mcx runs `codex exec` under the default `workspace-write` sandbox, and a worktree's gitdir lives outside the worker's cwd, so `fleet land` commits the dirty worktree on the worker's behalf.
+- An explicit mcx worker cannot commit: mcx runs `codex exec` under the default `workspace-write` sandbox, and a worktree's gitdir lives outside the worker's cwd, so `fleet land` commits the dirty worktree on the worker's behalf.
 - Do not use mcx to commit, steer unrelated workers, or create a second worker for a lane without an explicit split.
 
 ## CLI verbs

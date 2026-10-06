@@ -1,7 +1,7 @@
 # Native Codex fleet integration design
 
-**Status:** Option A approved. Native worker lifecycle verbs are implemented;
-default enablement remains staged behind the full live acceptance gates.
+**Status:** Option A approved and native is the default for new Codex workers
+and Codex supervisor bodies. The explicit mcx compatibility selector remains.
 **Evidence baseline:** fleet `6fa06c9`; installed `codex-cli 0.155.1`; v2 JSON Schema generated locally with `codex app-server generate-json-schema`.  
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -15,10 +15,9 @@ authenticated local endpoint. A durable Fleet operation journal will make a
 host restart conservative and reviewable.
 
 Existing mcx-backed rows remain mcx-backed. They are neither rewritten nor
-silently adopted. After the native adapter passes the live acceptance matrix,
-new `codex:<model>` dispatch defaults to app-server; an explicit legacy
-selector remains during migration. Removing mcx is a later operator decision
-backed by a zero-row census and a completed soak.
+silently adopted. New `codex:<model>` dispatch defaults to app-server; explicit
+`--codex-adapter mcx` remains during migration. Removing mcx is a later
+operator decision backed by a zero-row census and a completed soak.
 
 This design applies to all three roles:
 
@@ -526,7 +525,7 @@ registration, and claim. No home is discovered from private Codex state.
 
 1. Existing Codex rows continue through mcx.
 2. Doctor counts mcx, native, mixed-invalid, and unavailable-helper rows.
-3. After live acceptance, new `codex:<model>` uses app-server; explicit
+3. New `codex:<model>` uses app-server by default; explicit
    `--codex-adapter mcx` remains during soak.
 4. Active mcx rows never convert in place. Idle/terminal respawn may migrate
    only with an explicit flag, retaining old `mcx_id` as evidence.

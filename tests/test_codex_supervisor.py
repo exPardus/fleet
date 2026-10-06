@@ -401,7 +401,7 @@ def test_explicit_native_sup_spawn_binds_genuine_holder_and_boot_turn(
     client.lock_depth = depth
     monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
 
-    assert fleet.cmd_sup_spawn(_args()) == 0
+    assert fleet.cmd_sup_spawn(_args(codex_adapter=None)) == 0
 
     claim = fleet.read_incarnation()
     assert claim["state"] == "held"
@@ -869,11 +869,12 @@ def test_wrong_home_native_binding_pages_without_provider_call(
     assert client.operations == []
 
 
-def test_sup_spawn_native_is_explicit_and_legacy_default_is_unchanged(
-        supervisor_home):
+def test_sup_spawn_codex_model_defaults_to_native(supervisor_home):
     parser = fleet.build_parser()
     common = ["sup-spawn", "--task", "campaign",
               "--model", "codex:gpt-5.6-luna"]
+    # Omission is resolved after model policy so non-Codex supervisors retain
+    # the Claude route while codex:<model> selects native in cmd_sup_spawn.
     assert parser.parse_args(common).codex_adapter is None
     assert parser.parse_args(common + [
         "--codex-adapter", "native"]).codex_adapter == "native"
