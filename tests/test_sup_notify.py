@@ -417,14 +417,15 @@ class TestSupNotify:
         # and the same generation still works on the next call
         assert fleet.cmd_sup_notify(_args(nonce=nonce), run=Tmux()) == 0
 
-    def test_it_does_not_refresh_the_heartbeat(self, sup_home):
-        """Announcing is not a checkpoint. A verb that silently rewrote
-        liveness would make the keeper's dead-supervisor rule quieter for a
-        reason unrelated to being alive."""
+    def test_it_refreshes_the_heartbeat(self, sup_home):
+        """A proven holder announcing progress is live supervisor activity.
+        Keep the guard from paging a long busy turn between checkpoints."""
         nonce = _hold()
-        beat = fleet.read_incarnation()["heartbeat_at"]
+        claim = fleet.read_incarnation()
+        claim["heartbeat_at"] = "2026-07-23T00:00:00Z"
+        fleet.write_incarnation(claim)
         assert fleet.cmd_sup_notify(_args(nonce=nonce), run=Tmux()) == 0
-        assert fleet.read_incarnation()["heartbeat_at"] == beat
+        assert fleet.read_incarnation()["heartbeat_at"] > "2026-07-23T00:00:00Z"
 
 
 class TestSupNotifyIsNotOnTheContextCeiling:

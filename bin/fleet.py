@@ -5994,12 +5994,13 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         data = load_registry()
         validate_name(args.name, existing=data["workers"].keys())
         _spawner = current_caller_session()
+        _spawned_by_lineage = _spawning_claim_lineage(_spawner)
         record = new_worker_record(
             None, cwd, task, args.mode, model=args.model,
             setting_sources=args.setting_sources, token_ceiling=args.token_ceiling,
             spawned_by=_spawner,
             # Stamp proven lineage under the lock to preserve ownership across sid rotation.
-            spawned_by_lineage=_spawning_claim_lineage(_spawner),
+            spawned_by_lineage=_spawned_by_lineage,
             dispatch_kind=(
                 ("codex-app-server" if codex_adapter == "native" else "mcx")
                 if codex_slug is not None else "bg"),
@@ -6025,6 +6026,8 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             })
         data["workers"][args.name] = record
         save_registry(data)
+        _refresh_supervisor_heartbeat_for_dispatch(
+            _spawner, _spawned_by_lineage)
         append_event("spawned", args.name, cwd=str(cwd), mode=args.mode)
 
     pre_claim_at = record["last_dispatch_at"]
@@ -15471,6 +15474,25 @@ def _spawning_claim_lineage(caller):
     return None
 
 
+def _refresh_supervisor_heartbeat_for_dispatch(caller, lineage) -> None:
+    """Refresh a proven holder's heartbeat at a lane-dispatch boundary.
+
+    Call with ``fleet_lock`` held. Spawn provenance already requires the
+    caller sid to match the claim; re-check both sid and lineage here so a
+    concurrent claim transition can never be refreshed by the old body.
+    """
+    if not isinstance(caller, str) or not isinstance(lineage, str):
+        return
+    claim = read_incarnation()
+    if (not isinstance(claim, dict)
+            or claim.get("state") == "released"
+            or claim.get("session_id") != caller
+            or claim.get("lineage_id") != lineage):
+        return
+    claim["heartbeat_at"] = now_iso()
+    write_incarnation(claim)
+
+
 def nonce_rejection_log_path() -> Path:
     """§5.6's evidence file. Under `state/` (gitignored runtime)."""
     return state_dir() / "supervisor-nonce-rejections.jsonl"
@@ -18724,6 +18746,34 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
     registry = _registry_records_or_none()
     body_record = ((registry.get("workers") or {}).get(body_name)
                    if isinstance(registry, dict) and body_name else None)
+    parked_finished_lanes = []
+    parked_at = parked.get("parked_at")
+    try:
+        parked_since = _parse_iso(parked_at) if parked["parked_active"] else None
+    except (TypeError, ValueError):
+        parked_since = None
+    if parked_since is not None and isinstance(registry, dict):
+        for lane_name, lane_record in (registry.get("workers") or {}).items():
+            if (not isinstance(lane_record, dict)
+                    or lane_record.get("archived_at")
+                    or _is_supervisor_shaped(lane_name)
+                    or not _lane_owned_by_claim(lane_record, claim, registry)):
+                continue
+            if _is_codex_record(lane_record):
+                finished = lane_record.get("status") == "idle"
+            else:
+                finished = (recompute_worker_native(
+                    lane_name, lane_record, entries).get("status") == "idle")
+            if not finished:
+                continue
+            sid = lane_record.get("session_id") or lane_record.get("codex_thread_id")
+            outcome = latest_outcome(lane_name, sid) if sid else None
+            try:
+                finished_at = _parse_iso(outcome.get("ts"))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if outcome.get("kind") == "result" and finished_at >= parked_since:
+                parked_finished_lanes.append(lane_name)
     # An idle, unarchived holder row is a resumable native body between
     # turns (no live pid): WAKE revives it, DISPATCH would fork a second
     # generation over it. Working lanes are not required.
@@ -18777,6 +18827,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "parked_age_seconds": parked["parked_age_seconds"],
         "parked_active": parked["parked_active"],
         "parked_expired": parked["parked_expired"],
+        "parked_finished_lanes": sorted(parked_finished_lanes),
     }
 
 
@@ -18790,7 +18841,7 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
          "parked_wake_condition", "parked_age_seconds", "parked_active",
-         "parked_expired")
+         "parked_expired", "parked_finished_lanes")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -18813,16 +18864,35 @@ def _sup_guard_decide(observation):
     if obs.get("pending"):
         return "PAGE", "handoff in flight", detail
 
-    # PARKED wins over stale-body advice until its bounded marker expires.
-    if obs.get("state") == "held" and obs.get("parked_active"):
-        detail["quiet"] = True
-        return "PARKED", "supervisor parked by design", detail
-
+    # A usage-limit park dominates every ordinary wake/dispatch path. In
+    # particular, a lane finishing after PARKED must not dispatch a second
+    # supervisor before the recorded reset horizon.
     if obs.get("limited"):
         reason = "supervisor limited"
         if _limit_reset_passed({"limit_reset_at": obs.get("limit_reset_at")}):
             reason += "; reset horizon passed, interface must resume"
         return "PAGE", reason, detail
+
+    # PARKED normally wins over stale-body advice until its bounded marker
+    # expires. A result written after the park is durable proof that an owned
+    # lane reached the boundary the supervisor was waiting on. If the holder
+    # body then vanished, PARKED must not hide the only recovery path.
+    if obs.get("state") == "held" and obs.get("parked_active"):
+        sids = obs.get("claim_sids")
+        if obs.get("parked_finished_lanes"):
+            if not isinstance(sids, list) or not sids:
+                return "PAGE", "parked holder identity unavailable", detail
+            matching = [row for sid in sids
+                        for row in obs["live_rows"].get(sid, [])]
+            if not matching:
+                if obs.get("live_body_rows"):
+                    return "PAGE", "another live supervisor body is present", detail
+                if obs.get("idle_resumable_holder"):
+                    return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
+                return "DISPATCH", (
+                    "parked lane finished with no live supervisor body"), detail
+        detail["quiet"] = True
+        return "PARKED", "supervisor parked by design", detail
 
     # An over-band body gets no work while its heartbeat is fresh.
     _age = obs.get("heartbeat_age_seconds")
@@ -19123,7 +19193,8 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
     at the band. Validate with mint=False to avoid rotating the generation
     between notification and handoff. Commit acknowledgments and sid restamps,
     then emit notices before tmux, whose failure must not hide that commit.
-    Do not refresh heartbeat: a notification is not a checkpoint.
+    Refresh the heartbeat after holder continuity is proven: notification is
+    supervisor activity and long busy turns may otherwise look abandoned.
     --dry-run only prints the sanitized bytes, before any claim work or lock."""
     target = f"{args.tmux_session}:{args.window}"
     if args.dry_run:
@@ -19134,6 +19205,7 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         claim, _, notices = _require_claim_holder(
             getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
             verb="sup-notify", mint=False)
+        claim["heartbeat_at"] = now_iso()
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
