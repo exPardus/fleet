@@ -90,6 +90,7 @@ C:\projects\claude-fleet\
     journals\<name>.md       # worker journals
     hook-errors.log          # append-only swallowed-hook-exception log (§8 boundary item (b))
     pin-pass.json            # last pin-suite pass stamp (record_pin_pass @114; doctor pin_version)
+    mail-receipts\<id>.json  # authenticated Interface direction; read by `mail verify`
     supervisor-handoff-aborted.json  # doctor-visible handoff-abort flag (§12)
     autoclean-last-run.json  # autoclean run stamp
   logs\                      # gitignored; logs\archive\<name>\ = archived evidence (§11)
@@ -106,7 +107,7 @@ creates the stable local paths from generic seeds and never replaces existing
 operator-owned content. Existing homes therefore keep the same paths while a
 fresh public clone contains no campaign, identity, project, or operator record.
 
-Receipt: path helpers `state_dir/logs_dir/mailbox_dir/journals_dir/ceilings_dir/outcomes_dir/tasks_dir/archive_root/pin_pass_path` @ `bin/fleet.py:61-110`. There is **no per-worker `logs/<name>.jsonl` stdout pipeline** — that died with §6 of the pivot spec (the mc-delete wave, −7130 lines).
+Receipt: path helpers `state_dir/mail_receipts_dir/logs_dir/mailbox_dir/journals_dir/ceilings_dir/outcomes_dir/tasks_dir/archive_root/pin_pass_path` in `bin/fleet.py`. There is **no per-worker `logs/<name>.jsonl` stdout pipeline** — that died with §6 of the pivot spec (the mc-delete wave, −7130 lines).
 
 ## 4. Registry schema (`state\fleet.json`) — as it is today
 
@@ -266,6 +267,7 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 |---|---|
 | `spawn <name> --dir --task [--mode dontask] [--model] [--effort medium] [--codex-adapter native\|mcx] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. Codex `--model codex:<model>` defaults to the native app-server adapter and accepts `--effort low|medium|high|xhigh`; explicit mcx persists its selected effort and approval on that row. |
 | `send <name> <text\|@file>` | `_cmd_send_native` @2928. Working (roster busy/waiting) → mailbox append, unchanged mid-turn path (G1). Idle → **fork-steer** (RATIFIED G2(b)): ceiling check via summed outcome tokens, pre-claim, mailbox append rides the drain, `dispatch_bg(resume_sid=old_sid)` mints a NEW sid; `_restamp_after_steer` (@5877) retires the old sid, restamps sid/short-id, `_migrate_residual_mailbox` (@5901) re-points late mail. Refuses: dead-suspected, dead/interrupted (→ respawn), limited (→ resume-limited), other sticky states, and any G9-suspicious roster. Rollback restores the mailbox claim and the pre-claim **only if** the record still matches the claim this call wrote. |
+| `mail verify <id>` | File-only Interface-mail verification. Reads one atomic `state/mail-receipts/<id>.json`, checks its body digest and source against the current Interface registration, and prints the canonical body only after `VERIFIED`; missing, malformed, forged, or superseded evidence prints `UNVERIFIED` and exits 1. It takes no `fleet.lock`, probes nothing live, writes nothing, and never trusts mailbox content as provenance. |
 | `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the probe-free/lock-free/write-free view path (`status_snapshot` @1558). Archived records hidden by default (`--all` or a named query includes them) and **never recomputed**. Epoch-frozen ⇒ verdicts carried, not derived. |
 | `pr-poll <PR> (--since SHA\|--since-file PATH) [--repo OWNER/REPO] [--json]` | Read-only GitHub PR head check through one bounded `gh pr view --json headRefOid` call. Reports whether the head differs from the recorded SHA; never persists the SHA or writes fleet state. See `commands/pr-poll.md`. |
 | `peek <name> [-n]` | `_cmd_peek_native` @2607: last n substantive transcript records (assistant text/tool_use, user vs `isMeta`), tolerant parsing, works mid-turn (daemon writes the transcript live). No stream-json log exists to read. |
@@ -342,6 +344,19 @@ On an allowed worker Stop, `stop_mailbox.py` first reads the registry and claim 
 ## 9. Steering, mailbox, budget
 
 **Mid-turn steering is unchanged from v2** (G1: hooks fire inside `--bg` sessions): `send` to a working worker appends to `mailbox\<sid>.md`; PostToolUse claims-by-`os.replace` and injects `<MANAGER MESSAGE>` at the next tool boundary; Stop drains-or-blocks. Exception-proof, exit-0, claim-race-tolerant — all v2 §7 semantics stand and the moved history file remains their reference; they are substrate-independent.
+
+**Registered Interface direction to a supervisor is receipt-backed.** Before
+mailbox delivery, `send` authenticates the caller against the registered Claude
+session, native Codex process/thread claim, or (for a caller with no hosted
+identity) tmux pane. It atomically stores the exact instruction plus digest and
+registration identity under `state/mail-receipts/<id>.json`; the mailbox gets
+only a `FLEET VERIFIED MAIL NOTICE <id>` telling the supervisor to run
+`fleet mail verify <id>`. Verification re-checks current registration continuity
+and emits the stored instruction only after `VERIFIED`. A forged mailbox notice
+therefore has no authority by content alone. This is registration-backed
+application provenance with an integrity check, not a privilege boundary
+against another process running as the same OS user with write access to Fleet
+state. Unregistered and non-supervisor sends retain the ordinary raw-mail path.
 
 **Idle steering = fork-steer (RATIFIED G2(b)).** No CLI channel injects a prompt into an existing idle daemon session; `claude --bg --resume <sid>` **forks** — new sid, full transcript carried. Fleet adopts the fork as the worker's new canonical identity: old sid → `retired_sids`, mailbox re-pointed, ceiling file re-written, fresh `-n` restamp (which is also when a category change renders — no post-hoc rename channel exists, G13). The **universal drain rule** survives: every launch path (spawn, fork-steer, resume-limited, respawn) drains the current sid's mailbox into the composed prompt, and `status` flags `idle+mail`.
 
@@ -432,7 +447,10 @@ fixed sink avoids a date-range filename becoming stale or ambiguous.
 **`interface-register`.** The interface runs this one command on resume. It
 accepts only the `%<decimal>` pane shape already required by the keeper,
 renames that pane's window to `fleet` when needed, and writes
-`state/interface-pane` after successful tmux verification. An unset or invalid
+`state/interface-pane` after successful tmux verification. When the pane caller
+also has a Claude session id, registration binds that id in
+`state/interface-session`; a later pane-only registration clears the stale
+session binding. An unset or invalid
 `TMUX_PANE`, or an unavailable tmux pane, is a clear refusal and never writes a
 registration.
 
@@ -505,7 +523,7 @@ and `--statusline` retain their existing rendering/setup path, and the superviso
 gate still runs before either creation form writes. Cross-home CLI calls use
 `env -u CLAUDE_CODE_SESSION_ID`, including later read-only verification.
 
-`docs/specs/terminal-surface.md` remains binding: a view (statusline, `/fleet:*` read-only commands) never takes `fleet.lock`, never probes anything live, never writes, never quarantines — it reads `fleet.status_snapshot()` and exits 0 (CLAUDE.md rule; enforced by `tests/test_terminal_surface.py`, including the no-inline-exec lint on mutating slash commands). Post-pivot the "never probes a PID" clause generalizes: the snapshot path also never fetches the roster — roster fetches belong to mutating/authoritative commands only. Since D7 (2026-07-22) the surface is also **pull-only**: fleet registers no hooks and injects context into no session, so an unrelated project sees nothing. `FLEET_WORKER` (stamped by `_worker_env` @989) originally suppressed the SessionStart briefing for workers (D5); with the briefing gone it survives for the supervisor and destructive-command guards.
+`docs/specs/terminal-surface.md` remains binding: a view (statusline, `/fleet:*` read-only commands, and `mail verify`) never takes `fleet.lock`, never probes anything live, never writes, never quarantines — it reads committed file evidence and exits with its documented verdict (`mail verify` uses 0/1 for `VERIFIED`/`UNVERIFIED`; status views exit 0). Post-pivot the "never probes a PID" clause generalizes: the snapshot path also never fetches the roster — roster fetches belong to mutating/authoritative commands only. Since D7 (2026-07-22) the surface is also **pull-only**: fleet registers no hooks and injects context into no session, so an unrelated project sees nothing. `FLEET_WORKER` (stamped by `_worker_env` @989) originally suppressed the SessionStart briefing for workers (D5); with the briefing gone it survives for the supervisor and destructive-command guards.
 
 ## 15. Destructive-command guard + provenance (survives the pivot verbatim)
 

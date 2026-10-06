@@ -53,6 +53,19 @@ def test_register_renames_and_writes_once(tmp_path, monkeypatch, capsys):
     assert "registered" in capsys.readouterr().out
 
 
+def test_tmux_registration_also_binds_hosted_claude_session(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "interface-session")
+
+    assert fleet.cmd_interface_register(_args(), run=Tmux(window="fleet")) == 0
+
+    assert (tmp_path / "state/interface-pane").read_text() == "%42\n"
+    assert (tmp_path / "state/interface-session").read_text() == \
+        "interface-session\n"
+
+
 def test_register_is_noop_when_registration_and_window_are_correct(
         tmp_path, monkeypatch):
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
