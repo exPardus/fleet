@@ -213,3 +213,29 @@ def test_remote_error_never_echoes_secret_or_prompt(tmp_path):
         assert "request failed" in rendered
     finally:
         client.close()
+
+
+def test_event_queue_bound_has_safe_default_and_bounded_override(monkeypatch):
+    module = _protocol()
+    monkeypatch.delenv("FLEET_CODEX_EVENT_QUEUE_MAX", raising=False)
+    monkeypatch.delenv("FLEET_CODEX_MAX_EVENTS", raising=False)
+    assert module.resolve_max_events() == module.DEFAULT_MAX_EVENTS
+    assert module.DEFAULT_MAX_EVENTS > 1024
+    monkeypatch.setenv("FLEET_CODEX_EVENT_QUEUE_MAX", "2048")
+    assert module.resolve_max_events() == 2048
+    assert module.resolve_max_events(10**12) == module.MAX_MAX_EVENTS
+    with pytest.raises(ValueError, match="between 1"):
+        module.resolve_max_events(0)
+    with pytest.raises(ValueError, match="must be an integer"):
+        monkeypatch.setenv("FLEET_CODEX_EVENT_QUEUE_MAX", "many")
+        module.resolve_max_events()
+
+
+def test_event_queue_overflow_marker_is_narrow_and_cause_aware():
+    module = _protocol()
+    error = RuntimeError("wrapper")
+    error.__cause__ = module.ProtocolViolation(
+        module.EVENT_QUEUE_OVERFLOW_MESSAGE)
+    assert module.is_event_queue_overflow(error)
+    assert not module.is_event_queue_overflow(
+        module.ProtocolViolation("app-server stdout reached EOF"))

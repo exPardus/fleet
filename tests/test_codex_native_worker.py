@@ -195,6 +195,62 @@ def test_lost_thread_start_response_freezes_preclaim_without_retry(
     assert len(client.operations) == 1
 
 
+def test_native_spawn_retries_queue_overflow_then_commits(
+        native_home, monkeypatch):
+    home, lane = native_home
+    import fleet_codex_protocol
+    client = FakeClient(home, lane)
+    attempts = {"thread": 0}
+    original_call = client.call
+
+    def call(operation, timeout):
+        if operation["payload"]["method"] == "thread/start":
+            attempts["thread"] += 1
+            if attempts["thread"] == 1:
+                raise fleet_codex_protocol.ProtocolViolation(
+                    fleet_codex_protocol.EVENT_QUEUE_OVERFLOW_MESSAGE)
+        return original_call(operation, timeout)
+
+    client.call = call
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client,
+                        raising=False)
+    sleeps = []
+
+    assert fleet.cmd_spawn(_args(lane), sleep=sleeps.append) == 0
+    assert attempts["thread"] == 2
+    assert len(sleeps) == 1
+    assert fleet.load_registry()["workers"]["cx-native"]["adapter_state"] == "active"
+
+
+def test_native_spawn_persistent_queue_overflow_is_bounded_and_clear(
+        native_home, monkeypatch):
+    home, lane = native_home
+    import fleet_codex_protocol
+    client = FakeClient(home, lane)
+    original_call = client.call
+
+    def call(operation, timeout):
+        if operation["payload"]["method"] == "thread/start":
+            # Record each attempted operation just like the real client path.
+            client.operations.append(operation)
+            raise fleet_codex_protocol.ProtocolViolation(
+                fleet_codex_protocol.EVENT_QUEUE_OVERFLOW_MESSAGE)
+        return original_call(operation, timeout)
+
+    client.call = call
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client,
+                        raising=False)
+    sleeps = []
+
+    with pytest.raises(fleet.FleetCliError, match="queue bound after 3 attempts"):
+        fleet.cmd_spawn(_args(lane), sleep=sleeps.append)
+    assert len(client.operations) == 3
+    assert len(sleeps) == 2
+    record = fleet.load_registry()["workers"]["cx-native"]
+    assert record["adapter_state"] == "uncertain"
+    assert record["status"] == "dead-suspected"
+
+
 def test_wrong_provider_cwd_freezes_without_starting_a_turn(
         native_home, monkeypatch):
     home, lane = native_home

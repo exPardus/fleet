@@ -271,6 +271,15 @@ rejects invalid/oversized messages, and reports child exit. It stays alive
 while native rows, a Codex supervisor claim, or unresolved operations exist.
 Idle shutdown cannot occur during an accepted operation.
 
+The app-server notification queue is bounded at 8,192 events by default so a
+single busy home can multiplex several active lanes without the former 1,024-
+event burst failure. `FLEET_CODEX_EVENT_QUEUE_MAX` (or the compatibility
+spelling `FLEET_CODEX_MAX_EVENTS`) may select another positive bound, capped at
+65,536; no setting permits an unbounded queue. A native `fleet spawn` retries
+only the exact queue-overflow sentinel, at most three attempts with short
+backoff. Other transport failures, and a persistent overflow, remain a clear
+uncertain failure requiring reconciliation.
+
 ### 7.2 Locks
 
 1. `fleet.lock` protects registry, events, interface registration, and claim.
@@ -294,6 +303,8 @@ public evidence for recovery and never overwrites newer state.
 1. Under `fleet.lock`, validate name/home/model/permissions, write the brief,
    and insert a preclaim with no provider ID; release the lock immediately.
 2. Ensure the host and record a prepared `thread/start` outside the lock.
+   Queue-bound transport failures are retried by `fleet spawn` under the
+   bounded policy in §7.1; no other error is replayed.
 3. Call `thread/start`; on a valid response, persist the genuine thread/cwd.
 4. Reacquire `fleet.lock` only to conditionally bind that same preclaim to the
    thread, then release it. Bind failure records an orphan empty thread and

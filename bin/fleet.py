@@ -6136,7 +6136,8 @@ def _cmd_spawn_codex(args, cwd, task, prompt, record,
                      run=subprocess.run, which=shutil.which,
                      sleep=time.sleep) -> int:
     if record.get("dispatch_kind") == "codex-app-server":
-        return _cmd_spawn_codex_native(args, cwd, task, prompt, record)
+        return _cmd_spawn_codex_native(
+            args, cwd, task, prompt, record, sleep=sleep)
     return _cmd_spawn_codex_mcx(
         args, cwd, task, prompt, record, run=run, which=which, sleep=sleep)
 
@@ -6233,7 +6234,37 @@ def _commit_codex_journal(client, name, journal_operation_id,
             f"-- {exc}") from exc
 
 
-def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
+CODEX_SPAWN_QUEUE_RETRY_ATTEMPTS = 3
+CODEX_SPAWN_QUEUE_RETRY_BACKOFF_SECONDS = (0.10, 0.25)
+
+
+def _is_codex_event_queue_overflow(error: BaseException) -> bool:
+    """Keep spawn retry narrowly scoped to the app-server queue sentinel."""
+    try:
+        from fleet_codex_protocol import is_event_queue_overflow
+        return is_event_queue_overflow(error)
+    except (ImportError, AttributeError):
+        return "app-server event queue exceeded its bound" in str(error)
+
+
+def _codex_spawn_call_with_retry(name, phase, call, *, sleep=time.sleep):
+    """Retry one native-spawn provider call only on bounded queue overflow."""
+    for attempt in range(1, CODEX_SPAWN_QUEUE_RETRY_ATTEMPTS + 1):
+        try:
+            return call()
+        except BaseException as exc:
+            if not _is_codex_event_queue_overflow(exc):
+                raise
+            if attempt >= CODEX_SPAWN_QUEUE_RETRY_ATTEMPTS:
+                raise FleetCliError(
+                    f"{name}: native Codex {phase} hit the app-server event "
+                    f"queue bound after {attempt} attempts; increase "
+                    "FLEET_CODEX_EVENT_QUEUE_MAX (capped at 65536) or "
+                    "reduce concurrent lanes") from exc
+            sleep(CODEX_SPAWN_QUEUE_RETRY_BACKOFF_SECONDS[attempt - 1])
+
+
+def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep) -> int:
     """Bind a native Codex worker through two conditional registry commits."""
     name = args.name
     thread_operation_id = record["last_operation_id"]
@@ -6265,8 +6296,12 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
         write_brief(name, task)
         tasks_dir().mkdir(parents=True, exist_ok=True)
         task_file_path(name).write_text(prompt, encoding="utf-8")
-        client = _codex_native_client(FLEET_HOME)
-        managed_requirements = _codex_managed_requirements(client, profile)
+        client = _codex_spawn_call_with_retry(
+            name, "host setup", lambda: _codex_native_client(FLEET_HOME),
+            sleep=sleep)
+        managed_requirements = _codex_spawn_call_with_retry(
+            name, "managed requirements",
+            lambda: _codex_managed_requirements(client, profile), sleep=sleep)
     except BaseException as exc:
         _rollback_codex_preclaim(
             name, record, prior_brief, prior_task)
@@ -6275,7 +6310,9 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
         raise FleetCliError(
             f"{name}: native Codex launch failed before provider acceptance -- {exc}") from exc
     try:
-        thread_observation = client.call(thread_operation, timeout=30)
+        thread_observation = _codex_spawn_call_with_retry(
+            name, "thread/start", lambda: client.call(thread_operation, timeout=30),
+            sleep=sleep)
         thread_result = thread_observation.result
         if not isinstance(thread_result, dict):
             raise FleetCliError("Codex thread/start returned no public result")
@@ -6353,7 +6390,9 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
         },
     }
     try:
-        turn_observation = client.call(turn_operation, timeout=30)
+        turn_observation = _codex_spawn_call_with_retry(
+            name, "turn/start", lambda: client.call(turn_operation, timeout=30),
+            sleep=sleep)
         turn_result = turn_observation.result
         if not isinstance(turn_result, dict) or not isinstance(
                 turn_result.get("turn"), dict):

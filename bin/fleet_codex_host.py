@@ -45,7 +45,11 @@ from fleet_codex import (
     _send_frame,
     reconcile_home,
 )
-from fleet_codex_protocol import AppServerClient
+from fleet_codex_protocol import (
+    AppServerClient,
+    EVENT_QUEUE_OVERFLOW_MESSAGE,
+    is_event_queue_overflow,
+)
 from fleet_errors import FleetCliError
 
 
@@ -378,6 +382,15 @@ class Host:
                                 self.journal.uncertain(
                                     operation_id,
                                     f"public mutation outcome unknown: {type(exc).__name__}")
+                                if is_event_queue_overflow(exc):
+                                    # Preserve the one transport failure Fleet's
+                                    # spawn retry is allowed to recognize. The
+                                    # operation remains uncertain; callers must
+                                    # still use the bounded retry policy rather
+                                    # than treating arbitrary transport loss as
+                                    # replayable.
+                                    raise ValueError(
+                                        EVENT_QUEUE_OVERFLOW_MESSAGE) from exc
                                 raise ValueError(
                                     "public mutation outcome is uncertain") from exc
                             self.journal.observe(operation_id, result)
