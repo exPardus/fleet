@@ -520,6 +520,37 @@ class WorkerVerbClient:
         self.commits.append(operation_id)
 
 
+class BlockingResumeClient(WorkerVerbClient):
+    def __init__(self, lane, **kwargs):
+        super().__init__(lane, **kwargs)
+        self.resume_entered = threading.Event()
+        self.resume_release = threading.Event()
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") == "thread/resume":
+            self.resume_entered.set()
+            if not self.resume_release.wait(timeout=5):
+                raise AssertionError("test did not release thread/resume")
+        return super().call(operation, timeout)
+
+
+class TerminalDuringResumeClient(WorkerVerbClient):
+    def commit(self, operation_id):
+        super().commit(operation_id)
+        operation = next(
+            op for op in self.operations
+            if op["operation_id"] == operation_id)
+        if operation.get("payload", {}).get("method") != "thread/resume":
+            return
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            record = data["workers"]["cx-native"]
+            record["status"] = "dead"
+            record["adapter_state"] = "idle"
+            record["dead_reason"] = "concurrent terminal action"
+            fleet.save_registry(data)
+
+
 @pytest.mark.parametrize("provider_status,turn_status,error_code,expected", [
     ("active", "inProgress", None, "working"),
     ("idle", "completed", None, "idle"),
@@ -729,6 +760,84 @@ def test_native_worker_lost_restart_resume_freezes_without_replaying_turn(
     assert stored["codex_host_generation"] == "host-generation-1"
     assert stored["status"] == "dead-suspected"
     assert stored["adapter_state"] == "uncertain"
+    assert stored["pending_operation"]["kind"] == "thread/resume"
+
+
+def test_native_worker_kill_refuses_while_restart_resume_is_pending(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = BlockingResumeClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    kill_connect_entered = threading.Event()
+    kill_connect_release = threading.Event()
+    send_outcome = {}
+    kill_outcome = {}
+
+    def send_after_restart():
+        try:
+            send_outcome["rc"] = fleet._cmd_send_codex(
+                "cx-native", "continue after restart")
+        except BaseException as exc:  # surfaced in the test thread below
+            send_outcome["error"] = exc
+
+    def connect_during_kill(_home):
+        kill_connect_entered.set()
+        if not kill_connect_release.wait(timeout=5):
+            raise AssertionError("test did not release kill host lookup")
+        return client
+
+    def kill_old_generation():
+        try:
+            kill_outcome["rc"] = fleet._cmd_kill_codex_native(
+                "cx-native", record, connect=connect_during_kill)
+        except BaseException as exc:  # surfaced in the test thread below
+            kill_outcome["error"] = exc
+
+    killer = threading.Thread(target=kill_old_generation)
+    killer.start()
+    assert kill_connect_entered.wait(timeout=5)
+    sender = threading.Thread(target=send_after_restart)
+    sender.start()
+    try:
+        assert client.resume_entered.wait(timeout=5)
+        kill_connect_release.set()
+        killer.join(timeout=5)
+    finally:
+        kill_connect_release.set()
+        client.resume_release.set()
+        killer.join(timeout=5)
+        sender.join(timeout=5)
+
+    assert not killer.is_alive()
+    assert not sender.is_alive()
+    assert isinstance(kill_outcome.get("error"), fleet.FleetCliError)
+    assert "thread/resume" in str(kill_outcome["error"])
+    assert "refusing kill" in str(kill_outcome["error"])
+    assert send_outcome == {"rc": 0}
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "working"
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_resume_adoption_preserves_concurrent_terminal_state(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = TerminalDuringResumeClient(
+        lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="changed during host restart"):
+        fleet._cmd_send_codex("cx-native", "must not continue after kill")
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert stored["codex_host_generation"] == "host-generation-1"
     assert stored["pending_operation"]["kind"] == "thread/resume"
 
 

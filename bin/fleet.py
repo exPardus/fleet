@@ -2270,8 +2270,9 @@ def _resume_codex_worker_on_current_host(
             f"{binding.name}: native Codex row has no codex:<model>")
     profile = _codex_permission_profile(binding.record.get("mode"))
     operation_id = f"worker-{binding.name}-resume-{uuid.uuid4()}"
-    _reserve_codex_worker_operation(
-        binding, operation_id, "thread/resume")
+    resume_claim = _reserve_codex_worker_operation(
+        binding, operation_id, "thread/resume",
+        expected_record=binding.record)
     operation = {
         "operation_id": operation_id, "method": "rpc",
         "payload": {"method": "thread/resume", "params": {
@@ -2320,14 +2321,7 @@ def _resume_codex_worker_on_current_host(
     with fleet_lock():
         data = load_registry()
         record = data["workers"].get(binding.name)
-        pending = record.get("pending_operation") \
-            if isinstance(record, dict) else None
-        if (isinstance(pending, dict)
-                and pending.get("operation_id") == operation_id
-                and record.get("codex_thread_id") == binding.thread_id
-                and record.get("codex_turn_id") == binding.turn_id
-                and record.get("codex_host_generation")
-                    == binding.host_generation):
+        if record == resume_claim:
             record.pop("pending_operation", None)
             record.pop("uncertain_reason", None)
             record.update({
@@ -2350,8 +2344,6 @@ def _resume_codex_worker_on_current_host(
                 host_generation=client.generation)
             updated = dict(record)
     if updated is None:
-        _freeze_codex_worker_operation(binding, operation_id,
-                                       "record changed during host restart adoption")
         raise FleetCliError(
             f"{binding.name}: native Codex worker changed during host restart "
             "adoption")
@@ -2390,7 +2382,8 @@ def _guard_codex_worker_operation(name: str, record: dict, action: str, *,
 def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
                                     operation_id: str, kind: str, *,
                                     allowed_statuses: set | None = None,
-                                    allowed_adapter_states: set | None = None) -> None:
+                                    allowed_adapter_states: set | None = None,
+                                    expected_record: dict | None = None) -> dict:
     """Durably serialize Fleet mutations for one exact worker incarnation."""
     with fleet_lock():
         data = load_registry()
@@ -2399,6 +2392,9 @@ def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
                 or record.get("codex_thread_id") != binding.thread_id
                 or record.get("codex_turn_id") != binding.turn_id
                 or record.get("codex_host_generation") != binding.host_generation):
+            raise FleetCliError(
+                f"{binding.name}: native Codex worker changed concurrently")
+        if expected_record is not None and record != expected_record:
             raise FleetCliError(
                 f"{binding.name}: native Codex worker changed concurrently")
         if allowed_statuses is not None and allowed_adapter_states is not None:
@@ -2415,6 +2411,7 @@ def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
         }
         record["last_operation_id"] = operation_id
         save_registry(data)
+        return dict(record)
 
 
 def _clear_codex_worker_operation(binding: CodexWorkerBinding,
@@ -9654,12 +9651,27 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
     dead-suspected; it never becomes a successful tombstone or a blind retry."""
     from fleet_codex import HostUnavailable
     connect = connect or _codex_existing_client
+    binding = _codex_worker_binding(name, rec)
+    with fleet_lock():
+        current = load_registry()["workers"].get(name)
+        pending = (current.get("pending_operation")
+                   if isinstance(current, dict) else None)
+        if pending is not None:
+            kind = pending.get("kind") if isinstance(pending, dict) else None
+            raise FleetCliError(
+                f"{name}: native Codex operation {kind or 'unknown'} is "
+                "pending; refusing kill")
+        if current != rec:
+            raise FleetCliError(
+                f"{name}: native Codex worker changed concurrently; "
+                "refusing kill")
     thread_id = rec.get("codex_thread_id")
     turn_id = rec.get("codex_turn_id")
     row_generation = rec.get("codex_host_generation")
     reason = None
     stop_error = None
     reserved_operation_id = None
+    reserved_claim = None
     try:
         client = connect(FLEET_HOME)
     except HostUnavailable as exc:
@@ -9675,10 +9687,11 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
                       f"(current host is {client.generation})")
         elif (rec.get("status") == "working" and isinstance(thread_id, str)
               and isinstance(turn_id, str)):
-            binding = _codex_worker_binding(name, rec)
             operation_id = f"worker-kill-{uuid.uuid4()}"
             reserved_operation_id = operation_id
-            _reserve_codex_worker_operation(binding, operation_id, "kill/turn-interrupt")
+            reserved_claim = _reserve_codex_worker_operation(
+                binding, operation_id, "kill/turn-interrupt",
+                expected_record=rec)
             operation = {
                 "operation_id": operation_id, "method": "rpc",
                 "payload": {"method": "turn/interrupt", "params": {
@@ -9711,20 +9724,43 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
     with fleet_lock():
         data = load_registry()
         r = data["workers"].get(name)
-        if r is not None:
-            if stop_error is None:
-                pending = r.get("pending_operation")
-                if (isinstance(pending, dict)
-                        and pending.get("operation_id") == reserved_operation_id):
-                    r.pop("pending_operation", None)
-                r["status"] = "dead"
-                r["adapter_state"] = "idle"
-            else:
-                r["status"] = "dead-suspected"
-                r["adapter_state"] = "uncertain"
-            r["dead_reason"] = reason
-            r["last_activity"] = now_iso()
-            save_registry(data)
+        if not isinstance(r, dict):
+            raise FleetCliError(
+                f"{name}: native Codex worker changed concurrently; "
+                "refusing kill")
+        pending = r.get("pending_operation")
+        if reserved_operation_id is None:
+            if pending is not None:
+                kind = (pending.get("kind")
+                        if isinstance(pending, dict) else None)
+                raise FleetCliError(
+                    f"{name}: native Codex operation {kind or 'unknown'} "
+                    "became pending; refusing kill")
+            if r != rec:
+                raise FleetCliError(
+                    f"{name}: native Codex worker changed concurrently; "
+                    "refusing kill")
+        elif (not isinstance(pending, dict)
+              or pending.get("operation_id") != reserved_operation_id):
+            raise FleetCliError(
+                f"{name}: native Codex worker changed concurrently; "
+                "refusing kill")
+        elif stop_error is None and r != reserved_claim:
+            raise FleetCliError(
+                f"{name}: native Codex worker changed concurrently; "
+                "refusing kill")
+        if stop_error is None:
+            if (isinstance(pending, dict)
+                    and pending.get("operation_id") == reserved_operation_id):
+                r.pop("pending_operation", None)
+            r["status"] = "dead"
+            r["adapter_state"] = "idle"
+        else:
+            r["status"] = "dead-suspected"
+            r["adapter_state"] = "uncertain"
+        r["dead_reason"] = reason
+        r["last_activity"] = now_iso()
+        save_registry(data)
         append_event("killed" if stop_error is None else "kill_uncertain", name,
                      codex_thread_id=thread_id,
                      interrupt_outcome=stop_error is None, reason=reason)

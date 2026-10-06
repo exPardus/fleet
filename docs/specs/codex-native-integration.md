@@ -345,12 +345,14 @@ recover the exact `dead-suspected`/`uncertain` shape produced solely by a host
 generation change. When the existing host generation differs, `send` reserves
 one `thread/resume`, validates the real thread's ID, cwd, model, permission
 profile, and unchanged newest turn, and conditionally adopts the new generation
-before steering or waking. The resume creates no turn; a lost response or any
-identity conflict freezes the reservation and is never replayed. A down host
-with no replacement still creates no send reservation. A known-local mailbox
-failure before the provider call releases its reservation; only a possibly
-accepted provider call freezes the row and keeps the reservation for
-reconciliation.
+before steering or waking. Reservation compares the complete pre-resume row,
+and adoption compares the complete reserved row; any concurrent state change,
+including a terminal action, wins and cannot be overwritten by adoption. The
+resume creates no turn; a lost response or any identity conflict freezes the
+reservation and is never replayed. A down host with no replacement still
+creates no send reservation. A known-local mailbox failure before the provider
+call releases its reservation; only a possibly accepted provider call freezes
+the row and keeps the reservation for reconciliation.
 
 ### 8.3 Interrupt and terminal operations
 
@@ -358,7 +360,10 @@ reconciliation.
 then requires an exact same-turn terminal read before committing the terminal
 state. A lost response remains `dead-suspected` with an unresolved operation;
 it is not retried. A live-host `kill` uses the same proof rule; only proof that
-the recorded host incarnation itself is gone can bypass the turn read.
+the recorded host incarnation itself is gone can bypass the turn read. Kill
+refuses any pending native operation, including `thread/resume`, and revalidates
+the unchanged row at its terminal write; a concurrent reattachment can never be
+silently reported as killed.
 `respawn` requires old-turn terminal proof, creates a new
 provider-minted thread, records the retired thread/turn/proof tuple, and carries
 the durable brief, journal, and pending mail. `resume-limited` reads public
