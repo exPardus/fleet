@@ -9651,7 +9651,6 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
     dead-suspected; it never becomes a successful tombstone or a blind retry."""
     from fleet_codex import HostUnavailable
     connect = connect or _codex_existing_client
-    binding = _codex_worker_binding(name, rec)
     with fleet_lock():
         current = load_registry()["workers"].get(name)
         pending = (current.get("pending_operation")
@@ -9687,6 +9686,11 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
                       f"(current host is {client.generation})")
         elif (rec.get("status") == "working" and isinstance(thread_id, str)
               and isinstance(turn_id, str)):
+            # A complete provider binding is required only when Fleet will
+            # interrupt and verify a live same-generation turn. Expired
+            # preclaim/bound rows intentionally lack one or both IDs; their
+            # unchanged-row cleanup paths must remain reachable.
+            binding = _codex_worker_binding(name, rec)
             operation_id = f"worker-kill-{uuid.uuid4()}"
             reserved_operation_id = operation_id
             reserved_claim = _reserve_codex_worker_operation(

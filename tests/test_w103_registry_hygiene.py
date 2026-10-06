@@ -257,6 +257,37 @@ class TestNativeCodexKill:
         row = fleet.load_registry()["workers"]["cx-native"]
         assert row["status"] == "working" and row["adapter_state"] == "bound"
 
+    def test_kill_clears_an_expired_preclaim_without_a_thread_binding(
+            self, home, monkeypatch):
+        host = _FakeHost()
+        _seed("cx-native", _native_codex_row(
+            age_hours=1, adapter_state="preclaim", codex_thread_id=None,
+            codex_turn_id=None, codex_host_generation=None))
+        monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: host)
+
+        assert fleet.cmd_kill(argparse.Namespace(
+            name="cx-native", yes=True, nonce=None)) == 0
+
+        row = fleet.load_registry()["workers"]["cx-native"]
+        assert row["status"] == "dead"
+        assert "generation None gone" in row["dead_reason"]
+        assert host.calls == []
+
+    def test_kill_clears_an_expired_bound_row_without_a_turn_binding(
+            self, home, monkeypatch):
+        host = _FakeHost()
+        _seed("cx-native", _native_codex_row(
+            age_hours=1, adapter_state="bound", codex_turn_id=None))
+        monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: host)
+
+        assert fleet.cmd_kill(argparse.Namespace(
+            name="cx-native", yes=True, nonce=None)) == 0
+
+        row = fleet.load_registry()["workers"]["cx-native"]
+        assert row["status"] == "dead"
+        assert row["dead_reason"] == "no running turn (status 'working')"
+        assert host.calls == []
+
 
 class TestNativeCodexArchive:
     def _archive(self, name=None, ttl_hours=None):
