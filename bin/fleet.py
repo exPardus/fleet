@@ -843,13 +843,7 @@ class FleetLockTimeout(Exception):
 
 @contextmanager
 def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
-    """Single-writer lock for state/fleet.json, guarding registry CRUD.
-
-    Acquired by atomic create (os.O_CREAT | os.O_EXCL); a lock file older
-    than LOCK_STALE_SECONDS is assumed abandoned (crashed holder) and broken.
-    ``home`` lets an explicitly targeted home use that same lock discipline
-    without temporarily changing the process-global home selection.
-    """
+    """Lock one home's registry; ``home`` avoids changing global selection."""
     path = (lock_path() if home is None
             else Path(home) / "state" / "fleet.lock")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1017,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11394) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12333) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:15785) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11908) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12847) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16299) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3402) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:3740) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4093) -- expose that distinction to views.
-      * `_doctor_check_registry` (:12583) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:15659) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4435) -- expose that distinction to views.
+      * `_doctor_check_registry` (:13097) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16173) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:6726) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17439) -- render the release explanation.
+      * `_print_snapshot_table` (:7108) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:17953) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1489,14 +1483,7 @@ def _mail_provider_registration_is_exclusive(provider: str) -> bool:
 
 
 def _registered_interface_mail_source() -> dict | None:
-    """Authenticate this send invocation against the registered Interface.
-
-    Hosted Claude identity wins over inherited tmux environment. Native Codex
-    uses the same process/thread evidence as interface registration. A plain
-    shell may use the registered pane only when neither hosted identity exists.
-    This is application provenance on a same-user substrate, not a privilege
-    boundary; it prevents mailbox text alone from manufacturing authority.
-    """
+    """Return registered Interface provenance for this send, or ``None``."""
     caller_sid = current_caller_session()
     if caller_sid is not None:
         if not _mail_provider_registration_is_exclusive("claude"):
@@ -1567,14 +1554,7 @@ def _mail_source_is_current(source: dict) -> bool:
 
 
 def _issue_verified_supervisor_mail(target: str, body: str) -> tuple[str, str | None]:
-    """Store canonical Interface direction and return mailbox-safe notice text.
-
-    Non-supervisor sends retain their historical raw-mail behavior. A
-    supervisor send that cannot authenticate its Interface source is wrapped
-    as explicitly unverified direction so the body is surfaced rather than
-    silently ignored. Once authentication succeeds, a receipt write failure
-    aborts instead of silently downgrading an expected verified instruction.
-    """
+    """Return raw worker mail or a verified/unverified supervisor notice."""
     if not _is_supervisor_shaped(target):
         return body, None
     source = _registered_interface_mail_source()
@@ -2357,6 +2337,15 @@ def _codex_public_evidence_file(binding: CodexWorkerBinding) -> dict | None:
     return evidence
 
 
+def _codex_worker_has_completed_evidence(binding: CodexWorkerBinding) -> bool:
+    """Whether exact-turn evidence completed with no unresolved mutation."""
+    if binding.record.get("pending_operation") is not None:
+        return False
+    evidence = _codex_public_evidence_file(binding)
+    return (isinstance(evidence, dict)
+            and evidence.get("turn_status") == "completed")
+
+
 def _codex_error_code(turn: dict) -> str | None:
     error = turn.get("error")
     if error is None:
@@ -2472,14 +2461,7 @@ def _codex_worker_status(observed: dict) -> tuple[str, str]:
 def _resume_codex_worker_on_current_host(
         binding: CodexWorkerBinding, client, *, require_full=False
 ) -> tuple[dict, dict]:
-    """Resume one exact old-generation thread and adopt the new host.
-
-    A host generation is Fleet transport identity, not provider thread
-    identity.  ``thread/resume`` is therefore the only supported bridge: it
-    names the genuine provider thread, validates its immutable cwd/model/
-    permissions, then requires the recorded turn to remain newest before the
-    registry generation can move.  No turn is created or replayed here.
-    """
+    """Validate and resume one exact thread before adopting a new host."""
     if client.generation == binding.host_generation:
         return dict(binding.record), _codex_worker_observe(
             binding, client=client, require_full=require_full)
@@ -3740,9 +3722,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:15785`), because legacy upgrades also require a complete registry.
+    (`:16299`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1089`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -4153,14 +4135,18 @@ def recompute_worker_codex(name: str, record: dict,
     if route == "native":
         if record.get("status") in _NATIVE_STICKY:
             return updated
+        completed_evidence = False
         try:
             binding = _codex_worker_binding(name, record)
+            completed_evidence = _codex_worker_has_completed_evidence(binding)
             observed = _codex_worker_observe(binding)
         except (FleetCliError, OSError, ValueError):
             updated["status"] = "dead-suspected"
             updated["adapter_state"] = "uncertain"
             return updated
         status, adapter_state = _codex_worker_status(observed)
+        if status == "dead-suspected" and completed_evidence:
+            status, adapter_state = "idle", "idle"
         waits = _codex_wait_summaries(record)
         current_waits = [wait for wait in waits if not wait.get("stale")]
         if any(wait.get("state") in {"unknown", "unreadable"}
@@ -6605,8 +6591,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
     thread_params = {
         "cwd": expected_cwd,
         "model": requested_model,
-        # A public, provider-persisted correlation marker lets the host find
-        # this exact thread after a queue overflow without replaying start.
+        # Provider-persisted correlation for queue-overflow reconciliation.
         "threadSource": thread_source,
     }
     thread_params.update({key: value for key, value in profile.items()
@@ -8200,20 +8185,10 @@ fresh session; never a successor, never a fork.
 def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
                             setting_sources, prior_last_dispatch_at, *,
                             run, which, sleep) -> int:
-    """Give an idle supervisor body another turn WITHOUT forking (Cut 1, w87).
-    `--bg --resume` always forks the full transcript into a new sid (G2,
-    ratified, docs/specs/native-substrate.md) and leaves the old sid as a
-    `blocked`/no-pid roster corpse (state/tasks/20260915-guard-blocked-
-    corpses.md). A plain, unforked `--bg` dispatch that re-proves continuity
-    through a freshly minted pending nonce resumes the SAME incarnation with
-    zero transcript duplication and mints no new generation -- the same
-    checkpoint/journal-only boot `sup-boot` already runs for a successor
-    (Cut 2, w87), driven here for a same-generation wake instead.
-    The caller (`_cmd_send_native`) has already pre-claimed the registry row
-    as `working` and appended `message` to old_sid's mailbox; this drains
-    that mailbox itself (compose_prompt's worker-brief framing does not fit
-    a supervisor) and restores both the mailbox and the pre-claim on any
-    failure, exactly as the ordinary fork-steer path does.
+    """Wake an idle supervisor without forking its transcript.
+
+    The pending nonce preserves the incarnation; failure restores the caller's
+    pre-claimed row and old-sid mail.
     """
     incarnation_id = _wake_incarnation(name, old_sid)  # queue item 27a
     mail, claim_path = claim_mailbox(old_sid)
@@ -9933,13 +9908,7 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
 
 
 def _prove_codex_bound_thread_empty(name: str, rec: dict, client) -> None:
-    """Require exact public proof that a bound launch created no turn.
-
-    A crash after ``turn/start`` is accepted but before its registry commit
-    leaves the same bound/no-turn row as a genuinely empty thread.  The row
-    alone therefore cannot authorize cleanup; only the complete public turn
-    history can distinguish those cases.
-    """
+    """Require complete public history proving a bound launch has no turn."""
     thread_id = _provider_codex_id(
         rec.get("codex_thread_id"), "bound worker thread")
     generation = rec.get("codex_host_generation")
@@ -10056,10 +10025,7 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
             reason = "bound thread has no provider turns"
         elif (rec.get("status") == "working" and isinstance(thread_id, str)
               and isinstance(turn_id, str)):
-            # A complete provider binding is required only when Fleet will
-            # interrupt and verify a live same-generation turn. An expired
-            # preclaim lacks both IDs and remains cleanable; a bound row was
-            # proved empty above before this branch can be bypassed.
+            # Only a same-generation live turn requires a complete binding.
             binding = _codex_worker_binding(name, rec)
             operation_id = f"worker-kill-{uuid.uuid4()}"
             reserved_operation_id = operation_id
@@ -10285,7 +10251,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:9652` / `cmd_respawn:9059`, before
+    # resolution that runs from `cmd_kill:10166` / `cmd_respawn:9457`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10316,9 +10282,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:9652` / `cmd_respawn:9059`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10166` / `cmd_respawn:9457`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9080-9089` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9478-9487` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15151,10 +15117,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1089`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1091`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4081`) applies here too. An unreadable registry
+    rule for the view path (`:4423`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -15225,11 +15191,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3206, :3241, :3271, :3310, :3347,
-    :3409, :3489, :4490, :9755, :9917, :10181, :10410, :10446, :10688, :10689,
-    :10778, :10788, :10799, :10897, :11420, :14629, :18537, :18538, :18642, :18703, :20070, :22054`).
+    sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
+    :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
+    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20624, :22619`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8349, :8933, :12910, :20808. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13424, :21362. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15947,16 +15913,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8349, :8933, :12910,
-    # :20808) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8747, :9331, :13424,
+    # :21362) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1089`), which is a write. Routing the identity read
+        # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:14603`).
+        # names this gate as its reason (`:15117`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16326,7 +16292,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11391`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11905`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19724,16 +19690,10 @@ def cmd_sup_context(args) -> int:
 
 
 def cmd_sup_notify(args, run=subprocess.run) -> int:
-    """Send a sanitized SUPERVISOR line to the registered tmux interface.
-    Require claim continuity, but treat this as an accidental-second-body
-    speed bump: the same OS user can invoke tmux directly. The shared
-    sanitizer remains necessary regardless of the caller's identity.
-    Do not apply the dispatch ceiling: notifying a handoff must remain possible
-    at the band. Validate with mint=False to avoid rotating the generation
-    between notification and handoff. Commit acknowledgments and sid restamps,
-    then emit notices before tmux, whose failure must not hide that commit.
-    Refresh the heartbeat after holder continuity is proven.
-    --dry-run only prints the sanitized bytes, before any claim work or lock."""
+    """Notify the interface after non-minting claim validation.
+
+    Dry-run precedes claim work; normal calls commit the heartbeat before tmux.
+    """
     target = f"{args.tmux_session}:{args.window}"
     if args.dry_run:
         print(f"[dry-run] would type into {target}: "
@@ -19762,7 +19722,7 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
 
 
 def _clear_competing_interface_registration(path: Path) -> bool:
-    """Remove one superseded provider identity or fail registration closed."""
+    """Remove one competing provider identity or fail registration closed."""
     try:
         path.unlink()
     except FileNotFoundError:
@@ -19775,14 +19735,7 @@ def _clear_competing_interface_registration(path: Path) -> bool:
 
 
 def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
-    """Register the current interface pane or session.
-
-    The pane id comes only from ``TMUX_PANE`` and is checked in the same shape
-    the keeper accepts: a percent sign followed by ASCII decimal digits.  A
-    missing or malformed environment value is a refusal, never a guessed pane
-    target or a state-file write. Outside tmux, the caller's Claude session id
-    is the interface identity; this path does not weaken the pane refusal.
-    """
+    """Register the current validated Interface pane or hosted session."""
     root = FLEET_HOME if home is None else Path(home)
     codex_thread = getattr(args, "codex_thread", None)
     if codex_thread is not None:

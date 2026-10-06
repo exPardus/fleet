@@ -296,10 +296,15 @@ Rows with
 `dispatch_kind=codex-app-server` keep `session_id=null` and route every worker
 verb by that durable discriminator; they never fall through to mcx. Ordinary
 `status`/`wait` validate the exact provider-minted thread and newest bound turn
-through the existing exact-home host, while stale/file-only views remain
-probe-free. `peek` and `result` read only the bounded exact-turn
-public-evidence file; `result` requires complete durable item text and token
-usage and takes no lock, performs no RPC, and writes nothing. Busy `send` uses
+through the existing exact-home host and reconcile that observation with the
+bounded exact-turn public-evidence file. Durable `completed` evidence for the
+current bound turn yields `idle` even when the host later reports `notLoaded`
+or `systemError`; an unresolved mutation never lets an older completion vouch
+for unknown provider work, and a failed live read remains uncertain.
+Stale/file-only views remain probe-free. `peek` and `result` read only the
+bounded exact-turn public-evidence file; `result` requires complete durable
+item text and token usage and takes no lock, performs no RPC, and writes
+nothing. Busy `send` uses
 `turn/steer` with `expectedTurnId`; idle send and `resume-limited` start one
 turn on the same thread. When a replacement host has a new generation, `send`
 and `respawn` first reserve one `thread/resume` for the exact recorded provider

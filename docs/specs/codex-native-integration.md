@@ -345,9 +345,14 @@ wrong-effective-settings, or conflicting observations become
 
 **Implemented 2026-10-04:** ordinary native worker `status` and `wait` validate
 the exact recorded thread, newest recorded turn, canonical cwd, and host
-generation through the existing exact-home host. Host loss or conflicting
-public evidence maps to `dead-suspected`, never to a proved death. File-only
-views remain file-only. Busy `send` uses one
+generation through the existing exact-home host. They also read the bounded
+public-evidence file for the exact bound thread and turn: a durable
+`completed` event yields `idle` even when the live provider view is later
+`notLoaded` or `systemError`. An unresolved mutation prevents an older
+completion from vouching for unknown provider work. Host loss, a failed live
+read, malformed evidence, or conflicting identity maps to
+`dead-suspected`, never to a proved death. File-only views remain file-only.
+Busy `send` uses one
 `turn/steer(expectedTurnId=...)`; idle `send` starts one new turn on the same
 thread. Each mutation is reserved durably before IPC, and an uncertain response
 keeps that reservation and retained mail instead of retrying.
@@ -358,8 +363,10 @@ keeps that reservation and retained mail instead of retrying.
 | active + `waitingOnApproval` | `waiting` with approval metadata |
 | active + `waitingOnUserInput` | `waiting` with input metadata |
 | idle + persisted terminal current turn | terminal mapping, usually `idle` |
-| `notLoaded` | `dead-suspected`; explicit recovery is required, never inferred death |
-| system error, loss, schema mismatch, wrong cwd, conflicting turn | `dead-suspected`/PAGE |
+| exact current turn has durable `completed` evidence | `idle`, including after live-view eviction |
+| `notLoaded` without completed evidence | `dead-suspected`; explicit recovery is required, never inferred death |
+| `systemError` without completed evidence | `dead-suspected`/PAGE |
+| host loss, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
 | limit error + authoritative future reset | `limited` |
 | limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
 

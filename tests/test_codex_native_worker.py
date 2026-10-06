@@ -855,6 +855,103 @@ def test_native_worker_host_down_is_dead_suspected_without_mcx(
         == "dead-suspected"
 
 
+@pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
+def test_native_worker_completed_evidence_overrides_uncertain_provider_state(
+        native_home, monkeypatch, provider_status, capsys):
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence = {
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "turn_status": "completed", "result_item_id": "item-final",
+        "result_text": "durably finished", "result_truncated": False,
+        "usage": {
+            "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+            "input_tokens": 10, "output_tokens": 3,
+            "reasoning_output_tokens": 1, "total_tokens": 16,
+        },
+    }
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps(evidence), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status=provider_status, turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    # This is the same exact-turn evidence accepted by the file-only result
+    # surface; liveness must not contradict it merely because the live host no
+    # longer has an actionable provider thread.
+    assert fleet._cmd_result_codex("cx-native", record) == 0
+    capsys.readouterr()
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert client.generation == record["codex_host_generation"]
+    assert updated["status"] == "idle"
+    assert updated["adapter_state"] == "idle"
+    assert updated["provider_status"] == provider_status
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+def test_native_worker_status_persists_completed_evidence_as_idle(
+        native_home, monkeypatch, capsys):
+    home, lane = native_home
+    _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "turn_status": "completed", "result_item_id": "item-final",
+            "result_text": "status-visible completion",
+            "result_truncated": False,
+            "usage": {
+                "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+                "input_tokens": 10, "output_tokens": 3,
+                "reasoning_output_tokens": 1, "total_tokens": 16,
+            },
+        }), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    notifications = []
+    monkeypatch.setattr(
+        fleet, "notify_lane_done",
+        lambda name, status, **_kwargs: notifications.append((name, status)))
+
+    assert fleet.cmd_status(SimpleNamespace(
+        name="cx-native", all=False, stale_ok=False, json=True)) == 0
+
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["workers"][0]["status"] == "idle"
+    assert fleet.load_registry()["workers"]["cx-native"]["status"] == "idle"
+    assert notifications == [("cx-native", "idle")]
+
+
+def test_native_worker_completed_evidence_cannot_clear_pending_operation(
+        native_home, monkeypatch):
+    home, lane = native_home
+    record = _install_record(lane, pending_operation={
+        "operation_id": "unresolved-op", "kind": "turn/start",
+        "at": "2026-09-20T00:00:00Z",
+    })
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "turn_status": "completed",
+        }), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "dead-suspected"
+    assert updated["adapter_state"] == "uncertain"
+
+
 @pytest.mark.parametrize("provider_status,active_flags,expected_status,expected_adapter", [
     ("active", ["waitingOnApproval"], "working", "waiting"),
     ("active", ["waitingOnUserInput"], "working", "waiting"),
