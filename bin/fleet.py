@@ -2911,8 +2911,13 @@ def _text_cell(value, width: int) -> str:
 
     A non-string is not coerced with str(): a status of `7` or `None` is a
     corrupt record, and printing `7` in the STATUS column would read as a
-    status the fleet actually has."""
-    return f"{value if isinstance(value, str) else UNKNOWN_CELL:<{width}}"
+    status the fleet actually has. Long values are clipped with an ellipsis so
+    a malformed or unusually long name cannot shift the columns to its right."""
+    if not isinstance(value, str):
+        value = UNKNOWN_CELL
+    elif len(value) > width:
+        value = value[:max(0, width - 1)] + "…"
+    return f"{value:<{width}}"
 
 
 def _native_cumulative_tokens(name: str) -> int:
@@ -6788,7 +6793,7 @@ def _native_token_summary(name: str, rec: dict) -> str:
 
 
 def _print_status_table(data: dict, names) -> None:
-    header = f"{'NAME':<20}{'STATUS':<10}{'TURNS':>6}{'COST':>9}{'MIN-AGO':>9}{'MAIL':>6}{'ATTACH':>9}  FLAGS"
+    header = f"{'NAME':<20} {'STATUS':<10}{'TURNS':>6}{'COST':>9}{'MIN-AGO':>9}{'MAIL':>6}{'ATTACH':>9}  FLAGS"
     print(header)
     now = datetime.now(timezone.utc)
     for n in names:
@@ -6825,7 +6830,7 @@ def _print_status_table(data: dict, names) -> None:
         flags = ",".join(flag_list) or "-"
         # Render unknown cells as ? and keep rendering the remaining workers.
         print(
-            f"{n:<20}{_text_cell(rec.get('status'), 10)}"
+            f"{_text_cell(n, 20)} {_text_cell(rec.get('status'), 10)}"
             f"{_int_cell(rec.get('turns'), 6)}{cost_s}"
             f"{mins_s:>9}{mail:>6}{attach_s:>9}  {flags}"
         )

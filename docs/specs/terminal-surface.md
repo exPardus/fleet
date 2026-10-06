@@ -159,9 +159,15 @@ Honours the additive-schema rule: every field read with a default (`cost_baselin
 
 ### 4.2 `fleet status --json [--stale-ok]`
 
+The human-readable status tables use fixed-width NAME and STATUS cells. Names
+longer than the NAME cell are clipped with an ellipsis and separated from the
+STATUS column, keeping subsequent columns parseable; the `--json` projection
+always retains the complete worker name.
+
 `--json` prints `status_snapshot()` as JSON to stdout. `--stale-ok` selects the probe-free path (no recompute, no lock, no write). Without `--stale-ok`, `--json` prints the same schema after the ordinary authoritative recompute.
 
-Bare `fleet status` behaviour — the human table, the recompute, the anomaly flags — is **unchanged**.
+Bare `fleet status` recompute and anomaly-flag behaviour is **unchanged**; only
+the human table's fixed-width name rendering is bounded as described above.
 
 ### 4.3 `bin/fleet_statusline.py`
 

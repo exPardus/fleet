@@ -312,6 +312,34 @@ class TestStatusJsonFlags:
         out = capsys.readouterr().out
         assert "plan3-t12-lowfunding dead" in out
 
+    def test_a_name_longer_than_the_column_is_bounded(self, home, capsys):
+        name = "worker-name-that-is-longer-than-the-table-column"
+        _write_registry(home, {name: _rec(status="dead")})
+
+        fleet.cmd_status(self._args(stale_ok=True))
+        lines = capsys.readouterr().out.splitlines()
+        header = next(line for line in lines if line.startswith("NAME"))
+        row = next(line for line in lines if line.startswith("worker-name-that-is"))
+        status_start = header.index("STATUS")
+
+        # The row remains fixed-width parseable even though the registry key is
+        # longer than the NAME field; the JSON projection still carries `name`.
+        assert row[status_start:status_start + len("STATUS")].strip() == "dead"
+        assert "worker-name-that-is-longer-than" not in row[:status_start]
+
+        # Exercise the authoritative (probing) table renderer too; both table
+        # paths must keep the same fixed-width contract.
+        fleet._print_status_table({"workers": {name: _rec(status="dead")}}, [name])
+        table_lines = capsys.readouterr().out.splitlines()
+        table_header = next(line for line in table_lines if line.startswith("NAME"))
+        table_row = next(line for line in table_lines if line.startswith("worker-name-that-is"))
+        table_status_start = table_header.index("STATUS")
+        assert table_row[table_status_start:table_status_start + len("STATUS")].strip() == "dead"
+
+        fleet.cmd_status(self._args(json=True, stale_ok=True))
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["workers"][0]["name"] == name
+
     def test_unknown_worker_name_raises(self, home):
         _write_registry(home, {"botx": _rec()})
         with pytest.raises(fleet.FleetCliError):
