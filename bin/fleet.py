@@ -21310,11 +21310,12 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         return 1
 
     complete_timeout = getattr(args, "complete_timeout", None)
-    handoff_claim_snapshot = json.loads(json.dumps(claim))
+    handoff_proof_snapshot = json.loads(json.dumps(claim))
     snapshot_entry = handoff_entry_matching(
-        handoff_claim_snapshot, successor_inc=successor_inc)
+        handoff_proof_snapshot, successor_inc=successor_inc)
     if snapshot_entry is not None:
         snapshot_entry["successor_sid"] = successor_sid
+    handoff_cas_snapshot = json.loads(json.dumps(handoff_proof_snapshot))
     transfer_committed = False
 
     def mark_transfer_committed():
@@ -21326,15 +21327,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         # The sid lets hooks resolve its name before completion.
         succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
         with fleet_lock():
-            # Re-read under the lock and stamp only our successor_inc. Reusing the
-            # pre-dispatch claim could erase a concurrent begin; positional stamping
-            # could put our sid on a rival attempt and aim abort at the wrong body.
+            # Re-read only into the CAS snapshot: a rival begin may replace its token,
+            # but never the original proof. Stamp by inc; reusing the old claim could
+            # erase the rival, while positional stamping could aim abort at its body.
             live = read_incarnation()
             entry = handoff_entry_matching(live, successor_inc=successor_inc)
             if entry is not None:
                 entry["successor_sid"] = successor_sid
                 write_incarnation(live)
-            handoff_claim_snapshot = json.loads(json.dumps(live))
+            handoff_cas_snapshot = json.loads(json.dumps(live))
             data = load_registry()
             if name not in data["workers"]:
                 succ_rec = new_worker_record(
@@ -21367,7 +21368,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             deadline = clock() + complete_timeout
             timed_out = False
             while read_handshake() is None:
-                if read_incarnation() != handoff_claim_snapshot:
+                if read_incarnation() != handoff_cas_snapshot:
                     raise SupervisorContinuityError(
                         "sup-handoff-begin: supervisor claim changed while waiting "
                         "for HANDSHAKE -- refusing completion")
@@ -21394,7 +21395,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             _automatic_handoff_abort(
                 caller=caller, continuity_nonce=continuity_nonce,
                 successor_sid=successor_sid, successor_inc=successor_inc,
-                handoff_claim_snapshot=handoff_claim_snapshot,
+                handoff_cas_snapshot=handoff_cas_snapshot,
+                handoff_proof_snapshot=handoff_proof_snapshot,
                 handoff_token=handoff_token, holder_inc=holder_inc,
                 run=run, which=which)
     # Both recipes present --nonce because both verbs require continuity.
@@ -21602,11 +21604,11 @@ def _claim_is_transferred_successor(claim, successor_inc):
 
 
 def _prepare_successor_scoped_abort_locked(
-        successor_inc, successor_sid, handoff_claim_snapshot,
+        successor_inc, successor_sid, handoff_proof_snapshot,
         handoff_token, holder_inc):
-    expected_hash = handoff_claim_snapshot.get("handoff_token_hash")
+    expected_hash = handoff_proof_snapshot.get("handoff_token_hash")
     entry = handoff_entry_matching(
-        handoff_claim_snapshot, successor_sid=successor_sid,
+        handoff_proof_snapshot, successor_sid=successor_sid,
         successor_inc=successor_inc)
     if (entry is None or not expected_hash
             or nonce_digest(handoff_token) != expected_hash):
@@ -21655,7 +21657,8 @@ def _finish_successor_scoped_abort(target_sid, which=shutil.which,
 
 
 def _automatic_handoff_abort(*, caller, continuity_nonce, successor_sid,
-                              successor_inc, handoff_claim_snapshot,
+                              successor_inc, handoff_cas_snapshot,
+                              handoff_proof_snapshot,
                               handoff_token, holder_inc, run, which):
     abort_args = SimpleNamespace(
         sid=caller, nonce=continuity_nonce,
@@ -21669,12 +21672,12 @@ def _automatic_handoff_abort(*, caller, continuity_nonce, successor_sid,
             current = read_incarnation()
             if _claim_is_transferred_successor(current, successor_inc):
                 transfer_won = True
-            elif current == handoff_claim_snapshot:
+            elif current == handoff_cas_snapshot:
                 ordinary_plan = _prepare_sup_handoff_abort_locked(
                     abort_args, force=False)
             else:
                 scoped_sid = _prepare_successor_scoped_abort_locked(
-                    successor_inc, successor_sid, handoff_claim_snapshot,
+                    successor_inc, successor_sid, handoff_proof_snapshot,
                     handoff_token, holder_inc)
                 transfer_won = scoped_sid is None
     except Exception as abort_exc:
@@ -21682,7 +21685,7 @@ def _automatic_handoff_abort(*, caller, continuity_nonce, successor_sid,
         try:
             with fleet_lock():
                 scoped_sid = _prepare_successor_scoped_abort_locked(
-                    successor_inc, successor_sid, handoff_claim_snapshot,
+                    successor_inc, successor_sid, handoff_proof_snapshot,
                     handoff_token, holder_inc)
                 transfer_won = scoped_sid is None
         except Exception as scoped_exc:

@@ -3012,6 +3012,79 @@ class TestHandoff:
             fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
         assert flag["reason"] == "aborted"
 
+    def test_begin_sid_stamp_keeps_original_proof_across_concurrent_begin(
+            self, sup_home, monkeypatch):
+        """A rival begin may replace the token hash before our SID stamp.
+
+        The live claim reread is the right CAS snapshot, but it carries the
+        rival token.  If that snapshot later changes, scoped cleanup must still
+        authenticate our successor with our original retained token and SID.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        rival_run = self._dispatch_then_roster(
+            successor_sid="succ0002-full", short_id="succ0002")
+        clock = self._Clock()
+        real_lock = fleet.fleet_lock
+        lock_calls = 0
+        rival_started = False
+        original_task = None
+        rival_task = None
+        replacement_claim = None
+
+        @contextmanager
+        def concurrent_begin_before_sid_stamp(*args, **kwargs):
+            nonlocal lock_calls, rival_started, original_task, rival_task
+            lock_calls += 1
+            if lock_calls == 2:
+                before = fleet.read_incarnation()
+                original = fleet.handoff_pending_entries(before)[0]
+                original_task = Path(original["task_file"])
+                original_hash = before["handoff_token_hash"]
+                monkeypatch.setattr(fleet, "fleet_lock", real_lock)
+                try:
+                    assert self._begin(
+                        rival_run, nonce=live, complete_timeout=None) == 0
+                    rival_started = True
+                finally:
+                    monkeypatch.setattr(
+                        fleet, "fleet_lock", concurrent_begin_before_sid_stamp)
+                after = fleet.read_incarnation()
+                assert after["handoff_token_hash"] != original_hash
+                rival = fleet.handoff_pending_entries(after)[-1]
+                assert rival["successor_sid"] == "succ0002-full"
+                rival_task = Path(rival["task_file"])
+            with real_lock(*args, **kwargs):
+                yield
+
+        def replace_claim(seconds):
+            nonlocal replacement_claim
+            replacement_claim = {
+                "incarnation_id": "inc-other", "session_id": "sid-other",
+                "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                "claimed_via": "fresh", "nonce_seq": 1,
+                "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                "lineage_id": "lin-other"}
+            with real_lock():
+                fleet.write_incarnation(replacement_claim)
+            clock.advance(seconds)
+
+        monkeypatch.setattr(
+            fleet, "fleet_lock", concurrent_begin_before_sid_stamp)
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=replace_claim,
+                complete_timeout=0.5, nonce=live)
+        assert rival_started is True
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert not any(call[-2:] == ["stop", "succ0002"] for call in rival_run.calls)
+        assert fleet.read_incarnation() == replacement_claim
+        assert original_task is not None and not original_task.exists()
+        assert rival_task is not None and rival_task.exists()
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-scoped-abort"
+
     def test_begin_complete_timeout_aborts_a_failed_handshake(
             self, sup_home):
         live = self._hold_v2()

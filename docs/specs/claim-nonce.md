@@ -1865,11 +1865,13 @@ equality — the same root cause, third instance.
    atomic HANDSHAKE without holding `fleet.lock`, and passes the same value into the existing
    complete transition. Once the full successor sid is verified, a `finally` guard covers the
    pending-sid stamp, registry/event setup, wait and completion: every later exception before the
-   transferred claim commit aborts, and nothing aborts after that commit. Automatic abort makes one
-   decision under `fleet.lock`: the retained predecessor snapshot takes the ordinary abort
-   transition, a completed transfer to that successor is a no-op, and any other changed claim
-   prepares only the retained incarnation/token-proven cleanup. Scoped cleanup commits its abort
-   flag in that decision; only stop and console output remain outside the lock, so they cannot
+   transferred claim commit aborts, and nothing aborts after that commit. The incarnation/SID/token
+   proof captured at verification stays immutable; the later locked live-claim reread is a separate
+   comparison snapshot, because a concurrent begin may already have replaced the singleton token
+   hash. Automatic abort makes one decision under `fleet.lock`: the retained predecessor snapshot
+   takes the ordinary abort transition, a completed transfer to that successor is a no-op, and any
+   other changed claim prepares only the retained incarnation/token-proven cleanup. Scoped cleanup
+   commits its abort flag in that decision; only stop and console output remain outside the lock, so they cannot
    resurrect an older flag. Without the option, the separate `sup-handoff-complete` and
    `sup-handoff-abort` commands remain unchanged.
 
