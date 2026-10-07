@@ -2993,6 +2993,25 @@ class TestHandoff:
             fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
         assert flag["reason"] == "aborted"
 
+    def test_begin_complete_timeout_aborts_if_registry_setup_fails_after_sid(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+
+        def fail_registry_load():
+            raise OSError("registry unavailable after sid join")
+
+        monkeypatch.setattr(fleet, "load_registry", fail_registry_load)
+        with pytest.raises(OSError, match="registry unavailable after sid join"):
+            self._begin(run, complete_timeout=2, nonce=live)
+        assert sum("--bg" in call for call in run.calls) == 1
+        assert sum(call[-2:] == ["stop", "succ0001"] for call in run.calls) == 1
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+        assert not list((sup_home / "state").glob("supervisor-handoff-*.md"))
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "aborted"
+
     def test_begin_complete_timeout_aborts_a_failed_handshake(
             self, sup_home):
         live = self._hold_v2()
@@ -3049,6 +3068,49 @@ class TestHandoff:
             fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
         assert flag["reason"] == "successor-scoped-abort"
         assert flag["claim_untouched"] is True
+
+    def test_successor_scoped_abort_flag_is_committed_before_unlocked_stop(
+            self, sup_home):
+        live = self._hold_v2()
+        base_run = self._dispatch_then_roster()
+        clock = self._Clock()
+        replacement_claim = None
+        newer_flag = {"aborted_at": "newer", "reason": "newer-abort"}
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["stop", "succ0001"]:
+                base_run.calls.append(argv)
+                locked_flag = json.loads(
+                    fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+                assert locked_flag["reason"] == "successor-scoped-abort"
+                with fleet.fleet_lock():
+                    fleet._write_json_atomic(
+                        fleet.handoff_abort_flag_path(), newer_flag)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return base_run(argv, **kwargs)
+
+        run.calls = base_run.calls
+
+        def replace_claim(seconds):
+            nonlocal replacement_claim
+            replacement_claim = {
+                "incarnation_id": "inc-other", "session_id": "sid-other",
+                "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                "claimed_via": "fresh", "nonce_seq": 1,
+                "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                "lineage_id": "lin-other"}
+            with fleet.fleet_lock():
+                fleet.write_incarnation(replacement_claim)
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=replace_claim,
+                complete_timeout=0.5, nonce=live)
+        assert fleet.read_incarnation() == replacement_claim
+        final_flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert final_flag == newer_flag
 
     def test_begin_complete_timeout_does_not_stop_concurrently_committed_successor(
             self, sup_home, monkeypatch):

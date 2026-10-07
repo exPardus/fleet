@@ -15263,9 +15263,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20694, :22851`).
+    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20694, :22868`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13494, :21566. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13494, :21487. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15984,7 +15984,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:8747, :9331, :13494,
-    # :21566) -- so union identity cannot make one body answer for another.
+    # :21487) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -21309,145 +21309,61 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
               f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
         return 1
 
-    # Register the verified successor body with its provisional sid and turns=1.
-    # The sid lets hooks resolve its name before completion.
-    succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
-    with fleet_lock():
-        # Re-read under the lock and stamp only our successor_inc. Reusing the
-        # pre-dispatch claim could erase a concurrent begin; positional stamping
-        # could put our sid on a rival attempt and aim abort at the wrong body.
-        live = read_incarnation()
-        entry = handoff_entry_matching(live, successor_inc=successor_inc)
-        if entry is not None:
-            entry["successor_sid"] = successor_sid
-            write_incarnation(live)
-        data = load_registry()
-        if name not in data["workers"]:
-            succ_rec = new_worker_record(
-                successor_sid, FLEET_HOME,
-                f"supervisor successor {successor_inc} (handoff from {holder_inc})",
-                succ_mode, model=getattr(args, "model", None),
-                setting_sources=succ_setting_sources,
-                spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
-                dispatch_kind="bg", category=None,
-                # Item 28: same substrate stamping as the gen-0 dispatch.
-                substrate=_openrouter_substrate(getattr(args, "model", None)))
-            succ_rec["turns"] = 1
-            succ_rec["last_dispatch_at"] = now_iso()
-            data["workers"][name] = succ_rec
-            save_registry(data)
-            append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
-            # Record turn_started beside the turns=1 registry stamp. The other initial
-            # dispatch sites are cmd_spawn, _cmd_respawn_native and
-            # _dispatch_supervisor_body, each in fast-completion and joined arms.
-            # spawned has no session_id, so this event keeps ownership discoverable
-            # even if completion never runs and clean later removes the registry row.
-            # It proves dispatch, not successful boot; completion emits its own event.
-            # Best effort: an event-log error must not hide SUCCESSOR-SID after dispatch
-            # and registry commit, because abort needs that handle.
-            _append_event_quiet("turn_started", name, session_id=successor_sid)
-        handoff_claim_snapshot = json.loads(json.dumps(live))
-
-    print(f"SUCCESSOR-INC: {successor_inc}")
-    print(f"SUCCESSOR-SID: {successor_sid}")
     complete_timeout = getattr(args, "complete_timeout", None)
-    if complete_timeout is not None:
-        def prepare_successor_scoped_abort_locked():
-            expected_hash = handoff_claim_snapshot.get("handoff_token_hash")
-            entry = handoff_entry_matching(
-                handoff_claim_snapshot, successor_sid=successor_sid,
-                successor_inc=successor_inc)
-            if (entry is None or not expected_hash
-                    or nonce_digest(handoff_token) != expected_hash):
-                raise FleetCliError(
-                    "automatic successor-scoped abort lacks the original "
-                    "incarnation/token proof")
-            current = read_incarnation()
-            if _claim_is_transferred_successor(current, successor_inc):
-                print(f"automatic abort skipped: successor {successor_inc} "
-                      "already holds the committed supervisor claim")
-                return None
-            hs = read_handshake()
-            target_sid = successor_sid
-            if (isinstance(hs, dict)
-                    and hs.get("incarnation_id") == successor_inc
-                    and hs.get("handoff_token_hash") == expected_hash
-                    and isinstance(hs.get("session_id"), str)
-                    and hs.get("session_id")):
-                target_sid = hs["session_id"]
-            if (isinstance(hs, dict)
-                    and hs.get("incarnation_id") == successor_inc
-                    and (hs.get("handoff_token_hash") == expected_hash
-                         or hs.get("session_id") == successor_sid)):
-                try:
-                    handshake_path().unlink()
-                except FileNotFoundError:
-                    pass
-            unlink_handoff_task_file(
-                successor_inc, context=" (successor-scoped abort)")
-            return target_sid
+    handoff_claim_snapshot = json.loads(json.dumps(claim))
+    snapshot_entry = handoff_entry_matching(
+        handoff_claim_snapshot, successor_inc=successor_inc)
+    if snapshot_entry is not None:
+        snapshot_entry["successor_sid"] = successor_sid
+    transfer_committed = False
 
-        def finish_successor_scoped_abort(target_sid):
-            stopped = _stop_native_session(
-                target_sid, run=run, which=which, timeout=60)
-            _write_json_atomic(handoff_abort_flag_path(), {
-                "aborted_at": now_iso(), "reason": "successor-scoped-abort",
-                "successor_sid": target_sid, "successor_inc": successor_inc,
-                "holder": holder_inc, "claim_untouched": True,
-            })
-            if stopped:
-                print(f"limbo successor {target_sid} stopped by successor-scoped "
-                      "abort; the changed supervisor claim was not modified")
-            else:
-                print(f"WARNING: successor-scoped `claude stop {target_sid}` failed; "
-                      "the changed supervisor claim was not modified")
+    def mark_transfer_committed():
+        nonlocal transfer_committed
+        transfer_committed = True
 
-        def abort_successor_scoped():
-            with fleet_lock():
-                target_sid = prepare_successor_scoped_abort_locked()
-            if target_sid is not None:
-                finish_successor_scoped_abort(target_sid)
+    try:
+        # Register the verified successor body with its provisional sid and turns=1.
+        # The sid lets hooks resolve its name before completion.
+        succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
+        with fleet_lock():
+            # Re-read under the lock and stamp only our successor_inc. Reusing the
+            # pre-dispatch claim could erase a concurrent begin; positional stamping
+            # could put our sid on a rival attempt and aim abort at the wrong body.
+            live = read_incarnation()
+            entry = handoff_entry_matching(live, successor_inc=successor_inc)
+            if entry is not None:
+                entry["successor_sid"] = successor_sid
+                write_incarnation(live)
+            handoff_claim_snapshot = json.loads(json.dumps(live))
+            data = load_registry()
+            if name not in data["workers"]:
+                succ_rec = new_worker_record(
+                    successor_sid, FLEET_HOME,
+                    f"supervisor successor {successor_inc} (handoff from {holder_inc})",
+                    succ_mode, model=getattr(args, "model", None),
+                    setting_sources=succ_setting_sources,
+                    spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
+                    dispatch_kind="bg", category=None,
+                    # Item 28: same substrate stamping as the gen-0 dispatch.
+                    substrate=_openrouter_substrate(getattr(args, "model", None)))
+                succ_rec["turns"] = 1
+                succ_rec["last_dispatch_at"] = now_iso()
+                data["workers"][name] = succ_rec
+                save_registry(data)
+                append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
+                # Record turn_started beside the turns=1 registry stamp. The other initial
+                # dispatch sites are cmd_spawn, _cmd_respawn_native and
+                # _dispatch_supervisor_body, each in fast-completion and joined arms.
+                # spawned has no session_id, so this event keeps ownership discoverable
+                # even if completion never runs and clean later removes the registry row.
+                # It proves dispatch, not successful boot; completion emits its own event.
+                # Best effort: an event-log error must not hide SUCCESSOR-SID after dispatch
+                # and registry commit, because abort needs that handle.
+                _append_event_quiet("turn_started", name, session_id=successor_sid)
 
-        def abort_combined():
-            abort_args = SimpleNamespace(
-                sid=caller, nonce=continuity_nonce,
-                successor_sid=successor_sid, successor_inc=successor_inc,
-                retire_all=False, force=False)
-            ordinary_plan = None
-            scoped_sid = None
-            try:
-                with fleet_lock():
-                    current = read_incarnation()
-                    if _claim_is_transferred_successor(current, successor_inc):
-                        print(f"automatic abort skipped: successor {successor_inc} "
-                              "already holds the committed supervisor claim")
-                        return
-                    if current == handoff_claim_snapshot:
-                        ordinary_plan = _prepare_sup_handoff_abort_locked(
-                            abort_args, force=False)
-                    else:
-                        scoped_sid = prepare_successor_scoped_abort_locked()
-            except Exception as abort_exc:
-                print(f"WARNING: locked automatic abort failed: {abort_exc}")
-                try:
-                    abort_successor_scoped()
-                except Exception as scoped_exc:
-                    print(f"WARNING: successor-scoped automatic abort failed: "
-                          f"{scoped_exc}")
-                return
-            if ordinary_plan is not None:
-                _finish_sup_handoff_abort(
-                    ordinary_plan, run=run, which=which)
-            elif scoped_sid is not None:
-                finish_successor_scoped_abort(scoped_sid)
-
-        transfer_committed = False
-
-        def mark_transfer_committed():
-            nonlocal transfer_committed
-            transfer_committed = True
-
-        try:
+        print(f"SUCCESSOR-INC: {successor_inc}")
+        print(f"SUCCESSOR-SID: {successor_sid}")
+        if complete_timeout is not None:
             deadline = clock() + complete_timeout
             timed_out = False
             while read_handshake() is None:
@@ -21473,9 +21389,14 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                         f"handoff timed out after {complete_timeout:g}s: {exc}") from exc
                 raise
             return result
-        finally:
-            if not transfer_committed:
-                abort_combined()
+    finally:
+        if complete_timeout is not None and not transfer_committed:
+            _automatic_handoff_abort(
+                caller=caller, continuity_nonce=continuity_nonce,
+                successor_sid=successor_sid, successor_inc=successor_inc,
+                handoff_claim_snapshot=handoff_claim_snapshot,
+                handoff_token=handoff_token, holder_inc=holder_inc,
+                run=run, which=which)
     # Both recipes present --nonce because both verbs require continuity.
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
@@ -21678,6 +21599,104 @@ def _claim_is_transferred_successor(claim, successor_inc):
             and claim.get("incarnation_id") == successor_inc
             and isinstance(claim.get("session_id"), str)
             and bool(claim.get("session_id")))
+
+
+def _prepare_successor_scoped_abort_locked(
+        successor_inc, successor_sid, handoff_claim_snapshot,
+        handoff_token, holder_inc):
+    expected_hash = handoff_claim_snapshot.get("handoff_token_hash")
+    entry = handoff_entry_matching(
+        handoff_claim_snapshot, successor_sid=successor_sid,
+        successor_inc=successor_inc)
+    if (entry is None or not expected_hash
+            or nonce_digest(handoff_token) != expected_hash):
+        raise FleetCliError(
+            "automatic successor-scoped abort lacks the original "
+            "incarnation/token proof")
+    current = read_incarnation()
+    if _claim_is_transferred_successor(current, successor_inc):
+        return None
+    hs = read_handshake()
+    target_sid = successor_sid
+    if (isinstance(hs, dict)
+            and hs.get("incarnation_id") == successor_inc
+            and hs.get("handoff_token_hash") == expected_hash
+            and isinstance(hs.get("session_id"), str)
+            and hs.get("session_id")):
+        target_sid = hs["session_id"]
+    if (isinstance(hs, dict)
+            and hs.get("incarnation_id") == successor_inc
+            and (hs.get("handoff_token_hash") == expected_hash
+                 or hs.get("session_id") == successor_sid)):
+        try:
+            handshake_path().unlink()
+        except FileNotFoundError:
+            pass
+    unlink_handoff_task_file(
+        successor_inc, context=" (successor-scoped abort)")
+    _write_json_atomic(handoff_abort_flag_path(), {
+        "aborted_at": now_iso(), "reason": "successor-scoped-abort",
+        "successor_sid": target_sid, "successor_inc": successor_inc,
+        "holder": holder_inc, "claim_untouched": True,
+    })
+    return target_sid
+
+
+def _finish_successor_scoped_abort(target_sid, which=shutil.which,
+                                    run=subprocess.run):
+    stopped = _stop_native_session(
+        target_sid, run=run, which=which, timeout=60)
+    if stopped:
+        print(f"limbo successor {target_sid} stopped by successor-scoped "
+              "abort; the changed supervisor claim was not modified")
+    else:
+        print(f"WARNING: successor-scoped `claude stop {target_sid}` failed; "
+              "the changed supervisor claim was not modified")
+
+
+def _automatic_handoff_abort(*, caller, continuity_nonce, successor_sid,
+                              successor_inc, handoff_claim_snapshot,
+                              handoff_token, holder_inc, run, which):
+    abort_args = SimpleNamespace(
+        sid=caller, nonce=continuity_nonce,
+        successor_sid=successor_sid, successor_inc=successor_inc,
+        retire_all=False, force=False)
+    ordinary_plan = None
+    scoped_sid = None
+    transfer_won = False
+    try:
+        with fleet_lock():
+            current = read_incarnation()
+            if _claim_is_transferred_successor(current, successor_inc):
+                transfer_won = True
+            elif current == handoff_claim_snapshot:
+                ordinary_plan = _prepare_sup_handoff_abort_locked(
+                    abort_args, force=False)
+            else:
+                scoped_sid = _prepare_successor_scoped_abort_locked(
+                    successor_inc, successor_sid, handoff_claim_snapshot,
+                    handoff_token, holder_inc)
+                transfer_won = scoped_sid is None
+    except Exception as abort_exc:
+        print(f"WARNING: locked automatic abort failed: {abort_exc}")
+        try:
+            with fleet_lock():
+                scoped_sid = _prepare_successor_scoped_abort_locked(
+                    successor_inc, successor_sid, handoff_claim_snapshot,
+                    handoff_token, holder_inc)
+                transfer_won = scoped_sid is None
+        except Exception as scoped_exc:
+            print(f"WARNING: successor-scoped automatic abort failed: "
+                  f"{scoped_exc}")
+            return
+    if transfer_won:
+        print(f"automatic abort skipped: successor {successor_inc} "
+              "already holds the committed supervisor claim")
+    elif ordinary_plan is not None:
+        _finish_sup_handoff_abort(ordinary_plan, run=run, which=which)
+    elif scoped_sid is not None:
+        _finish_successor_scoped_abort(
+            scoped_sid, run=run, which=which)
 
 
 def _prepare_sup_handoff_abort_locked(args, force=False):

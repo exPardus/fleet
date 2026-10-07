@@ -1863,14 +1863,14 @@ equality — the same root cause, third instance.
 5. `sup-handoff-begin --complete-timeout SECONDS` is the one-process form. The predecessor presents
    its generation once; begin retains that proved plaintext only in process memory, waits for the
    atomic HANDSHAKE without holding `fleet.lock`, and passes the same value into the existing
-   complete transition. A `finally` guard aborts after every exception before the transferred claim
-   commit and never after that commit. If the claim changes while waiting, completion refuses; the
-   stale predecessor generation is not presented again. Automatic abort makes one decision under
-   `fleet_lock`: the retained predecessor snapshot takes the ordinary abort transition, a completed
-   transfer to that successor is a no-op, and any other changed claim prepares only the retained
-   incarnation/token-proven cleanup. The chosen stop runs after the lock. There is no unlocked
-   precheck from which a competing transfer can fall through into successor-scoped stop. Without
-   the option, the separate `sup-handoff-complete` and
+   complete transition. Once the full successor sid is verified, a `finally` guard covers the
+   pending-sid stamp, registry/event setup, wait and completion: every later exception before the
+   transferred claim commit aborts, and nothing aborts after that commit. Automatic abort makes one
+   decision under `fleet.lock`: the retained predecessor snapshot takes the ordinary abort
+   transition, a completed transfer to that successor is a no-op, and any other changed claim
+   prepares only the retained incarnation/token-proven cleanup. Scoped cleanup commits its abort
+   flag in that decision; only stop and console output remain outside the lock, so they cannot
+   resurrect an older flag. Without the option, the separate `sup-handoff-complete` and
    `sup-handoff-abort` commands remain unchanged.
 
 `sup-handoff-abort` is unchanged — **both** of its sid checks (the HANDSHAKE arm @7441-7445 and the
