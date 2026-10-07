@@ -2856,6 +2856,15 @@ class TestHandoff:
                                  "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
                                  "claimed_via": "fresh"})
 
+    def _hold_v2(self, sid="sid-old", inc="inc-old"):
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
+                                 "claimed_via": "fresh", "nonce_seq": 1,
+                                 "nonce_hash": fleet.nonce_digest(value),
+                                 "lineage_id": "lin-20260101T000000Z-aaaa"})
+        return value
+
     class _Clock:
         """Injectable monotonic clock; pairing sleep=advance exercises
         dispatch_bg's real 60s join window in zero wall-clock time (same
@@ -2870,14 +2879,18 @@ class TestHandoff:
             self.t += dt
 
     def _begin(self, run, sid="sid-old", clock=None, model=None,
-               permission_mode=None):
+               permission_mode=None, complete_timeout=None, nonce=None,
+               sleep=None):
         args = SimpleNamespace(sid=sid, model=model,
-                               permission_mode=permission_mode)
+                               permission_mode=permission_mode,
+                               complete_timeout=complete_timeout, nonce=nonce)
         if clock is None:
+            sleep = sleep or (lambda s: None)
             return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
-                                               sleep=lambda s: None)
+                                               sleep=sleep)
+        sleep = sleep or clock.advance
         return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
-                                           sleep=clock.advance, clock=clock)
+                                           sleep=sleep, clock=clock)
 
     @staticmethod
     def _dispatch_then_roster(successor_sid="succ0001-full", short_id="succ0001"):
@@ -2917,6 +2930,117 @@ class TestHandoff:
         assert "sup-boot --handoff-inc" in body and "NO spawn" in body
         dispatch = next(c for c in run.calls if "--bg" in c)
         assert any(a.startswith("sup|inc-") for a in dispatch)
+
+    def test_begin_complete_timeout_transfers_in_one_process(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        successor_nonce = fleet.mint_nonce()
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
+
+        def successor_boots(seconds):
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            if fleet.read_handshake() is None:
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(successor_nonce))
+            clock.advance(seconds)
+
+        assert self._begin(
+            run, clock=clock, sleep=successor_boots,
+            complete_timeout=2, nonce=live) == 0
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "handoff"
+        assert claim["nonce_hash"] == fleet.nonce_digest(successor_nonce)
+        assert fleet.read_handshake() is None
+        assert not fleet.handoff_abort_flag_path().exists()
+
+    def test_begin_complete_timeout_invokes_abort_on_timeout(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        aborted = []
+
+        def abort(args, **_kw):
+            aborted.append(args)
+            return 0
+
+        monkeypatch.setattr(fleet, "cmd_sup_handoff_abort", abort)
+        with pytest.raises(fleet.FleetCliError, match="timed out after 0s"):
+            self._begin(run, complete_timeout=0, nonce=live)
+        assert len(aborted) == 1
+        assert aborted[0].successor_sid == "succ0001-full"
+        assert aborted[0].successor_inc.startswith("inc-")
+
+    def test_begin_complete_timeout_stops_a_successor_that_never_handshakes(
+            self, sup_home):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        with pytest.raises(fleet.FleetCliError, match="timed out"):
+            self._begin(
+                run, clock=clock, complete_timeout=0.5, nonce=live)
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+        assert fleet.read_handshake() is None
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "aborted"
+
+    def test_begin_complete_timeout_aborts_a_failed_handshake(
+            self, sup_home):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+
+        def invalid_handshake(seconds):
+            entry = fleet.handoff_pending_entries(fleet.read_incarnation())[0]
+            if fleet.read_handshake() is None:
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=fleet.nonce_digest("wrong-token"),
+                    nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.FleetCliError, match="token mismatch"):
+            self._begin(
+                run, clock=clock, sleep=invalid_handshake,
+                complete_timeout=2, nonce=live)
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert fleet.read_handshake() is None
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+
+    def test_begin_complete_timeout_refuses_if_claim_changes_while_waiting(
+            self, sup_home, capsys):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        changed = False
+
+        def replace_claim(seconds):
+            nonlocal changed
+            if not changed:
+                changed = True
+                replacement = fleet.mint_nonce()
+                with fleet.fleet_lock():
+                    fleet.write_incarnation({
+                        "incarnation_id": "inc-other", "session_id": "sid-other",
+                        "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                        "claimed_via": "fresh", "nonce_seq": 1,
+                        "nonce_hash": fleet.nonce_digest(replacement),
+                        "lineage_id": "lin-other"})
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=replace_claim,
+                complete_timeout=0.5, nonce=live)
+        assert not any("stop" in call for call in run.calls)
+        assert "automatic handoff abort refused" in capsys.readouterr().out
 
     def test_successor_boot_is_fresh_never_a_resume_or_fork(self, sup_home):
         """Cut 2 (w87): a successor boots from the checkpoint/journal trail
@@ -3127,6 +3251,16 @@ class TestHandoff:
         assert args.permission_mode == "accept"
         with pytest.raises(SystemExit):
             parser.parse_args(["sup-handoff-begin", "--permission-mode", "acceptEdits"])
+
+    def test_complete_timeout_is_finite_and_nonnegative(self):
+        parser = fleet.build_parser()
+        args = parser.parse_args(
+            ["sup-handoff-begin", "--complete-timeout", "12.5"])
+        assert args.complete_timeout == 12.5
+        for value in ("-1", "inf", "nan"):
+            with pytest.raises(SystemExit):
+                parser.parse_args(
+                    ["sup-handoff-begin", "--complete-timeout", value])
 
     def test_missing_claude_refuses_before_journal_and_taskfile(self, sup_home):
         """B5: `resolve_claude_executable` is the same class of pre-flight as

@@ -15193,9 +15193,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20624, :22619`).
+    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20624, :22665`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13424, :21362. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13424, :21404. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15914,7 +15914,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:8747, :9331, :13424,
-    # :21362) -- so union identity cannot make one body answer for another.
+    # :21404) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -21107,6 +21107,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # After the commit and on every subsequent path (success, DOA, dispatch
     # failure): the generation the validator settled on is committed, so the
     # predecessor must learn it. Empty for the common live-claim case.
+    continuity_nonce = getattr(args, "nonce", None)
+    for notice in notices:
+        if notice.startswith("NONCE: ") and not notice.startswith("NONCE: unchanged"):
+            continuity_nonce = notice.removeprefix("NONCE: ")
     _deliver_notices(notices)
     holder_inc = claim["incarnation_id"]
 
@@ -21272,9 +21276,47 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             # Best effort: an event-log error must not hide SUCCESSOR-SID after dispatch
             # and registry commit, because abort needs that handle.
             _append_event_quiet("turn_started", name, session_id=successor_sid)
+        handoff_claim_snapshot = json.loads(json.dumps(live))
 
     print(f"SUCCESSOR-INC: {successor_inc}")
     print(f"SUCCESSOR-SID: {successor_sid}")
+    complete_timeout = getattr(args, "complete_timeout", None)
+    if complete_timeout is not None:
+        def abort_combined(failure):
+            abort_args = SimpleNamespace(
+                sid=caller, nonce=continuity_nonce,
+                successor_sid=successor_sid, successor_inc=successor_inc,
+                retire_all=False, force=False)
+            try:
+                cmd_sup_handoff_abort(abort_args, which=which, run=run)
+            except FleetCliError as abort_exc:
+                print(f"WARNING: automatic handoff abort refused: {abort_exc}")
+            raise failure
+
+        deadline = clock() + complete_timeout
+        timed_out = False
+        while read_handshake() is None:
+            if read_incarnation() != handoff_claim_snapshot:
+                abort_combined(SupervisorContinuityError(
+                    "sup-handoff-begin: supervisor claim changed while waiting "
+                    "for HANDSHAKE -- refusing completion"))
+            remaining = deadline - clock()
+            if remaining <= 0:
+                timed_out = True
+                break
+            sleep(min(0.25, remaining))
+        complete_args = SimpleNamespace(
+            sid=caller, nonce=continuity_nonce,
+            expect_inc=successor_inc, expect_sid=successor_sid)
+        try:
+            return cmd_sup_handoff_complete(
+                complete_args, run=run, which=which)
+        except FleetCliError as exc:
+            failure = exc
+            if timed_out and not isinstance(exc, SupervisorContinuityError):
+                failure = FleetCliError(
+                    f"handoff timed out after {complete_timeout:g}s: {exc}")
+            abort_combined(failure)
     # Both recipes present --nonce because both verbs require continuity.
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
@@ -22333,6 +22375,10 @@ def build_parser() -> argparse.ArgumentParser:
                               f"(default: {SUCCESSOR_DEFAULT_MODE})")
     p_suphb.add_argument("--sid", help="override caller session id")
     p_suphb.add_argument("--nonce", help=NONCE_ARG_HELP)
+    p_suphb.add_argument(
+        "--complete-timeout", dest="complete_timeout", type=_watch_timeout_arg,
+        help="wait up to SECONDS for HANDSHAKE, then complete in this process; "
+             "automatically abort the successor on timeout or failure")
 
     p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")
     # R6: an incarnation id is a PATH COMPONENT (`handoff_task_file_path`).

@@ -1860,6 +1860,13 @@ equality — the same root cause, third instance.
    predecessor's `lineage_id`.
 4. `_render_successor_task` (@7257-7274, §4.6) is amended in the same commit, and so is
    `skills/fleet/supervisor.md`'s handoff sequence with its required `--expect-sid` (§4.8).
+5. `sup-handoff-begin --complete-timeout SECONDS` is the one-process form. The predecessor presents
+   its generation once; begin retains that proved plaintext only in process memory, waits for the
+   atomic HANDSHAKE without holding `fleet.lock`, and passes the same value into the existing
+   complete transition. It compares the claim snapshot while waiting, so a concurrent claim change
+   refuses rather than transferring or overwriting it. Timeout or another failure before transfer
+   invokes the existing evidence-checked abort path. Without the option, the separate
+   `sup-handoff-complete` and `sup-handoff-abort` commands remain unchanged.
 
 `sup-handoff-abort` is unchanged — **both** of its sid checks (the HANDSHAKE arm @7441-7445 and the
 abort-flag arm @7456, §4.13(a)) are genuinely sid questions: they choose which *session* to stop.
