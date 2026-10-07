@@ -1,7 +1,9 @@
 """Shared platform adapter for Fleet core and the standalone Codex host."""
 
 import ctypes
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +16,40 @@ _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
 _OPEN_ALWAYS = 4
 _FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def _process_descendants(rows, root_pid):
+    by_parent = {}
+    for row in rows:
+        by_parent.setdefault(row["ppid"], []).append(row)
+    found = []
+    pending = list(by_parent.get(root_pid, ()))
+    seen = set()
+    while pending:
+        row = pending.pop()
+        pid = row["pid"]
+        if pid in seen:
+            continue
+        seen.add(pid)
+        found.append(row)
+        pending.extend(by_parent.get(pid, ()))
+    return found
+
+
+def _parse_elapsed(value):
+    days = 0
+    clock = value.strip()
+    if "-" in clock:
+        day, clock = clock.split("-", 1)
+        days = int(day)
+    parts = [int(part) for part in clock.split(":")]
+    if len(parts) == 2:
+        hours, minutes, seconds = 0, parts[0], parts[1]
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        raise ValueError(value)
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
 class UnsupportedPlatformError(NotImplementedError):
@@ -31,6 +67,33 @@ class _WindowsPlatform:
     def memory_available_mb(self) -> int:
         """Windows has no portable MemAvailable implementation in Fleet."""
         raise UnsupportedPlatformError("available memory is unsupported on Windows")
+
+    def process_tree(self, root_pid: int) -> list:
+        script = (
+            "$now=[DateTimeOffset]::UtcNow; $rows=@(Get-CimInstance Win32_Process | "
+            "ForEach-Object {$age=$null; if ($_.CreationDate) {$age=[int]($now-"
+            "[DateTimeOffset]$_.CreationDate).TotalSeconds}; [pscustomobject]@{"
+            "pid=[int]$_.ProcessId;ppid=[int]$_.ParentProcessId;age_seconds=$age;"
+            "command=$(if ($_.CommandLine) {$_.CommandLine} else {$_.Name})}}); "
+            "ConvertTo-Json -Compress -InputObject $rows")
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return []
+        payload = json.loads(proc.stdout)
+        if isinstance(payload, dict):
+            payload = [payload]
+        rows = []
+        for row in payload if isinstance(payload, list) else ():
+            try:
+                rows.append({"pid": int(row["pid"]), "ppid": int(row["ppid"]),
+                             "age_seconds": float(row["age_seconds"]),
+                             "command": str(row.get("command") or "")})
+            except (KeyError, TypeError, ValueError):
+                continue
+        return _process_descendants(rows, int(root_pid))
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Append bytes with one FILE_APPEND_DATA-only WriteFile call.
@@ -83,6 +146,25 @@ class _PosixPlatform:
             raise UnsupportedPlatformError(
                 "Linux MemAvailable is unavailable") from None
         raise UnsupportedPlatformError("Linux MemAvailable is unavailable")
+
+    def process_tree(self, root_pid: int) -> list:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,etime=,args="], capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=5)
+        if proc.returncode != 0:
+            return []
+        rows = []
+        for line in proc.stdout.splitlines():
+            parts = line.strip().split(None, 3)
+            if len(parts) != 4:
+                continue
+            try:
+                rows.append({"pid": int(parts[0]), "ppid": int(parts[1]),
+                             "age_seconds": _parse_elapsed(parts[2]),
+                             "command": parts[3]})
+            except ValueError:
+                continue
+        return _process_descendants(rows, int(root_pid))
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Append bytes with one O_APPEND write, atomically seeking to EOF on POSIX.

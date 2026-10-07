@@ -8175,7 +8175,14 @@ fresh session; never a successor, never a fork.
    rm "{bundle}"
    Carry the NONCE value in your working context ONLY -- never into the journal, never into any
    file.
-4. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
+4. Before any campaign action, run `"{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json`.
+   Abort every pending handoff successor with `"{py}" "{fleet_py}" --fleet-home "{home}"
+   sup-handoff-abort --successor-inc <inc> [--successor-sid <sid>] --nonce <CURRENT-NONCE>` until
+   status shows no pending successor or HANDSHAKE. If a sid-less attempt is
+   still inside its join window, wait until it becomes resolvable, then retry. Run each nonce-minting
+   verb directly: never pipe or filter its output, and record every newly printed NONCE before the
+   next abort. A lost-nonce wake must not leave a successor able to take over afterward.
+5. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
    skills/fleet/supervisor.md. Refresh the heartbeat through the normal protocol
    (`sup-checkpoint`) before any other action; do not seize a changed claim or spawn another
    supervisor.
@@ -19219,7 +19226,7 @@ def _sup_guard_body_name(sids):
     return None
 
 
-def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
+def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
     """Collect the read-only inputs for one two-live-body decision."""
     snapshot_fn = snapshot_fn or status_snapshot
     roster_fn = roster_fn or _fetch_agents_roster
@@ -19304,6 +19311,8 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
                       and _sup_guard_row_in_home(row, registry=registry)
                       and (row.get("name") == SUPERVISOR_BODY_NAME
                            or _is_supervisor_shaped(row.get("name")))]
+    busy_children = _sup_guard_busy_children(
+        body_rows, sup.get("heartbeat_age_seconds"), process_tree_fn)
     return {
         "snapshot": snapshot,
         "registry_ok": bool(snapshot.get("ok", True))
@@ -19317,6 +19326,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "roster_reason": None if roster_ok else str(roster_or_reason),
         "live_rows": live_rows,
         "live_body_rows": live_body_rows,
+        "busy_children": busy_children,
         "handshake_exists": handshake_exists,
         "handshake": handshake,
         "pending": pending,
@@ -19348,7 +19358,7 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
          "parked_wake_condition", "parked_age_seconds", "parked_active",
-         "parked_expired", "parked_finished_lanes")
+         "parked_expired", "parked_finished_lanes", "busy_children")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -19445,7 +19455,14 @@ def _sup_guard_decide(observation):
             detail["quiet"] = True
             return "OK", "fresh heartbeat with live body", detail
         if "busy" in statuses:
-            return "PAGE", "roster says busy", detail
+            reason = "roster says busy"
+            children = obs.get("busy_children") or []
+            if children:
+                rendered = ", ".join(
+                    f"pid {child['pid']} age {_format_process_age(child['age_seconds'])} "
+                    f"command {child['command']}" for child in children)
+                reason += f"; long-running child: {rendered}"
+            return "PAGE", reason, detail
         if statuses == {"idle"}:
             return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         return "PAGE", "live supervisor status unknown", detail
@@ -19597,7 +19614,8 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
     return rc
 
 
-def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
+def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
+                  process_tree_fn=None) -> int:
     """Observe twice before action; only WAKE acts, and never spawns.
 
     JSON includes explicit sent/quiet flags so the keeper does not derive
@@ -19609,13 +19627,17 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
     if isinstance(claim, dict) and claim.get("provider") == "codex":
         return _cmd_codex_sup_guard(args, lane_done=lane_done)
-    observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+    observation = _sup_guard_observe(
+        snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+        process_tree_fn=process_tree_fn)
     if do:
         # Only the WAKE path retries deferred fork retirement. OK and PAGE
         # must stay action-free. Re-observe after any retirement before send.
         if _sup_guard_decide(observation)[0] == "WAKE":
             _reap_current_supervisor_forks(roster_fn=roster_fn)
-        observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        observation = _sup_guard_observe(
+            snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+            process_tree_fn=process_tree_fn)
     verdict, reason, detail = _sup_guard_decide(observation)
     sent, rc = False, 0
     if do and verdict == "WAKE":
@@ -19643,7 +19665,9 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
         # Send can discover and persist a limit while recomputing its target.
         # Publish that park/horizon immediately; never turn it into timer retries
         # of a generic send failure. This is observation only, not a second send.
-        after = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        after = _sup_guard_observe(
+            snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+            process_tree_fn=process_tree_fn)
         next_verdict, next_reason, next_detail = _sup_guard_decide(after)
         if next_reason.startswith("supervisor limited"):
             verdict, reason, detail, rc = next_verdict, next_reason, next_detail, 0
@@ -22908,6 +22932,47 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
               f"{entry.get('waitingFor') or 'a prompt'}; a message queues "
               f"until that clears", file=sys.stderr)
     return 0
+
+
+def _sup_guard_busy_children(body_rows, heartbeat_age, process_tree_fn=None,
+                             min_age=300.0):
+    if (not isinstance(heartbeat_age, (int, float))
+            or heartbeat_age <= SUPERVISOR_CLAIM_STALE_SECONDS
+            or not any(row.get("status") == "busy" for row in body_rows)):
+        return []
+    read_tree = process_tree_fn or PLATFORM.process_tree
+    children = {}
+    for body in body_rows:
+        if body.get("status") != "busy":
+            continue
+        try:
+            descendants = read_tree(int(body.get("pid")))
+        except Exception:
+            continue
+        for child in descendants if isinstance(descendants, list) else ():
+            try:
+                pid = int(child["pid"])
+                age = float(child["age_seconds"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if age < min_age:
+                continue
+            command = " ".join(str(child.get("command") or "").split())[:160]
+            if command:
+                children[pid] = {"pid": pid, "age_seconds": age,
+                                 "command": command}
+    return sorted(children.values(), key=lambda row: (-row["age_seconds"], row["pid"]))[:3]
+
+
+def _format_process_age(seconds):
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400}d{seconds % 86400 // 3600}h"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{seconds % 3600 // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 if __name__ == "__main__":

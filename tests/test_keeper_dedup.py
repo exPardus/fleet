@@ -65,6 +65,25 @@ def test_a_held_stale_supervisor_stalled_page_dedups_across_a_tick():
     assert state2 == state
 
 
+def test_busy_child_age_is_reported_but_does_not_break_page_dedup():
+    child = {"pid": 77, "command": "sh -c until fleet status | grep working"}
+
+    def obs(age):
+        reason = f"roster says busy; long-running child: pid 77 age {age}h command {child['command']}"
+        return {"goals_active": True, "claim_state": "held",
+                "supervisor_guard": {"verdict": f"PAGE {reason}",
+                                     "reason": reason, "body_name": "body",
+                                     "busy_children": [{**child, "age_seconds": age * 3600}]}}
+
+    first = k.evaluate(obs(17), NOW)[0]
+    assert "age 17h" in first.text and child["command"] in first.text
+    sent, state = k.dedup([first], {}, NOW)
+    assert sent == [first]
+    second = k.evaluate(obs(18), NOW + 900)[0]
+    sent_again, unchanged = k.dedup([second], state, NOW + 900)
+    assert sent_again == [] and unchanged == state
+
+
 def test_state_roundtrip_and_corrupt_file(tmp_path):
     path = tmp_path / "keeper" / "last-page.json"
     k.save_state(path, {"x": {"fingerprint": "f", "at": 1.0}})

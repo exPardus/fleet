@@ -14,6 +14,13 @@ parent. A later required-child RED overrides an earlier parent GREEN.
 Dispatch precise, disjoint briefs; review results; land only verified work; run
 the required floor and regression gates; then close the wave. Preserve current
 home, claim, model, budget, and operator rulings in checkpoints and handoff.
+Wait for a lane with `fleet wait NAME --timeout SECONDS`; never hand-roll an
+`until fleet status | grep ...` loop. A `dead-suspected` result ends the wait
+promptly and needs inspection, not more polling.
+
+Run every nonce-minting verb directly, never through a pipe or output filter.
+Record every printed `NONCE` before the next command; the newest value is the
+continuity proof for the next mutating supervisor verb.
 
 For Codex collaboration, `send_message` only queues a message. It does not start
 an idle or completed agent and queued delivery is not evidence that a body is

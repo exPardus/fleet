@@ -8,6 +8,7 @@ import pytest
 
 import fleet
 import fleet_keeper
+import fleet_platform
 
 
 SID = "sid-current"
@@ -297,6 +298,47 @@ def test_unreadable_roster_is_page(home, capsys):
 def test_live_busy_body_is_page_not_dispatch(home, monkeypatch, capsys):
     run_guard(monkeypatch, snapshot(), [row(SID, status="busy")])
     assert capsys.readouterr().out == "PAGE roster says busy\n"
+
+
+def test_stale_busy_body_names_long_running_child_command(home, capsys):
+    calls = []
+
+    def process_tree(pid):
+        calls.append(pid)
+        return [
+            {"pid": 77, "ppid": pid, "age_seconds": 17 * 3600,
+             "command": "sh -c until fleet status | grep working; do sleep 30; done"},
+            {"pid": 78, "ppid": pid, "age_seconds": 20,
+             "command": "fleet status"},
+        ]
+
+    fleet.cmd_sup_guard(
+        SimpleNamespace(do=False, json=True),
+        snapshot_fn=snapshot,
+        roster_fn=roster(row(SID, status="busy", pid=42)),
+        process_tree_fn=process_tree,
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert calls == [42]
+    assert result["busy_children"] == [{
+        "pid": 77, "age_seconds": 17 * 3600,
+        "command": "sh -c until fleet status | grep working; do sleep 30; done",
+    }]
+    assert "pid 77 age 17h0m command sh -c until fleet status" in result["reason"]
+
+
+def test_posix_process_tree_collects_nested_descendants(monkeypatch):
+    output = """42 1 02:00:00 claude --bg
+77 42 17:00:00 sh -c until fleet status | grep working
+78 77 16:59:30 sleep 30
+99 1 20:00:00 unrelated
+"""
+    monkeypatch.setattr(
+        fleet_platform.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=output))
+    rows = fleet_platform._PosixPlatform().process_tree(42)
+    assert {row["pid"] for row in rows} == {77, 78}
+    assert next(row for row in rows if row["pid"] == 77)["age_seconds"] == 17 * 3600
 
 
 def test_pidless_listed_body_can_dispatch_when_stale(home, monkeypatch, capsys):

@@ -149,7 +149,14 @@ def rule_supervisor_stalled(obs, now):
     else:
         if obs.get("pending_decision"):
             return None  # rule_supervisor_frozen owns the tick
-        fingerprint = f"page:{identity}:{reason}"
+        children = guard.get("busy_children")
+        if reason.startswith("roster says busy") and isinstance(children, list):
+            child_identity = ",".join(
+                f"{row.get('pid')}:{row.get('command')}"
+                for row in children if isinstance(row, dict))
+            fingerprint = f"page:{identity}:roster-busy:{child_identity}"
+        else:
+            fingerprint = f"page:{identity}:{reason}"
         text = f"KEEPER: supervisor stalled ({reason}). Report state."
     return Page("supervisor-stalled", fingerprint, text)
 

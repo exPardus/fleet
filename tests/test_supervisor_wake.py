@@ -203,6 +203,30 @@ class TestIdleSupervisorWake:
         assert claim["incarnation_id"] == INC           # SAME generation, never a new one
         assert claim["session_id"] == NEW_SID            # restamped by sup-boot's own resume verdict
 
+    def test_lost_nonce_wake_requires_pending_successor_cleanup(
+            self, wake_home, monkeypatch):
+        _seed_supervisor_worker(wake_home, sid=OLD_SID, status="idle")
+        fleet.append_outcome(
+            NAME, {"ts": _iso(NOW), "session_id": OLD_SID, "kind": "result"})
+        _seed_claim(extra={"handoff_pending": [{
+            "successor_inc": "inc-pending", "successor_sid": "pending-sid",
+            "minted_at": _iso(NOW - timedelta(minutes=10)),
+        }]})
+        monkeypatch.setattr(fleet, "_fetch_agents_roster", _roster_sequence(
+            (True, []), (True, []),
+            (True, [_make_roster_entry(NEW_SID, status="idle", state="working")]),
+        ))
+
+        assert fleet.cmd_send(
+            _send_args(), run=_fake_dispatch_run(), which=lambda _: "claude",
+            sleep=lambda s: None) == 0
+        task = fleet.task_file_path(NAME).read_text(encoding="utf-8")
+        assert "sup-status --json" in task
+        assert "sup-handoff-abort --successor-inc <inc>" in task
+        assert f'--fleet-home "{wake_home.as_posix()}"' in task
+        assert "Run each nonce-minting\n   verb directly: never pipe or filter" in task
+        assert "record every newly printed NONCE" in task
+
     def test_ordinary_worker_still_forks(self, wake_home, monkeypatch):
         """Regression guard for Cut 1's scope: an ordinary (non-supervisor)
         idle worker keeps the ratified G2b fork-steer -- only supervisor-
