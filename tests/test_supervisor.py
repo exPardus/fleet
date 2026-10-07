@@ -3048,6 +3048,92 @@ class TestHandoff:
         assert flag["reason"] == "successor-scoped-abort"
         assert flag["claim_untouched"] is True
 
+    def test_begin_complete_timeout_does_not_stop_concurrently_committed_successor(
+            self, sup_home, monkeypatch):
+        """A second complete may win while the one-command form is polling.
+
+        The waiting invocation observes a changed claim after the other complete
+        has already transferred this successor.  That is a successful handoff,
+        not a limbo body to stop.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        completed = False
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
+
+        def concurrent_complete(seconds):
+            nonlocal completed
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            if not completed:
+                completed = True
+                successor_nonce = fleet.mint_nonce()
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(successor_nonce))
+                assert fleet.cmd_sup_handoff_complete(
+                    SimpleNamespace(
+                        sid="sid-old", nonce=live,
+                        expect_inc=entry["successor_inc"],
+                        expect_sid=entry["successor_sid"]),
+                    run=run, which=_fake_which) == 0
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=concurrent_complete,
+                complete_timeout=2, nonce=live)
+        assert completed is True
+        assert fleet.read_incarnation()["claimed_via"] == "handoff"
+        assert fleet.read_incarnation()["incarnation_id"].startswith("inc-")
+        assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+
+    def test_begin_timeout_rechecks_transfer_after_abort_precheck(
+            self, sup_home, monkeypatch):
+        """The successor may take the claim after the unlocked precheck.
+
+        Force the transfer after `abort_combined` reads the predecessor claim but
+        before the ordinary abort takes its lock. Its continuity refusal must not
+        send the transferred successor into the scoped stop fallback.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        original_abort = fleet.cmd_sup_handoff_abort
+        transferred = False
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
+
+        def transfer_then_abort(args, **kwargs):
+            nonlocal transferred
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            successor_nonce = fleet.mint_nonce()
+            fleet.write_handshake(
+                entry["successor_inc"], entry["successor_sid"],
+                handoff_token_hash=claim["handoff_token_hash"],
+                nonce_hash=fleet.nonce_digest(successor_nonce))
+            assert fleet.cmd_sup_handoff_complete(
+                SimpleNamespace(
+                    sid="sid-old", nonce=live,
+                    expect_inc=entry["successor_inc"],
+                    expect_sid=entry["successor_sid"]),
+                run=run, which=_fake_which) == 0
+            transferred = True
+            return original_abort(args, **kwargs)
+
+        monkeypatch.setattr(fleet, "cmd_sup_handoff_abort", transfer_then_abort)
+        with pytest.raises(fleet.FleetCliError, match="timed out after 0s"):
+            self._begin(run, complete_timeout=0, nonce=live)
+        assert transferred is True
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "handoff"
+        assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert not fleet.handoff_abort_flag_path().exists()
+        assert not fleet.nonce_rejection_log_path().exists()
+
     def test_begin_complete_timeout_aborts_on_pretransfer_oserror(
             self, sup_home, monkeypatch):
         live = self._hold_v2()

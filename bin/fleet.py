@@ -15193,9 +15193,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20624, :22734`).
+    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20624, :22757`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13424, :21473. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13424, :21496. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15914,7 +15914,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:8747, :9331, :13424,
-    # :21473) -- so union identity cannot make one body answer for another.
+    # :21496) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -21292,28 +21292,32 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 raise FleetCliError(
                     "automatic successor-scoped abort lacks the original "
                     "incarnation/token proof")
-            hs = read_handshake()
-            target_sid = successor_sid
-            if (isinstance(hs, dict)
-                    and hs.get("incarnation_id") == successor_inc
-                    and hs.get("handoff_token_hash") == expected_hash
-                    and isinstance(hs.get("session_id"), str)
-                    and hs.get("session_id")):
-                target_sid = hs["session_id"]
-            stopped = _stop_native_session(
-                target_sid, run=run, which=which, timeout=60)
             with fleet_lock():
-                current_hs = read_handshake()
-                if (isinstance(current_hs, dict)
-                        and current_hs.get("incarnation_id") == successor_inc
-                        and (current_hs.get("handoff_token_hash") == expected_hash
-                             or current_hs.get("session_id") == successor_sid)):
+                current = read_incarnation()
+                if _claim_is_transferred_successor(current, successor_inc):
+                    print(f"automatic abort skipped: successor {successor_inc} "
+                          "already holds the committed supervisor claim")
+                    return
+                hs = read_handshake()
+                target_sid = successor_sid
+                if (isinstance(hs, dict)
+                        and hs.get("incarnation_id") == successor_inc
+                        and hs.get("handoff_token_hash") == expected_hash
+                        and isinstance(hs.get("session_id"), str)
+                        and hs.get("session_id")):
+                    target_sid = hs["session_id"]
+                if (isinstance(hs, dict)
+                        and hs.get("incarnation_id") == successor_inc
+                        and (hs.get("handoff_token_hash") == expected_hash
+                             or hs.get("session_id") == successor_sid)):
                     try:
                         handshake_path().unlink()
                     except FileNotFoundError:
                         pass
                 unlink_handoff_task_file(
                     successor_inc, context=" (successor-scoped abort)")
+            stopped = _stop_native_session(
+                target_sid, run=run, which=which, timeout=60)
             _write_json_atomic(handoff_abort_flag_path(), {
                 "aborted_at": now_iso(), "reason": "successor-scoped-abort",
                 "successor_sid": target_sid, "successor_inc": successor_inc,
@@ -21339,7 +21343,9 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                       f"{abort_exc}")
             if claim_unchanged:
                 try:
-                    cmd_sup_handoff_abort(abort_args, which=which, run=run)
+                    cmd_sup_handoff_abort(
+                        abort_args, which=which, run=run,
+                        guard_successor_inc=successor_inc)
                     return
                 except Exception as abort_exc:
                     print(f"WARNING: ordinary automatic abort failed: {abort_exc}")
@@ -21579,7 +21585,16 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
     return 0
 
 
-def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
+def _claim_is_transferred_successor(claim, successor_inc):
+    return (isinstance(claim, dict)
+            and claim.get("claimed_via") == "handoff"
+            and claim.get("incarnation_id") == successor_inc
+            and isinstance(claim.get("session_id"), str)
+            and bool(claim.get("session_id")))
+
+
+def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run,
+                          guard_successor_inc=None) -> int:
     """Resolve and abort one recorded successor, or bulk-retire eligible entries.
     Cross-check HANDSHAKE and pending records through resolve_handoff_abort;
     never stop an arbitrary unverified sid. Use claude stop, not a raw kill,
@@ -21602,6 +21617,12 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
                             "or --retire-all "
                             "(see `fleet sup-status --json` for the pending successors)")
     with fleet_lock():
+        if (guard_successor_inc is not None
+                and _claim_is_transferred_successor(
+                    read_incarnation(), guard_successor_inc)):
+            print(f"automatic abort skipped: successor {guard_successor_inc} "
+                  "already holds the committed supervisor claim")
+            return 0
         # The old side RESUMES duty here (it rewrites its own heartbeat
         # below), so it mints and is delivered a fresh generation like any
         # other continuing verb.
