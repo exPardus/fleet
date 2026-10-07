@@ -332,6 +332,11 @@ def _hold(sid="sid-old", inc="inc-20260917T000000Z-w93t"):
     fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
                              "claimed_at": beat, "heartbeat_at": beat,
                              "claimed_via": "fresh"})
+    data = fleet.load_registry()
+    data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+        sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+        setting_sources=None, dispatch_kind="bg", category=None)
+    fleet.save_registry(data)
 
 
 class TestSupHandoffBeginOpenrouter:
@@ -458,6 +463,25 @@ class TestSupSpawnOpenrouter:
 
 
 class TestSupHandoffBeginRecordsSubstrate:
+    def test_inherited_openrouter_successor_row_records_the_substrate(
+            self, sup_home, openrouter_key):
+        _hold()
+        data = fleet.load_registry()
+        holder = data["workers"]["sup|inc-20260917T000000Z-w93t|boot"]
+        holder["model"] = "openrouter:stealth/union-alpha"
+        fleet.save_registry(data)
+        args = SimpleNamespace(sid="sid-old", model=None,
+                               permission_mode=None, nonce=None)
+        rc = fleet.cmd_sup_handoff_begin(
+            args, which=_fake_which,
+            run=_dispatch_then_roster(), sleep=lambda s: None)
+        assert rc == 0
+        workers = fleet.load_registry()["workers"]
+        succ = [rec for name, rec in workers.items() if name.endswith("|successor")]
+        assert len(succ) == 1, workers
+        assert succ[0]["model"] == "openrouter:stealth/union-alpha"
+        assert succ[0]["substrate"] == "openrouter/stealth/union-alpha"
+
     def test_successor_row_records_the_substrate(self, sup_home, openrouter_key):
         _hold()
         calls = []
@@ -488,7 +512,10 @@ class TestSupHandoffBeginRecordsSubstrate:
         assert succ[0]["substrate"] is None
 
 
-def _register_sup_body(sid, model, substrate, name="sup|inc-body|boot"):
+def _register_sup_body(sid, model, substrate, name=None):
+    if name is None:
+        claim = fleet.read_incarnation()
+        name = f"sup|{claim['incarnation_id']}|boot"
     rec = fleet.new_worker_record(sid, "C:/proj", "campaign", "accept",
                                   model=model, dispatch_kind="bg",
                                   category=None, substrate=substrate)

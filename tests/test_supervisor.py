@@ -2855,6 +2855,11 @@ class TestHandoff:
         fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
                                  "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
                                  "claimed_via": "fresh"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
 
     class _Clock:
         """Injectable monotonic clock; pairing sleep=advance exercises
@@ -3086,15 +3091,24 @@ class TestHandoff:
                          if n.endswith("|successor"))
         assert successor["model"] is None
 
-    def test_an_unresolvable_holder_record_does_not_break_the_handoff(self, sup_home):
-        """The carry is a best-effort READ of a dispatch flag, not a
-        precondition: a claim whose holder sid matches no record (the
-        stranded-stamp window) still hands off."""
+    def test_an_unresolvable_holder_record_refuses_the_handoff(self, sup_home):
+        """A claim without a validated predecessor row cannot invent settings."""
         self._hold()
+        fleet.save_registry({"workers": {}})
         run = self._dispatch_then_roster()
-        assert self._begin(run) == 0
-        dispatch = next(c for c in run.calls if "--bg" in c)
-        assert "--setting-sources" not in dispatch
+        with pytest.raises(fleet.FleetCliError, match="launch settings are unresolved"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+
+    def test_corrupt_predecessor_registry_refuses_before_dispatch(self, sup_home):
+        """Registry validation is a pre-dispatch gate and never quarantines evidence."""
+        self._hold()
+        fleet.registry_path().write_text("{not json", encoding="utf-8")
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="registry could not be validated"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert not list(fleet.registry_path().parent.glob("fleet.json.corrupt.*"))
 
     def test_successor_dispatch_refused_without_rendered_settings(self, sup_home):
         """Same doctrine as cmd_spawn's `_require_instance_settings`: claude
@@ -3181,6 +3195,16 @@ class TestHandoff:
         assert args.permission_mode == "accept"
         with pytest.raises(SystemExit):
             parser.parse_args(["sup-handoff-begin", "--permission-mode", "acceptEdits"])
+
+    def test_handoff_help_describes_inheritance_and_fail_closed(self, capsys):
+        parser = fleet.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["sup-handoff-begin", "--help"])
+        out = capsys.readouterr().out
+        assert "inherit the predecessor" in out
+        assert "refuses if unavailable" in out
+        assert "validated predecessor" in out
+        assert "default: bypass" not in out
 
     def test_missing_claude_refuses_before_journal_and_taskfile(self, sup_home):
         """B5: `resolve_claude_executable` is the same class of pre-flight as
@@ -3787,6 +3811,11 @@ class TestHandoffToken:
                                  "claimed_at": beat, "heartbeat_at": beat,
                                  "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
                                  "nonce_seq": 2, "lineage_id": "lin-20260101T000000Z-aaaa"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
         return value
 
     @staticmethod

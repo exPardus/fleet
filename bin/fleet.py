@@ -15193,9 +15193,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20626, :22660`).
+    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20630, :22706`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13424, :21400. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13424, :21441. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15914,7 +15914,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:8747, :9331, :13424,
-    # :21400) -- so union identity cannot make one body answer for another.
+    # :21441) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -20606,20 +20606,24 @@ Do exactly this, in order:
 
 
 def _claim_holder_dispatch_settings(claim):
-    """Read the claim holder's persisted dispatch settings, or an empty dict.
-    This best-effort read decides successor launch flags, not handoff
-    eligibility. Unreadable identity or registry uses the successor defaults.
-    Use read_registry_no_repair outside fleet_lock: load_registry could perform
-    an unlocked quarantine write."""
+    """Read the claim holder's persisted dispatch settings, or ``None``.
+    A missing holder row is unresolved, not permission to invent a launch
+    policy. Corrupt/unreadable registry state refuses the handoff without
+    quarantine; the caller can report the repair path. Use
+    ``read_registry_no_repair`` outside ``fleet_lock`` so this read never
+    mutates operator evidence."""
     if not isinstance(claim, dict):
-        return {}
+        return None
     holder_sid = claim.get("session_id")
     if not isinstance(holder_sid, str) or not holder_sid:
-        return {}
+        return None
     try:
         data = read_registry_no_repair(hint=False)
-    except RegistryCorruptError:
-        return {}
+    except RegistryCorruptError as exc:
+        raise FleetCliError(
+            "sup-handoff-begin: predecessor registry could not be validated; "
+            f"refusing handoff ({exc}). Run `fleet doctor` and repair the "
+            "registry before retrying") from exc
     for rec in data.get("workers", {}).values():
         if not isinstance(rec, dict):
             continue
@@ -20628,8 +20632,17 @@ def _claim_holder_dispatch_settings(claim):
                 "model": rec.get("model"),
                 "mode": rec.get("mode"),
                 "setting_sources": rec.get("setting_sources"),
+                "model_resolved": "model" in rec and (
+                    rec.get("model") is None
+                    or (isinstance(rec.get("model"), str)
+                        and bool(rec.get("model")))),
+                "mode_resolved": rec.get("mode") in MODE_FLAGS,
+                "setting_sources_resolved": "setting_sources" in rec and (
+                    rec.get("setting_sources") is None
+                    or (isinstance(rec.get("setting_sources"), str)
+                        and bool(rec.get("setting_sources")))),
             }
-    return {}
+    return None
 
 
 def _claim_holder_setting_sources(claim):
@@ -20637,7 +20650,7 @@ def _claim_holder_setting_sources(claim):
     Kept as a narrow compatibility helper for callers that only need this
     field; successor dispatch uses `_claim_holder_dispatch_settings` so model,
     mode and setting-source inheritance are resolved from one holder row."""
-    value = _claim_holder_dispatch_settings(claim).get("setting_sources")
+    value = (_claim_holder_dispatch_settings(claim) or {}).get("setting_sources")
     return value if isinstance(value, str) and value else None
 
 
@@ -21054,9 +21067,9 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     corresponding flag is omitted, and persist the effective values for the
     next handoff in the chain. No --add-dir is needed because the task file is
     inside cwd=FLEET_HOME.
-    Render explicit and default permissions through mode_flags. The default
-    is SUCCESSOR_DEFAULT_MODE: a headless supervisor must be able to run its
-    bootstrap Bash command without an interactive permission prompt."""
+    Render the inherited or explicit permission mode through mode_flags. A
+    missing predecessor setting refuses the handoff instead of silently
+    selecting the unrestricted bypass mode."""
     # Empty values from a quoted `--model ""` are equivalent to omission;
     # normalise before either handoff policy branch evaluates the model.
     args.model = _normalise_model(getattr(args, "model", None))
@@ -21070,23 +21083,41 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             "supervisor", getattr(args, "model", None) or persisted_model)
         return _cmd_codex_sup_handoff_begin(args)
     holder_settings = _claim_holder_dispatch_settings(read_incarnation())
-    inherited_model = _normalise_model(holder_settings.get("model"))
-    inherited_mode = holder_settings.get("mode")
-    if inherited_mode not in MODE_FLAGS:
-        inherited_mode = None
-    inherited_setting_sources = holder_settings.get("setting_sources")
-    if (not isinstance(inherited_setting_sources, str)
-            or not inherited_setting_sources):
-        inherited_setting_sources = None
-    effective_model = getattr(args, "model", None) or inherited_model
-    effective_mode = (getattr(args, "permission_mode", None)
-                      or inherited_mode or SUCCESSOR_DEFAULT_MODE)
+    explicit_model = getattr(args, "model", None)
+    explicit_mode = getattr(args, "permission_mode", None)
     explicit_setting_sources = getattr(args, "setting_sources", None)
-    if explicit_setting_sources is None:
-        effective_setting_sources = inherited_setting_sources
-    else:
-        effective_setting_sources = (explicit_setting_sources
-                                     if explicit_setting_sources else None)
+    inherited_model = (holder_settings.get("model")
+                       if holder_settings is not None
+                       and holder_settings.get("model_resolved") else None)
+    inherited_mode = (holder_settings.get("mode")
+                      if holder_settings is not None
+                      and holder_settings.get("mode_resolved") else None)
+    inherited_setting_sources = (
+        holder_settings.get("setting_sources")
+        if holder_settings is not None
+        and holder_settings.get("setting_sources_resolved") else None)
+    unresolved = []
+    if holder_settings is None or not holder_settings.get("model_resolved"):
+        if not explicit_model:
+            unresolved.append("model (pass --model)")
+    if holder_settings is None or not holder_settings.get("mode_resolved"):
+        if not explicit_mode:
+            unresolved.append("permission mode (pass --permission-mode)")
+    if (holder_settings is None
+            or not holder_settings.get("setting_sources_resolved")):
+        if explicit_setting_sources is None:
+            unresolved.append(
+                "setting sources (pass --setting-sources, use an empty value to disable)")
+    if unresolved:
+        raise FleetCliError(
+            "sup-handoff-begin: predecessor launch settings are unresolved; "
+            "refusing to choose a successor policy. Resolve or explicitly "
+            "override: " + "; ".join(unresolved))
+    effective_model = explicit_model or inherited_model
+    effective_mode = explicit_mode or inherited_mode or SUCCESSOR_DEFAULT_MODE
+    effective_setting_sources = (
+        inherited_setting_sources if explicit_setting_sources is None
+        else (explicit_setting_sources or None))
     _enforce_tier_policy("supervisor", effective_model)
     _require_instance_settings()
     try:
@@ -21099,6 +21130,16 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     except NativeDispatchError as exc:
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues") from exc
     with fleet_lock():
+        try:
+            # Revalidate immediately before writing the handoff task and later
+            # dispatch. This read is deliberately no-repair: corruption must
+            # refuse without quarantining evidence on an unlocked path.
+            read_registry_no_repair(hint=False)
+        except RegistryCorruptError as exc:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor registry became unreadable; "
+                f"refusing handoff ({exc}). Run fleet doctor and repair the "
+                "registry before retrying") from exc
         # Do not mint a pending generation before lock-free dispatch and handoff.
         # Deliver notices after commit: legacy upgrade may still create a generation
         # the predecessor must know to complete or abort.
@@ -21295,7 +21336,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
                 dispatch_kind="bg", category=None,
                 # Item 28: same substrate stamping as the gen-0 dispatch.
-                substrate=_openrouter_substrate(getattr(args, "model", None)))
+                substrate=_openrouter_substrate(effective_model))
             succ_rec["turns"] = 1
             succ_rec["last_dispatch_at"] = now_iso()
             data["workers"][name] = succ_rec
@@ -22364,14 +22405,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_supnotify.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
-    p_suphb.add_argument("--model", help="model for the successor session")
+    p_suphb.add_argument(
+        "--model",
+        help="model for the successor session (default: inherit the validated "
+             "predecessor; refuses if unavailable unless explicitly supplied)")
     p_suphb.add_argument("--permission-mode", dest="permission_mode",
                          choices=list(MODE_FLAGS),
                          help="fleet mode name for the successor session "
-                         f"(default: {SUCCESSOR_DEFAULT_MODE})")
+                         "(default: inherit the predecessor; refuses if "
+                         "unavailable)")
     p_suphb.add_argument("--setting-sources", dest="setting_sources",
                          help="Claude setting-source selection for the successor "
-                         "(default: inherit the predecessor)")
+                         "(default: inherit the validated predecessor; refuses "
+                         "if unavailable unless explicitly supplied)")
     p_suphb.add_argument("--sid", help="override caller session id")
     p_suphb.add_argument("--nonce", help=NONCE_ARG_HELP)
 

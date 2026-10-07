@@ -212,6 +212,11 @@ class _HandoffBase:
         fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
                                  "claimed_at": beat, "heartbeat_at": beat,
                                  "claimed_via": "fresh"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
 
     def _begin(self, capsys, run=None, sid="sid-old", nonce=None, clock=None):
         """Returns `(rc, generation)`. A legacy first-contact claim is upgraded
@@ -916,6 +921,12 @@ class TestAbortRecipeCarriesTheNonce:
         fleet.write_incarnation({"incarnation_id": "inc-20260724T000000Z-0old",
                                  "session_id": "sid-old", "claimed_at": beat,
                                  "heartbeat_at": beat, "claimed_via": "fresh"})
+        data = fleet.load_registry()
+        data["workers"]["sup|inc-20260724T000000Z-0old|boot"] = \
+            fleet.new_worker_record(
+                "sid-old", fleet.FLEET_HOME, "campaign", "bypass", model=None,
+                setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
         args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=None)
         assert fleet.cmd_sup_handoff_begin(args, which=_fake_which,
                                            run=_dispatch_then_roster(),

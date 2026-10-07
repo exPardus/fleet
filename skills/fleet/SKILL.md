@@ -179,7 +179,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-context [--sid SID] [--json]`: report this session's context occupancy against its tier band.
 - `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json] [--nonce VALUE]`: route an operator-only decision.
 - `fleet sup-notify TEXT [--tmux-session SESSION] [--window WINDOW] [--dry-run] [--nonce VALUE]`: notify the interface through its tmux window.
-- `fleet sup-handoff-begin [--model MODEL] [--permission-mode MODE] [--setting-sources LIST] [--nonce VALUE]`: dispatch the handoff successor; omitted launch settings inherit the predecessor.
+- `fleet sup-handoff-begin [--model MODEL] [--permission-mode MODE] [--setting-sources LIST] [--nonce VALUE]`: dispatch the handoff successor; omitted launch settings inherit the validated predecessor, and unresolved settings refuse the handoff.
 - `fleet sup-handoff-complete --expect-inc ID [--expect-sid SID] [--nonce VALUE]`: verify the successor handshake and transfer the claim.
 - `fleet sup-handoff-abort [--successor-sid SID|--successor-inc ID|--retire-all] [--force] [--nonce VALUE]`: stop or retire a pending successor and resume duty.
 
