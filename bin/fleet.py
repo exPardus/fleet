@@ -4145,7 +4145,7 @@ def recompute_worker_codex(name: str, record: dict,
             updated["adapter_state"] = "uncertain"
             return updated
         status, adapter_state = _codex_worker_status(observed)
-        if status == "dead-suspected" and completed_evidence:
+        if status == "dead-suspected" and completed_evidence and observed["turn_status"] == "completed":
             status, adapter_state = "idle", "idle"
         waits = _codex_wait_summaries(record)
         current_waits = [wait for wait in waits if not wait.get("stale")]

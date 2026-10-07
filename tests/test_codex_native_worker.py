@@ -856,7 +856,7 @@ def test_native_worker_host_down_is_dead_suspected_without_mcx(
 
 
 @pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
-def test_native_worker_completed_evidence_overrides_uncertain_provider_state(
+def test_native_worker_completed_evidence_and_live_turn_agree_on_completion(
         native_home, monkeypatch, provider_status, capsys):
     home, lane = native_home
     record = _install_record(lane)
@@ -888,6 +888,32 @@ def test_native_worker_completed_evidence_overrides_uncertain_provider_state(
     assert client.generation == record["codex_host_generation"]
     assert updated["status"] == "idle"
     assert updated["adapter_state"] == "idle"
+    assert updated["provider_status"] == provider_status
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+@pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
+@pytest.mark.parametrize("turn_status", ["inProgress", "failed", "interrupted"])
+def test_native_worker_completed_evidence_cannot_override_live_noncompletion(
+        native_home, monkeypatch, provider_status, turn_status):
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "turn_status": "completed",
+        }), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status=provider_status, turn_status=turn_status)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "dead-suspected"
+    assert updated["adapter_state"] == "uncertain"
     assert updated["provider_status"] == provider_status
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/read"]

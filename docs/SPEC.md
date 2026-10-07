@@ -298,8 +298,10 @@ verb by that durable discriminator; they never fall through to mcx. Ordinary
 `status`/`wait` validate the exact provider-minted thread and newest bound turn
 through the existing exact-home host and reconcile that observation with the
 bounded exact-turn public-evidence file. Durable `completed` evidence for the
-current bound turn yields `idle` even when the host later reports `notLoaded`
-or `systemError`; an unresolved mutation never lets an older completion vouch
+current bound turn yields `idle` after `notLoaded` or `systemError` only when
+the validated live read also reports that exact newest turn as `completed`.
+An in-progress, failed, interrupted, missing, or conflicting live turn remains
+non-idle; an unresolved mutation never lets older completion evidence vouch
 for unknown provider work, and a failed live read remains uncertain.
 Stale/file-only views remain probe-free. `peek` and `result` read only the
 bounded exact-turn public-evidence file; `result` requires complete durable
