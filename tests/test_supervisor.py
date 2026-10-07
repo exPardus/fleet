@@ -3059,6 +3059,27 @@ class TestHandoff:
         assert successor["mode"] == "plan"
         assert successor["setting_sources"] == "project,local"
 
+    def test_supervisor_launch_contract_has_no_effort(self, sup_home):
+        """Supervisor spawn/handoff carry model, mode and setting_sources only."""
+        parser = fleet.build_parser()
+        for argv in (["sup-spawn", "--task", "campaign", "--effort", "high"],
+                     ["sup-handoff-begin", "--effort", "high"]):
+            with pytest.raises(SystemExit):
+                parser.parse_args(argv)
+
+        self._hold()
+        self._seed_holder_record(model="claude-sonnet-5-5",
+                                 setting_sources="project,local")
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--effort" not in dispatch
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert {"model", "mode", "setting_sources"}.issubset(successor)
+        assert "effort" not in successor
+        assert "mcx_effort" not in successor
+
     def test_explicit_handoff_flags_override_holder_launch_contract(self, sup_home):
         self._hold()
         self._seed_holder_record(model="claude-sonnet-5-5",
