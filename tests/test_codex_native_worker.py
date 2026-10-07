@@ -94,6 +94,12 @@ class FakeClient:
             assert record["cwd"] == str(self.lane)
             result = {"turn": {"id": TURN_ID, "status": "inProgress",
                                "items": []}}
+        elif method == "thread/read":
+            result = {"thread": {
+                "id": THREAD_ID, "cwd": str(self.lane),
+                "status": {"type": "idle", "activeFlags": []},
+                "turns": [],
+            }}
         else:
             raise AssertionError(f"unexpected public method: {method}")
         digest = "a" * 64
@@ -351,6 +357,70 @@ def test_concurrent_preclaim_change_never_binds_or_starts_the_body(
     assert client.commits == []
 
 
+def test_kill_fences_a_delayed_initial_turn_start(native_home, monkeypatch):
+    home, lane = native_home
+    client = FakeClient(home, lane)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client", lambda _home: client, raising=False)
+    original_commit = fleet._commit_codex_journal
+    killed = {"done": False}
+
+    def kill_after_thread_bind(client_arg, name, journal_operation_id,
+                               record_operation_id):
+        original_commit(
+            client_arg, name, journal_operation_id, record_operation_id)
+        if killed["done"]:
+            return
+        killed["done"] = True
+        bound = dict(fleet.load_registry()["workers"][name])
+        assert bound["adapter_state"] == "bound"
+        assert fleet._cmd_kill_codex_native(
+            name, bound, connect=lambda _home: client) == 0
+
+    monkeypatch.setattr(fleet, "_commit_codex_journal", kill_after_thread_bind)
+
+    assert fleet.cmd_spawn(_args(lane)) == 1
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/start", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+
+
+def test_journal_failure_cannot_downgrade_a_concurrent_terminal_kill(
+        native_home, monkeypatch):
+    home, lane = native_home
+    client = FakeClient(home, lane)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client", lambda _home: client, raising=False)
+    commit_attempted = {"done": False}
+
+    def kill_then_fail_commit(operation_id):
+        assert not commit_attempted["done"]
+        commit_attempted["done"] = True
+        client.commits.append(operation_id)
+        bound = dict(fleet.load_registry()["workers"]["cx-native"])
+        assert bound["adapter_state"] == "bound"
+        assert fleet._cmd_kill_codex_native(
+            "cx-native", bound, connect=lambda _home: client) == 0
+        raise OSError("journal commit lost after terminal kill")
+
+    client.commit = kill_then_fail_commit
+
+    with pytest.raises(fleet.FleetCliError, match="journal commit failed"):
+        fleet.cmd_spawn(_args(lane))
+
+    assert commit_attempted["done"] is True
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/start", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+
+
 @pytest.mark.parametrize("commit_number,provider_calls", [(1, 1), (2, 2)])
 def test_journal_commit_failure_freezes_the_bound_row(
         native_home, monkeypatch, commit_number, provider_calls):
@@ -437,8 +507,10 @@ class WorkerVerbClient:
     def __init__(self, lane, *, provider_status="active",
                  turn_status="inProgress", active_flags=None,
                  error_code=None, evidence=None, fail_method=None,
-                 rate_result=None):
+                 rate_result=None, generation=None):
         self.lane = str(lane)
+        if generation is not None:
+            self.generation = generation
         self.provider_status = provider_status
         self.turn_status = turn_status
         self.active_flags = list(active_flags or [])
@@ -499,6 +571,13 @@ class WorkerVerbClient:
                 "approvalPolicy": "on-request", "approvalsReviewer": "user",
                 "sandbox": {"type": "workspaceWrite"},
             }
+        elif public == "thread/resume":
+            result = {
+                "thread": {"id": THREAD_ID, "cwd": self.lane},
+                "cwd": self.lane, "model": "gpt-5.6-luna",
+                "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                "sandbox": {"type": "workspaceWrite"},
+            }
         elif public == "account/rateLimits/read":
             result = self.rate_result
         else:
@@ -509,6 +588,37 @@ class WorkerVerbClient:
 
     def commit(self, operation_id):
         self.commits.append(operation_id)
+
+
+class BlockingResumeClient(WorkerVerbClient):
+    def __init__(self, lane, **kwargs):
+        super().__init__(lane, **kwargs)
+        self.resume_entered = threading.Event()
+        self.resume_release = threading.Event()
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") == "thread/resume":
+            self.resume_entered.set()
+            if not self.resume_release.wait(timeout=5):
+                raise AssertionError("test did not release thread/resume")
+        return super().call(operation, timeout)
+
+
+class TerminalDuringResumeClient(WorkerVerbClient):
+    def commit(self, operation_id):
+        super().commit(operation_id)
+        operation = next(
+            op for op in self.operations
+            if op["operation_id"] == operation_id)
+        if operation.get("payload", {}).get("method") != "thread/resume":
+            return
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            record = data["workers"]["cx-native"]
+            record["status"] = "dead"
+            record["adapter_state"] = "idle"
+            record["dead_reason"] = "concurrent terminal action"
+            fleet.save_registry(data)
 
 
 @pytest.mark.parametrize("provider_status,turn_status,error_code,expected", [
@@ -679,6 +789,126 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     record = fleet.load_registry()["workers"]["cx-native"]
     assert record["codex_turn_id"] == expected_turn
     assert record["status"] == "working"
+
+
+def test_native_worker_send_resumes_live_thread_after_host_generation_change(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    assert fleet._cmd_send_codex("cx-native", "continue after restart") == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "turn/steer"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == THREAD_ID
+    assert stored["codex_turn_id"] == TURN_ID
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert stored["status"] == "working"
+    assert stored["adapter_state"] == "active"
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_lost_restart_resume_freezes_without_replaying_turn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = WorkerVerbClient(
+        lane, generation="host-generation-2", fail_method="thread/resume")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="restart reconciliation"):
+        fleet._cmd_send_codex("cx-native", "must not be replayed")
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_host_generation"] == "host-generation-1"
+    assert stored["status"] == "dead-suspected"
+    assert stored["adapter_state"] == "uncertain"
+    assert stored["pending_operation"]["kind"] == "thread/resume"
+
+
+def test_native_worker_kill_refuses_while_restart_resume_is_pending(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = BlockingResumeClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    kill_connect_entered = threading.Event()
+    kill_connect_release = threading.Event()
+    send_outcome = {}
+    kill_outcome = {}
+
+    def send_after_restart():
+        try:
+            send_outcome["rc"] = fleet._cmd_send_codex(
+                "cx-native", "continue after restart")
+        except BaseException as exc:  # surfaced in the test thread below
+            send_outcome["error"] = exc
+
+    def connect_during_kill(_home):
+        kill_connect_entered.set()
+        if not kill_connect_release.wait(timeout=5):
+            raise AssertionError("test did not release kill host lookup")
+        return client
+
+    def kill_old_generation():
+        try:
+            kill_outcome["rc"] = fleet._cmd_kill_codex_native(
+                "cx-native", record, connect=connect_during_kill)
+        except BaseException as exc:  # surfaced in the test thread below
+            kill_outcome["error"] = exc
+
+    killer = threading.Thread(target=kill_old_generation)
+    killer.start()
+    assert kill_connect_entered.wait(timeout=5)
+    sender = threading.Thread(target=send_after_restart)
+    sender.start()
+    try:
+        assert client.resume_entered.wait(timeout=5)
+        kill_connect_release.set()
+        killer.join(timeout=5)
+    finally:
+        kill_connect_release.set()
+        client.resume_release.set()
+        killer.join(timeout=5)
+        sender.join(timeout=5)
+
+    assert not killer.is_alive()
+    assert not sender.is_alive()
+    assert isinstance(kill_outcome.get("error"), fleet.FleetCliError)
+    assert "thread/resume" in str(kill_outcome["error"])
+    assert "refusing kill" in str(kill_outcome["error"])
+    assert send_outcome == {"rc": 0}
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "working"
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_resume_adoption_preserves_concurrent_terminal_state(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = TerminalDuringResumeClient(
+        lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="changed during host restart"):
+        fleet._cmd_send_codex("cx-native", "must not continue after kill")
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert stored["codex_host_generation"] == "host-generation-1"
+    assert stored["pending_operation"]["kind"] == "thread/resume"
 
 
 @pytest.mark.parametrize("verb", ["send", "interrupt"])
@@ -895,3 +1125,77 @@ def test_native_worker_respawn_uses_fresh_thread_after_old_terminal_proof(
     prompt = fleet.task_file_path("cx-native").read_text(encoding="utf-8")
     assert "preserve the full worker brief" in prompt
     assert "checkpoint from the previous thread" in prompt
+
+
+def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "preserve the restart-safe brief")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed",
+        generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    args = SimpleNamespace(
+        name="cx-native", task=None, force=False, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+    assert fleet._cmd_respawn_codex(args, record) == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "thread/start", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == NEXT_THREAD_ID
+    assert stored["codex_turn_id"] == NEXT_TURN_ID
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert stored["retired_codex_threads"] == [{
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "terminal_status": "completed",
+    }]
+    assert "preserve the restart-safe brief" in \
+        fleet.task_file_path("cx-native").read_text(encoding="utf-8")
+
+
+def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
+        native_home, monkeypatch):
+    home, lane = native_home
+    record = _install_record(lane, status="idle", adapter_state="idle")
+    fleet.write_brief("cx-native", "preserve the terminal worker brief")
+    mailbox = home / "mailbox" / f"{THREAD_ID}.md"
+    mailbox.write_text("preserve this queued direction", encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    original_reserve = fleet._reserve_codex_worker_operation
+    killed = {"done": False}
+
+    def kill_before_respawn_reservation(binding, operation_id, kind, **kwargs):
+        if kind == "respawn/thread-start" and not killed["done"]:
+            killed["done"] = True
+            current = dict(fleet.load_registry()["workers"][binding.name])
+            assert fleet._cmd_kill_codex_native(
+                binding.name, current, connect=lambda _home: client) == 0
+        return original_reserve(binding, operation_id, kind, **kwargs)
+
+    monkeypatch.setattr(
+        fleet, "_reserve_codex_worker_operation",
+        kill_before_respawn_reservation)
+    args = SimpleNamespace(
+        name="cx-native", task=None, force=False, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+    with pytest.raises(fleet.FleetCliError, match="changed concurrently"):
+        fleet._cmd_respawn_codex(args, record)
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+    assert mailbox.read_text(encoding="utf-8") == \
+        "preserve this queued direction"
+    assert list(mailbox.parent.glob(f"{THREAD_ID}.md.claimed.*")) == []
