@@ -163,7 +163,11 @@ def test_connect_existing_never_ensures_or_launches_a_host(tmp_path, monkeypatch
     sentinel = object()
     monkeypatch.setattr(
         module.CodexHostClient, "_existing",
-        classmethod(lambda cls, exact_home, schema_manifest: sentinel))
+        classmethod(lambda cls, exact_home: sentinel))
+    monkeypatch.setattr(
+        module, "_reviewed_schema_manifest",
+        lambda *args, **kwargs: pytest.fail(
+            "attaching to a reviewed live host must not inspect installed Codex"))
     monkeypatch.setattr(
         module.CodexHostClient, "ensure",
         classmethod(lambda cls, *args, **kwargs: pytest.fail(
@@ -716,6 +720,7 @@ def test_host_state_is_owner_only_and_pid_does_not_decide_identity(tmp_path):
     ("transport", "AF_PIPE"),
     ("ipc_protocol_version", 999),
     ("codex_protocol_version", 999),
+    ("codex_version", "9.9.9"),
     ("schema_digest", "0" * 64),
     ("process_identity", None),
     ("app_server_process_identity", None),
@@ -735,6 +740,53 @@ def test_existing_host_metadata_must_match_the_exact_reviewed_contract(
         client.metadata_path.write_bytes(original)
         client.metadata_path.chmod(0o600)
         _shutdown(client)
+
+
+def test_live_old_host_remains_reachable_after_installed_version_change(
+        tmp_path, monkeypatch):
+    module = _modules()
+    home = _home(tmp_path)
+    schemas = {
+        version: (json.dumps({"reviewed": version}, sort_keys=True) + "\n").encode()
+        for version in ("0.155.1", "0.160.0")
+    }
+    manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
+    for version, schema_bytes in schemas.items():
+        value = json.loads(manifests[version].read_text(encoding="utf-8"))
+        value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
+        manifest = tmp_path / f"manifest-{version}.json"
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+        manifests[version] = manifest
+    monkeypatch.setattr(module, "REVIEWED_SCHEMA_MANIFESTS", manifests)
+    log = tmp_path / "app-server.jsonl"
+    old_client = module.CodexHostClient.ensure(
+        home,
+        app_server_command=[str(_fake_app_server(tmp_path, "0.155.1"))],
+        schema_command=[str(_fake_schema_command(
+            tmp_path, "0.155.1", schemas["0.155.1"]))],
+        env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+        ready_timeout=5,
+        idle_timeout=0,
+    )
+    try:
+        new_client = module.CodexHostClient.ensure(
+            home,
+            app_server_command=[str(tmp_path / "must-not-start")],
+            schema_command=[str(_fake_schema_command(
+                tmp_path, "0.160.0", schemas["0.160.0"]))],
+            env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+            ready_timeout=2,
+            idle_timeout=0,
+        )
+
+        metadata = json.loads(new_client.metadata_path.read_text(encoding="utf-8"))
+        assert new_client.generation == old_client.generation
+        assert metadata["codex_version"] == "0.155.1"
+        assert [json.loads(line) for line in log.read_text().splitlines()] == [
+            {"event": "started", "inherited_claude_sid": False},
+        ]
+    finally:
+        _shutdown(old_client)
 
 
 def test_silent_and_disconnected_clients_cannot_wedge_or_crash_host(tmp_path):
@@ -870,6 +922,43 @@ def test_darwin_process_identity_falls_back_to_ps_lstart(monkeypatch):
     assert observed["argv"] == ["ps", "-o", "lstart=", "-p", "4321"]
     assert observed["env"]["LC_ALL"] == "C"
     assert observed["env"]["LC_TIME"] == "C"
+
+
+def test_darwin_identity_source_change_does_not_make_live_lock_stealable(
+        tmp_path, monkeypatch):
+    module = _modules()
+    path = tmp_path / "host.lock"
+    path.write_text(json.dumps({
+        "pid": 4321,
+        "identity": "darwin:1800000001.002345",
+        "nonce": "live",
+    }), encoding="ascii")
+    monkeypatch.setattr(
+        module, "_process_identity",
+        lambda pid: "darwin-ps:2027-01-15T08:00:01")
+    kill_calls = []
+    monkeypatch.setattr(
+        module.os, "kill", lambda pid, signal: kill_calls.append((pid, signal)))
+
+    assert module._lock_holder_is_live(path) is True
+    assert kill_calls == [(4321, 0)]
+
+
+def test_darwin_identity_source_change_does_not_replace_live_host(monkeypatch):
+    module = _modules()
+    owner = SimpleNamespace(
+        _pid=4321,
+        _process_identity="darwin-ps:2027-01-15T08:00:01",
+    )
+    monkeypatch.setattr(
+        module, "_process_identity",
+        lambda pid: "darwin:1800000001.002345")
+    kill_calls = []
+    monkeypatch.setattr(
+        module.os, "kill", lambda pid, signal: kill_calls.append((pid, signal)))
+
+    assert module.CodexHostClient._owner_live(owner) is True
+    assert kill_calls == [(4321, 0)]
 
 
 @pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])

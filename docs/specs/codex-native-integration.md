@@ -89,11 +89,14 @@ That compatibility adapter cannot provide the target lifecycle:
 
 ### 3.2 Reviewed Codex v2 schemas
 
-The adapter selects an explicit reviewed manifest from exact `codex --version`
-output. Versions 0.155.1 and 0.160.0 are reviewed; any other version refuses
-before host startup, and an installed schema whose digest differs from its
-selected manifest never publishes ready. The adapter begins with `initialize`
-and `initialized`. Both reviewed generated schemas expose:
+For a new host, the adapter selects an explicit reviewed manifest from exact
+`codex --version` output. Versions 0.155.1 and 0.160.0 are reviewed; any other
+version refuses before host startup, and an installed schema whose digest
+differs from its selected manifest never publishes ready. An already-live host
+is instead authenticated against the reviewed version and digest recorded in
+its metadata, so upgrading the installed CLI does not strand native work owned
+by the prior reviewed host. The adapter begins with `initialize` and
+`initialized`. Both reviewed generated schemas expose:
 
 | Concern | Exact public surface |
 | --- | --- |
@@ -289,6 +292,9 @@ cannot validate stale metadata. Linux retains `/proc/<pid>/stat` field 22.
 Darwin reads `KERN_PROC_PID` through libc `sysctl` and uses
 `kinfo_proc.kp_proc.p_starttime` seconds plus microseconds; if that read is
 unavailable it falls back to `ps -o lstart= -p <pid>` under the C locale.
+Because those sources have incompatible precision and representation, a
+source change is treated as unknown and falls back to a conservative PID
+existence check; it never proves the owner dead or permits lock/host theft.
 Windows retains its existing unsupported identity result. A missing identity
 still prevents ready metadata from being accepted.
 

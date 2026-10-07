@@ -596,6 +596,31 @@ def _darwin_process_identity(pid: int) -> str | None:
             or _darwin_ps_process_identity(pid))
 
 
+def _process_identities_match(expected: str, observed: str) -> bool | None:
+    """Compare process identities, returning ``None`` when sources differ.
+
+    Darwin's sysctl identity has microsecond precision while the ps fallback
+    exposes a local wall-clock value with second precision.  Neither can be
+    losslessly converted to the other, so a source transition is unknown
+    rather than evidence that a live PID was reused.
+    """
+    sources = {
+        "darwin:": "sysctl",
+        "darwin-ps:": "ps",
+    }
+
+    def source(value: str) -> str | None:
+        return next((name for prefix, name in sources.items()
+                     if value.startswith(prefix)), None)
+
+    expected_source = source(expected)
+    observed_source = source(observed)
+    if (expected_source is not None and observed_source is not None
+            and expected_source != observed_source):
+        return None
+    return hmac.compare_digest(expected, observed)
+
+
 def _process_identity(pid: int) -> str | None:
     """Return a PID-reuse-resistant identity from the current OS."""
     if _platform().is_windows:
@@ -620,7 +645,11 @@ def _lock_holder_is_live(path: Path) -> bool:
         return True
     current = _process_identity(pid)
     if current is not None:
-        return isinstance(identity, str) and hmac.compare_digest(current, identity)
+        if not isinstance(identity, str):
+            return False
+        matches = _process_identities_match(identity, current)
+        if matches is not None:
+            return matches
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1601,9 +1630,7 @@ class CodexHostClient:
         home = _canonical_home(home)
         state_dir = home / "state" / "codex"
         _validate_fixed_paths(state_dir)
-        schema_manifest = _reviewed_schema_manifest(
-            ["codex"], env=os.environ, cwd=home)
-        existing = cls._existing(home, schema_manifest)
+        existing = cls._existing(home)
         if existing is None:
             raise HostUnavailable("no ready Codex host exists for this Fleet home")
         return existing
@@ -1622,27 +1649,28 @@ class CodexHostClient:
         home = _canonical_home(home)
         state_dir = home / "state" / "codex"
         _validate_fixed_paths(state_dir)
-        child_env = dict(os.environ if env is None else env)
-        child_env.pop("CLAUDE_CODE_SESSION_ID", None)
-        schema_command_argv = list(
-            ["codex"] if schema_command is None else schema_command)
-        schema_manifest = _reviewed_schema_manifest(
-            schema_command_argv, env=child_env, cwd=home)
-        existing = cls._existing(home, schema_manifest)
+        existing = cls._existing(home)
         if existing is not None and existing._ping(0.5):
             return existing
         if (existing is not None
                 and (not existing._metadata_stale() or existing._owner_live())):
             raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
 
+        child_env = dict(os.environ if env is None else env)
+        child_env.pop("CLAUDE_CODE_SESSION_ID", None)
+        schema_command_argv = list(
+            ["codex"] if schema_command is None else schema_command)
+
         with _host_lock(state_dir / "codex-host.lock", ready_timeout):
             _validate_fixed_paths(state_dir)
-            existing = cls._existing(home, schema_manifest)
+            existing = cls._existing(home)
             if existing is not None and existing._ping(0.5):
                 return existing
             if (existing is not None
                     and (not existing._metadata_stale() or existing._owner_live())):
                 raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
+            schema_manifest = _reviewed_schema_manifest(
+                schema_command_argv, env=child_env, cwd=home)
             key_path = state_dir / "host.key"
             if key_path.exists():
                 _read_key(key_path)
@@ -1690,7 +1718,7 @@ class CodexHostClient:
                 if process.poll() is not None:
                     raise HostUnavailable(
                         f"Codex host exited before ready ({process.returncode})")
-                candidate = cls._existing(home, schema_manifest)
+                candidate = cls._existing(home)
                 if (candidate is not None and candidate.generation == generation
                         and candidate._ping(0.25)):
                     candidate._launched_process = process
@@ -1699,9 +1727,7 @@ class CodexHostClient:
             raise HostUnavailable("timed out waiting for Codex host readiness")
 
     @classmethod
-    def _existing(
-        cls, home: Path, schema_manifest: Path,
-    ) -> "CodexHostClient | None":
+    def _existing(cls, home: Path) -> "CodexHostClient | None":
         state_dir = home / "state" / "codex"
         metadata = _read_json(state_dir / "host.json")
         key_path = state_dir / "host.key"
@@ -1709,7 +1735,6 @@ class CodexHostClient:
             if key_path.exists() or key_path.is_symlink():
                 _read_key(key_path)
             return None
-        manifest = json.loads(schema_manifest.read_text(encoding="utf-8"))
         endpoint, transport = _endpoint_for(home, state_dir)
         required = {
             "schema", "home", "generation", "endpoint", "transport", "ready",
@@ -1721,6 +1746,17 @@ class CodexHostClient:
         }
         if not required.issubset(metadata) or metadata.get("home") != str(home):
             raise UnsafeHostState("Codex host metadata has wrong home or missing fields")
+        version = metadata.get("codex_version")
+        schema_manifest = (REVIEWED_SCHEMA_MANIFESTS.get(version)
+                           if isinstance(version, str) else None)
+        if schema_manifest is None:
+            raise UnsafeHostState(
+                "Codex host metadata names an unreviewed Codex version")
+        try:
+            manifest = json.loads(schema_manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise UnsafeHostState(
+                "reviewed Codex schema manifest is unreadable") from exc
         try:
             generation = uuid.UUID(metadata["generation"])
         except (ValueError, TypeError, AttributeError) as exc:
@@ -1767,7 +1803,9 @@ class CodexHostClient:
     def _owner_live(self) -> bool:
         current = _process_identity(self._pid)
         if current is not None:
-            return hmac.compare_digest(current, self._process_identity)
+            matches = _process_identities_match(self._process_identity, current)
+            if matches is not None:
+                return matches
         try:
             os.kill(self._pid, 0)
         except ProcessLookupError:
