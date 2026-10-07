@@ -1517,24 +1517,37 @@ class OperationJournal:
                 or not isinstance(result, Mapping)):
             raise HostRejected(
                 f"operation {operation_id} is not an uncertain thread intent")
+
+        def reject_settlement(detail: str) -> None:
+            reason = self.settle_failed(
+                operation_id, detail,
+                from_public_read=True).get("reason", str(detail))
+            raise HostRejected(reason)
+
         projection = _thread_result_projection(result)
         thread = projection.get("thread")
         prior_thread = prior.get("thread") if isinstance(prior, Mapping) else None
         if not isinstance(thread, Mapping):
-            raise HostRejected(
-                f"operation {operation_id} public thread evidence is malformed")
+            reject_settlement("public thread evidence is malformed")
         expected_thread_id = recovery.get("thread_id")
         if not isinstance(expected_thread_id, str) and isinstance(prior_thread, Mapping):
             expected_thread_id = prior_thread.get("id")
         expected_cwd = recovery.get("canonical_cwd")
         if not isinstance(expected_cwd, str) and isinstance(prior_thread, Mapping):
             expected_cwd = prior_thread.get("cwd")
-        if (not isinstance(expected_thread_id, str)
-                or thread.get("id") != expected_thread_id
+        if isinstance(expected_thread_id, str):
+            identity_matches = thread.get("id") == expected_thread_id
+        else:
+            thread_source = recovery.get("thread_source")
+            identity_matches = (
+                public_method == "thread/start"
+                and isinstance(thread.get("id"), str)
+                and isinstance(thread_source, str)
+                and thread.get("threadSource") == thread_source)
+        if (not identity_matches
                 or not isinstance(expected_cwd, str)
                 or thread.get("cwd") != expected_cwd):
-            raise HostRejected(
-                f"operation {operation_id} public thread identity does not match")
+            reject_settlement("public thread identity does not match")
         actual_count = projection.get("turnCount")
         prior_count = prior.get("turnCount") if isinstance(prior, Mapping) else None
         expected_count = prior_count
@@ -1547,8 +1560,7 @@ class OperationJournal:
                 or isinstance(expected_count, bool)
                 or expected_count < 0
                 or actual_count != expected_count):
-            raise HostRejected(
-                f"operation {operation_id} public thread history does not match")
+            reject_settlement("public thread history does not match")
         prior_newest = prior.get("newestTurn") if isinstance(prior, Mapping) else None
         actual_newest = projection.get("newestTurn")
         expected_newest_id = prior_newest.get("id") \
@@ -1560,8 +1572,7 @@ class OperationJournal:
                     and (not isinstance(expected_newest_id, str)
                          or not isinstance(actual_newest, Mapping)
                          or actual_newest.get("id") != expected_newest_id))):
-            raise HostRejected(
-                f"operation {operation_id} newest public turn does not match")
+            reject_settlement("newest public turn does not match")
 
         if isinstance(prior, Mapping):
             for key in ("cwd", "model", "approvalPolicy", "approvalsReviewer",
@@ -1574,6 +1585,67 @@ class OperationJournal:
                     if key not in merged_thread and key in prior_thread:
                         merged_thread[key] = prior_thread[key]
                 projection["thread"] = merged_thread
+                thread = merged_thread
+
+        expected_effective = recovery.get("expected_effective")
+        if "cwd" not in projection:
+            projection["cwd"] = expected_cwd
+        if "model" not in projection:
+            expected_model = expected_effective.get("model") \
+                if isinstance(expected_effective, Mapping) else None
+            candidate_model = (expected_model if isinstance(expected_model, str)
+                               else thread.get("model"))
+            if isinstance(candidate_model, str):
+                projection["model"] = candidate_model
+        if "approvalPolicy" not in projection and isinstance(
+                expected_effective, Mapping):
+            policies = expected_effective.get("approval_policies")
+            if isinstance(policies, list) and len(policies) == 1 \
+                    and isinstance(policies[0], str):
+                projection["approvalPolicy"] = policies[0]
+        if "approvalsReviewer" not in projection and isinstance(
+                expected_effective, Mapping):
+            reviewer = expected_effective.get("approvals_reviewer")
+            if isinstance(reviewer, str):
+                projection["approvalsReviewer"] = reviewer
+        if "sandbox" not in projection and isinstance(
+                expected_effective, Mapping):
+            sandbox_types = expected_effective.get("sandbox_types")
+            if isinstance(sandbox_types, list) and len(sandbox_types) == 1 \
+                    and isinstance(sandbox_types[0], str):
+                projection["sandbox"] = {"type": sandbox_types[0]}
+
+        model = projection.get("model")
+        approval = projection.get("approvalPolicy")
+        reviewer = projection.get("approvalsReviewer")
+        sandbox = projection.get("sandbox")
+        sandbox_type = sandbox.get("type") if isinstance(sandbox, Mapping) else None
+        if projection.get("cwd") != expected_cwd:
+            reject_settlement("effective cwd is unknown or mismatched")
+        if isinstance(expected_effective, Mapping):
+            expected_model = expected_effective.get("model")
+            policies = expected_effective.get("approval_policies")
+            expected_reviewer = expected_effective.get("approvals_reviewer")
+            sandbox_types = expected_effective.get("sandbox_types")
+            if (not isinstance(expected_model, str)
+                    or not isinstance(policies, list) or not policies
+                    or any(not isinstance(value, str) for value in policies)
+                    or not isinstance(expected_reviewer, str)
+                    or not isinstance(sandbox_types, list) or not sandbox_types
+                    or any(not isinstance(value, str)
+                           for value in sandbox_types)):
+                reject_settlement("recorded effective intent is malformed")
+            if (model != expected_model
+                    or approval not in policies
+                    or reviewer != expected_reviewer
+                    or sandbox_type not in sandbox_types):
+                reject_settlement("effective settings are unknown or mismatched")
+        elif (not isinstance(model, str)
+                or approval not in {"never", "on-request", "untrusted"}
+                or reviewer != "user"
+                or sandbox_type not in {
+                    "dangerFullAccess", "workspaceWrite", "readOnly"}):
+            reject_settlement("effective settings are unknown")
         projection["adoptedFromPublicRead"] = True
         return self._transition(
             operation_id, {"uncertain"}, "observed", result=projection)
@@ -1582,6 +1654,13 @@ class OperationJournal:
         return self._transition(
             operation_id, {"accepted", "prepared"}, "uncertain",
             reason=str(reason)[:500])
+
+    def settle_failed(self, operation_id: str, reason: str, *,
+                      from_public_read: bool = False) -> dict[str, Any]:
+        return self._transition(
+            operation_id, {"uncertain"}, "failed",
+            reason=f"public thread settlement failed: {reason}"[:500],
+            settled_from_public_read=from_public_read)
 
     def fail(self, operation_id: str, reason: str) -> dict[str, Any]:
         return self._transition(

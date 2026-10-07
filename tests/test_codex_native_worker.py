@@ -1314,6 +1314,12 @@ def test_native_worker_send_resumes_live_thread_after_host_generation_change(
 
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/resume", "thread/read", "turn/steer"]
+    assert client.operations[0]["recovery"]["expected_effective"] == {
+        "model": "gpt-5.6-luna",
+        "approval_policies": ["on-request"],
+        "approvals_reviewer": "user",
+        "sandbox_types": ["workspaceWrite"],
+    }
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["codex_thread_id"] == THREAD_ID
     assert stored["codex_turn_id"] == TURN_ID

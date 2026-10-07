@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 import stat
 
 import pytest
@@ -24,8 +25,32 @@ def _host_module():
     return fleet_codex_host
 
 
-def _mutation(operation_id="turn-op", public_method="turn/start", value=1):
+def test_codex_integration_spec_pins_general_operation_journal_contract():
+    text = (Path(__file__).parents[1] / "docs" / "specs"
+            / "codex-native-integration.md").read_text(encoding="utf-8")
+    heading = "### 7.3 Operation-journal result and settlement contract"
+    assert heading in text
+    section = " ".join(
+        text.split(heading, 1)[1].split("\n## ", 1)[0].split())
+    for phrase in (
+            "`thread/start`", "`thread/resume`", "bounded projection",
+            "message bodies", "moves to `uncertain`", "public `thread/read`",
+            "immutable request intent", "terminally as `failed`",
+            "terminal as `committed`", "predecessor fence"):
+        assert phrase in section
+
+
+def _expected_effective():
     return {
+        "model": "gpt-5.6-luna",
+        "approval_policies": ["on-request"],
+        "approvals_reviewer": "user",
+        "sandbox_types": ["workspaceWrite"],
+    }
+
+
+def _mutation(operation_id="turn-op", public_method="turn/start", value=1):
+    operation = {
         "operation_id": operation_id,
         "method": "rpc",
         "payload": {
@@ -40,6 +65,9 @@ def _mutation(operation_id="turn-op", public_method="turn/start", value=1):
             "history_watermark": 2,
         },
     }
+    if public_method in {"thread/start", "thread/resume"}:
+        operation["recovery"]["expected_effective"] = _expected_effective()
+    return operation
 
 
 def _operation_file(client, operation_id):
@@ -331,6 +359,15 @@ def _resume_result(*, item_text="small result"):
     }
 
 
+def _thread_read_result(*, item_text="small result", turns=2):
+    """Match ThreadReadResponse: effective settings are not top-level fields."""
+    result = _resume_result(item_text=item_text)
+    thread = dict(result["thread"])
+    thread.pop("model", None)
+    thread["turns"] = thread["turns"][:turns]
+    return {"thread": thread}
+
+
 def _queue_recovery_resume(home, journal, parent_operation_id):
     operation_id = "queue-recovery-" + hashlib.sha256(
         parent_operation_id.encode("utf-8")).hexdigest()
@@ -346,6 +383,7 @@ def _queue_recovery_resume(home, journal, parent_operation_id):
             "thread_id": "thread-1",
             "canonical_cwd": str(home),
             "history_watermark": 0,
+            "expected_effective": _expected_effective(),
         },
     }
     journal.prepare(operation)
@@ -353,7 +391,9 @@ def _queue_recovery_resume(home, journal, parent_operation_id):
     result = _resume_result()
     result["thread"]["cwd"] = result["cwd"] = str(home)
     result["thread"]["turns"] = []
-    return operation_id, result
+    public_read = _thread_read_result(turns=0)
+    public_read["thread"]["cwd"] = str(home)
+    return operation_id, result, public_read
 
 
 @pytest.mark.parametrize("state", ["observed", "uncertain"])
@@ -365,7 +405,7 @@ def test_queue_recovery_resume_finalizes_without_replaying_mutation(
     (home / "state").mkdir(parents=True)
     journal = module.OperationJournal(home, "generation-1")
     parent_operation_id = f"parent-{state}"
-    operation_id, result = _queue_recovery_resume(
+    operation_id, result, public_read = _queue_recovery_resume(
         home, journal, parent_operation_id)
     if state == "observed":
         journal.observe(operation_id, result)
@@ -379,13 +419,14 @@ def test_queue_recovery_resume_finalizes_without_replaying_mutation(
         assert state == "uncertain"
         assert method == "thread/read"
         assert params == {"threadId": "thread-1", "includeTurns": True}
-        return result
+        return public_read
 
     host = object.__new__(host_module.Host)
     host.journal = journal
     host._recovery_request = recovery_request
     resumed = host._resume_recovery_thread(
-        parent_operation_id, "thread-1", str(home), 1.0)
+        parent_operation_id, "thread-1", str(home), 1.0,
+        expected_effective=_expected_effective())
 
     assert resumed["thread"]["id"] == "thread-1"
     assert journal.load(operation_id)["state"] == "committed"
@@ -406,11 +447,13 @@ def test_queue_recovery_resume_settles_observe_persistence_failure(
     result = _resume_result()
     result["thread"]["cwd"] = result["cwd"] = str(home)
     result["thread"]["turns"] = []
+    public_read = _thread_read_result(turns=0)
+    public_read["thread"]["cwd"] = str(home)
     requests = []
 
     def recovery_request(method, params, _deadline):
         requests.append((method, params))
-        return result
+        return result if method == "thread/resume" else public_read
 
     real_atomic_json = module._atomic_json
     failed = False
@@ -429,7 +472,8 @@ def test_queue_recovery_resume_settles_observe_persistence_failure(
     host._recovery_request = recovery_request
 
     resumed = host._resume_recovery_thread(
-        parent_operation_id, "thread-1", str(home), 1.0)
+        parent_operation_id, "thread-1", str(home), 1.0,
+        expected_effective=_expected_effective())
 
     assert resumed["thread"]["id"] == "thread-1"
     assert journal.load(operation_id)["state"] == "committed"
@@ -493,10 +537,16 @@ def test_uncertain_resume_settles_from_exact_public_thread_and_unblocks_mutation
     journal.uncertain(operation["operation_id"], "provider response lost")
 
     adopted = journal.adopt_thread_read(
-        operation["operation_id"], _resume_result(item_text="public read body"))
+        operation["operation_id"],
+        _thread_read_result(item_text="public read body"))
     assert adopted["state"] == "observed"
     assert adopted["result"]["newestTurn"] == {
         "id": "turn-1", "status": "completed"}
+    assert adopted["result"]["cwd"] == "/project"
+    assert adopted["result"]["model"] == "gpt-5.6-luna"
+    assert adopted["result"]["approvalPolicy"] == "on-request"
+    assert adopted["result"]["approvalsReviewer"] == "user"
+    assert adopted["result"]["sandbox"] == {"type": "workspaceWrite"}
     journal.commit(operation["operation_id"])
 
     next_operation = _mutation("next-operation", "turn/start")
@@ -505,13 +555,61 @@ def test_uncertain_resume_settles_from_exact_public_thread_and_unblocks_mutation
     assert journal.accept("next-operation")["state"] == "accepted"
 
 
+def test_resultless_uncertain_thread_start_settles_from_public_read_and_intent(
+        tmp_path):
+    module = _module()
+    host_module = _host_module()
+    home = (tmp_path / "thread-start-settlement").resolve()
+    (home / "state").mkdir(parents=True)
+    journal = module.OperationJournal(home, "generation-1")
+    operation = {
+        "operation_id": "thread-start-resultless",
+        "method": "rpc",
+        "payload": {"method": "thread/start", "params": {
+            "cwd": "/project", "model": "gpt-5.6-luna",
+            "approvalPolicy": "on-request", "sandbox": "workspace-write",
+            "threadSource": "fleet-test-source",
+        }},
+        "recovery": {
+            "kind": "thread/start", "canonical_cwd": "/project",
+            "thread_source": "fleet-test-source",
+            "expected_effective": _expected_effective(),
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(operation["operation_id"])
+    journal.uncertain(operation["operation_id"], "projection write failed")
+
+    reads = []
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host._find_recovery_thread = lambda recovery, deadline: {
+        "id": "thread-1"}
+
+    def recovery_request(method, params, deadline):
+        reads.append((method, params))
+        return _thread_read_result(turns=0)
+
+    host._recovery_request = recovery_request
+    host._settle_uncertain_thread_result(operation["operation_id"], 1.0)
+    adopted = journal.load(operation["operation_id"])
+
+    assert adopted["state"] == "observed"
+    assert adopted["result"]["thread"]["id"] == "thread-1"
+    assert adopted["result"]["turnCount"] == 0
+    assert adopted["result"]["approvalPolicy"] == "on-request"
+    assert adopted["result"]["sandbox"] == {"type": "workspaceWrite"}
+    assert reads == [("thread/read", {
+        "threadId": "thread-1", "includeTurns": True})]
+
+
 @pytest.mark.parametrize("mismatch", ["turn-count", "newest-turn"])
 def test_uncertain_resume_refuses_mismatched_public_thread_history(
         tmp_path, mismatch):
     module, _home, journal, operation, _record = _prepared_record(
         tmp_path, "thread/resume", "after-send")
     journal.uncertain(operation["operation_id"], "provider response lost")
-    result = _resume_result()
+    result = _thread_read_result()
     if mismatch == "turn-count":
         result["thread"]["turns"].append({
             "id": "turn-2", "status": "completed", "items": []})
@@ -523,7 +621,36 @@ def test_uncertain_resume_refuses_mismatched_public_thread_history(
     with pytest.raises(module.HostRejected, match=match):
         journal.adopt_thread_read(operation["operation_id"], result)
 
-    assert journal.load(operation["operation_id"])["state"] == "uncertain"
+    record = journal.load(operation["operation_id"])
+    assert record["state"] == "failed"
+    assert record["settled_from_public_read"] is True
+    assert journal.unresolved_predecessor("next-operation") is None
+
+
+def test_uncertain_resume_with_unknown_effective_intent_settles_failed(
+        tmp_path):
+    module, _home, journal, operation, _record = _prepared_record(
+        tmp_path, "thread/resume", "after-send")
+    path = journal.path(operation["operation_id"])
+    record = journal.load(operation["operation_id"])
+    record["recovery"]["expected_effective"]["approval_policies"] = [
+        "never", "on-request", "untrusted"]
+    record["recovery"]["expected_effective"]["sandbox_types"] = [
+        "dangerFullAccess", "workspaceWrite", "readOnly"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    journal.uncertain(operation["operation_id"], "provider response lost")
+
+    with pytest.raises(module.HostRejected, match="effective settings are unknown"):
+        journal.adopt_thread_read(
+            operation["operation_id"], _thread_read_result())
+
+    settled = journal.load(operation["operation_id"])
+    assert settled["state"] == "failed"
+    assert settled["settled_from_public_read"] is True
+    next_operation = _mutation("after-settled-failure", "turn/start")
+    journal.prepare(next_operation)
+    assert journal.unresolved_predecessor("after-settled-failure") is None
+    assert journal.accept("after-settled-failure")["state"] == "accepted"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX owner-only mode assertion")

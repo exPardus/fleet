@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11909) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12911) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16370) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11930) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12932) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16391) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3741) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:3767) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4436) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13161) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16244) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4462) -- expose that distinction to views.
+      * `_doctor_check_registry` (:13182) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16265) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7109) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18024) -- render the release explanation.
+      * `_print_snapshot_table` (:7123) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:18045) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2175,6 +2175,30 @@ def _codex_permission_profile(mode: str) -> dict:
         raise FleetCliError(f"unsupported Codex permission mode: {mode!r}") from exc
 
 
+def _codex_expected_effective(model: str, profile: dict) -> dict:
+    """Persist the effective thread fields a later public read cannot return."""
+    return {
+        "model": model,
+        "approval_policies": (
+            [profile["approvalPolicy"]]
+            if profile["approvalPolicy"] is not None
+            else ["never", "on-request", "untrusted"]),
+        "approvals_reviewer": "user",
+        "sandbox_types": ({
+            "danger-full-access": ["dangerFullAccess"],
+            "workspace-write": ["workspaceWrite"],
+            "read-only": ["readOnly"],
+        }.get(profile["sandbox"], [
+            "dangerFullAccess", "workspaceWrite", "readOnly"])),
+    }
+
+
+def _codex_thread_source(operation_id: str, purpose: str) -> str:
+    """Return a provider-persisted, body-free correlation for thread/start."""
+    return f"fleet-{purpose}-" + hashlib.sha256(
+        operation_id.encode("utf-8")).hexdigest()
+
+
 def _validate_codex_managed_requirements(result, profile: dict) -> dict | None:
     """Refuse an explicit Fleet policy excluded by public managed requirements."""
     if not isinstance(result, dict) or set(result) - {"requirements"}:
@@ -2489,6 +2513,8 @@ def _resume_codex_worker_on_current_host(
             "history_watermark": binding.record.get("turns"),
             "previous_host_generation": binding.host_generation,
             "canonical_cwd": binding.cwd,
+            "expected_effective": _codex_expected_effective(
+                requested_model, profile),
         },
     }
     try:
@@ -3723,7 +3749,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16370`), because legacy upgrades also require a complete registry.
+    (`:16391`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -6587,8 +6613,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
     profile = _codex_permission_profile(args.mode)
     expected_cwd = str(Path(cwd).resolve())
     requested_model = _codex_model_slug(args.model)
-    thread_source = "fleet-spawn-" + hashlib.sha256(
-        thread_operation_id.encode("utf-8")).hexdigest()
+    thread_source = _codex_thread_source(thread_operation_id, "spawn")
     thread_params = {
         "cwd": expected_cwd,
         "model": requested_model,
@@ -6605,19 +6630,8 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
             "kind": "thread/start", "fleet_name": name,
             "canonical_cwd": expected_cwd,
             "thread_source": thread_source,
-            "expected_effective": {
-                "model": requested_model,
-                "approval_policies": (
-                    [profile["approvalPolicy"]]
-                    if profile["approvalPolicy"] is not None
-                    else ["never", "on-request", "untrusted"]),
-                "sandbox_types": ({
-                    "danger-full-access": ["dangerFullAccess"],
-                    "workspace-write": ["workspaceWrite"],
-                    "read-only": ["readOnly"],
-                }.get(profile["sandbox"], [
-                    "dangerFullAccess", "workspaceWrite", "readOnly"])),
-            },
+            "expected_effective": _codex_expected_effective(
+                requested_model, profile),
         },
     }
     prior_brief = brief_snapshot(name)
@@ -9644,7 +9658,11 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         _clear_codex_worker_operation(binding, operation_id)
         raise
 
-    thread_params = {"cwd": cwd, "model": requested_model}
+    thread_source = _codex_thread_source(operation_id, "respawn")
+    thread_params = {
+        "cwd": cwd, "model": requested_model,
+        "threadSource": thread_source,
+    }
     thread_params.update({key: value for key, value in profile.items()
                           if value is not None})
     thread_operation = {
@@ -9656,6 +9674,9 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
             "retired_turn_id": binding.turn_id,
             "retired_turn_status": observed["turn_status"],
             "canonical_cwd": cwd,
+            "thread_source": thread_source,
+            "expected_effective": _codex_expected_effective(
+                requested_model, profile),
         },
     }
     try:
@@ -10252,7 +10273,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10167` / `cmd_respawn:9458`, before
+    # resolution that runs from `cmd_kill:10188` / `cmd_respawn:9472`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10283,9 +10304,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10167` / `cmd_respawn:9458`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10188` / `cmd_respawn:9472`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9479-9488` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9493-9502` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15191,7 +15212,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1091`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4424`) applies here too. An unreadable registry
+    rule for the view path (`:4450`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -15262,11 +15283,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3545, :3580, :3610, :3649, :3686,
-    :3748, :3828, :4833, :10270, :10432, :10696, :10925, :10961, :11203, :11204,
-    :11293, :11303, :11314, :11412, :11935, :15214, :19126, :19127, :19231, :19292, :20699, :22694`).
+    sites that already key on the union (`:3571, :3606, :3636, :3675, :3712,
+    :3774, :3854, :4859, :10291, :10453, :10717, :10946, :10982, :11224, :11225,
+    :11314, :11324, :11335, :11433, :11956, :15235, :19151, :19152, :19256, :19317, :20730, :22731`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8748, :9332, :13495, :21437. This makes union identity
+    OWN prior sid alone: :8762, :9346, :13516, :21474. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15984,8 +16005,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8748, :9332, :13495,
-    # :21437) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8762, :9346, :13516,
+    # :21474) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15993,7 +16014,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15188`).
+        # names this gate as its reason (`:15209`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16363,7 +16384,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11906`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11927`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -18306,6 +18327,8 @@ def _reconcile_codex_activating() -> int:
                     "history_watermark": 1,
                     "previous_host_generation": binding.host_generation,
                     "canonical_cwd": str(FLEET_HOME.resolve()),
+                    "expected_effective": _codex_expected_effective(
+                        bare_model, profile),
                 },
             }
             resumed_observation = _call_codex_activating_recovery(
@@ -18729,6 +18752,8 @@ def cmd_sup_reconcile(args) -> int:
                 "history_watermark": binding.record.get("turns"),
                 "previous_host_generation": binding.host_generation,
                 "canonical_cwd": str(FLEET_HOME.resolve()),
+                "expected_effective": _codex_expected_effective(
+                    bare_model, profile),
             },
         }
         try:
@@ -20297,16 +20322,22 @@ def _dispatch_codex_supervisor_body(campaign, mode, model, *,
             f"{name}: native Codex supervisor failed before provider "
             f"acceptance -- {exc}") from exc
 
+    thread_source = _codex_thread_source(
+        thread_operation_id, "supervisor")
     thread_operation = {
         "operation_id": thread_operation_id, "method": "rpc",
         "payload": {"method": "thread/start", "params": {
             "cwd": str(cwd), "model": bare_model,
+            "threadSource": thread_source,
             **{key: value for key, value in profile.items()
                if value is not None},
         }},
         "recovery": {
             "kind": "supervisor/thread-start", "fleet_name": name,
             "incarnation_id": incarnation_id, "canonical_cwd": str(cwd),
+            "thread_source": thread_source,
+            "expected_effective": _codex_expected_effective(
+                bare_model, profile),
         },
     }
     try:
@@ -20847,10 +20878,13 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
     _reserve_codex_supervisor_operation(
         binding, thread_operation_id, "handoff-thread/start")
     client = observed["client"]
+    thread_source = _codex_thread_source(
+        thread_operation_id, "handoff")
     thread_operation = {
         "operation_id": thread_operation_id, "method": "rpc",
         "payload": {"method": "thread/start", "params": {
             "cwd": str(FLEET_HOME.resolve()), "model": bare_model,
+            "threadSource": thread_source,
             **{key: value for key, value in profile.items()
                if value is not None},
         }},
@@ -20859,6 +20893,9 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
             "fleet_name": successor_name,
             "predecessor_incarnation_id": binding.incarnation_id,
             "canonical_cwd": str(FLEET_HOME.resolve()),
+            "thread_source": thread_source,
+            "expected_effective": _codex_expected_effective(
+                bare_model, profile),
         },
     }
     try:

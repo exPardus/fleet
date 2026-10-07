@@ -314,6 +314,36 @@ perform one operation with durable intent; relock Fleet and conditionally bind
 or commit only if the preclaim matches; unlock. A changed preclaim leaves
 public evidence for recovery and never overwrites newer state.
 
+### 7.3 Operation-journal result and settlement contract
+
+The general result contract for `thread/start` and `thread/resume` is a bounded
+projection, independent of queue-overflow recovery. The journal keeps the
+thread ID, cwd, model, source and status; total turn count; newest turn ID and
+status; and the returned cwd, model, approval policy, approvals reviewer and
+sandbox type. It drops turn item arrays, message bodies and every other
+provider-sized field. A committed or replayed journal response therefore cannot
+become an unbounded provider transcript.
+
+Provider acceptance precedes result persistence. If writing the observed
+projection fails after acceptance, the operation moves to `uncertain` with a
+bounded reason. Fleet retains the projection when that write is possible and
+otherwise retains a result-less uncertain record; it never leaves the entry in
+`accepted` or replays the mutation.
+
+An uncertain thread operation settles through public `thread/read` with turns
+included. `thread/resume` uses the exact requested thread ID. `thread/start`
+uses its provider-persisted operation source to identify one exact empty
+thread before reading it. Settlement validates canonical cwd, history count and
+newest turn identity. Because `thread/read` does not return the top-level
+effective model or permission tuple, settlement restores those fields from the
+bounded prior projection or the immutable request intent. Only uniquely known
+values may be restored. Unknown or mismatched identity, history or effective
+settings settles terminally as `failed`; matching evidence becomes `observed`
+and the caller then makes it terminal as `committed`. Both terminal outcomes
+clear the predecessor fence, while only the committed projection may be
+adopted into Fleet state. Later native mutations may proceed only after one of
+those terminal outcomes.
+
 ## 8. Worker lifecycle and no-duplicate recovery
 
 ### 8.1 Spawn

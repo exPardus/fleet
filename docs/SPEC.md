@@ -347,9 +347,11 @@ operation to `uncertain` with a reason, retaining the projection when the
 metadata store can accept it; it never leaves the entry `accepted`. The host may
 settle that uncertain entry without replaying the mutation by reading the exact
 projected or recovery-bound thread and matching its cwd, turn count, and newest
-turn identity; incomplete recovery identity refuses adoption. After the caller
-commits the adopted result, the predecessor fence clears and later native
-mutations may proceed.
+turn identity. A result-less record restores uniquely known effective fields
+from its immutable intent; incomplete or mismatched identity, history, or
+effective settings settles terminally failed and is never adopted. A committed
+adoption or terminal settlement failure clears the predecessor fence so later
+native mutations may proceed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

@@ -181,23 +181,28 @@ class Host:
 
     def _resume_recovery_thread(self, parent_operation_id: str,
                                 thread_id: str, canonical_cwd: str,
-                                deadline: float) -> Any:
+                                deadline: float, *,
+                                expected_effective: Mapping[str, Any] | None = None
+                                ) -> Any:
         """Load an exact empty thread under its own durable, one-shot intent."""
         operation_id = "queue-recovery-" + hashlib.sha256(
             parent_operation_id.encode("utf-8")).hexdigest()
+        recovery = {
+            "kind": "queue-overflow-thread-resume",
+            "parent_operation_id": parent_operation_id,
+            "thread_id": thread_id,
+            "canonical_cwd": canonical_cwd,
+            "history_watermark": 0,
+        }
+        if isinstance(expected_effective, Mapping):
+            recovery["expected_effective"] = dict(expected_effective)
         operation = {
             "operation_id": operation_id,
             "method": "rpc",
             "payload": {"method": "thread/resume", "params": {
                 "threadId": thread_id,
             }},
-            "recovery": {
-                "kind": "queue-overflow-thread-resume",
-                "parent_operation_id": parent_operation_id,
-                "thread_id": thread_id,
-                "canonical_cwd": canonical_cwd,
-                "history_watermark": 0,
-            },
+            "recovery": recovery,
         }
         record = self.journal.prepare(operation)
         state = record.get("state")
@@ -238,8 +243,16 @@ class Host:
             thread_id = recovery.get("thread_id")
         if (record.get("state") != "uncertain"
                 or record.get("public_method") not in {
-                    "thread/start", "thread/resume"}
-                or not isinstance(thread_id, str)):
+                    "thread/start", "thread/resume"}):
+            raise ValueError("uncertain thread result has no exact public identity")
+        if not isinstance(thread_id, str) and record.get(
+                "public_method") == "thread/start" and isinstance(
+                    recovery, Mapping):
+            candidate = self._find_recovery_thread(recovery, deadline)
+            thread_id = candidate.get("id")
+        if not isinstance(thread_id, str):
+            self.journal.settle_failed(
+                operation_id, "exact public thread identity is unknown")
             raise ValueError("uncertain thread result has no exact public identity")
         observed = self._recovery_request(
             "thread/read", {"threadId": thread_id, "includeTurns": True},
@@ -260,7 +273,8 @@ class Host:
             candidate = self._find_recovery_thread(recovery, deadline)
             resumed = self._resume_recovery_thread(
                 operation_id, candidate["id"], recovery["canonical_cwd"],
-                deadline)
+                deadline,
+                expected_effective=recovery.get("expected_effective"))
             if not isinstance(resumed, dict) or not isinstance(
                     resumed.get("thread"), dict):
                 raise ValueError("thread/resume recovery evidence is malformed")
