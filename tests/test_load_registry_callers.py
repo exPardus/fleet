@@ -214,6 +214,7 @@ ALLOWED = {
     "_rollback_codex_handoff_activation",
     "cmd_sup_reconcile", "_reconcile_codex_activating",
     "_call_codex_activating_recovery", "_reconcile_codex_handoff_predecessor",
+    "_reconcile_dead_suspected_codex_completions",
     "_freeze_codex_predecessor_retirement",
     "_finalize_codex_predecessor_retirement",
     "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
@@ -278,8 +279,8 @@ ALLOWED = {
     # corrupt registry refuses before this call is ever reached.
     # `TestTheViewSurfaceIsNotAmongTheCallers` pins both halves.
     "cmd_status",
-    # `cmd_doctor` keeps ONE call, on the `--repair` branch only, under
-    # `fleet_lock`. After the 2026-07-27 gate that call IS the quarantine
+    # `cmd_doctor` keeps its calls on the `--repair` branch only, under
+    # `fleet_lock`. After the 2026-07-27 gate those calls ARE the quarantine
     # surface: the operator typed the flag, which is the entire point of the
     # flag. Default `doctor` reads through `read_registry_no_repair` and reports.
     "cmd_doctor",

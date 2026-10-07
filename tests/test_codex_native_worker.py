@@ -694,6 +694,17 @@ def _install_record(lane, **updates):
     return record
 
 
+def _write_turn_evidence(home, *, thread_id=THREAD_ID, turn_id=TURN_ID,
+                         turn_status="completed"):
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": thread_id, "turn_id": turn_id,
+            "turn_status": turn_status,
+        }), encoding="utf-8")
+
+
 class WorkerVerbClient:
     generation = "host-generation-1"
     schema_digest = "reviewed-schema"
@@ -976,6 +987,188 @@ def test_native_worker_completed_evidence_cannot_clear_pending_operation(
 
     assert updated["status"] == "dead-suspected"
     assert updated["adapter_state"] == "uncertain"
+
+
+def test_doctor_repair_reconciles_pre_fix_dead_suspected_completion(
+        native_home, monkeypatch):
+    home, lane = native_home
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _write_turn_evidence(home)
+    depth = _track_lock(monkeypatch)
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    original_call = client.call
+
+    def call_unlocked(operation, timeout):
+        assert depth() == 0, "native Codex reconciliation held fleet.lock during RPC"
+        return original_call(operation, timeout)
+
+    client.call = call_unlocked
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == [
+        "cx-native"]
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "idle"
+    assert stored["adapter_state"] == "idle"
+    assert stored["provider_status"] == "notLoaded"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+@pytest.mark.parametrize(
+    "case,record_updates,evidence_kwargs,provider_status,turn_status,expected_calls",
+    [
+        ("non-candidate-status", {"status": "working"}, {},
+         "notLoaded", "completed", 0),
+        ("archived", {"archived_at": "2026-09-21T00:00:00Z"}, {},
+         "notLoaded", "completed", 0),
+        ("mcx-route", {"dispatch_kind": "mcx", "mcx_id": "mcx-job"}, {},
+         "notLoaded", "completed", 0),
+        ("pending-resume", {"pending_operation": {
+            "operation_id": "resume-op", "kind": "thread/resume"}}, {},
+         "notLoaded", "completed", 0),
+        ("missing-evidence", {}, None, "notLoaded", "completed", 0),
+        ("wrong-evidence-thread", {}, {"thread_id": NEXT_THREAD_ID},
+         "notLoaded", "completed", 0),
+        ("wrong-evidence-turn", {}, {"turn_id": NEXT_TURN_ID},
+         "notLoaded", "completed", 0),
+        ("durable-noncompletion", {}, {"turn_status": "failed"},
+         "notLoaded", "completed", 0),
+        ("live-in-progress", {}, {}, "notLoaded", "inProgress", 1),
+        ("live-failed", {}, {}, "systemError", "failed", 1),
+        ("live-interrupted", {}, {}, "notLoaded", "interrupted", 1),
+    ],
+)
+def test_doctor_repair_completion_reconciliation_negative_matrix(
+        native_home, monkeypatch, case, record_updates, evidence_kwargs,
+        provider_status, turn_status, expected_calls):
+    home, lane = native_home
+    updates = {"status": "dead-suspected", "adapter_state": "uncertain"}
+    updates.update(record_updates)
+    original = _install_record(lane, **updates)
+    if evidence_kwargs is not None:
+        _write_turn_evidence(home, **evidence_kwargs)
+    client = WorkerVerbClient(
+        lane, provider_status=provider_status, turn_status=turn_status)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == [], case
+
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+    assert len(client.operations) == expected_calls
+
+
+@pytest.mark.parametrize("mismatch", ["thread", "turn"])
+def test_doctor_repair_completion_reconciliation_rejects_live_identity_mismatch(
+        native_home, monkeypatch, mismatch):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _write_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    original_thread = client._thread
+
+    def mismatched_thread():
+        payload = original_thread()
+        if mismatch == "thread":
+            payload["thread"]["id"] = NEXT_THREAD_ID
+        else:
+            payload["thread"]["turns"][0]["id"] = NEXT_TURN_ID
+        return payload
+
+    client._thread = mismatched_thread
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+@pytest.mark.parametrize("race", ["terminal", "resume"])
+def test_doctor_repair_completion_reconciliation_full_row_cas_loses_to_races(
+        native_home, monkeypatch, race):
+    home, lane = native_home
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _write_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    original_call = client.call
+
+    def mutate_during_read(operation, timeout):
+        result = original_call(operation, timeout)
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            record = data["workers"]["cx-native"]
+            if race == "terminal":
+                record["status"] = "dead"
+                record["adapter_state"] = "idle"
+                record["dead_reason"] = "concurrent terminal action"
+            else:
+                record["pending_operation"] = {
+                    "operation_id": "resume-op", "kind": "thread/resume",
+                }
+                record["resume_owner"] = "concurrent recovery"
+            fleet.save_registry(data)
+        return result
+
+    client.call = mutate_during_read
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == []
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    if race == "terminal":
+        assert stored["status"] == "dead"
+        assert stored["dead_reason"] == "concurrent terminal action"
+    else:
+        assert stored["status"] == "dead-suspected"
+        assert stored["pending_operation"]["kind"] == "thread/resume"
+        assert stored["resume_owner"] == "concurrent recovery"
+
+
+def test_bare_doctor_never_runs_codex_completion_reconciliation(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    called = []
+    monkeypatch.setattr(
+        fleet, "_reconcile_dead_suspected_codex_completions",
+        lambda: called.append(True) or ["cx-native"])
+
+    fleet.cmd_doctor(
+        SimpleNamespace(repair=False), which=lambda _name: None,
+        run=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr=""))
+
+    assert called == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+
+
+def test_doctor_repair_runs_codex_completion_reconciliation(
+        native_home, monkeypatch, capsys):
+    home, lane = native_home
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _write_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    fleet.cmd_doctor(
+        SimpleNamespace(repair=True), which=lambda _name: None,
+        run=lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr=""))
+
+    assert fleet.load_registry()["workers"]["cx-native"]["status"] == "idle"
+    assert "reconciled 1 exact native Codex completion(s): cx-native" \
+        in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("provider_status,active_flags,expected_status,expected_adapter", [

@@ -354,6 +354,14 @@ turn evidence stays non-idle. An unresolved mutation prevents an older
 completion from vouching for unknown provider work. Host loss, a failed live
 read, malformed evidence, or conflicting identity maps to
 `dead-suspected`, never to a proved death. File-only views remain file-only.
+`fleet doctor --repair` backfills rows that were already committed
+`dead-suspected` before this completion rule shipped. It requires the same
+exact bound thread/turn in durable evidence and a validated live `thread/read`,
+with both reporting `completed`; every other status, route, archived row,
+pending operation, evidence mismatch, and host ambiguity stays unchanged.
+Candidate rows are snapshotted under `fleet.lock`, host IPC runs unlocked, and
+the repair commits by complete-row compare-and-swap so a concurrent kill,
+resume reservation, or other mutation wins. Bare `doctor` remains report-only.
 Busy `send` uses one
 `turn/steer(expectedTurnId=...)`; idle `send` starts one new turn on the same
 thread. Each mutation is reserved durably before IPC, and an uncertain response
