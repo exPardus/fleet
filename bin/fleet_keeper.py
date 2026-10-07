@@ -152,7 +152,7 @@ def rule_supervisor_stalled(obs, now):
         children = guard.get("busy_children")
         if reason.startswith("roster says busy") and isinstance(children, list):
             child_identity = ",".join(
-                f"{row.get('pid')}:{row.get('command')}"
+                f"{row.get('pid')}:{row.get('executable')}"
                 for row in children if isinstance(row, dict))
             fingerprint = f"page:{identity}:roster-busy:{child_identity}"
         else:

@@ -66,19 +66,27 @@ def test_a_held_stale_supervisor_stalled_page_dedups_across_a_tick():
 
 
 def test_busy_child_age_is_reported_but_does_not_break_page_dedup():
-    child = {"pid": 77, "command": "sh -c until fleet status | grep working"}
+    secret = "secret-password-7f21"
+    child = {"pid": 77, "executable": "sh",
+             "command": f"sh -c worker --password={secret}"}
 
     def obs(age):
-        reason = f"roster says busy; long-running child: pid 77 age {age}h command {child['command']}"
+        reason = (f"roster says busy; long-running child: pid 77 age {age}h "
+                  f"executable {child['executable']}")
         return {"goals_active": True, "claim_state": "held",
                 "supervisor_guard": {"verdict": f"PAGE {reason}",
                                      "reason": reason, "body_name": "body",
                                      "busy_children": [{**child, "age_seconds": age * 3600}]}}
 
     first = k.evaluate(obs(17), NOW)[0]
-    assert "age 17h" in first.text and child["command"] in first.text
+    assert "age 17h" in first.text and child["executable"] in first.text
+    assert secret not in first.text
     sent, state = k.dedup([first], {}, NOW)
     assert sent == [first]
+    assert state["supervisor-stalled"]["fingerprint"] == (
+        "page:body:roster-busy:77:sh")
+    assert secret not in json.dumps(state)
+    assert "command" not in json.dumps(state)
     second = k.evaluate(obs(18), NOW + 900)[0]
     sent_again, unchanged = k.dedup([second], state, NOW + 900)
     assert sent_again == [] and unchanged == state

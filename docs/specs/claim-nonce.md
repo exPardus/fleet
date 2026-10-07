@@ -1518,7 +1518,7 @@ context compaction eating the last printed value. Its options:
 unilateral lever: a separate registered Interface waits for durable `idle` state and sends the holder.
 Fleet mints the wake credential internally, and the fresh body must clear pending succession before
 resuming work. A roster-busy holder is not recoverable through this path because the send only queues
-mail; `sup-guard` names its long-running child commands and ages for operator diagnosis.
+mail; `sup-guard` names its long-running child executable basenames and ages for operator diagnosis.
 
 **Binding constraint on the refusal message, and on the freeze page.** Agent-facing output must
 name the ambiguity and the escalation, and must **not** name a lever that resolves it unilaterally. It
