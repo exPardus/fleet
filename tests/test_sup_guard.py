@@ -334,6 +334,26 @@ def test_stale_busy_body_names_executable_without_leaking_argv(home, capsys):
     assert "password" not in rendered and "command" not in rendered
 
 
+def test_stale_busy_body_kept_busy_by_background_shell_names_it(home, capsys):
+    """A background-only task still makes the roster body busy.
+
+    The roster has no foreground/background discriminator, so the process tree
+    must diagnose the long-running shell descendant from the same busy shape.
+    """
+    fleet.cmd_sup_guard(
+        SimpleNamespace(do=False, json=False),
+        snapshot_fn=snapshot,
+        roster_fn=roster(row(SID, status="busy", pid=42)),
+        process_tree_fn=lambda pid: [{
+            "pid": 77, "ppid": pid, "age_seconds": 58 * 60,
+            "executable": "/bin/zsh",
+        }],
+    )
+    assert capsys.readouterr().out == (
+        "PAGE roster says busy; long-running child: "
+        "pid 77 age 58m executable zsh\n")
+
+
 def test_posix_process_tree_is_bounded_and_captures_no_arguments(monkeypatch):
     calls = []
     output = "\n".join(

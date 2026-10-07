@@ -17,6 +17,8 @@ home, claim, model, budget, and operator rulings in checkpoints and handoff.
 Wait for a lane with `fleet wait NAME --timeout SECONDS`; never hand-roll an
 `until fleet status | grep ...` loop. A `dead-suspected` result ends the wait
 promptly and needs inspection, not more polling.
+Run lane spawns in the foreground, one `fleet spawn` per call, with a timeout;
+never launch a `run_in_background` spawn batch.
 
 Run every nonce-minting verb directly, never through a pipe or output filter.
 Record every printed `NONCE` before the next command; the newest value is the
