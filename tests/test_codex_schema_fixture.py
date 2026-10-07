@@ -7,7 +7,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT / "tests" / "fixtures" / "codex_app_server" / "0.155.1"
+FIXTURES = ROOT / "tests" / "fixtures" / "codex_app_server"
 
 
 def _generator():
@@ -221,12 +221,14 @@ def test_generate_contract_rejects_oversized_public_schema(tmp_path):
         _generator()(str(codex), tmp_path / "fixture")
 
 
-def test_checked_fixture_pins_reviewed_public_contract():
-    manifest = json.loads((FIXTURE / "manifest.json").read_text())
-    contract_bytes = (FIXTURE / "v2-contract.json").read_bytes()
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+def test_checked_fixture_pins_reviewed_public_contract(version):
+    fixture = FIXTURES / version
+    manifest = json.loads((fixture / "manifest.json").read_text())
+    contract_bytes = (fixture / "v2-contract.json").read_bytes()
     contract = json.loads(contract_bytes)
 
-    assert manifest["codex_version"] == "0.155.1"
+    assert manifest["codex_version"] == version
     assert manifest["protocol_version"] == 2
     assert manifest["contract_sha256"] == hashlib.sha256(contract_bytes).hexdigest()
     assert contract["client_methods"]["turn/steer"]["params_required"] == [
@@ -238,8 +240,32 @@ def test_checked_fixture_pins_reviewed_public_contract():
             "turn/interrupt"}.issubset(contract["client_methods"])
 
 
-def test_checked_fixture_contains_no_private_codex_path():
-    for path in FIXTURE.glob("*.json"):
+def test_0160_reviewed_contract_has_only_additive_error_codes():
+    old = json.loads((FIXTURES / "0.155.1" / "v2-contract.json").read_text())
+    new = json.loads((FIXTURES / "0.160.0" / "v2-contract.json").read_text())
+    old_errors = set(old["enums"]["codex_error_codes"])
+    new_errors = set(new["enums"]["codex_error_codes"])
+    old["enums"]["codex_error_codes"] = []
+    new["enums"]["codex_error_codes"] = []
+
+    assert new == old
+    assert new_errors - old_errors == {"flexUnavailable", "tooManyDenials"}
+    assert old_errors - new_errors == set()
+
+
+def test_0160_no_inference_contract_changes_only_the_version():
+    old = json.loads(
+        (FIXTURES / "0.155.1" / "no-inference-acceptance.json").read_text())
+    new = json.loads(
+        (FIXTURES / "0.160.0" / "no-inference-acceptance.json").read_text())
+    assert old.pop("codex_version") == "0.155.1"
+    assert new.pop("codex_version") == "0.160.0"
+    assert new == old
+
+
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+def test_checked_fixture_contains_no_private_codex_path(version):
+    for path in (FIXTURES / version).glob("*.json"):
         text = path.read_text(encoding="utf-8")
         assert "/.codex/" not in text
         assert "\\.codex\\" not in text
