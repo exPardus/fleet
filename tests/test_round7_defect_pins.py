@@ -444,7 +444,9 @@ RATIFIED_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "sup-guard", "q", "index",
                      # [w110/peer-messaging] read-only, like `result`
-                     "address", "watch")
+                     "address", "watch",
+                     # [w130/mail-verify] file-only authenticated-mail view
+                     "mail")
 
 # Named by the ratified table but NOT YET BUILT. Kept separate so the "the table
 # cites no dead verb" pin cannot be satisfied by an unbuilt name.

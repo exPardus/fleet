@@ -187,6 +187,9 @@ def _view_calls():
             argparse.Namespace(name="w", lines=20)),
         "fleet result": lambda: fleet.cmd_result(
             argparse.Namespace(name="w")),
+        "fleet mail verify": lambda: fleet.cmd_mail_verify(
+            argparse.Namespace(
+                mail_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
         # `sup-guard` is a read-only CLI view too.  Inject the roster read so
         # this doctrine pin remains isolated from the host's Claude daemon.
         "fleet sup-guard": lambda: fleet.cmd_sup_guard(
@@ -246,7 +249,7 @@ def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
     }
     reachable = set()
     pending = ["status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
-               "cmd_sup_guard"]
+               "cmd_sup_guard", "cmd_mail_verify"]
     while pending:
         name = pending.pop()
         if name in reachable or name not in functions:
