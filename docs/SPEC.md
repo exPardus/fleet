@@ -320,6 +320,11 @@ and carries the brief, journal, and queued mail. A concurrent kill wins instead
 of being resurrected; each accepted-thread/turn commit compares the complete
 reserved row. The retired thread is recorded with its exact turn and terminal
 status.
+The queue-overflow sentinel has one non-replay recovery:
+the host replaces its failed stdio child and adopts the original spawn journal
+entry only from an operation-tagged empty thread with matching effective
+settings, or exactly one public turn beyond the bound history watermark;
+otherwise the row stays uncertain with a queue-bound/concurrency remedy.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

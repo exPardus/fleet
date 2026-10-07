@@ -58,6 +58,11 @@ for line in sys.stdin:
         send({{"id": "server-1", "method": "item/commandExecution/requestApproval",
               "params": {{"threadId": "t", "turnId": "u", "itemId": "i"}}}})
         send({{"id": message["id"], "result": {{"queued": True}}}})
+    elif method == "overflow":
+        send({{"method": "thread/status/changed", "params": {{"seq": 1}}}})
+        send({{"method": "turn/started", "params": {{"seq": 2}}}})
+        time.sleep(0.05)
+        send({{"id": message["id"], "result": {{"tooLate": True}}}})
     elif method == "malformed":
         sys.stdout.write("{{not-json\n")
         sys.stdout.flush()
@@ -211,5 +216,45 @@ def test_remote_error_never_echoes_secret_or_prompt(tmp_path):
         assert "private-prompt" not in rendered
         assert "outbound-secret" not in rendered
         assert "request failed" in rendered
+    finally:
+        client.close()
+
+
+def test_event_queue_bound_has_safe_default_and_bounded_override(monkeypatch):
+    module = _protocol()
+    monkeypatch.delenv("FLEET_CODEX_EVENT_QUEUE_MAX", raising=False)
+    monkeypatch.delenv("FLEET_CODEX_MAX_EVENTS", raising=False)
+    assert module.resolve_max_events() == module.DEFAULT_MAX_EVENTS
+    assert module.DEFAULT_MAX_EVENTS > 1024
+    monkeypatch.setenv("FLEET_CODEX_EVENT_QUEUE_MAX", "2048")
+    assert module.resolve_max_events() == 2048
+    assert module.resolve_max_events(10**12) == module.MAX_MAX_EVENTS
+    with pytest.raises(ValueError, match="between 1"):
+        module.resolve_max_events(0)
+    with pytest.raises(ValueError, match="must be an integer"):
+        monkeypatch.setenv("FLEET_CODEX_EVENT_QUEUE_MAX", "many")
+        module.resolve_max_events()
+
+
+def test_event_queue_overflow_marker_is_narrow_and_cause_aware():
+    module = _protocol()
+    error = RuntimeError("wrapper")
+    error.__cause__ = module.ProtocolViolation(
+        module.EVENT_QUEUE_OVERFLOW_MESSAGE)
+    assert module.is_event_queue_overflow(error)
+    assert not module.is_event_queue_overflow(
+        module.ProtocolViolation("app-server stdout reached EOF"))
+
+
+def test_request_after_idle_queue_overflow_is_proved_not_sent(tmp_path):
+    module, client, _events = _start(tmp_path, max_events=1)
+    try:
+        with pytest.raises(module.ProtocolViolation, match="queue exceeded"):
+            client.request("overflow", {}, timeout=1)
+        next_id = client.next_request_id
+        with pytest.raises(module.RequestNotSent) as caught:
+            client.request("echo", {"must": "not be sent"}, timeout=1)
+        assert module.is_event_queue_overflow(caught.value)
+        assert client.next_request_id == next_id
     finally:
         client.close()

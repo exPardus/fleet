@@ -36,6 +36,7 @@ from fleet_codex import (
     _public_evidence,
     _public_method,
     _process_identity,
+    _public_uuid7,
     codex_process_source,
     interface_source_matches,
     read_interface_claim,
@@ -45,7 +46,12 @@ from fleet_codex import (
     _send_frame,
     reconcile_home,
 )
-from fleet_codex_protocol import AppServerClient
+from fleet_codex_protocol import (
+    AppServerClient,
+    EVENT_QUEUE_OVERFLOW_MESSAGE,
+    RequestNotSent,
+    is_event_queue_overflow,
+)
 from fleet_errors import FleetCliError
 
 
@@ -98,6 +104,169 @@ class Host:
         self.evidence = CodexPublicEvidenceStore(self.home)
         self.approvals = CodexApprovalStore(self.home, self.generation)
 
+    def _start_app_server(self, timeout: float) -> None:
+        client = AppServerClient.start(
+            self.app_server_command, cwd=self.home, env=os.environ,
+            timeout=timeout)
+        if not self._reviewed_initialize(client.initialize_result):
+            client.close()
+            raise RuntimeError(
+                "Codex app-server initialize result does not match reviewed "
+                f"{self.expected_version!r} contract")
+        self.client = client
+        self.app_server_started_at = time.time()
+
+    def _restart_app_server_after_queue_overflow(self, deadline: float) -> None:
+        """Replace only the failed stdio child before read-only recovery."""
+        previous = self.client
+        if previous is not None:
+            self._drain_notifications()
+            previous.close()
+        self.client = None
+        try:
+            self._start_app_server(min(10.0, _remaining(deadline)))
+            _atomic_json(self.metadata_path, self.metadata())
+        except BaseException:
+            self.client = None
+            raise
+
+    def _recovery_request(self, method: str, params: Mapping[str, Any],
+                          deadline: float) -> Any:
+        if self.client is None:
+            raise ValueError("replacement app-server is unavailable")
+        result = self.client.request(
+            method, dict(params), timeout=min(10.0, _remaining(deadline)))
+        self._drain_notifications()
+        return result
+
+    def _find_recovery_thread(self, recovery: Mapping[str, Any],
+                              deadline: float) -> dict[str, Any]:
+        marker = recovery.get("thread_source")
+        cwd = recovery.get("canonical_cwd")
+        if not isinstance(marker, str) or not marker or not isinstance(cwd, str):
+            raise ValueError("thread recovery metadata is incomplete")
+        cursor = None
+        seen_cursors: set[str] = set()
+        matches: list[dict[str, Any]] = []
+        for _page in range(64):
+            params: dict[str, Any] = {
+                "cwd": cwd, "sourceKinds": ["appServer"],
+                "sortKey": "created_at", "sortDirection": "desc", "limit": 100,
+            }
+            if cursor is not None:
+                params["cursor"] = cursor
+            result = self._recovery_request("thread/list", params, deadline)
+            data = result.get("data") if isinstance(result, dict) else None
+            if not isinstance(data, list) or any(
+                    not isinstance(item, dict) for item in data):
+                raise ValueError("thread/list recovery evidence is malformed")
+            matches.extend(
+                item for item in data
+                if item.get("threadSource") == marker and item.get("cwd") == cwd)
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                break
+            if (not isinstance(cursor, str) or not cursor
+                    or cursor in seen_cursors):
+                raise ValueError("thread/list recovery cursor is malformed")
+            seen_cursors.add(cursor)
+        else:
+            raise ValueError("thread/list recovery exceeded 64 pages")
+        if len(matches) != 1:
+            raise ValueError(
+                f"thread/start public recovery found {len(matches)} exact "
+                "operation-tagged threads")
+        _public_uuid7(matches[0].get("id"), "recovered thread id")
+        return matches[0]
+
+    def _resume_recovery_thread(self, parent_operation_id: str,
+                                thread_id: str, deadline: float) -> Any:
+        """Load an exact empty thread under its own durable, one-shot intent."""
+        operation_id = "queue-recovery-" + hashlib.sha256(
+            parent_operation_id.encode("utf-8")).hexdigest()
+        operation = {
+            "operation_id": operation_id,
+            "method": "rpc",
+            "payload": {"method": "thread/resume", "params": {
+                "threadId": thread_id,
+            }},
+            "recovery": {
+                "kind": "queue-overflow-thread-resume",
+                "parent_operation_id": parent_operation_id,
+                "thread_id": thread_id,
+            },
+        }
+        record = self.journal.prepare(operation)
+        if record.get("state") in {"observed", "committed"}:
+            return record.get("result")
+        if record.get("state") != "prepared":
+            raise ValueError("thread/resume recovery intent is unresolved")
+        self.journal.accept(operation_id)
+        try:
+            result = self._recovery_request(
+                "thread/resume", {"threadId": thread_id}, deadline)
+        except BaseException as exc:
+            self.journal.uncertain(
+                operation_id,
+                f"thread/resume recovery outcome unknown: {type(exc).__name__}")
+            raise
+        self.journal.observe(operation_id, result)
+        return self.journal.commit(operation_id).get("result")
+
+    def _recover_spawn_queue_overflow(
+            self, operation_id: str, deadline: float) -> Any:
+        """Adopt a queue-obscured spawn mutation without replaying it."""
+        record = self.journal.load(operation_id)
+        recovery = record.get("recovery")
+        if record.get("state") != "uncertain" or not isinstance(recovery, dict):
+            raise ValueError("operation journal is not an uncertain intent")
+        self._restart_app_server_after_queue_overflow(deadline)
+        public_method = record.get("public_method")
+        if public_method == "thread/start":
+            candidate = self._find_recovery_thread(recovery, deadline)
+            resumed = self._resume_recovery_thread(
+                operation_id, candidate["id"], deadline)
+            if not isinstance(resumed, dict) or not isinstance(
+                    resumed.get("thread"), dict):
+                raise ValueError("thread/resume recovery evidence is malformed")
+            resumed = dict(resumed)
+            resumed["recoveredThreadId"] = candidate["id"]
+            adopted = self.journal.adopt_spawn_queue_overflow(
+                operation_id, resumed)
+            return adopted["result"]
+        if public_method == "turn/start":
+            thread_id = recovery.get("thread_id")
+            cwd = recovery.get("canonical_cwd")
+            watermark = recovery.get("history_watermark")
+            _public_uuid7(thread_id, "turn recovery thread id")
+            if (not isinstance(cwd, str) or not isinstance(watermark, int)
+                    or isinstance(watermark, bool) or watermark < 0):
+                raise ValueError("turn recovery metadata is incomplete")
+            observed = self._recovery_request(
+                "thread/read", {"threadId": thread_id, "includeTurns": True},
+                deadline)
+            thread = observed.get("thread") if isinstance(observed, dict) else None
+            turns = thread.get("turns") if isinstance(thread, dict) else None
+            if (not isinstance(thread, dict) or thread.get("id") != thread_id
+                    or thread.get("cwd") != cwd or not isinstance(turns, list)
+                    or any(not isinstance(turn, dict) for turn in turns)):
+                raise ValueError("thread/read recovery evidence is malformed")
+            if len(turns) != watermark + 1:
+                raise ValueError(
+                    "turn/start public recovery did not find exactly one new turn")
+            turn = turns[-1]
+            _public_uuid7(turn.get("id"), "recovered turn id")
+            result = {
+                "turn": turn, "threadId": thread_id, "canonicalCwd": cwd,
+                "historyWatermark": watermark,
+                "observedTurnCount": len(turns),
+            }
+            adopted = self.journal.adopt_spawn_queue_overflow(
+                operation_id, result)
+            return adopted["result"]
+        raise ValueError(
+            f"{public_method or 'unknown'} has no safe queue-overflow adoption path")
+
     def metadata(self) -> dict[str, Any]:
         app_server_pid = self.client.process_id if self.client is not None else None
         return {
@@ -124,15 +293,7 @@ class Host:
 
     def run(self) -> int:
         self._verify_installed_schema()
-        self.client = AppServerClient.start(
-            self.app_server_command, cwd=self.home, env=os.environ, timeout=10)
-        self.app_server_started_at = time.time()
-        initialized = self.client.initialize_result
-        if not self._reviewed_initialize(initialized):
-            self.client.close()
-            raise RuntimeError(
-                "Codex app-server initialize result does not match reviewed "
-                f"{self.expected_version!r} contract")
+        self._start_app_server(10)
         # Classify every old durable intent before this generation can publish
         # ready or accept a fresh mutation. Until the public observer is wired,
         # accepted operations conservatively become uncertain and page-worthy.
@@ -332,9 +493,22 @@ class Host:
                     assert self.client is not None
                     public_method = _public_method("rpc", payload)
                     if public_method is None:
-                        result = self.client.request(
-                            payload["method"], payload.get("params", {}),
-                            timeout=rpc_timeout)
+                        try:
+                            result = self.client.request(
+                                payload["method"], payload.get("params", {}),
+                                timeout=rpc_timeout)
+                        except Exception as exc:
+                            if not is_event_queue_overflow(exc):
+                                raise
+                            # Reads are replayable, but the failed stdio client
+                            # is not. Replace it once, then repeat only the read.
+                            self._restart_app_server_after_queue_overflow(deadline)
+                            assert self.client is not None
+                            result = self.client.request(
+                                payload["method"], payload.get("params", {}),
+                                timeout=_bounded_rpc_timeout(
+                                    payload, float(request["operation_timeout"]),
+                                    deadline))
                         self._drain_notifications()
                     else:
                         self._authorize_public_mutation(
@@ -370,17 +544,65 @@ class Host:
                                     "unresolved predecessor operation "
                                     f"{predecessor.get('operation_id')} blocks mutation")
                             self.journal.accept(operation_id)
+                            recovered = False
+                            failure: Exception | None = None
                             try:
                                 result = self.client.request(
                                     payload["method"], payload.get("params", {}),
                                     timeout=rpc_timeout)
+                            except RequestNotSent as exc:
+                                if is_event_queue_overflow(exc):
+                                    # The old client failed before this request
+                                    # was written, so replacing it and issuing
+                                    # the mutation once is not a replay.
+                                    self._restart_app_server_after_queue_overflow(
+                                        deadline)
+                                    assert self.client is not None
+                                    try:
+                                        result = self.client.request(
+                                            payload["method"],
+                                            payload.get("params", {}),
+                                            timeout=_bounded_rpc_timeout(
+                                                payload,
+                                                float(request["operation_timeout"]),
+                                                deadline))
+                                    except Exception as retry_exc:
+                                        failure = retry_exc
+                                else:
+                                    failure = exc
                             except Exception as exc:
+                                failure = exc
+                            if failure is not None:
                                 self.journal.uncertain(
                                     operation_id,
-                                    f"public mutation outcome unknown: {type(exc).__name__}")
-                                raise ValueError(
-                                    "public mutation outcome is uncertain") from exc
-                            self.journal.observe(operation_id, result)
+                                    "public mutation outcome unknown: "
+                                    f"{type(failure).__name__}")
+                                if is_event_queue_overflow(failure):
+                                    try:
+                                        result = self._recover_spawn_queue_overflow(
+                                            operation_id, deadline)
+                                    except Exception as recovery_exc:
+                                        raise ValueError(
+                                            f"{EVENT_QUEUE_OVERFLOW_MESSAGE}; "
+                                            "the mutation was not replayed and exact public "
+                                            f"recovery failed: {recovery_exc}; increase "
+                                            "FLEET_CODEX_EVENT_QUEUE_MAX (maximum 65536) "
+                                            "or reduce concurrent lanes") from recovery_exc
+                                    # The recovery helper moved the original
+                                    # journal entry to observed from exact public
+                                    # evidence. Do not observe it a second time.
+                                    record = self.journal.load(operation_id)
+                                    if record.get("state") != "observed":
+                                        raise ValueError(
+                                            "queue-overflow recovery did not settle the journal")
+                                    result = record.get("result")
+                                    self._drain_notifications()
+                                    recovered = True
+                                else:
+                                    raise ValueError(
+                                        "public mutation outcome is uncertain") from failure
+                            if not recovered:
+                                self.journal.observe(operation_id, result)
                         else:
                             raise ValueError("operation journal has unknown state")
                 elif method == "public-evidence/read":
