@@ -301,8 +301,12 @@ public evidence for recovery and never overwrites newer state.
 4. Reacquire `fleet.lock` only to conditionally bind that same preclaim to the
    thread, then release it. Bind failure records an orphan empty thread and
    starts no turn.
-5. Prepare and call `turn/start` once outside the lock; record the real turn;
-   reacquire only to conditionally commit active state.
+5. Immediately before `turn/start`, reserve the exact bound row under
+   `fleet.lock`, then release it. A terminal mutation that commits first fences
+   the launcher; once reserved, terminal mutation refuses until reconciliation.
+6. Prepare and call `turn/start` once outside the lock; record the real turn;
+   reacquire only to conditionally commit active state from the complete
+   reserved row.
 
 Lost `thread/start` response never retries automatically because no reliable
 correlation exists. It can leave an empty orphan, not duplicate work. Lost
@@ -370,8 +374,11 @@ zero turns is safe to clear. Any observed provider turn may be the accepted turn
 whose registry commit was lost, so kill refuses with that identity instead of
 allowing a later respawn to duplicate its work.
 `respawn` requires old-turn terminal proof, creates a new
-provider-minted thread, records the retired thread/turn/proof tuple, and carries
-the durable brief, journal, and pending mail. `resume-limited` reads public
+provider-minted thread only after a full-row reservation of that actionable
+post-proof state, records the retired thread/turn/proof tuple, and carries the
+durable brief, journal, and pending mail. A concurrent kill that commits first
+wins that compare-and-swap; fresh-thread and turn commits also require their
+complete reserved rows and cannot resurrect it. `resume-limited` reads public
 rate-limit state, records an authoritative future reset when supplied, and
 starts one same-thread turn only after explicit allowance or an elapsed reset.
 If respawn finds a replacement host generation, it first performs the same

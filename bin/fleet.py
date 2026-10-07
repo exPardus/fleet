@@ -2414,6 +2414,30 @@ def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
         return dict(record)
 
 
+def _reserve_codex_initial_turn_start(name: str, expected_record: dict,
+                                      operation_id: str) -> dict:
+    """Fence an initial turn against terminal mutation of its bound row."""
+    with fleet_lock():
+        data = load_registry()
+        record = data["workers"].get(name)
+        if (record != expected_record
+                or record.get("adapter_state") != "bound"
+                or record.get("codex_turn_id") is not None
+                or record.get("last_operation_id") != operation_id):
+            raise FleetCliError(
+                f"{name}: native Codex launch changed before turn/start")
+        if record.get("pending_operation") is not None:
+            raise FleetCliError(
+                f"{name}: another native Codex operation is pending")
+        record["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "spawn/turn-start",
+            "at": now_iso(),
+        }
+        save_registry(data)
+        return dict(record)
+
+
 def _clear_codex_worker_operation(binding: CodexWorkerBinding,
                                   operation_id: str) -> None:
     with fleet_lock():
@@ -6407,6 +6431,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
 
     turn_operation_id = f"worker-{name}-turn-{uuid.uuid4()}"
     bound = False
+    bound_claim = None
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
@@ -6432,6 +6457,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
             _append_event_quiet(
                 "codex_thread_bound", name, codex_thread_id=thread_id,
                 host_generation=thread_observation.generation)
+            bound_claim = dict(rec)
             bound = True
     if not bound:
         print(
@@ -6441,6 +6467,15 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
         return 1
     _commit_codex_journal(
         client, name, thread_operation_id, turn_operation_id)
+    try:
+        turn_claim = _reserve_codex_initial_turn_start(
+            name, bound_claim, turn_operation_id)
+    except FleetCliError:
+        print(
+            f"fleet: {name}: native Codex thread {thread_id} was fenced "
+            "before turn/start; no turn was started",
+            file=sys.stderr)
+        return 1
 
     tiny_prompt = f"Read {task_file_path(name).as_posix()} and follow it exactly."
     turn_operation = {
@@ -6483,10 +6518,8 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
-        if (rec is not None
-                and rec.get("adapter_state") == "bound"
-                and rec.get("codex_thread_id") == thread_id
-                and rec.get("last_operation_id") == turn_operation_id):
+        if rec == turn_claim:
+            rec.pop("pending_operation", None)
             rec.update({
                 "adapter_state": "active",
                 "codex_turn_id": turn_id,
@@ -9348,7 +9381,9 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     except OSError:
         prior_task = None
     operation_id = f"worker-{name}-respawn-thread-{uuid.uuid4()}"
-    _reserve_codex_worker_operation(binding, operation_id, "respawn/thread-start")
+    respawn_claim = _reserve_codex_worker_operation(
+        binding, operation_id, "respawn/thread-start",
+        expected_record=before)
     managed_requirements = None
     try:
         if task_override is not None:
@@ -9410,11 +9445,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     with fleet_lock():
         data = load_registry()
         record = data["workers"].get(name)
-        pending = record.get("pending_operation") if isinstance(record, dict) else None
-        if (isinstance(pending, dict)
-                and pending.get("operation_id") == operation_id
-                and record.get("codex_thread_id") == binding.thread_id
-                and record.get("codex_turn_id") == binding.turn_id):
+        if record == respawn_claim:
             retired = list(record.get("retired_codex_threads") or [])
             retired.append({
                 "thread_id": binding.thread_id, "turn_id": binding.turn_id,
@@ -9444,6 +9475,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
             _append_event_quiet(
                 "codex_thread_bound", name, codex_thread_id=thread_id,
                 host_generation=reply.generation)
+            turn_claim = dict(record)
             bound = True
     if not bound:
         raise FleetCliError(
@@ -9484,11 +9516,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     with fleet_lock():
         data = load_registry()
         record = data["workers"].get(name)
-        pending = record.get("pending_operation") if isinstance(record, dict) else None
-        if (not isinstance(pending, dict)
-                or pending.get("operation_id") != turn_operation_id
-                or record.get("codex_thread_id") != thread_id
-                or record.get("codex_turn_id") is not None):
+        if record != turn_claim:
             raise FleetCliError(
                 f"{name}: record changed after accepted respawn turn")
         record.pop("pending_operation", None)

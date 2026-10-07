@@ -94,6 +94,12 @@ class FakeClient:
             assert record["cwd"] == str(self.lane)
             result = {"turn": {"id": TURN_ID, "status": "inProgress",
                                "items": []}}
+        elif method == "thread/read":
+            result = {"thread": {
+                "id": THREAD_ID, "cwd": str(self.lane),
+                "status": {"type": "idle", "activeFlags": []},
+                "turns": [],
+            }}
         else:
             raise AssertionError(f"unexpected public method: {method}")
         digest = "a" * 64
@@ -349,6 +355,38 @@ def test_concurrent_preclaim_change_never_binds_or_starts_the_body(
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/start"]
     assert client.commits == []
+
+
+def test_kill_fences_a_delayed_initial_turn_start(native_home, monkeypatch):
+    home, lane = native_home
+    client = FakeClient(home, lane)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client", lambda _home: client, raising=False)
+    original_commit = fleet._commit_codex_journal
+    killed = {"done": False}
+
+    def kill_after_thread_bind(client_arg, name, journal_operation_id,
+                               record_operation_id):
+        original_commit(
+            client_arg, name, journal_operation_id, record_operation_id)
+        if killed["done"]:
+            return
+        killed["done"] = True
+        bound = dict(fleet.load_registry()["workers"][name])
+        assert bound["adapter_state"] == "bound"
+        assert fleet._cmd_kill_codex_native(
+            name, bound, connect=lambda _home: client) == 0
+
+    monkeypatch.setattr(fleet, "_commit_codex_journal", kill_after_thread_bind)
+
+    assert fleet.cmd_spawn(_args(lane)) == 1
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/start", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
 
 
 @pytest.mark.parametrize("commit_number,provider_calls", [(1, 1), (2, 2)])
@@ -1086,3 +1124,41 @@ def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
     }]
     assert "preserve the restart-safe brief" in \
         fleet.task_file_path("cx-native").read_text(encoding="utf-8")
+
+
+def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane, status="idle", adapter_state="idle")
+    fleet.write_brief("cx-native", "preserve the terminal worker brief")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    original_reserve = fleet._reserve_codex_worker_operation
+    killed = {"done": False}
+
+    def kill_before_respawn_reservation(binding, operation_id, kind, **kwargs):
+        if kind == "respawn/thread-start" and not killed["done"]:
+            killed["done"] = True
+            current = dict(fleet.load_registry()["workers"][binding.name])
+            assert fleet._cmd_kill_codex_native(
+                binding.name, current, connect=lambda _home: client) == 0
+        return original_reserve(binding, operation_id, kind, **kwargs)
+
+    monkeypatch.setattr(
+        fleet, "_reserve_codex_worker_operation",
+        kill_before_respawn_reservation)
+    args = SimpleNamespace(
+        name="cx-native", task=None, force=False, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+    with pytest.raises(fleet.FleetCliError, match="changed concurrently"):
+        fleet._cmd_respawn_codex(args, record)
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored

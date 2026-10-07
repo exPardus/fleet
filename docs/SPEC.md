@@ -306,12 +306,18 @@ then conditionally adopt the new generation only if the complete reserved row is
 unchanged; reattachment creates no turn. A concurrent terminal or other row
 change wins and adoption refuses without overwriting it. Kill refuses while the
 resume reservation is pending and rechecks for that race before marking dead.
+Spawn reserves the exact bound row immediately before its initial
+`turn/start`: a kill that commits first fences the delayed launcher, while a
+reservation that commits first makes kill refuse until acceptance is resolved.
 Lost or conflicting resume evidence remains reserved and uncertain without a
 retry. Interrupt uses `turn/interrupt` and commits only after same-turn
 terminal proof. Other ambiguous mutation responses are likewise durably
 reserved and never retried. Respawn requires old-turn terminal proof before
-creating a fresh provider thread and carries the brief, journal, and queued
-mail; the retired thread is recorded with its exact turn and terminal status.
+creating a fresh provider thread, reserves only by full-row compare-and-swap,
+and carries the brief, journal, and queued mail. A concurrent kill wins instead
+of being resurrected; each accepted-thread/turn commit compares the complete
+reserved row. The retired thread is recorded with its exact turn and terminal
+status.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 
