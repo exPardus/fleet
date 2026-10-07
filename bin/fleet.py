@@ -15193,9 +15193,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20630, :22706`).
+    :11292, :11302, :11313, :11411, :11934, :15143, :19051, :19052, :19156, :19217, :20636, :20675, :22776`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13424, :21441. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13424, :21511. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15914,7 +15914,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:8747, :9331, :13424,
-    # :21441) -- so union identity cannot make one body answer for another.
+    # :21511) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -20605,26 +20605,32 @@ Do exactly this, in order:
 """
 
 
-def _claim_holder_dispatch_settings(claim):
+def _claim_holder_dispatch_settings(claim, registry=None):
     """Read the claim holder's persisted dispatch settings, or ``None``.
     A missing holder row is unresolved, not permission to invent a launch
     policy. Corrupt/unreadable registry state refuses the handoff without
-    quarantine; the caller can report the repair path. Use
-    ``read_registry_no_repair`` outside ``fleet_lock`` so this read never
-    mutates operator evidence."""
+    quarantine; the caller can report the repair path. A caller holding the
+    fleet lock may pass its already-read registry snapshot so the holder and
+    every inherited setting can be revalidated atomically."""
     if not isinstance(claim, dict):
         return None
     holder_sid = claim.get("session_id")
     if not isinstance(holder_sid, str) or not holder_sid:
         return None
-    try:
-        data = read_registry_no_repair(hint=False)
-    except RegistryCorruptError as exc:
-        raise FleetCliError(
-            "sup-handoff-begin: predecessor registry could not be validated; "
-            f"refusing handoff ({exc}). Run `fleet doctor` and repair the "
-            "registry before retrying") from exc
-    for rec in data.get("workers", {}).values():
+    if registry is None:
+        try:
+            data = read_registry_no_repair(hint=False)
+        except RegistryCorruptError as exc:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor registry could not be validated; "
+                f"refusing handoff ({exc}). Run `fleet doctor` and repair the "
+                "registry before retrying") from exc
+    else:
+        data = registry
+    workers = data.get("workers", {}) if isinstance(data, dict) else {}
+    if not isinstance(workers, dict):
+        return None
+    for rec in workers.values():
         if not isinstance(rec, dict):
             continue
         if holder_sid in _record_sids(rec):
@@ -20642,6 +20648,32 @@ def _claim_holder_dispatch_settings(claim):
                     or (isinstance(rec.get("setting_sources"), str)
                         and bool(rec.get("setting_sources")))),
             }
+    return None
+
+
+def _claim_holder_dispatch_snapshot(claim, registry=None):
+    """Return ``(holder_name, settings)`` for atomic handoff race validation.
+    Include row identity so equal settings on a replacement row cannot pass."""
+    settings = _claim_holder_dispatch_settings(claim, registry=registry)
+    if settings is None:
+        return None
+    holder_sid = claim.get("session_id") if isinstance(claim, dict) else None
+    workers = (registry.get("workers") if isinstance(registry, dict)
+               else None)
+    if workers is None:
+        try:
+            registry = read_registry_no_repair(hint=False)
+        except RegistryCorruptError as exc:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor registry could not be validated; "
+                f"refusing handoff ({exc}). Run `fleet doctor` and repair the "
+                "registry before retrying") from exc
+        workers = registry.get("workers")
+    if not isinstance(workers, dict):
+        return None
+    for name, rec in workers.items():
+        if isinstance(rec, dict) and holder_sid in _record_sids(rec):
+            return name, settings
     return None
 
 
@@ -20784,14 +20816,34 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
         raise FleetCliError("native Codex handoff predecessor state is ambiguous")
     if observed["active_flags"]:
         raise FleetCliError("native Codex handoff predecessor is waiting")
-    mode = getattr(args, "permission_mode", None) or binding.record.get("mode") \
-        or SUCCESSOR_DEFAULT_MODE
+    explicit_mode = getattr(args, "permission_mode", None)
+    if explicit_mode is None:
+        if ("mode" not in binding.record
+                or binding.record.get("mode") not in MODE_FLAGS):
+            raise FleetCliError(
+                "native Codex handoff predecessor permission mode is unresolved; "
+                "pass --permission-mode explicitly")
+        mode = binding.record["mode"]
+    else:
+        mode = explicit_mode
     model = getattr(args, "model", None) or binding.record.get("model")
-    setting_sources = getattr(args, "setting_sources", None)
-    if setting_sources is None:
-        setting_sources = binding.record.get("setting_sources")
-    elif not setting_sources:
+    explicit_setting_sources = getattr(args, "setting_sources", None)
+    if explicit_setting_sources is None:
+        if "setting_sources" not in binding.record:
+            raise FleetCliError(
+                "native Codex handoff predecessor setting sources are unresolved; "
+                "pass --setting-sources explicitly (use an empty value to disable)")
+        setting_sources = binding.record["setting_sources"]
+        if (setting_sources is not None
+                and (not isinstance(setting_sources, str)
+                     or not setting_sources)):
+            raise FleetCliError(
+                "native Codex handoff predecessor setting sources are unresolved; "
+                "pass --setting-sources explicitly (use an empty value to disable)")
+    elif not explicit_setting_sources:
         setting_sources = None
+    else:
+        setting_sources = explicit_setting_sources
     bare_model = _codex_model_slug(model)
     if bare_model is None:
         raise FleetCliError("native Codex handoff requires a codex:<model>")
@@ -21073,7 +21125,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # Empty values from a quoted `--model ""` are equivalent to omission;
     # normalise before either handoff policy branch evaluates the model.
     args.model = _normalise_model(getattr(args, "model", None))
-    if _claim_uses_native_codex():
+    selected_claim = read_incarnation()
+    if _claim_uses_native_codex(selected_claim):
         # Native claims persist their provider model in the registry.  Resolve
         # that model before enforcing forbid-default: omitting --model is safe
         # here because the handoff remains on the already selected Codex model.
@@ -21082,7 +21135,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         _enforce_tier_policy(
             "supervisor", getattr(args, "model", None) or persisted_model)
         return _cmd_codex_sup_handoff_begin(args)
-    holder_settings = _claim_holder_dispatch_settings(read_incarnation())
+    holder_snapshot = _claim_holder_dispatch_snapshot(selected_claim)
+    holder_settings = holder_snapshot[1] if holder_snapshot is not None else None
     explicit_model = getattr(args, "model", None)
     explicit_mode = getattr(args, "permission_mode", None)
     explicit_setting_sources = getattr(args, "setting_sources", None)
@@ -21134,12 +21188,28 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             # Revalidate immediately before writing the handoff task and later
             # dispatch. This read is deliberately no-repair: corruption must
             # refuse without quarantining evidence on an unlocked path.
-            read_registry_no_repair(hint=False)
+            live_registry = read_registry_no_repair(hint=False)
         except RegistryCorruptError as exc:
             raise FleetCliError(
                 "sup-handoff-begin: predecessor registry became unreadable; "
                 f"refusing handoff ({exc}). Run fleet doctor and repair the "
                 "registry before retrying") from exc
+        live_claim = read_incarnation()
+        claim_key = lambda claim: (
+            claim.get("provider") if isinstance(claim, dict) else None,
+            claim.get("incarnation_id") if isinstance(claim, dict) else None,
+            claim.get("session_id") if isinstance(claim, dict) else None,
+        )
+        if claim_key(live_claim) != claim_key(selected_claim):
+            raise FleetCliError(
+                "sup-handoff-begin: selected predecessor holder changed while "
+                "preparing the handoff; retry")
+        live_snapshot = _claim_holder_dispatch_snapshot(
+            live_claim, registry=live_registry)
+        if live_snapshot != holder_snapshot:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor holder settings changed while "
+                "preparing the handoff; retry")
         # Do not mint a pending generation before lock-free dispatch and handoff.
         # Deliver notices after commit: legacy upgrade may still create a generation
         # the predecessor must know to complete or abort.

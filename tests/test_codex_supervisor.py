@@ -990,6 +990,42 @@ def test_native_handoff_uses_persisted_model_for_tier_policy(
         expect_inc=binding.incarnation_id)) == 0
 
 
+def test_native_handoff_refuses_missing_predecessor_permission_mode(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    data = fleet.load_registry()
+    record = next(iter(data["workers"].values()))
+    record.pop("mode")
+    fleet.save_registry(data)
+    binding = fleet._codex_supervisor_binding()
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="permission mode is unresolved"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model=None, permission_mode=None, setting_sources=None,
+            sid=None, nonce=None, expect_inc=binding.incarnation_id))
+    assert [op["payload"]["method"] for op in client.operations] == ["thread/read"]
+
+
+def test_native_handoff_refuses_missing_predecessor_setting_sources(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    data = fleet.load_registry()
+    record = next(iter(data["workers"].values()))
+    record.pop("setting_sources")
+    fleet.save_registry(data)
+    binding = fleet._codex_supervisor_binding()
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="setting sources are unresolved"):
+        fleet.cmd_sup_handoff_begin(SimpleNamespace(
+            model=None, permission_mode="bypass", setting_sources=None,
+            sid=None, nonce=None, expect_inc=binding.incarnation_id))
+    assert [op["payload"]["method"] for op in client.operations] == ["thread/read"]
+
+
 def test_claude_handoff_still_refuses_unresolved_tier_policy(
         supervisor_home):
     (supervisor_home / "supervisor" / "GOALS.md").write_text(
@@ -1001,6 +1037,11 @@ def test_claude_handoff_still_refuses_unresolved_tier_policy(
         "incarnation_id": "inc-claude", "state": "held",
         "provider": "claude", "session_id": "sid-claude",
     })
+    data = fleet.load_registry()
+    data["workers"]["sup|inc-claude|boot"] = fleet.new_worker_record(
+        "sid-claude", supervisor_home, "campaign", "bypass", model=None,
+        setting_sources=None, dispatch_kind="bg", category=None)
+    fleet.save_registry(data)
     with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
         fleet.cmd_sup_handoff_begin(SimpleNamespace(
             model=None, permission_mode="bypass", sid=None, nonce=None))

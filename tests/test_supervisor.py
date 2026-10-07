@@ -3110,6 +3110,26 @@ class TestHandoff:
         assert not any("--bg" in c for c in run.calls)
         assert not list(fleet.registry_path().parent.glob("fleet.json.corrupt.*"))
 
+    def test_handoff_revalidates_holder_settings_under_the_lock(
+            self, sup_home, monkeypatch):
+        """A settings read before dispatch must not authorize a changed row."""
+        self._hold()
+        original = fleet._openrouter_dispatch_args
+
+        def mutate_holder(model, settings_path):
+            data = fleet.load_registry()
+            holder = data["workers"]["sup|inc-old|boot"]
+            holder["mode"] = "plan"
+            fleet.save_registry(data)
+            return original(model, settings_path)
+
+        monkeypatch.setattr(fleet, "_openrouter_dispatch_args", mutate_holder)
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="settings changed"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert fleet.supervisor_journal_entries() == []
+
     def test_successor_dispatch_refused_without_rendered_settings(self, sup_home):
         """Same doctrine as cmd_spawn's `_require_instance_settings`: claude
         silently ignores a --settings path that does not exist, so a missing

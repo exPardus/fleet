@@ -94,6 +94,11 @@ def _hold(sid="sid-old", inc="inc-old"):
                              "claimed_at": "2026-07-14T12:00:00Z",
                              "heartbeat_at": "2026-07-14T12:00:00Z",
                              "claimed_via": "fresh"})
+    data = fleet.load_registry()
+    data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+        sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+        setting_sources=None, dispatch_kind="bg", category=None)
+    fleet.save_registry(data)
 
 
 def _dispatch_then_roster(calls):
