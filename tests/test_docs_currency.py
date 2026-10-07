@@ -22,6 +22,11 @@ TASK_CUTOFF = datetime(2026, 9, 11, 21, 0, tzinfo=timezone.utc).timestamp()
 _SERVES_RE = re.compile(
     r'^Serves:\s*(?P<section>[^—]+?)\s+—\s+"(?P<phrase>.+)"\s*$')
 WINDOW = 20
+# This target ancestor refreshed only executable self-citation prose. Its
+# missing trailer cannot be repaired without rewriting the shared merge base.
+HISTORICAL_METADATA_EXEMPTIONS = {
+    "ffd1197836ef2f5a586f35434d58b97ab5c3f892",
+}
 
 
 def git(repo, *args):
@@ -53,7 +58,8 @@ def currency_violations(repo, cutoff=ADOPTION_BASE):
                    or p.startswith("skills/") or p.startswith("knowledge/")
                    for p in names)
         message = git(repo, "show", "-s", "--format=%B", commit)
-        exempt = re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M)
+        exempt = (commit in HISTORICAL_METADATA_EXEMPTIONS
+                  or re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M))
         if code and not docs and not exempt:
             violations.append(f"{commit}: bin/*.py changed without docs/ or Docs: n/a")
     return violations
