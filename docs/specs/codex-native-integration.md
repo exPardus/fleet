@@ -512,7 +512,10 @@ peer-process and PID-reuse acceptance proof.
 
 Interface provider registration is exclusive. A successful native Codex
 registration removes the Claude session and tmux pane identities; a successful
-Claude/tmux registration removes the native Codex claim. Receipt verification
+Claude/tmux registration removes the native Codex claim. Both routes take the
+target home's same `fleet.lock` and perform the competing-provider cleanup
+inside it, so concurrent cross-provider registrations cannot leave both
+families present. Receipt verification
 also rejects a home containing both provider families, so legacy or raced stale
 identity files cannot preserve authority after a provider rotation.
 

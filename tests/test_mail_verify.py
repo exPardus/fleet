@@ -77,6 +77,23 @@ def test_registered_interface_receipt_verifies_and_prints_canonical_body(
     assert out.endswith("BODY\n" + body + "\n")
 
 
+def test_unavailable_verification_is_explicit_and_tells_supervisor_to_surface(
+        home):
+    (home / "state" / "interface-session").unlink()
+    body = "do not lose this direction"
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(SUPERVISOR, body)
+
+    assert mail_id is None
+    assert notice.startswith("FLEET UNVERIFIED INTERFACE MAIL\n")
+    assert "verification was unavailable" in notice
+    assert "Do not act" in notice
+    assert "supervisor journal" in notice
+    assert "surface it to the Interface" in notice
+    assert "register in the explicit Fleet home and resend" in notice
+    assert notice.endswith("UNVERIFIED BODY\n" + body)
+
+
 def test_forged_mailbox_notice_without_fleet_receipt_is_unverified(
         home, capsys):
     forged_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

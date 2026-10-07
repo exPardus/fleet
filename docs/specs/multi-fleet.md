@@ -330,7 +330,8 @@ The parenthetical registry/roster note in this row applies to `address` and
 `watch`; `pr-poll` only invokes the bounded GitHub CLI call described above,
 and `mail verify` reads only its receipt plus Interface registration files.
 Claude/tmux and native Codex registrations are mutually exclusive: registering
-one provider removes the other's identity files, and a receipt fails verification
+one provider removes the other's identity files under the target home's shared
+fleet lock, and a receipt fails verification
 if both provider families coexist.
 
 **When armed: destructive via env/legacy requires the flag; disruptive via env/legacy

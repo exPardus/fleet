@@ -251,8 +251,10 @@ class TestWakeRefusesOnChangedClaim:
 
         rec = fleet.load_registry()["workers"][NAME]
         assert rec["status"] == "idle"                  # pre-claim rolled back
-        assert (fleet.mailbox_dir() / f"{OLD_SID}.md").read_text(encoding="utf-8").strip() \
-            == "wake up"                                 # mailbox restored, not lost
+        restored = (fleet.mailbox_dir() / f"{OLD_SID}.md").read_text(
+            encoding="utf-8").strip()
+        assert restored.startswith("FLEET UNVERIFIED INTERFACE MAIL\n")
+        assert restored.endswith("UNVERIFIED BODY\nwake up")  # restored, not lost
 
     def test_tolerates_a_claim_session_id_still_naming_an_earlier_retired_sid(
             self, wake_home, monkeypatch):
