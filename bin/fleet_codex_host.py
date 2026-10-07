@@ -213,6 +213,26 @@ class Host:
         self.journal.observe(operation_id, result)
         return self.journal.commit(operation_id).get("result")
 
+    def _settle_uncertain_thread_result(
+            self, operation_id: str, deadline: float) -> Any:
+        record = self.journal.load(operation_id)
+        result = record.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
+        thread_id = thread.get("id") if isinstance(thread, dict) else None
+        recovery = record.get("recovery")
+        if not isinstance(thread_id, str) and isinstance(recovery, dict):
+            thread_id = recovery.get("thread_id")
+        if (record.get("state") != "uncertain"
+                or record.get("public_method") not in {
+                    "thread/start", "thread/resume"}
+                or not isinstance(thread_id, str)):
+            raise ValueError("uncertain thread result has no exact public identity")
+        observed = self._recovery_request(
+            "thread/read", {"threadId": thread_id, "includeTurns": True},
+            deadline)
+        return self.journal.adopt_thread_read(
+            operation_id, observed).get("result")
+
     def _recover_spawn_queue_overflow(
             self, operation_id: str, deadline: float) -> Any:
         """Adopt a queue-obscured spawn mutation without replaying it."""
@@ -529,6 +549,10 @@ class Host:
                         state = record.get("state")
                         if state in {"observed", "committed"}:
                             result = record.get("result")
+                        elif state == "uncertain" and public_method in {
+                                "thread/start", "thread/resume"}:
+                            result = self._settle_uncertain_thread_result(
+                                operation_id, deadline)
                         elif state in {"accepted", "uncertain"}:
                             raise ValueError("operation acceptance is uncertain; reconcile before retry")
                         elif state == "failed":
@@ -602,7 +626,14 @@ class Host:
                                     raise ValueError(
                                         "public mutation outcome is uncertain") from failure
                             if not recovered:
-                                self.journal.observe(operation_id, result)
+                                try:
+                                    self.journal.observe(operation_id, result)
+                                except Exception:
+                                    if public_method not in {
+                                            "thread/start", "thread/resume"}:
+                                        raise
+                                    result = self._settle_uncertain_thread_result(
+                                        operation_id, deadline)
                         else:
                             raise ValueError("operation journal has unknown state")
                 elif method == "public-evidence/read":

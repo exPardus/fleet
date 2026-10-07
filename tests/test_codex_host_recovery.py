@@ -302,6 +302,93 @@ def test_journal_redacts_prompts_but_keeps_public_ids(tmp_path):
     assert "turn-1" in text
 
 
+def _resume_result(*, item_text="small result"):
+    return {
+        "thread": {
+            "id": "thread-1", "cwd": "/project", "model": "gpt-5.6-luna",
+            "threadSource": "fleet-test-source",
+            "status": {"type": "idle", "activeFlags": []},
+            "turns": [
+                {"id": "turn-0", "status": "completed", "items": []},
+                {"id": "turn-1", "status": "completed", "items": [{
+                    "id": "item-1", "type": "agentMessage", "text": item_text,
+                }]},
+            ],
+        },
+        "cwd": "/project", "model": "gpt-5.6-luna",
+        "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": {"type": "workspaceWrite"},
+    }
+
+
+def test_large_resume_result_persists_as_a_bounded_projection_and_commits(tmp_path):
+    module, home, journal, operation, _record = _prepared_record(
+        tmp_path, "thread/resume", "after-send")
+
+    observed = journal.observe(
+        operation["operation_id"], _resume_result(item_text="x" * (96 * 1024)))
+    committed = journal.commit(operation["operation_id"])
+
+    assert observed["result"] == {
+        "thread": {
+            "id": "thread-1", "cwd": "/project", "model": "gpt-5.6-luna",
+            "threadSource": "fleet-test-source",
+            "status": {"type": "idle", "activeFlags": []},
+        },
+        "cwd": "/project", "model": "gpt-5.6-luna",
+        "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": {"type": "workspaceWrite"},
+        "turnCount": 2,
+        "newestTurn": {"id": "turn-1", "status": "completed"},
+    }
+    assert committed["state"] == "committed"
+    path = journal.path(operation["operation_id"])
+    assert path.stat().st_size < module.MAX_METADATA_BYTES
+    assert "x" * 100 not in path.read_text()
+
+
+def test_observe_persistence_failure_moves_accepted_operation_to_uncertain(
+        tmp_path, monkeypatch):
+    module, _home, journal, operation, _record = _prepared_record(
+        tmp_path, "thread/resume", "after-send")
+    real_atomic_json = module._atomic_json
+
+    def fail_result_persistence(path, value):
+        if value.get("state") in {"observed", "uncertain"} \
+                and "result" in value:
+            raise OSError("injected observed persistence failure")
+        return real_atomic_json(path, value)
+
+    monkeypatch.setattr(module, "_atomic_json", fail_result_persistence)
+
+    with pytest.raises(OSError, match="injected observed persistence failure"):
+        journal.observe(operation["operation_id"], _resume_result())
+
+    record = journal.load(operation["operation_id"])
+    assert record["state"] == "uncertain"
+    assert "result persistence failed" in record["reason"]
+    assert "result" not in record
+
+
+def test_uncertain_resume_settles_from_exact_public_thread_and_unblocks_mutation(
+        tmp_path):
+    _module_value, _home, journal, operation, _record = _prepared_record(
+        tmp_path, "thread/resume", "after-send")
+    journal.uncertain(operation["operation_id"], "provider response lost")
+
+    adopted = journal.adopt_thread_read(
+        operation["operation_id"], _resume_result(item_text="public read body"))
+    assert adopted["state"] == "observed"
+    assert adopted["result"]["newestTurn"] == {
+        "id": "turn-1", "status": "completed"}
+    journal.commit(operation["operation_id"])
+
+    next_operation = _mutation("next-operation", "turn/start")
+    journal.prepare(next_operation)
+    assert journal.unresolved_predecessor("next-operation") is None
+    assert journal.accept("next-operation")["state"] == "accepted"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX owner-only mode assertion")
 def test_operation_journal_is_owner_only(tmp_path):
     _module_value, home, journal, operation, _record = _prepared_record(

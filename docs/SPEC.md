@@ -338,6 +338,17 @@ the host replaces its failed stdio child and adopts the original spawn journal
 entry only from an operation-tagged empty thread with matching effective
 settings, or exactly one public turn beyond the bound history watermark;
 otherwise the row stays uncertain with a queue-bound/concurrency remedy.
+Operation-journal results for `thread/start` and `thread/resume` are bounded
+projections, not provider transcripts: they retain the thread id, cwd, model,
+status, total turn count, newest turn id/status, and the small effective-policy
+fields needed by replay readers, while omitting turn item bodies. A failure to
+persist the observed projection after provider acceptance durably changes the
+operation to `uncertain` with a reason, retaining the projection when the
+metadata store can accept it; it never leaves the entry `accepted`. The host may
+settle that uncertain entry without replaying the mutation by reading the exact
+projected or recovery-bound thread and matching its cwd, turn count, and newest
+turn identity. After the caller commits the adopted result, the predecessor
+fence clears and later native mutations may proceed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

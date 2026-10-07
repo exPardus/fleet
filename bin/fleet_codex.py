@@ -570,6 +570,79 @@ def _public_evidence(value: Any, key: str | None = None) -> Any:
     return "<unsupported>"
 
 
+_OPERATION_PROJECTION_TEXT_MAX = 4096
+
+
+def _project_text(value: Any, *, maximum: int = _OPERATION_PROJECTION_TEXT_MAX) -> Any:
+    if isinstance(value, str):
+        encoded = json.dumps(value, ensure_ascii=True).encode("utf-8")
+        return value if len(encoded) <= maximum else "<oversized>"
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return "<unsupported>"
+
+
+def _project_thread_status(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return _project_text(value, maximum=160)
+    projected = {}
+    if "type" in value:
+        projected["type"] = _project_text(value.get("type"), maximum=160)
+    flags = value.get("activeFlags")
+    if isinstance(flags, list):
+        projected["activeFlags"] = [
+            _project_text(flag, maximum=160) for flag in flags[:16]]
+    return projected
+
+
+def _thread_result_projection(value: Any) -> dict[str, Any]:
+    source = value if isinstance(value, Mapping) else {}
+    raw_thread = source.get("thread")
+    thread = raw_thread if isinstance(raw_thread, Mapping) else {}
+    projected_thread = {}
+    for key, maximum in (
+            ("id", 256), ("cwd", _OPERATION_PROJECTION_TEXT_MAX),
+            ("model", 256), ("threadSource", 512)):
+        if key in thread:
+            projected_thread[key] = _project_text(
+                thread.get(key), maximum=maximum)
+    if "status" in thread:
+        projected_thread["status"] = _project_thread_status(thread.get("status"))
+
+    projection: dict[str, Any] = {"thread": projected_thread}
+    for key, maximum in (
+            ("cwd", _OPERATION_PROJECTION_TEXT_MAX), ("model", 256),
+            ("approvalPolicy", 160), ("approvalsReviewer", 160)):
+        if key in source:
+            projection[key] = _project_text(source.get(key), maximum=maximum)
+    sandbox = source.get("sandbox")
+    if isinstance(sandbox, Mapping):
+        projection["sandbox"] = {
+            "type": _project_text(sandbox.get("type"), maximum=160)}
+
+    turns = thread.get("turns")
+    if isinstance(turns, list):
+        projection["turnCount"] = len(turns)
+        newest = turns[-1] if turns else None
+    else:
+        count = source.get("turnCount")
+        if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+            projection["turnCount"] = count
+        newest = source.get("newestTurn")
+    if isinstance(newest, Mapping):
+        projection["newestTurn"] = {
+            "id": _project_text(newest.get("id"), maximum=256),
+            "status": _project_text(newest.get("status"), maximum=160),
+        }
+    return projection
+
+
+def _operation_result_projection(record: Mapping[str, Any], result: Any) -> Any:
+    if record.get("public_method") in {"thread/start", "thread/resume"}:
+        return _thread_result_projection(result)
+    return _public_evidence(result)
+
+
 def _public_method(method: str, payload: Any) -> str | None:
     if method != "rpc" or not isinstance(payload, dict):
         return None
@@ -1258,9 +1331,37 @@ class OperationJournal:
         return self._transition(operation_id, {"prepared"}, "accepted")
 
     def observe(self, operation_id: str, result: Any) -> dict[str, Any]:
-        return self._transition(
-            operation_id, {"accepted"}, "observed",
-            result=_public_evidence(result))
+        record = self.load(operation_id)
+        if record.get("state") == "observed":
+            return record
+        if record.get("state") != "accepted":
+            raise HostRejected(
+                f"operation {operation_id} cannot move from "
+                f"{record.get('state')} to observed")
+        projection = _operation_result_projection(record, result)
+        try:
+            return self._transition(
+                operation_id, {"accepted"}, "observed", result=projection)
+        except BaseException as exc:
+            reason = (
+                "result persistence failed after provider acceptance: "
+                f"{type(exc).__name__}: {exc}")[:500]
+            try:
+                self._transition(
+                    operation_id, {"accepted", "observed"}, "uncertain",
+                    reason=reason, result=projection)
+            except BaseException:
+                try:
+                    current = self.load(operation_id)
+                    if current.get("state") != "uncertain":
+                        self._transition(
+                            operation_id, {"accepted", "observed"}, "uncertain",
+                            reason=reason)
+                except BaseException as marker_exc:
+                    raise UnsafeHostState(
+                        f"operation {operation_id} result persistence failed and "
+                        "the uncertain marker could not be persisted") from marker_exc
+            raise
 
     def commit(self, operation_id: str) -> dict[str, Any]:
         return self._transition(operation_id, {"observed"}, "committed")
@@ -1373,7 +1474,8 @@ class OperationJournal:
                     or thread.get("cwd") != recovery.get("canonical_cwd")
                     or result.get("cwd") != recovery.get("canonical_cwd")
                     or thread.get("threadSource") != recovery.get("thread_source")
-                    or thread.get("turns") != []
+                    or result.get("turnCount") != 0
+                    or result.get("newestTurn") is not None
                     or result.get("model") != expected.get("model")
                     or approval not in approval_policies
                     or result.get("approvalsReviewer") != "user"
@@ -1398,10 +1500,70 @@ class OperationJournal:
         else:
             raise HostRejected(
                 f"operation {operation_id} is not a spawn thread/turn intent")
-        evidence = _public_evidence(dict(result))
+        evidence = _operation_result_projection(record, dict(result))
         evidence["adoptedFromQueueOverflow"] = True
         return self._transition(
             operation_id, {"uncertain"}, "observed", result=evidence)
+
+    def adopt_thread_read(
+            self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
+        record = self.load(operation_id)
+        public_method = record.get("public_method")
+        recovery = record.get("recovery")
+        prior = record.get("result")
+        if (record.get("state") != "uncertain"
+                or public_method not in {"thread/start", "thread/resume"}
+                or not isinstance(recovery, Mapping)
+                or not isinstance(result, Mapping)):
+            raise HostRejected(
+                f"operation {operation_id} is not an uncertain thread intent")
+        projection = _thread_result_projection(result)
+        thread = projection.get("thread")
+        prior_thread = prior.get("thread") if isinstance(prior, Mapping) else None
+        if not isinstance(thread, Mapping):
+            raise HostRejected(
+                f"operation {operation_id} public thread evidence is malformed")
+        expected_thread_id = recovery.get("thread_id")
+        if not isinstance(expected_thread_id, str) and isinstance(prior_thread, Mapping):
+            expected_thread_id = prior_thread.get("id")
+        expected_cwd = recovery.get("canonical_cwd")
+        if not isinstance(expected_cwd, str) and isinstance(prior_thread, Mapping):
+            expected_cwd = prior_thread.get("cwd")
+        if (not isinstance(expected_thread_id, str)
+                or thread.get("id") != expected_thread_id
+                or not isinstance(expected_cwd, str)
+                or thread.get("cwd") != expected_cwd):
+            raise HostRejected(
+                f"operation {operation_id} public thread identity does not match")
+        actual_count = projection.get("turnCount")
+        prior_count = prior.get("turnCount") if isinstance(prior, Mapping) else None
+        if (not isinstance(actual_count, int) or isinstance(actual_count, bool)
+                or (isinstance(prior_count, int) and actual_count != prior_count)
+                or (public_method == "thread/start" and actual_count != 0)):
+            raise HostRejected(
+                f"operation {operation_id} public thread history does not match")
+        prior_newest = prior.get("newestTurn") if isinstance(prior, Mapping) else None
+        actual_newest = projection.get("newestTurn")
+        if (isinstance(prior_newest, Mapping)
+                and (not isinstance(actual_newest, Mapping)
+                     or actual_newest.get("id") != prior_newest.get("id"))):
+            raise HostRejected(
+                f"operation {operation_id} newest public turn does not match")
+
+        if isinstance(prior, Mapping):
+            for key in ("cwd", "model", "approvalPolicy", "approvalsReviewer",
+                        "sandbox"):
+                if key not in projection and key in prior:
+                    projection[key] = prior[key]
+            if isinstance(prior_thread, Mapping):
+                merged_thread = dict(thread)
+                for key in ("model", "threadSource"):
+                    if key not in merged_thread and key in prior_thread:
+                        merged_thread[key] = prior_thread[key]
+                projection["thread"] = merged_thread
+        projection["adoptedFromPublicRead"] = True
+        return self._transition(
+            operation_id, {"uncertain"}, "observed", result=projection)
 
     def uncertain(self, operation_id: str, reason: str) -> dict[str, Any]:
         return self._transition(
