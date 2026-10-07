@@ -21282,7 +21282,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     print(f"SUCCESSOR-SID: {successor_sid}")
     complete_timeout = getattr(args, "complete_timeout", None)
     if complete_timeout is not None:
-        def abort_successor_scoped():
+        def prepare_successor_scoped_abort_locked():
             expected_hash = handoff_claim_snapshot.get("handoff_token_hash")
             entry = handoff_entry_matching(
                 handoff_claim_snapshot, successor_sid=successor_sid,
@@ -21292,30 +21292,32 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 raise FleetCliError(
                     "automatic successor-scoped abort lacks the original "
                     "incarnation/token proof")
-            with fleet_lock():
-                current = read_incarnation()
-                if _claim_is_transferred_successor(current, successor_inc):
-                    print(f"automatic abort skipped: successor {successor_inc} "
-                          "already holds the committed supervisor claim")
-                    return
-                hs = read_handshake()
-                target_sid = successor_sid
-                if (isinstance(hs, dict)
-                        and hs.get("incarnation_id") == successor_inc
-                        and hs.get("handoff_token_hash") == expected_hash
-                        and isinstance(hs.get("session_id"), str)
-                        and hs.get("session_id")):
-                    target_sid = hs["session_id"]
-                if (isinstance(hs, dict)
-                        and hs.get("incarnation_id") == successor_inc
-                        and (hs.get("handoff_token_hash") == expected_hash
-                             or hs.get("session_id") == successor_sid)):
-                    try:
-                        handshake_path().unlink()
-                    except FileNotFoundError:
-                        pass
-                unlink_handoff_task_file(
-                    successor_inc, context=" (successor-scoped abort)")
+            current = read_incarnation()
+            if _claim_is_transferred_successor(current, successor_inc):
+                print(f"automatic abort skipped: successor {successor_inc} "
+                      "already holds the committed supervisor claim")
+                return None
+            hs = read_handshake()
+            target_sid = successor_sid
+            if (isinstance(hs, dict)
+                    and hs.get("incarnation_id") == successor_inc
+                    and hs.get("handoff_token_hash") == expected_hash
+                    and isinstance(hs.get("session_id"), str)
+                    and hs.get("session_id")):
+                target_sid = hs["session_id"]
+            if (isinstance(hs, dict)
+                    and hs.get("incarnation_id") == successor_inc
+                    and (hs.get("handoff_token_hash") == expected_hash
+                         or hs.get("session_id") == successor_sid)):
+                try:
+                    handshake_path().unlink()
+                except FileNotFoundError:
+                    pass
+            unlink_handoff_task_file(
+                successor_inc, context=" (successor-scoped abort)")
+            return target_sid
+
+        def finish_successor_scoped_abort(target_sid):
             stopped = _stop_native_session(
                 target_sid, run=run, which=which, timeout=60)
             _write_json_atomic(handoff_abort_flag_path(), {
@@ -21330,29 +21332,44 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 print(f"WARNING: successor-scoped `claude stop {target_sid}` failed; "
                       "the changed supervisor claim was not modified")
 
+        def abort_successor_scoped():
+            with fleet_lock():
+                target_sid = prepare_successor_scoped_abort_locked()
+            if target_sid is not None:
+                finish_successor_scoped_abort(target_sid)
+
         def abort_combined():
             abort_args = SimpleNamespace(
                 sid=caller, nonce=continuity_nonce,
                 successor_sid=successor_sid, successor_inc=successor_inc,
                 retire_all=False, force=False)
+            ordinary_plan = None
+            scoped_sid = None
             try:
-                claim_unchanged = read_incarnation() == handoff_claim_snapshot
+                with fleet_lock():
+                    current = read_incarnation()
+                    if _claim_is_transferred_successor(current, successor_inc):
+                        print(f"automatic abort skipped: successor {successor_inc} "
+                              "already holds the committed supervisor claim")
+                        return
+                    if current == handoff_claim_snapshot:
+                        ordinary_plan = _prepare_sup_handoff_abort_locked(
+                            abort_args, force=False)
+                    else:
+                        scoped_sid = prepare_successor_scoped_abort_locked()
             except Exception as abort_exc:
-                claim_unchanged = False
-                print(f"WARNING: automatic abort could not read the current claim: "
-                      f"{abort_exc}")
-            if claim_unchanged:
+                print(f"WARNING: locked automatic abort failed: {abort_exc}")
                 try:
-                    cmd_sup_handoff_abort(
-                        abort_args, which=which, run=run,
-                        guard_successor_inc=successor_inc)
-                    return
-                except Exception as abort_exc:
-                    print(f"WARNING: ordinary automatic abort failed: {abort_exc}")
-            try:
-                abort_successor_scoped()
-            except Exception as abort_exc:
-                print(f"WARNING: successor-scoped automatic abort failed: {abort_exc}")
+                    abort_successor_scoped()
+                except Exception as scoped_exc:
+                    print(f"WARNING: successor-scoped automatic abort failed: "
+                          f"{scoped_exc}")
+                return
+            if ordinary_plan is not None:
+                _finish_sup_handoff_abort(
+                    ordinary_plan, run=run, which=which)
+            elif scoped_sid is not None:
+                finish_successor_scoped_abort(scoped_sid)
 
         transfer_committed = False
 
@@ -21593,81 +21610,63 @@ def _claim_is_transferred_successor(claim, successor_inc):
             and bool(claim.get("session_id")))
 
 
-def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run,
-                          guard_successor_inc=None) -> int:
-    """Resolve and abort one recorded successor, or bulk-retire eligible entries.
-    Cross-check HANDSHAKE and pending records through resolve_handoff_abort;
-    never stop an arbitrary unverified sid. Use claude stop, not a raw kill,
-    then remove HANDSHAKE and raise the doctor-visible abort flag. Claude stop
-    fires no Stop hook, so it supplies no successor journal entry.
-    An incarnation handle can also retire an aged-out sid-less entry; that
-    path stops nothing and reports retirement without claiming a stop."""
+def _prepare_sup_handoff_abort_locked(args, force=False):
     successor_sid = getattr(args, "successor_sid", None)
     successor_inc = getattr(args, "successor_inc", None)
-    force = bool(getattr(args, "force", False))
-    if getattr(args, "retire_all", False):
-        if successor_sid or successor_inc:
-            raise FleetCliError(
-                "--retire-all takes no handle: it retires EVERY retirable entry. "
-                "Drop --successor-sid/--successor-inc, or drop --retire-all to "
-                "retire exactly one")
-        return _cmd_sup_handoff_retire_all(args, force=force)
-    if not successor_sid and not successor_inc:
-        raise FleetCliError("sup-handoff-abort needs --successor-sid, --successor-inc "
-                            "or --retire-all "
-                            "(see `fleet sup-status --json` for the pending successors)")
-    with fleet_lock():
-        if (guard_successor_inc is not None
-                and _claim_is_transferred_successor(
-                    read_incarnation(), guard_successor_inc)):
-            print(f"automatic abort skipped: successor {guard_successor_inc} "
-                  "already holds the committed supervisor claim")
-            return 0
-        # The old side RESUMES duty here (it rewrites its own heartbeat
-        # below), so it mints and is delivered a fresh generation like any
-        # other continuing verb.
-        claim, caller, notices = _require_claim_holder(
-            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
-            verb="sup-handoff-abort")
-        verdict = resolve_handoff_abort(claim, read_handshake(),
-                                        successor_sid=successor_sid,
-                                        successor_inc=successor_inc,
-                                        force=force)
-        if verdict["action"] == "refuse":
-            raise FleetCliError(verdict["reason"])
-        retiring = verdict["action"] == "retire"
-        target_sid, aborted_inc = verdict["sid"], verdict["inc"]
-        try:
-            handshake_path().unlink()
-        except FileNotFoundError:
-            pass
-        # Unlink the aborted token file. Only absence is silent: failure to remove
-        # a plaintext token must remain visible.
-        if aborted_inc:
-            unlink_handoff_task_file(aborted_inc, context=" (handoff abort)")
-        supervisor_journal_append(
-            "HANDOFF-ABORT", claim["incarnation_id"], caller,
-            f"retiring stale successor {aborted_inc} (no sid was ever recorded; "
-            f"via {verdict.get('via')})"
-            if retiring else
-            f"stopping limbo successor sid={target_sid} inc={aborted_inc} "
-            f"(via {verdict.get('via')})")
-        _write_json_atomic(handoff_abort_flag_path(), {
-            "aborted_at": now_iso(),
-            "reason": "stale-entry-retired" if retiring else "aborted",
-            "successor_sid": target_sid,
-            "successor_inc": aborted_inc,
-            "holder": claim["incarnation_id"],
-        })
-        claim["heartbeat_at"] = now_iso()   # old resumes duty
-        # Retire only this attempt. Drop the claim token hash with the last entry
-        # so stranded plaintext no longer validates.
-        if verdict.get("entry") is not None:
-            drop_handoff_entry(claim, verdict["entry"])
-        write_incarnation(claim)
-        # D2/R2: age-gated, fail-closed sweep of ownerless residue, under the
-        # lock we already hold. It cannot reach a surviving entry's file.
-        sweep_handoff_task_files(claim)
+    # The old side RESUMES duty here (it rewrites its own heartbeat
+    # below), so it mints and is delivered a fresh generation like any
+    # other continuing verb.
+    claim, caller, notices = _require_claim_holder(
+        getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+        verb="sup-handoff-abort")
+    verdict = resolve_handoff_abort(claim, read_handshake(),
+                                    successor_sid=successor_sid,
+                                    successor_inc=successor_inc,
+                                    force=force)
+    if verdict["action"] == "refuse":
+        raise FleetCliError(verdict["reason"])
+    retiring = verdict["action"] == "retire"
+    target_sid, aborted_inc = verdict["sid"], verdict["inc"]
+    try:
+        handshake_path().unlink()
+    except FileNotFoundError:
+        pass
+    # Unlink the aborted token file. Only absence is silent: failure to remove
+    # a plaintext token must remain visible.
+    if aborted_inc:
+        unlink_handoff_task_file(aborted_inc, context=" (handoff abort)")
+    supervisor_journal_append(
+        "HANDOFF-ABORT", claim["incarnation_id"], caller,
+        f"retiring stale successor {aborted_inc} (no sid was ever recorded; "
+        f"via {verdict.get('via')})"
+        if retiring else
+        f"stopping limbo successor sid={target_sid} inc={aborted_inc} "
+        f"(via {verdict.get('via')})")
+    _write_json_atomic(handoff_abort_flag_path(), {
+        "aborted_at": now_iso(),
+        "reason": "stale-entry-retired" if retiring else "aborted",
+        "successor_sid": target_sid,
+        "successor_inc": aborted_inc,
+        "holder": claim["incarnation_id"],
+    })
+    claim["heartbeat_at"] = now_iso()   # old resumes duty
+    # Retire only this attempt. Drop the claim token hash with the last entry
+    # so stranded plaintext no longer validates.
+    if verdict.get("entry") is not None:
+        drop_handoff_entry(claim, verdict["entry"])
+    write_incarnation(claim)
+    # D2/R2: age-gated, fail-closed sweep of ownerless residue, under the
+    # lock we already hold. It cannot reach a surviving entry's file.
+    sweep_handoff_task_files(claim)
+    return {"retiring": retiring, "target_sid": target_sid,
+            "aborted_inc": aborted_inc, "claim": claim,
+            "notices": notices, "verdict": verdict}
+
+
+def _finish_sup_handoff_abort(plan, which=shutil.which, run=subprocess.run) -> int:
+    retiring = plan["retiring"]
+    target_sid, aborted_inc = plan["target_sid"], plan["aborted_inc"]
+    claim, notices, verdict = plan["claim"], plan["notices"], plan["verdict"]
     if retiring:
         why = {
             "stale-entry": "no sid was ever recorded for it (dispatch never joined "
@@ -21694,6 +21693,33 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run,
               f"{claim['incarnation_id']}. Doctor will flag until the abort flag is cleared.")
     _deliver_notices(notices)
     return 0
+
+
+def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
+    """Resolve and abort one recorded successor, or bulk-retire eligible entries.
+    Cross-check HANDSHAKE and pending records through resolve_handoff_abort;
+    never stop an arbitrary unverified sid. Use claude stop, not a raw kill,
+    then remove HANDSHAKE and raise the doctor-visible abort flag. Claude stop
+    fires no Stop hook, so it supplies no successor journal entry.
+    An incarnation handle can also retire an aged-out sid-less entry; that
+    path stops nothing and reports retirement without claiming a stop."""
+    successor_sid = getattr(args, "successor_sid", None)
+    successor_inc = getattr(args, "successor_inc", None)
+    force = bool(getattr(args, "force", False))
+    if getattr(args, "retire_all", False):
+        if successor_sid or successor_inc:
+            raise FleetCliError(
+                "--retire-all takes no handle: it retires EVERY retirable entry. "
+                "Drop --successor-sid/--successor-inc, or drop --retire-all to "
+                "retire exactly one")
+        return _cmd_sup_handoff_retire_all(args, force=force)
+    if not successor_sid and not successor_inc:
+        raise FleetCliError("sup-handoff-abort needs --successor-sid, --successor-inc "
+                            "or --retire-all "
+                            "(see `fleet sup-status --json` for the pending successors)")
+    with fleet_lock():
+        plan = _prepare_sup_handoff_abort_locked(args, force=force)
+    return _finish_sup_handoff_abort(plan, run=run, which=which)
 
 
 def supervisor_goals_active() -> bool:

@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2964,12 +2965,13 @@ class TestHandoff:
         live = self._hold_v2()
         run = self._dispatch_then_roster()
         aborted = []
+        real_prepare = fleet._prepare_sup_handoff_abort_locked
 
-        def abort(args, **_kw):
+        def prepare(args, force=False):
             aborted.append(args)
-            return 0
+            return real_prepare(args, force=force)
 
-        monkeypatch.setattr(fleet, "cmd_sup_handoff_abort", abort)
+        monkeypatch.setattr(fleet, "_prepare_sup_handoff_abort_locked", prepare)
         with pytest.raises(fleet.FleetCliError, match="timed out after 0s"):
             self._begin(run, complete_timeout=0, nonce=live)
         assert len(aborted) == 1
@@ -3091,43 +3093,61 @@ class TestHandoff:
         assert fleet.read_incarnation()["incarnation_id"].startswith("inc-")
         assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
 
-    def test_begin_timeout_rechecks_transfer_after_abort_precheck(
+    def test_begin_timeout_decides_after_transfer_at_abort_lock(
             self, sup_home, monkeypatch):
-        """The successor may take the claim after the unlocked precheck.
+        """The successor may take the claim as automatic abort takes its lock.
 
-        Force the transfer after `abort_combined` reads the predecessor claim but
-        before the ordinary abort takes its lock. Its continuity refusal must not
-        send the transferred successor into the scoped stop fallback.
+        The outer complete fails first. Immediately before abort acquires its
+        decision lock, a competing two-verb complete commits the successor.
         """
         live = self._hold_v2()
         run = self._dispatch_then_roster()
-        original_abort = fleet.cmd_sup_handoff_abort
+        clock = self._Clock()
+        real_lock = fleet.fleet_lock
+        armed = False
+        armed_lock_calls = 0
         transferred = False
         monkeypatch.setattr(
             fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
 
-        def transfer_then_abort(args, **kwargs):
-            nonlocal transferred
-            claim = fleet.read_incarnation()
-            entry = fleet.handoff_pending_entries(claim)[0]
-            successor_nonce = fleet.mint_nonce()
-            fleet.write_handshake(
-                entry["successor_inc"], entry["successor_sid"],
-                handoff_token_hash=claim["handoff_token_hash"],
-                nonce_hash=fleet.nonce_digest(successor_nonce))
-            assert fleet.cmd_sup_handoff_complete(
-                SimpleNamespace(
-                    sid="sid-old", nonce=live,
-                    expect_inc=entry["successor_inc"],
-                    expect_sid=entry["successor_sid"]),
-                run=run, which=_fake_which) == 0
-            transferred = True
-            return original_abort(args, **kwargs)
+        @contextmanager
+        def racing_lock(*args, **kwargs):
+            nonlocal armed_lock_calls, transferred
+            if armed:
+                armed_lock_calls += 1
+            if armed and armed_lock_calls == 2:
+                claim = fleet.read_incarnation()
+                entry = fleet.handoff_pending_entries(claim)[0]
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+                monkeypatch.setattr(fleet, "fleet_lock", real_lock)
+                try:
+                    assert fleet.cmd_sup_handoff_complete(
+                        SimpleNamespace(
+                            sid="sid-old", nonce=live,
+                            expect_inc=entry["successor_inc"],
+                            expect_sid=entry["successor_sid"]),
+                        run=run, which=_fake_which) == 0
+                    transferred = True
+                finally:
+                    monkeypatch.setattr(fleet, "fleet_lock", racing_lock)
+            with real_lock(*args, **kwargs):
+                yield
 
-        monkeypatch.setattr(fleet, "cmd_sup_handoff_abort", transfer_then_abort)
-        with pytest.raises(fleet.FleetCliError, match="timed out after 0s"):
-            self._begin(run, complete_timeout=0, nonce=live)
+        def arm_race(seconds):
+            nonlocal armed
+            armed = True
+            clock.advance(seconds)
+
+        monkeypatch.setattr(fleet, "fleet_lock", racing_lock)
+        with pytest.raises(fleet.FleetCliError, match="timed out after 0.25s"):
+            self._begin(
+                run, clock=clock, sleep=arm_race,
+                complete_timeout=0.25, nonce=live)
         assert transferred is True
+        assert armed_lock_calls == 2
         claim = fleet.read_incarnation()
         assert claim["claimed_via"] == "handoff"
         assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)

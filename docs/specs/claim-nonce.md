@@ -1865,12 +1865,12 @@ equality — the same root cause, third instance.
    atomic HANDSHAKE without holding `fleet.lock`, and passes the same value into the existing
    complete transition. A `finally` guard aborts after every exception before the transferred claim
    commit and never after that commit. If the claim changes while waiting, completion refuses; the
-   stale predecessor generation is not presented again. The successor-scoped abort rechecks the
-   current claim under `fleet_lock`; a completed transfer to that successor makes it refuse without
-   a stop or cleanup. Otherwise the retained successor incarnation, pending-entry snapshot, and
-   one-shot token prove which dispatched body to stop; it removes only that body's HANDSHAKE/task
-   artifacts under the same lock, then stops it without writing the new holder's claim. Without the
-   option, the separate `sup-handoff-complete` and
+   stale predecessor generation is not presented again. Automatic abort makes one decision under
+   `fleet_lock`: the retained predecessor snapshot takes the ordinary abort transition, a completed
+   transfer to that successor is a no-op, and any other changed claim prepares only the retained
+   incarnation/token-proven cleanup. The chosen stop runs after the lock. There is no unlocked
+   precheck from which a competing transfer can fall through into successor-scoped stop. Without
+   the option, the separate `sup-handoff-complete` and
    `sup-handoff-abort` commands remain unchanged.
 
 `sup-handoff-abort` is unchanged — **both** of its sid checks (the HANDSHAKE arm @7441-7445 and the
