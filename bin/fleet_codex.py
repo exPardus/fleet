@@ -1537,16 +1537,29 @@ class OperationJournal:
                 f"operation {operation_id} public thread identity does not match")
         actual_count = projection.get("turnCount")
         prior_count = prior.get("turnCount") if isinstance(prior, Mapping) else None
+        expected_count = prior_count
+        if not isinstance(expected_count, int) or isinstance(expected_count, bool):
+            expected_count = recovery.get("history_watermark")
+        if public_method == "thread/start":
+            expected_count = 0
         if (not isinstance(actual_count, int) or isinstance(actual_count, bool)
-                or (isinstance(prior_count, int) and actual_count != prior_count)
-                or (public_method == "thread/start" and actual_count != 0)):
+                or not isinstance(expected_count, int)
+                or isinstance(expected_count, bool)
+                or expected_count < 0
+                or actual_count != expected_count):
             raise HostRejected(
                 f"operation {operation_id} public thread history does not match")
         prior_newest = prior.get("newestTurn") if isinstance(prior, Mapping) else None
         actual_newest = projection.get("newestTurn")
-        if (isinstance(prior_newest, Mapping)
-                and (not isinstance(actual_newest, Mapping)
-                     or actual_newest.get("id") != prior_newest.get("id"))):
+        expected_newest_id = prior_newest.get("id") \
+            if isinstance(prior_newest, Mapping) else None
+        if not isinstance(expected_newest_id, str):
+            expected_newest_id = recovery.get("turn_id")
+        if ((expected_count == 0 and actual_newest is not None)
+                or (expected_count > 0
+                    and (not isinstance(expected_newest_id, str)
+                         or not isinstance(actual_newest, Mapping)
+                         or actual_newest.get("id") != expected_newest_id))):
             raise HostRejected(
                 f"operation {operation_id} newest public turn does not match")
 

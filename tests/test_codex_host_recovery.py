@@ -26,8 +26,9 @@ def _mutation(operation_id="turn-op", public_method="turn/start", value=1):
         "recovery": {
             "kind": public_method,
             "thread_id": "thread-1",
+            "turn_id": "turn-1",
             "canonical_cwd": "/project",
-            "history_watermark": 4,
+            "history_watermark": 2,
         },
     }
 
@@ -387,6 +388,27 @@ def test_uncertain_resume_settles_from_exact_public_thread_and_unblocks_mutation
     journal.prepare(next_operation)
     assert journal.unresolved_predecessor("next-operation") is None
     assert journal.accept("next-operation")["state"] == "accepted"
+
+
+@pytest.mark.parametrize("mismatch", ["turn-count", "newest-turn"])
+def test_uncertain_resume_refuses_mismatched_public_thread_history(
+        tmp_path, mismatch):
+    module, _home, journal, operation, _record = _prepared_record(
+        tmp_path, "thread/resume", "after-send")
+    journal.uncertain(operation["operation_id"], "provider response lost")
+    result = _resume_result()
+    if mismatch == "turn-count":
+        result["thread"]["turns"].append({
+            "id": "turn-2", "status": "completed", "items": []})
+        match = "history"
+    else:
+        result["thread"]["turns"][-1]["id"] = "turn-other"
+        match = "newest"
+
+    with pytest.raises(module.HostRejected, match=match):
+        journal.adopt_thread_read(operation["operation_id"], result)
+
+    assert journal.load(operation["operation_id"])["state"] == "uncertain"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX owner-only mode assertion")

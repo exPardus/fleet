@@ -347,8 +347,9 @@ operation to `uncertain` with a reason, retaining the projection when the
 metadata store can accept it; it never leaves the entry `accepted`. The host may
 settle that uncertain entry without replaying the mutation by reading the exact
 projected or recovery-bound thread and matching its cwd, turn count, and newest
-turn identity. After the caller commits the adopted result, the predecessor
-fence clears and later native mutations may proceed.
+turn identity; incomplete recovery identity refuses adoption. After the caller
+commits the adopted result, the predecessor fence clears and later native
+mutations may proceed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

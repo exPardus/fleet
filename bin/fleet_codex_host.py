@@ -180,7 +180,8 @@ class Host:
         return matches[0]
 
     def _resume_recovery_thread(self, parent_operation_id: str,
-                                thread_id: str, deadline: float) -> Any:
+                                thread_id: str, canonical_cwd: str,
+                                deadline: float) -> Any:
         """Load an exact empty thread under its own durable, one-shot intent."""
         operation_id = "queue-recovery-" + hashlib.sha256(
             parent_operation_id.encode("utf-8")).hexdigest()
@@ -194,6 +195,8 @@ class Host:
                 "kind": "queue-overflow-thread-resume",
                 "parent_operation_id": parent_operation_id,
                 "thread_id": thread_id,
+                "canonical_cwd": canonical_cwd,
+                "history_watermark": 0,
             },
         }
         record = self.journal.prepare(operation)
@@ -245,7 +248,8 @@ class Host:
         if public_method == "thread/start":
             candidate = self._find_recovery_thread(recovery, deadline)
             resumed = self._resume_recovery_thread(
-                operation_id, candidate["id"], deadline)
+                operation_id, candidate["id"], recovery["canonical_cwd"],
+                deadline)
             if not isinstance(resumed, dict) or not isinstance(
                     resumed.get("thread"), dict):
                 raise ValueError("thread/resume recovery evidence is malformed")
