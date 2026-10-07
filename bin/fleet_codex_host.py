@@ -200,9 +200,15 @@ class Host:
             },
         }
         record = self.journal.prepare(operation)
-        if record.get("state") in {"observed", "committed"}:
+        state = record.get("state")
+        if state == "committed":
             return record.get("result")
-        if record.get("state") != "prepared":
+        if state == "observed":
+            return self.journal.commit(operation_id).get("result")
+        if state == "uncertain":
+            self._settle_uncertain_thread_result(operation_id, deadline)
+            return self.journal.commit(operation_id).get("result")
+        if state != "prepared":
             raise ValueError("thread/resume recovery intent is unresolved")
         self.journal.accept(operation_id)
         try:
@@ -213,7 +219,12 @@ class Host:
                 operation_id,
                 f"thread/resume recovery outcome unknown: {type(exc).__name__}")
             raise
-        self.journal.observe(operation_id, result)
+        try:
+            self.journal.observe(operation_id, result)
+        except Exception:
+            if self.journal.load(operation_id).get("state") != "uncertain":
+                raise
+            self._settle_uncertain_thread_result(operation_id, deadline)
         return self.journal.commit(operation_id).get("result")
 
     def _settle_uncertain_thread_result(

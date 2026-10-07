@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import stat
@@ -13,6 +14,14 @@ def _module():
     except ModuleNotFoundError:
         pytest.fail("bin/fleet_codex.py is not implemented")
     return fleet_codex
+
+
+def _host_module():
+    try:
+        import fleet_codex_host
+    except ModuleNotFoundError:
+        pytest.fail("bin/fleet_codex_host.py is not implemented")
+    return fleet_codex_host
 
 
 def _mutation(operation_id="turn-op", public_method="turn/start", value=1):
@@ -320,6 +329,112 @@ def _resume_result(*, item_text="small result"):
         "approvalPolicy": "on-request", "approvalsReviewer": "user",
         "sandbox": {"type": "workspaceWrite"},
     }
+
+
+def _queue_recovery_resume(home, journal, parent_operation_id):
+    operation_id = "queue-recovery-" + hashlib.sha256(
+        parent_operation_id.encode("utf-8")).hexdigest()
+    operation = {
+        "operation_id": operation_id,
+        "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": "thread-1",
+        }},
+        "recovery": {
+            "kind": "queue-overflow-thread-resume",
+            "parent_operation_id": parent_operation_id,
+            "thread_id": "thread-1",
+            "canonical_cwd": str(home),
+            "history_watermark": 0,
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(operation_id)
+    result = _resume_result()
+    result["thread"]["cwd"] = result["cwd"] = str(home)
+    result["thread"]["turns"] = []
+    return operation_id, result
+
+
+@pytest.mark.parametrize("state", ["observed", "uncertain"])
+def test_queue_recovery_resume_finalizes_without_replaying_mutation(
+        tmp_path, state):
+    module = _module()
+    host_module = _host_module()
+    home = (tmp_path / state).resolve()
+    (home / "state").mkdir(parents=True)
+    journal = module.OperationJournal(home, "generation-1")
+    parent_operation_id = f"parent-{state}"
+    operation_id, result = _queue_recovery_resume(
+        home, journal, parent_operation_id)
+    if state == "observed":
+        journal.observe(operation_id, result)
+    else:
+        journal.uncertain(operation_id, "injected projection write failure")
+
+    requests = []
+
+    def recovery_request(method, params, _deadline):
+        requests.append((method, params))
+        assert state == "uncertain"
+        assert method == "thread/read"
+        assert params == {"threadId": "thread-1", "includeTurns": True}
+        return result
+
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host._recovery_request = recovery_request
+    resumed = host._resume_recovery_thread(
+        parent_operation_id, "thread-1", str(home), 1.0)
+
+    assert resumed["thread"]["id"] == "thread-1"
+    assert journal.load(operation_id)["state"] == "committed"
+    assert requests == ([] if state == "observed" else [
+        ("thread/read", {"threadId": "thread-1", "includeTurns": True})])
+
+
+def test_queue_recovery_resume_settles_observe_persistence_failure(
+        tmp_path, monkeypatch):
+    module = _module()
+    host_module = _host_module()
+    home = tmp_path.resolve()
+    (home / "state").mkdir()
+    journal = module.OperationJournal(home, "generation-1")
+    parent_operation_id = "parent-observe-failure"
+    operation_id = "queue-recovery-" + hashlib.sha256(
+        parent_operation_id.encode("utf-8")).hexdigest()
+    result = _resume_result()
+    result["thread"]["cwd"] = result["cwd"] = str(home)
+    result["thread"]["turns"] = []
+    requests = []
+
+    def recovery_request(method, params, _deadline):
+        requests.append((method, params))
+        return result
+
+    real_atomic_json = module._atomic_json
+    failed = False
+
+    def fail_observed_once(path, value):
+        nonlocal failed
+        if (not failed and path == journal.path(operation_id)
+                and value.get("state") == "observed"):
+            failed = True
+            raise OSError("injected observed persistence failure")
+        return real_atomic_json(path, value)
+
+    monkeypatch.setattr(module, "_atomic_json", fail_observed_once)
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host._recovery_request = recovery_request
+
+    resumed = host._resume_recovery_thread(
+        parent_operation_id, "thread-1", str(home), 1.0)
+
+    assert resumed["thread"]["id"] == "thread-1"
+    assert journal.load(operation_id)["state"] == "committed"
+    assert [method for method, _params in requests] == [
+        "thread/resume", "thread/read"]
 
 
 def test_large_resume_result_persists_as_a_bounded_projection_and_commits(tmp_path):

@@ -286,7 +286,10 @@ operation ID, so recovery can list the exact-cwd app-server threads and load the
 one tagged empty thread under a separate durable `thread/resume` intent to
 recover its effective model and permission tuple; a `turn/start` reads the
 already-bound thread and requires exactly one turn beyond its recorded history
-watermark. The original journal entry is adopted only after those identities,
+watermark. The inner resume is finalized idempotently: an `observed` re-entry
+commits it, while an `uncertain` re-entry reads the exact empty thread and
+adopts then commits that evidence without replaying `thread/resume`. The
+original journal entry is adopted only after those identities,
 cwd, effective settings, and turn counts agree. Missing, duplicate, malformed,
 or repeatedly overflowing evidence leaves the original intent uncertain and
 reports the `FLEET_CODEX_EVENT_QUEUE_MAX`/lane-concurrency remedy. Read-only
