@@ -2857,7 +2857,8 @@ class TestHandoff:
                                  "claimed_via": "fresh"})
         data = fleet.load_registry()
         data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
-            sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
             setting_sources=None, dispatch_kind="bg", category=None)
         fleet.save_registry(data)
 
@@ -3000,6 +3001,7 @@ class TestHandoff:
         """The claim holder's own registry record -- the body running the
         verb. `cmd_sup_handoff_begin` already resolves the caller by this sid
         to authorise it; I4 reads the same record for its dispatch flags."""
+        over.setdefault("model", "claude-sonnet-5-5")
         rec = fleet.new_worker_record(sid, fleet.FLEET_HOME, "campaign", "bypass",
                                       dispatch_kind="bg", **over)
         data = fleet.load_registry()
@@ -3101,16 +3103,16 @@ class TestHandoff:
         assert successor["mode"] == "bypass"
         assert successor["setting_sources"] == "user"
 
-    def test_successor_without_predecessor_model_omits_model_flag(self, sup_home):
+    def test_successor_without_predecessor_model_refuses_before_dispatch(
+            self, sup_home):
         self._hold()
-        self._seed_holder_record()
+        self._seed_holder_record(model=None)
         run = self._dispatch_then_roster()
-        assert self._begin(run) == 0
-        dispatch = next(c for c in run.calls if "--bg" in c)
-        assert "--model" not in dispatch
-        successor = next(r for n, r in fleet.load_registry()["workers"].items()
-                         if n.endswith("|successor"))
-        assert successor["model"] is None
+        with pytest.raises(fleet.FleetCliError, match=r"model \(pass --model\)"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert not any(n.endswith("|successor")
+                       for n in fleet.load_registry()["workers"])
 
     def test_an_unresolvable_holder_record_refuses_the_handoff(self, sup_home):
         """A claim without a validated predecessor row cannot invent settings."""
@@ -3854,7 +3856,8 @@ class TestHandoffToken:
                                  "nonce_seq": 2, "lineage_id": "lin-20260101T000000Z-aaaa"})
         data = fleet.load_registry()
         data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
-            sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
             setting_sources=None, dispatch_kind="bg", category=None)
         fleet.save_registry(data)
         return value

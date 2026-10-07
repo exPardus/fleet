@@ -1026,7 +1026,7 @@ def test_native_handoff_refuses_missing_predecessor_setting_sources(
     assert [op["payload"]["method"] for op in client.operations] == ["thread/read"]
 
 
-def test_claude_handoff_still_refuses_unresolved_tier_policy(
+def test_claude_handoff_refuses_unknown_predecessor_model_before_tier_default(
         supervisor_home):
     (supervisor_home / "supervisor" / "GOALS.md").write_text(
         "<!-- fleet-tier-policy\n"
@@ -1042,7 +1042,9 @@ def test_claude_handoff_still_refuses_unresolved_tier_policy(
         "sid-claude", supervisor_home, "campaign", "bypass", model=None,
         setting_sources=None, dispatch_kind="bg", category=None)
     fleet.save_registry(data)
-    with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+    with pytest.raises(
+            fleet.FleetCliError,
+            match=r"predecessor launch settings are unresolved.*model \(pass --model\)"):
         fleet.cmd_sup_handoff_begin(SimpleNamespace(
             model=None, permission_mode="bypass", sid=None, nonce=None))
 

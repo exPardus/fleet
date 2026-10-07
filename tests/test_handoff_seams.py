@@ -214,7 +214,8 @@ class _HandoffBase:
                                  "claimed_via": "fresh"})
         data = fleet.load_registry()
         data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
-            sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
             setting_sources=None, dispatch_kind="bg", category=None)
         fleet.save_registry(data)
 
@@ -924,7 +925,8 @@ class TestAbortRecipeCarriesTheNonce:
         data = fleet.load_registry()
         data["workers"]["sup|inc-20260724T000000Z-0old|boot"] = \
             fleet.new_worker_record(
-                "sid-old", fleet.FLEET_HOME, "campaign", "bypass", model=None,
+                "sid-old", fleet.FLEET_HOME, "campaign", "bypass",
+                model="claude-sonnet-5-5",
                 setting_sources=None, dispatch_kind="bg", category=None)
         fleet.save_registry(data)
         args = SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=None)

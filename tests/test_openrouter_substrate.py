@@ -334,7 +334,8 @@ def _hold(sid="sid-old", inc="inc-20260917T000000Z-w93t"):
                              "claimed_via": "fresh"})
     data = fleet.load_registry()
     data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
-        sid, fleet.FLEET_HOME, "campaign", "bypass", model=None,
+        sid, fleet.FLEET_HOME, "campaign", "bypass",
+        model="claude-sonnet-5-5",
         setting_sources=None, dispatch_kind="bg", category=None)
     fleet.save_registry(data)
 

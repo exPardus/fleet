@@ -20708,10 +20708,12 @@ def _claim_holder_dispatch_settings(claim, registry=None):
                 "model": rec.get("model"),
                 "mode": rec.get("mode"),
                 "setting_sources": rec.get("setting_sources"),
-                "model_resolved": "model" in rec and (
-                    rec.get("model") is None
-                    or (isinstance(rec.get("model"), str)
-                        and bool(rec.get("model")))),
+                # A null model only says the predecessor omitted --model; it
+                # does not identify the provider model that actually ran. A
+                # successor cannot inherit or accurately record that unknown
+                # value, so legacy null rows require an explicit override.
+                "model_resolved": (isinstance(rec.get("model"), str)
+                                   and bool(_normalise_model(rec.get("model")))),
                 "mode_resolved": rec.get("mode") in MODE_FLAGS,
                 "setting_sources_resolved": "setting_sources" in rec and (
                     rec.get("setting_sources") is None
