@@ -389,6 +389,38 @@ def test_kill_fences_a_delayed_initial_turn_start(native_home, monkeypatch):
     assert "pending_operation" not in stored
 
 
+def test_journal_failure_cannot_downgrade_a_concurrent_terminal_kill(
+        native_home, monkeypatch):
+    home, lane = native_home
+    client = FakeClient(home, lane)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client", lambda _home: client, raising=False)
+    commit_attempted = {"done": False}
+
+    def kill_then_fail_commit(operation_id):
+        assert not commit_attempted["done"]
+        commit_attempted["done"] = True
+        client.commits.append(operation_id)
+        bound = dict(fleet.load_registry()["workers"]["cx-native"])
+        assert bound["adapter_state"] == "bound"
+        assert fleet._cmd_kill_codex_native(
+            "cx-native", bound, connect=lambda _home: client) == 0
+        raise OSError("journal commit lost after terminal kill")
+
+    client.commit = kill_then_fail_commit
+
+    with pytest.raises(fleet.FleetCliError, match="journal commit failed"):
+        fleet.cmd_spawn(_args(lane))
+
+    assert commit_attempted["done"] is True
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/start", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+
+
 @pytest.mark.parametrize("commit_number,provider_calls", [(1, 1), (2, 2)])
 def test_journal_commit_failure_freezes_the_bound_row(
         native_home, monkeypatch, commit_number, provider_calls):
@@ -1128,9 +1160,11 @@ def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
 
 def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
         native_home, monkeypatch):
-    _home, lane = native_home
+    home, lane = native_home
     record = _install_record(lane, status="idle", adapter_state="idle")
     fleet.write_brief("cx-native", "preserve the terminal worker brief")
+    mailbox = home / "mailbox" / f"{THREAD_ID}.md"
+    mailbox.write_text("preserve this queued direction", encoding="utf-8")
     client = WorkerVerbClient(
         lane, provider_status="idle", turn_status="completed")
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
@@ -1162,3 +1196,6 @@ def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
     assert stored["status"] == "dead"
     assert stored["adapter_state"] == "idle"
     assert "pending_operation" not in stored
+    assert mailbox.read_text(encoding="utf-8") == \
+        "preserve this queued direction"
+    assert list(mailbox.parent.glob(f"{THREAD_ID}.md.claimed.*")) == []

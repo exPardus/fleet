@@ -6274,11 +6274,13 @@ def _cmd_spawn_codex(args, cwd, task, prompt, record,
         args, cwd, task, prompt, record, run=run, which=which, sleep=sleep)
 
 
-def _freeze_codex_preclaim(name, operation_id, detail):
+def _freeze_codex_preclaim(name, expected_record, detail):
+    """Freeze only the exact launch row whose provider result is uncertain."""
+    operation_id = expected_record.get("last_operation_id")
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
-        if rec is not None and rec.get("last_operation_id") == operation_id:
+        if rec == expected_record:
             rec["adapter_state"] = "uncertain"
             rec["status"] = "dead-suspected"
             rec["last_activity"] = now_iso()
@@ -6354,11 +6356,11 @@ def _validate_codex_thread_effective(thread_result, requested_model, profile):
 
 
 def _commit_codex_journal(client, name, journal_operation_id,
-                          record_operation_id):
+                          expected_record):
     try:
         client.commit(journal_operation_id)
     except BaseException as exc:
-        _freeze_codex_preclaim(name, record_operation_id, exc)
+        _freeze_codex_preclaim(name, expected_record, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise FleetCliError(
@@ -6423,7 +6425,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
                 f"got {sorted(str(value) for value in returned_cwds)!r}")
         _validate_codex_thread_effective(thread_result, requested_model, profile)
     except BaseException as exc:
-        _freeze_codex_preclaim(name, thread_operation_id, exc)
+        _freeze_codex_preclaim(name, record, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise FleetCliError(
@@ -6466,7 +6468,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
             file=sys.stderr)
         return 1
     _commit_codex_journal(
-        client, name, thread_operation_id, turn_operation_id)
+        client, name, thread_operation_id, bound_claim)
     try:
         turn_claim = _reserve_codex_initial_turn_start(
             name, bound_claim, turn_operation_id)
@@ -6508,13 +6510,14 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
             raise FleetCliError(
                 f"Codex turn/start returned unexpected status {turn.get('status')!r}")
     except BaseException as exc:
-        _freeze_codex_preclaim(name, turn_operation_id, exc)
+        _freeze_codex_preclaim(name, turn_claim, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise FleetCliError(
             f"{name}: native Codex turn acceptance is uncertain -- {exc}") from exc
 
     committed = False
+    committed_claim = None
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
@@ -6531,6 +6534,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
             _append_event_quiet(
                 "turn_started", name, codex_thread_id=thread_id,
                 codex_turn_id=turn_id, substrate="codex")
+            committed_claim = dict(rec)
             committed = True
     if not committed:
         print(
@@ -6539,7 +6543,7 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record) -> int:
             file=sys.stderr)
         return 1
     _commit_codex_journal(
-        client, name, turn_operation_id, turn_operation_id)
+        client, name, turn_operation_id, committed_claim)
     print(f"model: codex:{_codex_model_slug(args.model)} (native app-server)")
     print(f"{name} codex {thread_id} turn {turn_id}")
     return 0
@@ -9371,10 +9375,6 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     task_override = (_read_task_arg(args.task)
                      if getattr(args, "task", None) else None)
     task = task_override if task_override is not None else read_brief(name, before)
-    mail, mail_claim = claim_mailbox(binding.thread_id)
-    prompt = _compose_codex_worker_continuation(
-        name, cwd, task, mail=mail)
-    assert_brief_carried(name, task, prompt)
     prior_brief = brief_snapshot(name)
     try:
         prior_task = task_file_path(name).read_bytes()
@@ -9384,8 +9384,13 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     respawn_claim = _reserve_codex_worker_operation(
         binding, operation_id, "respawn/thread-start",
         expected_record=before)
+    mail_claim = None
     managed_requirements = None
     try:
+        mail, mail_claim = claim_mailbox(binding.thread_id)
+        prompt = _compose_codex_worker_continuation(
+            name, cwd, task, mail=mail)
+        assert_brief_carried(name, task, prompt)
         if task_override is not None:
             write_brief(name, task_override)
         tasks_dir().mkdir(parents=True, exist_ok=True)
@@ -9506,7 +9511,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
             raise FleetCliError("Codex respawn turn did not start")
         client.commit(turn_operation_id)
     except BaseException as exc:
-        _freeze_codex_preclaim(name, turn_operation_id, exc)
+        _freeze_codex_preclaim(name, turn_claim, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         raise FleetCliError(
