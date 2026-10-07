@@ -1012,19 +1012,19 @@ def _quarantine_artifacts() -> list:
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
       * `_sweep_husks` (:11915) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12854) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16306) -- legacy upgrades need complete records.
+      * `_doctor_check_autoclean` (:12917) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16376) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3740) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
       * `_read_registry_readonly` (:4435) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13104) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16180) -- describe the incident-specific absence.
+      * `_doctor_check_registry` (:13167) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16250) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:7108) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:17960) -- render the release explanation.
+      * `_tombstone_releasing_body` (:18030) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3722,7 +3722,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16306`), because legacy upgrades also require a complete registry.
+    (`:16376`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -12523,16 +12523,79 @@ def _doctor_check_codex_adapters(workers: dict, which=shutil.which):
     return ("codex-adapters", not findings, detail)
 
 
-def _doctor_check_dead_suspected(workers: dict):
+def _reconcile_dead_suspected_codex_completions() -> list[str]:
+    """Repair legacy native-Codex completion verdicts with a full-row CAS.
+
+    Snapshot only unarchived ``dead-suspected`` native worker rows under the
+    registry lock, release it for exact-turn evidence and host reads, then
+    commit the ordinary w129 verdict only when the complete row is unchanged.
+    A kill, resume reservation, or any other concurrent mutation therefore
+    wins. Missing, conflicting, non-completed, or unreadable evidence changes
+    nothing.
+    """
+    with fleet_lock():
+        data = load_registry()
+        candidates = {
+            name: dict(record)
+            for name, record in data.get("workers", {}).items()
+            if (isinstance(record, dict)
+                and record.get("status") == "dead-suspected"
+                and record.get("archived_at") is None
+                and _codex_record_route(record) == "native"
+                and not _is_supervisor_shaped(name))
+        }
+
+    prepared = {}
+    for name, before in candidates.items():
+        try:
+            binding = _codex_worker_binding(name, before)
+            if not _codex_worker_has_completed_evidence(binding):
+                continue
+            updated = recompute_worker_codex(name, before)
+        except (FleetCliError, OSError, ValueError):
+            continue
+        if updated.get("status") != "idle":
+            continue
+        updated = dict(updated)
+        updated.pop("waiting_for_permission", None)
+        prepared[name] = (before, updated)
+
+    if not prepared:
+        return []
+
+    reconciled = []
+    with fleet_lock():
+        data = load_registry()
+        workers = data.get("workers", {})
+        for name, (before, updated) in prepared.items():
+            if workers.get(name) != before:
+                continue
+            workers[name] = updated
+            reconciled.append(name)
+        if reconciled:
+            save_registry(data)
+            for name in reconciled:
+                append_event(
+                    "status_changed", name,
+                    old="dead-suspected", new="idle",
+                    reason="exact native Codex turn completed")
+    return reconciled
+
+
+def _doctor_check_dead_suspected(workers: dict, reconciled=()):
     """Note dead-suspected rows in the supplied snapshot without recomputing.
     The verdict is advisory and recomputable, never a sticky respawn trigger.
     """
+    repaired = (
+        f"reconciled {len(reconciled)} exact native Codex completion(s): "
+        f"{', '.join(sorted(reconciled))}; "
+        if reconciled else "")
     names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
     if names:
         return ("dead-suspected", True,
-                f"{len(names)} dead-suspected worker(s): {', '.join(names)} -- no outcome record; "
+                f"{repaired}{len(names)} dead-suspected worker(s): {', '.join(names)} -- no outcome record; "
                 "inspect via fleet peek/result, then kill or respawn")
-    return ("dead-suspected", True, "no dead-suspected workers")
+    return ("dead-suspected", True, f"{repaired}no dead-suspected workers")
 
 
 def _doctor_check_permission_stalls(workers: dict, which=shutil.which, run=subprocess.run):
@@ -13141,7 +13204,8 @@ def _doctor_check_registry(error, repaired: bool, quarantined=None,
 
 def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     """Run health checks and return nonzero if any check fails.
-    Report only by default; --repair permits quarantine under fleet_lock.
+    Report only by default; --repair permits quarantine and exact native-Codex
+    completion reconciliation under fleet_lock.
     Capture a corrupt registry as a diagnostic and continue other checks.
     Snapshot under the lock, then run checks outside it so subprocesses cannot
     starve concurrent fleet commands.
@@ -13152,10 +13216,15 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     # Track the observed quarantine outcome separately from the repair request.
     registry_quarantined = None
     registry_rename_attempted = False
+    reconciled_codex = []
     try:
         if repair:
             with fleet_lock():
                 data = load_registry()          # the ONE quarantine site left
+            reconciled_codex = _reconcile_dead_suspected_codex_completions()
+            # Refresh the diagnostic snapshot after the conditional repair.
+            with fleet_lock():
+                data = load_registry()
         else:
             # The diagnostic row supplies its own more precise repair hint.
             data = read_registry_no_repair(hint=False)
@@ -13188,7 +13257,8 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_limited_parks, workers),
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
-        functools.partial(_doctor_check_dead_suspected, workers),
+        functools.partial(
+            _doctor_check_dead_suspected, workers, reconciled_codex),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_permission_denials, workers),
@@ -15200,9 +15270,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
-    :11299, :11309, :11320, :11418, :11941, :15150, :19058, :19059, :19163, :19224, :20648, :22643`).
+    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20718, :22713`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8754, :9338, :13431, :21386. This makes union identity
+    OWN prior sid alone: :8754, :9338, :13501, :21456. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15920,8 +15990,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8754, :9338, :13431,
-    # :21386) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8754, :9338, :13501,
+    # :21456) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15929,7 +15999,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15124`).
+        # names this gate as its reason (`:15194`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -22174,10 +22244,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_doctor = sub.add_parser("doctor", help="run fleet health checks")
     p_doctor.add_argument(
         "--repair", action="store_true",
-        help="quarantine a corrupt state/fleet.json by renaming it aside to "
-             "state/fleet.json.corrupt.<ts>. Without this flag `doctor` only "
-             "reports (operator gate 2026-07-27): a diagnostic verb does not "
-             "mutate the state it was invoked to diagnose")
+        help="quarantine a corrupt state/fleet.json and reconcile legacy "
+             "dead-suspected native Codex rows whose exact durable and live "
+             "turn evidence both say completed. Without this flag `doctor` "
+             "only reports")
 
     p_supboot = sub.add_parser("sup-boot", help="supervisor boot ritual: epoch check, claim decision, boot bundle (spec §4)")
     p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")
