@@ -1,4 +1,4 @@
-"""Forward-only docs currency and DONE pins, adopted by w63 on 2026-09-10.
+"""Forward-only docs currency and DONE pins, adopted by w123 on 2026-10-05.
 
 The lint deliberately checks a small proxy for currency, not prose correctness.
 Only direct bin/*.py edits are in its code population. The adoption base excludes
@@ -15,13 +15,18 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 REPO = Path(__file__).resolve().parents[1]
-ADOPTION_BASE = "708fa45246ca957263b3ce299add6f13efb8c330"
+ADOPTION_BASE = "117bfa75b755e8cc566f3a608484e0023ab0e636"
 # Wave 76 is the first dispatch covered by the product-line citation pin.
 # Older runtime briefs stay grandfathered; rewriting one puts it in scope.
 TASK_CUTOFF = datetime(2026, 9, 11, 21, 0, tzinfo=timezone.utc).timestamp()
 _SERVES_RE = re.compile(
     r'^Serves:\s*(?P<section>[^—]+?)\s+—\s+"(?P<phrase>.+)"\s*$')
 WINDOW = 20
+# This target ancestor refreshed only executable self-citation prose. Its
+# missing trailer cannot be repaired without rewriting the shared merge base.
+HISTORICAL_METADATA_EXEMPTIONS = {
+    "ffd1197836ef2f5a586f35434d58b97ab5c3f892",
+}
 
 
 def git(repo, *args):
@@ -53,7 +58,8 @@ def currency_violations(repo, cutoff=ADOPTION_BASE):
                    or p.startswith("skills/") or p.startswith("knowledge/")
                    for p in names)
         message = git(repo, "show", "-s", "--format=%B", commit)
-        exempt = re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M)
+        exempt = (commit in HISTORICAL_METADATA_EXEMPTIONS
+                  or re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M))
         if code and not docs and not exempt:
             violations.append(f"{commit}: bin/*.py changed without docs/ or Docs: n/a")
     return violations

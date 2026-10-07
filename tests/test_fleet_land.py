@@ -141,7 +141,7 @@ def test_check_commands_docs_currency_catches_a_lane_report_missing_done(tmp_pat
     # history so it runs the SAME logic `land` shells in the real fleet repo.
     real_script = (Path(__file__).resolve().parents[1] / "tests" /
                   "test_docs_currency.py").read_text(encoding="utf-8")
-    marker = 'ADOPTION_BASE = "708fa45246ca957263b3ce299add6f13efb8c330"'
+    marker = 'ADOPTION_BASE = "117bfa75b755e8cc566f3a608484e0023ab0e636"'
     assert marker in real_script
     (worktree / "tests").mkdir()
     (worktree / "tests" / "test_docs_currency.py").write_text(

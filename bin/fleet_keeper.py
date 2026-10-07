@@ -356,7 +356,8 @@ def _supervisor_guard(home, run, *, do):
         cp = run(argv, capture_output=True, text=True, timeout=180, env=env)
         data = json.loads(cp.stdout or "")
         if (not isinstance(data, dict) or not isinstance(data.get("verdict"), str)
-                or data["verdict"].split(" ", 1)[0] not in {"OK", "WAKE", "DISPATCH", "PAGE"}):
+                or data["verdict"].split(" ", 1)[0]
+                not in {"OK", "WAKE", "DISPATCH", "PAGE", "PARKED"}):
             raise ValueError("invalid guard verdict")
         if cp.returncode:
             raise ValueError(data.get("reason") or "guard action failed")

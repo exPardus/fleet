@@ -20,7 +20,14 @@ from fleet_errors import FleetCliError
 
 DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024
 DEFAULT_MAX_STDERR_BYTES = 64 * 1024
-DEFAULT_MAX_EVENTS = 1024
+# A home-scoped app-server can multiplex several active lanes. 1024 events
+# was enough for one lane but overflowed during a burst from roughly eight.
+# Keep the default deliberately finite and expose a bounded operator override;
+# an app-server notification stream must never turn into an unbounded buffer.
+DEFAULT_MAX_EVENTS = 8192
+MAX_MAX_EVENTS = 65536
+EVENT_QUEUE_MAX_ENV = "FLEET_CODEX_EVENT_QUEUE_MAX"
+EVENT_QUEUE_OVERFLOW_MESSAGE = "app-server event queue exceeded its bound"
 
 
 class ProtocolViolation(FleetCliError):
@@ -29,6 +36,10 @@ class ProtocolViolation(FleetCliError):
 
 class TransportLost(FleetCliError):
     """The app-server stdio transport ended before an operation completed."""
+
+
+class RequestNotSent(FleetCliError):
+    """The transport was already unusable before this request was written."""
 
 
 @dataclass
@@ -54,6 +65,49 @@ def _frame(value: Mapping[str, Any]) -> bytes:
         raise ProtocolViolation("outbound app-server message is not JSON-serializable") from exc
 
 
+def resolve_max_events(value: int | None = None,
+                       *, env: Mapping[str, str] | None = None) -> int:
+    """Return the finite notification-queue bound for one app-server client.
+
+    ``FLEET_CODEX_EVENT_QUEUE_MAX`` is read at client start rather than import
+    time so a home can choose a larger/smaller bound without changing code.
+    The hard ceiling is intentional: configuration cannot request unbounded
+    memory. Explicit API values use the same ceiling and validation.
+    """
+    if value is None:
+        source = os.environ if env is None else env
+        raw = source.get(EVENT_QUEUE_MAX_ENV)
+        if raw is None:
+            # Accept the shorter spelling as a compatibility convenience for
+            # existing launch wrappers; the documented name above wins.
+            raw = source.get("FLEET_CODEX_MAX_EVENTS")
+        if raw is None or not raw.strip():
+            return DEFAULT_MAX_EVENTS
+        try:
+            value = int(raw, 10)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{EVENT_QUEUE_MAX_ENV} must be an integer between 1 and "
+                f"{MAX_MAX_EVENTS}") from exc
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"app-server event queue bound must be an integer between 1 and "
+            f"{MAX_MAX_EVENTS}")
+    return min(value, MAX_MAX_EVENTS)
+
+
+def is_event_queue_overflow(error: BaseException) -> bool:
+    """Identify only the queue-bound failure eligible for host recovery."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if EVENT_QUEUE_OVERFLOW_MESSAGE in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class AppServerClient:
     """One ordered JSON-lines connection to one public Codex app-server."""
 
@@ -67,6 +121,7 @@ class AppServerClient:
     ) -> None:
         if process.stdin is None or process.stdout is None or process.stderr is None:
             raise ValueError("app-server process must have stdin/stdout/stderr pipes")
+        max_events = resolve_max_events(max_events)
         if min(max_frame_bytes, max_stderr_bytes, max_events) <= 0:
             raise ValueError("protocol bounds must be positive")
         self._process = process
@@ -106,12 +161,13 @@ class AppServerClient:
         timeout: float = 10.0,
         max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
         max_stderr_bytes: int = DEFAULT_MAX_STDERR_BYTES,
-        max_events: int = DEFAULT_MAX_EVENTS,
+        max_events: int | None = None,
     ) -> "AppServerClient":
         if not command or not all(isinstance(part, str) and part for part in command):
             raise ValueError("app-server command must contain non-empty strings")
         child_env = dict(os.environ if env is None else env)
         child_env.pop("CLAUDE_CODE_SESSION_ID", None)
+        max_events = resolve_max_events(max_events, env=child_env)
         process = subprocess.Popen(
             list(command),
             cwd=cwd,
@@ -150,9 +206,12 @@ class AppServerClient:
         pending = _Pending(threading.Event())
         with self._state_lock:
             if self._fatal_error is not None:
-                raise self._fatal_error
+                raise RequestNotSent(
+                    "app-server request was not sent because the client had failed") \
+                    from self._fatal_error
             if self._closing:
-                raise TransportLost("app-server client is closed")
+                raise RequestNotSent(
+                    "app-server request was not sent because the client is closed")
             request_id = self._next_id
             self._next_id += 1
             self._pending[request_id] = pending
@@ -306,7 +365,7 @@ class AppServerClient:
             try:
                 self._events.put_nowait(message)
             except queue.Full:
-                self._fail(ProtocolViolation("app-server event queue exceeded its bound"))
+                self._fail(ProtocolViolation(EVENT_QUEUE_OVERFLOW_MESSAGE))
                 return False
             return True
         self._fail(ProtocolViolation("app-server sent an invalid message shape"))
@@ -340,4 +399,9 @@ class AppServerClient:
             waiter.event.set()
 
 
-__all__ = ["AppServerClient", "ProtocolViolation", "TransportLost"]
+__all__ = [
+    "AppServerClient", "DEFAULT_MAX_EVENTS", "EVENT_QUEUE_MAX_ENV",
+    "EVENT_QUEUE_OVERFLOW_MESSAGE", "MAX_MAX_EVENTS", "ProtocolViolation",
+    "RequestNotSent", "TransportLost", "is_event_queue_overflow",
+    "resolve_max_events",
+]

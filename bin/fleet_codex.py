@@ -70,6 +70,16 @@ class ReconcileReport:
 _MUTATING_PUBLIC_METHODS = frozenset({
     "thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt",
 })
+_BLOCKING_SERVER_REQUESTS = frozenset({
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/tool/requestUserInput",
+    "mcpServer/elicitation/request",
+    "item/permissions/requestApproval",
+})
+_SIMPLE_APPROVAL_DECISIONS = frozenset({
+    "accept", "acceptForSession", "decline", "cancel",
+})
 _SENSITIVE_KEYS = frozenset({
     "content", "input", "instructions", "message", "prompt", "reasoning",
     "secret", "text", "transcript",
@@ -713,6 +723,434 @@ class CodexPublicEvidenceStore:
         return current
 
 
+def _server_request_id(value: object) -> str | int:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("server request id must be a string or integer")
+    if isinstance(value, str) and (not value or len(value) > 160):
+        raise ValueError("server request id must be a non-empty bounded string")
+    if isinstance(value, int) and value < 0:
+        raise ValueError("server request id must be non-negative")
+    return value
+
+
+def _approval_key(generation: str, request_id: str | int) -> str:
+    encoded = json.dumps(
+        {"generation": generation, "request_id": request_id},
+        separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_approval_request_params(method: str,
+                                      params: Mapping[str, Any]) -> None:
+    """Validate required fields that are specific to each reviewed request."""
+    def required_started_at() -> None:
+        started_at = params.get("startedAtMs")
+        if isinstance(started_at, bool) or not isinstance(started_at, int):
+            raise ValueError("approval request startedAtMs is invalid")
+
+    if method in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval"}:
+        required_started_at()
+        return
+
+    if method == "item/tool/requestUserInput":
+        if not isinstance(params.get("isBlocking"), bool):
+            raise ValueError("user input request isBlocking is invalid")
+        questions = params.get("questions")
+        if not isinstance(questions, list):
+            raise ValueError("user input request questions are invalid")
+        question_ids: set[str] = set()
+        for question in questions:
+            if not isinstance(question, dict):
+                raise ValueError("user input request question is invalid")
+            for field in ("header", "id", "question"):
+                if not isinstance(question.get(field), str):
+                    raise ValueError(f"user input request question {field} is invalid")
+            question_id = question["id"]
+            if not question_id or question_id in question_ids:
+                raise ValueError("user input request question id is invalid")
+            question_ids.add(question_id)
+            options = question.get("options")
+            if options is not None:
+                if not isinstance(options, list):
+                    raise ValueError("user input request options are invalid")
+                for option in options:
+                    if (not isinstance(option, dict)
+                            or not isinstance(option.get("label"), str)
+                            or not isinstance(option.get("description"), str)):
+                        raise ValueError("user input request option is invalid")
+            for field in ("isOther", "isSecret"):
+                if field in question and not isinstance(question[field], bool):
+                    raise ValueError(f"user input request question {field} is invalid")
+        return
+
+    if method == "mcpServer/elicitation/request":
+        server_name = params.get("serverName")
+        if not isinstance(server_name, str) or not server_name:
+            raise ValueError("MCP elicitation serverName is invalid")
+        return
+
+    if method == "item/permissions/requestApproval":
+        required_started_at()
+        if not isinstance(params.get("cwd"), str):
+            raise ValueError("permission request cwd is invalid")
+        if not isinstance(params.get("permissions"), dict):
+            raise ValueError("permission request permissions are invalid")
+        return
+
+
+def _approval_decision(method: str, decision: Any,
+                       params: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an explicit response without inventing any omitted choice."""
+    if method in {
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval"}:
+        response = {"decision": decision} if isinstance(decision, str) else decision
+        if not isinstance(response, dict) or set(response) != {"decision"}:
+            raise HostRejected("approval decision must be one explicit decision")
+        choice = response["decision"]
+        if isinstance(choice, str):
+            if choice not in _SIMPLE_APPROVAL_DECISIONS:
+                raise HostRejected("approval decision was not offered")
+            return response
+        if method != "item/commandExecution/requestApproval" or not isinstance(choice, dict):
+            raise HostRejected("approval decision was not offered")
+        if set(choice) == {"acceptWithExecpolicyAmendment"}:
+            proposed = params.get("proposedExecpolicyAmendment")
+            body = choice["acceptWithExecpolicyAmendment"]
+            amendment = body.get("execpolicy_amendment") if isinstance(body, dict) else None
+            if (not isinstance(proposed, list) or amendment != proposed
+                    or any(not isinstance(item, str) for item in proposed)):
+                raise HostRejected("execpolicy amendment was not offered exactly")
+            return response
+        if set(choice) == {"applyNetworkPolicyAmendment"}:
+            proposed = params.get("proposedNetworkPolicyAmendments")
+            body = choice["applyNetworkPolicyAmendment"]
+            amendment = body.get("network_policy_amendment") \
+                if isinstance(body, dict) else None
+            if not isinstance(proposed, list) or amendment not in proposed:
+                raise HostRejected("network policy amendment was not offered")
+            return response
+        raise HostRejected("approval decision was not offered")
+
+    if method == "item/tool/requestUserInput":
+        if not isinstance(decision, dict) or set(decision) != {"answers"}:
+            raise HostRejected("user input requires an explicit answers object")
+        answers = decision["answers"]
+        questions = params.get("questions")
+        if not isinstance(answers, dict) or not isinstance(questions, list):
+            raise HostRejected("user input answers are malformed")
+        offered: dict[str, dict[str, Any]] = {}
+        for question in questions:
+            if not isinstance(question, dict):
+                raise HostRejected("user input question is malformed")
+            question_id = question.get("id")
+            if not isinstance(question_id, str) or not question_id or question_id in offered:
+                raise HostRejected("user input question id is invalid")
+            offered[question_id] = question
+        if set(answers) != set(offered):
+            raise HostRejected("user input must answer exactly the offered questions")
+        for question_id, answer in answers.items():
+            if not isinstance(answer, dict) or set(answer) != {"answers"}:
+                raise HostRejected("user input answer is malformed")
+            values = answer["answers"]
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(value, str) for value in values)):
+                raise HostRejected("user input answer values are malformed")
+            options = offered[question_id].get("options")
+            if isinstance(options, list) and not offered[question_id].get("isOther", False):
+                labels = {item.get("label") for item in options if isinstance(item, dict)}
+                if any(value not in labels for value in values):
+                    raise HostRejected("user input answer was not offered")
+        return decision
+
+    if method == "mcpServer/elicitation/request":
+        if not isinstance(decision, dict) or not set(decision).issubset(
+                {"action", "content", "_meta"}):
+            raise HostRejected("MCP elicitation response is malformed")
+        action = decision.get("action")
+        if action not in {"accept", "decline", "cancel"}:
+            raise HostRejected("MCP elicitation action was not offered")
+        if action == "accept" and "content" not in decision:
+            raise HostRejected("accepted MCP elicitation requires explicit content")
+        if action != "accept" and decision.get("content") not in (None, {}):
+            raise HostRejected("declined MCP elicitation cannot include content")
+        return decision
+
+    if method == "item/permissions/requestApproval":
+        if not isinstance(decision, dict) or not set(decision).issubset(
+                {"permissions", "scope", "strictAutoReview"}):
+            raise HostRejected("permission response is malformed")
+        requested = params.get("permissions")
+        if not isinstance(requested, dict):
+            raise HostRejected("permission request has no permissions object")
+        if (not isinstance(decision.get("permissions"), dict)
+                or decision["permissions"] != requested):
+            raise HostRejected("permission response must grant exactly the requested profile")
+        if decision.get("scope", "turn") not in {"turn", "session"}:
+            raise HostRejected("permission response scope is invalid")
+        strict = decision.get("strictAutoReview")
+        if strict is not None and not isinstance(strict, bool):
+            raise HostRejected("permission response strictAutoReview is invalid")
+        return decision
+
+    raise HostRejected("unknown server request kind is frozen and cannot be answered")
+
+
+def _approval_response_evidence(method: str, response: Mapping[str, Any]) -> dict[str, Any]:
+    """Persist response state without retaining user-input or elicitation values."""
+    if method == "item/tool/requestUserInput":
+        answers = response.get("answers")
+        return {"answered_question_ids": sorted(answers) if isinstance(answers, dict) else []}
+    if method == "mcpServer/elicitation/request":
+        return {"action": response.get("action"),
+                "content_supplied": "content" in response}
+    return _public_evidence(response)
+
+
+class CodexApprovalStore:
+    """Owner-only durable app-server requests and exactly-once responses."""
+
+    _UNRESOLVED = frozenset({
+        "pending", "responding", "responded", "uncertain", "unknown"})
+
+    def __init__(self, home: Path, generation: str) -> None:
+        self.home = _canonical_home(home)
+        if not isinstance(generation, str) or not generation:
+            raise ValueError("host generation is required")
+        self.generation = generation
+        self.state_dir = self.home / "state" / "codex"
+        _require_directory(self.state_dir, create=True)
+        self.directory = self.state_dir / "approvals"
+        _require_directory(self.directory, create=True)
+
+    def path(self, request_id: str | int, generation: str | None = None) -> Path:
+        request_id = _server_request_id(request_id)
+        return self.directory / f"{_approval_key(generation or self.generation, request_id)}.json"
+
+    def _load_path(self, path: Path) -> dict[str, Any]:
+        value = _read_json(path)
+        try:
+            generation = value.get("generation") if isinstance(value, dict) else None
+            request_id = _server_request_id(value.get("request_id")) \
+                if isinstance(value, dict) else None
+            expected_key = (_approval_key(generation, request_id)
+                            if isinstance(generation, str) and generation else None)
+        except (TypeError, ValueError):
+            expected_key = None
+        if (value is None or value.get("schema") != 1
+                or value.get("home") != str(self.home)
+                or value.get("key") != path.stem
+                or expected_key != path.stem):
+            raise UnsafeHostState(f"Codex approval identity mismatch: {path}")
+        return value
+
+    def records(self) -> list[dict[str, Any]]:
+        records = []
+        for path in sorted(self.directory.glob("*.json")):
+            _require_regular(path)
+            records.append(self._load_path(path))
+        return sorted(records, key=lambda item: item.get("created_at", 0))
+
+    @staticmethod
+    def _offered(method: str, params: Mapping[str, Any]) -> list[str]:
+        if method in {
+                "item/commandExecution/requestApproval",
+                "item/fileChange/requestApproval"}:
+            offered = ["accept", "acceptForSession", "decline", "cancel"]
+            if method == "item/commandExecution/requestApproval":
+                if isinstance(params.get("proposedExecpolicyAmendment"), list):
+                    offered.append("acceptWithExecpolicyAmendment")
+                if isinstance(params.get("proposedNetworkPolicyAmendments"), list):
+                    offered.append("applyNetworkPolicyAmendment")
+            return offered
+        if method == "mcpServer/elicitation/request":
+            return ["accept", "decline", "cancel"]
+        if method == "item/tool/requestUserInput":
+            return ["answers"]
+        if method == "item/permissions/requestApproval":
+            return ["permissions"]
+        return []
+
+    def record_request(self, message: Mapping[str, Any]) -> dict[str, Any]:
+        request_id = _server_request_id(message.get("id"))
+        method = message.get("method")
+        params = message.get("params")
+        params_map = params if isinstance(params, dict) else None
+        thread_id = params_map.get("threadId") if params_map is not None else None
+        turn_id = params_map.get("turnId") if params_map is not None else None
+        item_id = params_map.get("itemId") if params_map is not None else None
+        known = (isinstance(method, str) and bool(method)
+                 and method in _BLOCKING_SERVER_REQUESTS
+                 and params_map is not None)
+        if params_map is not None:
+            try:
+                thread_id = _public_uuid7(thread_id, "server request thread id")
+                if turn_id is not None:
+                    turn_id = _public_uuid7(turn_id, "server request turn id")
+                if method != "mcpServer/elicitation/request" and turn_id is None:
+                    raise ValueError("server request turn id is missing")
+                if method not in {"mcpServer/elicitation/request"}:
+                    if not isinstance(item_id, str) or not item_id or len(item_id) > 160:
+                        raise ValueError("server request item id is invalid")
+                if known:
+                    _validate_approval_request_params(method, params_map)
+            except ValueError:
+                known = False
+        safe_params = _public_evidence(params)
+        record = {
+            "schema": 1, "home": str(self.home),
+            "key": _approval_key(self.generation, request_id),
+            "generation": self.generation, "request_id": request_id,
+            "method": method, "thread_id": thread_id, "turn_id": turn_id,
+            "item_id": item_id, "params": safe_params,
+            "offered_decisions": self._offered(method, params_map) if known else [],
+            "state": "pending" if known else "unknown",
+            "created_at": time.time(),
+        }
+        if not known:
+            record["reason"] = "unknown, malformed, or identity-incomplete server request kind"
+        # Approval evidence is intentionally bounded below the fixed metadata cap.
+        if len(json.dumps(record, ensure_ascii=False).encode("utf-8")) > 48 * 1024:
+            record["params"] = {
+                key: safe_params.get(key) for key in ("threadId", "turnId", "itemId")
+                if isinstance(safe_params, dict) and key in safe_params}
+            record["offered_decisions"] = []
+            record["state"] = "unknown"
+            record["reason"] = "oversized server request was frozen"
+        path = self.path(request_id)
+        if path.exists() or path.is_symlink():
+            existing = self._load_path(path)
+            immutable = ("request_id", "generation", "method", "thread_id",
+                         "turn_id", "item_id", "params")
+            if any(existing.get(key) != record.get(key) for key in immutable):
+                raise UnsafeHostState("server request id was reused with different content")
+            return existing
+        _atomic_json(path, record)
+        return record
+
+    def unresolved(self, *, thread_id: str | None = None,
+                   turn_id: str | None = None) -> list[dict[str, Any]]:
+        result = []
+        for record in self.records():
+            if record.get("state") not in self._UNRESOLVED:
+                continue
+            if thread_id is not None and record.get("thread_id") != thread_id:
+                continue
+            if (turn_id is not None
+                    and record.get("turn_id") not in (None, turn_id)):
+                continue
+            result.append(record)
+        return result
+
+    def has_unresolved(self) -> bool:
+        return any(record.get("generation") == self.generation
+                   for record in self.unresolved())
+
+    def _current(self, request_id: str | int, thread_id: str,
+                 turn_id: str) -> dict[str, Any]:
+        matches = [record for record in self.unresolved(thread_id=thread_id)
+                   if (record.get("turn_id") in {None, turn_id}
+                       and str(record.get("request_id")) == str(request_id))]
+        current = [record for record in matches
+                   if record.get("generation") == self.generation]
+        if len(current) == 1:
+            return current[0]
+        if not current and matches:
+            raise HostRejected("approval request belongs to a stale host generation")
+        if len(current) != 1:
+            raise HostRejected("approval request is missing, stale, or ambiguous")
+        return current[0]
+
+    def begin_response(self, request_id: str | int, thread_id: str,
+                       turn_id: str, decision: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        record = self._current(request_id, thread_id, turn_id)
+        if record.get("state") != "pending":
+            raise HostRejected(
+                f"approval request was already consumed ({record.get('state')})")
+        response = _approval_decision(
+            record.get("method", ""), decision,
+            record.get("params") if isinstance(record.get("params"), dict) else {})
+        record.update({"state": "responding", "response": _approval_response_evidence(
+                           record.get("method", ""), response),
+                       "responding_at": time.time()})
+        _atomic_json(self.path(record["request_id"]), record)
+        return record, response
+
+    def mark_responded(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        current = self._load_path(self.path(record["request_id"]))
+        if current.get("state") != "responding":
+            raise HostRejected("approval response state changed before consumption")
+        current.update({"state": "responded", "responded_at": time.time()})
+        _atomic_json(self.path(current["request_id"]), current)
+        return current
+
+    def mark_uncertain(self, record: Mapping[str, Any], reason: str) -> dict[str, Any]:
+        current = self._load_path(self.path(record["request_id"]))
+        if current.get("state") == "responding":
+            current.update({"state": "uncertain", "reason": str(reason)[:300],
+                            "uncertain_at": time.time()})
+            _atomic_json(self.path(current["request_id"]), current)
+        return current
+
+    def resolve(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
+        params = message.get("params")
+        if not isinstance(params, dict):
+            raise ValueError("serverRequest/resolved params are malformed")
+        request_id = _server_request_id(params.get("requestId"))
+        thread_id = _public_uuid7(params.get("threadId"), "resolved request thread id")
+        matches = [record for record in self.unresolved(thread_id=thread_id)
+                   if record.get("generation") == self.generation
+                   and record.get("request_id") == request_id]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise UnsafeHostState("resolved server request is ambiguous")
+        record = matches[0]
+        record.update({"state": "resolved", "resolved_at": time.time()})
+        _atomic_json(self.path(record["request_id"]), record)
+        return record
+
+
+def read_pending_requests(home: Path, thread_id: str, turn_id: str | None = None,
+                          current_generation: str | None = None) -> list[dict[str, Any]]:
+    """Read durable waits without starting a host, taking a lock, or writing."""
+    home = _canonical_home(home)
+    directory = home / "state" / "codex" / "approvals"
+    if not directory.exists() and not directory.is_symlink():
+        return []
+    _require_directory(directory)
+    rows = []
+    for path in sorted(directory.glob("*.json")):
+        _require_regular(path)
+        value = _read_json(path)
+        try:
+            generation = value.get("generation") if isinstance(value, dict) else None
+            request_id = _server_request_id(value.get("request_id")) \
+                if isinstance(value, dict) else None
+            expected_key = (_approval_key(generation, request_id)
+                            if isinstance(generation, str) and generation else None)
+        except (TypeError, ValueError):
+            expected_key = None
+        if (value is None or value.get("schema") != 1
+                or value.get("home") != str(home)
+                or value.get("key") != path.stem
+                or expected_key != path.stem):
+            raise UnsafeHostState(f"Codex approval identity mismatch: {path}")
+        if value.get("state") not in CodexApprovalStore._UNRESOLVED:
+            continue
+        if value.get("thread_id") != thread_id:
+            continue
+        if turn_id is not None and value.get("turn_id") not in (None, turn_id):
+            continue
+        row = dict(value)
+        row["stale"] = (current_generation is not None
+                        and row.get("generation") != current_generation)
+        rows.append(row)
+    return sorted(rows, key=lambda item: item.get("created_at", 0))
+
+
 class OperationJournal:
     """Owner-only durable intent and public observation for Codex mutations."""
 
@@ -889,6 +1327,81 @@ class OperationJournal:
             return self._transition(
                 operation_id, {"observed"}, "committed", result=evidence)
         return record
+
+    def adopt_spawn_queue_overflow(
+            self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
+        """Adopt one spawn mutation from exact post-overflow public evidence.
+
+        This is deliberately narrower than a general ``uncertain -> observed``
+        transition.  The host must prove either the operation-tagged empty
+        thread and its effective settings, or exactly one turn beyond the
+        recorded history watermark.  Nothing here dispatches a provider
+        mutation or makes an ambiguous journal entry replayable.
+        """
+        record = self.load(operation_id)
+        recovery = record.get("recovery")
+        if (record.get("state") != "uncertain"
+                or record.get("method") != "rpc"
+                or not isinstance(recovery, dict)
+                or not isinstance(result, Mapping)):
+            raise HostRejected(
+                f"operation {operation_id} is not an uncertain spawn intent")
+        public_method = record.get("public_method")
+        kind = recovery.get("kind")
+        if public_method == "thread/start" and kind == "thread/start":
+            thread = result.get("thread")
+            expected = recovery.get("expected_effective")
+            if not isinstance(thread, Mapping) or not isinstance(expected, dict):
+                raise HostRejected(
+                    f"operation {operation_id} has incomplete thread evidence")
+            approval_policies = expected.get("approval_policies")
+            sandbox_types = expected.get("sandbox_types")
+            if (not isinstance(approval_policies, list)
+                    or not approval_policies
+                    or any(not isinstance(value, str)
+                           for value in approval_policies)
+                    or not isinstance(sandbox_types, list)
+                    or not sandbox_types
+                    or any(not isinstance(value, str)
+                           for value in sandbox_types)):
+                raise HostRejected(
+                    f"operation {operation_id} has malformed effective settings")
+            approval = result.get("approvalPolicy")
+            sandbox = result.get("sandbox")
+            sandbox_type = sandbox.get("type") if isinstance(sandbox, Mapping) else None
+            if (thread.get("id") != result.get("recoveredThreadId")
+                    or thread.get("cwd") != recovery.get("canonical_cwd")
+                    or result.get("cwd") != recovery.get("canonical_cwd")
+                    or thread.get("threadSource") != recovery.get("thread_source")
+                    or thread.get("turns") != []
+                    or result.get("model") != expected.get("model")
+                    or approval not in approval_policies
+                    or result.get("approvalsReviewer") != "user"
+                    or sandbox_type not in sandbox_types):
+                raise HostRejected(
+                    f"operation {operation_id} thread evidence does not match intent")
+        elif public_method == "turn/start" and kind == "turn/start":
+            turn = result.get("turn")
+            watermark = recovery.get("history_watermark")
+            if (not isinstance(turn, Mapping)
+                    or result.get("threadId") != recovery.get("thread_id")
+                    or result.get("canonicalCwd") != recovery.get("canonical_cwd")
+                    or result.get("historyWatermark") != watermark
+                    or not isinstance(watermark, int)
+                    or isinstance(watermark, bool)
+                    or watermark < 0
+                    or result.get("observedTurnCount") != watermark + 1
+                    or turn.get("status") not in {
+                        "inProgress", "completed", "failed", "interrupted"}):
+                raise HostRejected(
+                    f"operation {operation_id} turn evidence does not match intent")
+        else:
+            raise HostRejected(
+                f"operation {operation_id} is not a spawn thread/turn intent")
+        evidence = _public_evidence(dict(result))
+        evidence["adoptedFromQueueOverflow"] = True
+        return self._transition(
+            operation_id, {"uncertain"}, "observed", result=evidence)
 
     def uncertain(self, operation_id: str, reason: str) -> dict[str, Any]:
         return self._transition(
@@ -1204,6 +1717,44 @@ class CodexHostClient:
         return CodexObservation(operation_id, self.generation, digest,
                                 response.get("result"))
 
+    def config_requirements(self, timeout: float = 10.0) -> Any:
+        """Read managed requirements before any provider mutation is prepared."""
+        operation = {
+            "operation_id": f"config-requirements-{uuid.uuid4()}",
+            "method": "rpc",
+            "payload": {"method": "configRequirements/read", "params": {}},
+        }
+        return self.call(operation, timeout=timeout).result
+
+    def pending_approvals(self, thread_id: str,
+                          turn_id: str | None = None) -> list[dict[str, Any]]:
+        operation = {
+            "operation_id": f"approval-list-{uuid.uuid4()}",
+            "method": "approval/list",
+            "payload": {"thread_id": thread_id, "turn_id": turn_id},
+        }
+        result = self.call(operation, timeout=5).result
+        if not isinstance(result, list) or any(not isinstance(row, dict) for row in result):
+            raise HostUnavailable("Codex host returned malformed approval state")
+        return result
+
+    def respond_approval(self, request_id: str, thread_id: str,
+                         turn_id: str, decision: Any,
+                         timeout: float = 10.0) -> dict[str, Any]:
+        """Consume one current durable request; the host rejects every replay."""
+        operation = {
+            "operation_id": f"approval-response-{uuid.uuid4()}",
+            "method": "approval/respond",
+            "payload": {
+                "request_id": request_id, "thread_id": thread_id,
+                "turn_id": turn_id, "decision": decision,
+            },
+        }
+        result = self.call(operation, timeout=timeout).result
+        if not isinstance(result, dict):
+            raise HostUnavailable("Codex host returned malformed approval response state")
+        return result
+
     def commit(self, operation_id: str) -> None:
         OperationJournal(self.home, self.generation).commit(operation_id)
 
@@ -1323,7 +1874,7 @@ def connect_existing(home: Path) -> CodexHostClient:
 
 
 __all__ = [
-    "CodexHostClient", "CodexObservation", "HostRejected", "HostUnavailable",
-    "OperationJournal", "ReconcileReport", "UnsafeHostState", "connect_existing",
-    "reconcile_home",
+    "CodexApprovalStore", "CodexHostClient", "CodexObservation", "HostRejected",
+    "HostUnavailable", "OperationJournal", "ReconcileReport", "UnsafeHostState",
+    "connect_existing", "read_pending_requests", "reconcile_home",
 ]

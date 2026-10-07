@@ -444,7 +444,9 @@ RATIFIED_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "sup-guard", "q", "index",
                      # [w110/peer-messaging] read-only, like `result`
-                     "address", "watch")
+                     "address", "watch",
+                     # [w130/mail-verify] file-only authenticated-mail view
+                     "mail")
 
 # Named by the ratified table but NOT YET BUILT. Kept separate so the "the table
 # cites no dead verb" pin cannot be satisfied by an unbuilt name.
@@ -550,8 +552,10 @@ RATIFIED_BUT_UNBUILT = ()
 # home's Codex host through `CodexHostClient.ensure`, and may finalize a
 # releasing claim to `released`, which is terminal. The tier is operator-owned,
 # so it waits here under the fail-safe unknown-verb default (`destructive`).
+# `codex-respond` is provider-specific direction; keep the fail-safe unknown
+# tier until the operator adds it to the ratified §5 table.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
-                                     "lane-done", "sup-reconcile")
+                                     "lane-done", "sup-reconcile", "codex-respond")
 
 
 def _classified_verbs():

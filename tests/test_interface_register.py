@@ -1,7 +1,9 @@
 """The interface pane registration verb."""
 
-import subprocess
+from contextlib import contextmanager
 import json
+import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +53,19 @@ def test_register_renames_and_writes_once(tmp_path, monkeypatch, capsys):
     ]
     assert (tmp_path / "state/interface-pane").read_text() == "%42\n"
     assert "registered" in capsys.readouterr().out
+
+
+def test_tmux_registration_also_binds_hosted_claude_session(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "interface-session")
+
+    assert fleet.cmd_interface_register(_args(), run=Tmux(window="fleet")) == 0
+
+    assert (tmp_path / "state/interface-pane").read_text() == "%42\n"
+    assert (tmp_path / "state/interface-session").read_text() == \
+        "interface-session\n"
 
 
 def test_register_is_noop_when_registration_and_window_are_correct(
@@ -172,6 +187,90 @@ def test_codex_interface_reregister_rotates_claim_and_disarms_predecessor(
     second = json.loads((tmp_path / "state/interface-codex.json").read_text())
     assert second["claim_id"] != first["claim_id"]
     assert second["ancestor_pid"] == 700
+
+
+def test_competing_provider_registrations_share_one_atomic_lock(
+        tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "interface-codex.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setattr(fleet, "append_interface_log", lambda *_a, **_k: None)
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: CodexReadClient())
+    import fleet_codex
+    monkeypatch.setattr(fleet_codex, "codex_process_source",
+                        lambda _pid, thread: _source(thread))
+
+    gate = threading.Lock()
+    claude_cleared = threading.Event()
+    release_claude = threading.Event()
+    codex_observed = threading.Event()
+    codex_finished = threading.Event()
+    codex_saw_lock_held = []
+    failures = []
+
+    @contextmanager
+    def coordinated_lock(timeout=fleet.LOCK_TIMEOUT_SECONDS, *, home=None):
+        assert home is not None
+        assert home.resolve() == tmp_path.resolve()
+        if threading.current_thread().name == "codex-register":
+            codex_saw_lock_held.append(gate.locked())
+            codex_observed.set()
+        with gate:
+            yield
+
+    original_clear = fleet._clear_competing_interface_registration
+
+    def pause_after_claude_clear(path):
+        cleared = original_clear(path)
+        if (threading.current_thread().name == "claude-register"
+                and path.name == "interface-codex.json"):
+            claude_cleared.set()
+            if not release_claude.wait(5):
+                raise AssertionError("test did not release Claude registration")
+        return cleared
+
+    monkeypatch.setattr(fleet, "fleet_lock", coordinated_lock)
+    monkeypatch.setattr(
+        fleet, "_clear_competing_interface_registration", pause_after_claude_clear)
+
+    def register_claude():
+        try:
+            fleet.cmd_interface_register(SimpleNamespace(
+                codex_thread=None, session_id="claude-interface"))
+        except BaseException as exc:  # keep the test's coordination releasable
+            failures.append(exc)
+
+    def register_codex():
+        try:
+            fleet.cmd_interface_register(_codex_args())
+        except BaseException as exc:  # keep the test's coordination releasable
+            failures.append(exc)
+        finally:
+            codex_finished.set()
+
+    claude = threading.Thread(target=register_claude, name="claude-register")
+    codex = threading.Thread(target=register_codex, name="codex-register")
+    claude.start()
+    assert claude_cleared.wait(5)
+    codex.start()
+    assert codex_observed.wait(5)
+    if codex_saw_lock_held == [False]:
+        assert codex_finished.wait(5)
+    release_claude.set()
+    claude.join(5)
+    codex.join(5)
+
+    assert not claude.is_alive()
+    assert not codex.is_alive()
+    assert failures == []
+    assert codex_saw_lock_held == [True]
+    assert (state / "interface-codex.json").exists()
+    assert not (state / "interface-session").exists()
+    assert not (state / "interface-pane").exists()
 
 
 def test_codex_interface_refuses_implicit_home_before_membership_read(

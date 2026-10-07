@@ -1,7 +1,7 @@
 # Native Codex fleet integration design
 
-**Status:** Option A approved. Native worker lifecycle verbs are implemented;
-default enablement remains staged behind the full live acceptance gates.
+**Status:** Option A approved and native is the default for new Codex workers
+and Codex supervisor bodies. The explicit mcx compatibility selector remains.
 **Evidence baseline:** fleet `6fa06c9`; installed `codex-cli 0.155.1`; v2 JSON Schema generated locally with `codex app-server generate-json-schema`.  
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -15,10 +15,9 @@ authenticated local endpoint. A durable Fleet operation journal will make a
 host restart conservative and reviewable.
 
 Existing mcx-backed rows remain mcx-backed. They are neither rewritten nor
-silently adopted. After the native adapter passes the live acceptance matrix,
-new `codex:<model>` dispatch defaults to app-server; an explicit legacy
-selector remains during migration. Removing mcx is a later operator decision
-backed by a zero-row census and a completed soak.
+silently adopted. New `codex:<model>` dispatch defaults to app-server; explicit
+`--codex-adapter mcx` remains during migration. Removing mcx is a later
+operator decision backed by a zero-row census and a completed soak.
 
 This design applies to all three roles:
 
@@ -267,10 +266,34 @@ another host.
 
 The host starts `codex app-server --listen stdio://` with
 `CLAUDE_CODE_SESSION_ID` removed, performs `initialize`/`initialized`,
-verifies version/schema, then publishes ready. It supervises stdio/stderr,
-rejects invalid/oversized messages, and reports child exit. It stays alive
-while native rows, a Codex supervisor claim, or unresolved operations exist.
-Idle shutdown cannot occur during an accepted operation.
+verifies version/schema, then publishes ready. It supervises protocol stdio,
+bounds and redacts app-server stderr in memory, and rejects invalid/oversized
+messages. The detached host's own stdout/stderr are currently discarded and
+there is no durable host lifecycle log, so an unexpected predecessor exit can
+be unclassifiable after `host.json` is replaced. It stays alive while native
+rows, a Codex supervisor claim, or unresolved operations exist. Idle shutdown
+cannot occur during an accepted operation.
+
+The app-server notification queue is bounded at 8,192 events by default so a
+single busy home can multiplex several active lanes without the former 1,024-
+event burst failure. `FLEET_CODEX_EVENT_QUEUE_MAX` (or the compatibility
+spelling `FLEET_CODEX_MAX_EVENTS`) may select another positive bound, capped at
+65,536; no setting permits an unbounded queue. A queue overflow never makes a
+mutation replayable. The host marks the original operation uncertain, replaces
+only the failed stdio child, and attempts exact public reconciliation: a
+`thread/start` carries a provider-persisted `threadSource` derived from its
+operation ID, so recovery can list the exact-cwd app-server threads and load the
+one tagged empty thread under a separate durable `thread/resume` intent to
+recover its effective model and permission tuple; a `turn/start` reads the
+already-bound thread and requires exactly one turn beyond its recorded history
+watermark. The original journal entry is adopted only after those identities,
+cwd, effective settings, and turn counts agree. Missing, duplicate, malformed,
+or repeatedly overflowing evidence leaves the original intent uncertain and
+reports the `FLEET_CODEX_EVENT_QUEUE_MAX`/lane-concurrency remedy. Read-only
+requests may be repeated once after replacing the failed stdio child. If the
+client was already failed before a spawn request could be written, the protocol
+reports that fact explicitly; the replacement child then receives the first and
+only provider dispatch under the already-accepted journal intent.
 
 ### 7.2 Locks
 
@@ -295,28 +318,43 @@ public evidence for recovery and never overwrites newer state.
 1. Under `fleet.lock`, validate name/home/model/permissions, write the brief,
    and insert a preclaim with no provider ID; release the lock immediately.
 2. Ensure the host and record a prepared `thread/start` outside the lock.
+   Its public `threadSource` is the operation-derived recovery correlation.
+   Queue-bound transport failures follow §7.1 reconciliation; the mutation is
+   never retried.
 3. Call `thread/start`; on a valid response, persist the genuine thread/cwd.
 4. Reacquire `fleet.lock` only to conditionally bind that same preclaim to the
    thread, then release it. Bind failure records an orphan empty thread and
    starts no turn.
-5. Prepare and call `turn/start` once outside the lock; record the real turn;
-   reacquire only to conditionally commit active state.
+5. Immediately before `turn/start`, reserve the exact bound row under
+   `fleet.lock`, then release it. A terminal mutation that commits first fences
+   the launcher; once reserved, terminal mutation refuses until reconciliation.
+6. Prepare and call `turn/start` once outside the lock; record the real turn;
+   reacquire only to conditionally commit active state from the complete
+   reserved row.
 
-Lost `thread/start` response never retries automatically because no reliable
-correlation exists. It can leave an empty orphan, not duplicate work. Lost
-`turn/start` response also never retries blindly. Recovery reads the bound
-thread and turns. Exactly one new genuine turn may be adopted only when it is
-strictly after the history watermark and the thread is exclusively Fleet-bound.
-Zero, multiple, wrong-cwd, or conflicting observations become
+Lost `thread/start` and `turn/start` responses never retry automatically.
+Queue-overflow recovery has the exact correlation described in §7.1; other
+transport loss still has no reliable `thread/start` correlation and leaves a
+possible empty orphan. Turn recovery reads the bound thread and turns. Exactly
+one new genuine turn may be adopted only when it is strictly after the history
+watermark and the thread is exclusively Fleet-bound. Zero, multiple, wrong-cwd,
+wrong-effective-settings, or conflicting observations become
 `uncertain`/`dead-suspected` and PAGE.
 
 ### 8.2 State, send, and wake
 
 **Implemented 2026-10-04:** ordinary native worker `status` and `wait` validate
 the exact recorded thread, newest recorded turn, canonical cwd, and host
-generation through the existing exact-home host. Host loss or conflicting
-public evidence maps to `dead-suspected`, never to a proved death. File-only
-views remain file-only. Busy `send` uses one
+generation through the existing exact-home host. They also read the bounded
+public-evidence file for the exact bound thread and turn: a durable
+`completed` event yields `idle` after `notLoaded` or `systemError` only when
+the validated live read finds that same exact newest turn and also reports it
+`completed`. In-progress, failed, interrupted, missing, or conflicting live
+turn evidence stays non-idle. An unresolved mutation prevents an older
+completion from vouching for unknown provider work. Host loss, a failed live
+read, malformed evidence, or conflicting identity maps to
+`dead-suspected`, never to a proved death. File-only views remain file-only.
+Busy `send` uses one
 `turn/steer(expectedTurnId=...)`; idle `send` starts one new turn on the same
 thread. Each mutation is reserved durably before IPC, and an uncertain response
 keeps that reservation and retained mail instead of retrying.
@@ -327,8 +365,10 @@ keeps that reservation and retained mail instead of retrying.
 | active + `waitingOnApproval` | `waiting` with approval metadata |
 | active + `waitingOnUserInput` | `waiting` with input metadata |
 | idle + persisted terminal current turn | terminal mapping, usually `idle` |
-| `notLoaded` | `dead-suspected`; explicit recovery is required, never inferred death |
-| system error, loss, schema mismatch, wrong cwd, conflicting turn | `dead-suspected`/PAGE |
+| exact newest turn is `completed` in both durable evidence and validated live read | `idle`, including after live-view eviction |
+| `notLoaded` with missing or disagreeing completion evidence | `dead-suspected`; explicit recovery is required, never inferred death |
+| `systemError` with missing or disagreeing completion evidence | `dead-suspected`/PAGE |
+| host loss, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
 | limit error + authoritative future reset | `limited` |
 | limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
 
@@ -338,11 +378,19 @@ Send to a matching active steerable turn calls
 claims mail and calls one `turn/start`; failure restores/leaves the claim
 recoverable. Mail deletes only after accepted public observation. Send and
 interrupt refuse a committed `dead-suspected`, unknown, waiting, or uncertain
-row and any unresolved operation before provider IPC. They read the existing
-host first and reserve a mutation only after the exact thread is actionable, so
-a down host creates no reservation. A known-local mailbox failure before the
-provider call releases its reservation; only a possibly accepted provider call
-freezes the row and keeps the reservation for reconciliation.
+row and any unresolved operation before provider IPC, except that `send` may
+recover the exact `dead-suspected`/`uncertain` shape produced solely by a host
+generation change. When the existing host generation differs, `send` reserves
+one `thread/resume`, validates the real thread's ID, cwd, model, permission
+profile, and unchanged newest turn, and conditionally adopts the new generation
+before steering or waking. Reservation compares the complete pre-resume row,
+and adoption compares the complete reserved row; any concurrent state change,
+including a terminal action, wins and cannot be overwritten by adoption. The
+resume creates no turn; a lost response or any identity conflict freezes the
+reservation and is never replayed. A down host with no replacement still
+creates no send reservation. A known-local mailbox failure before the provider
+call releases its reservation; only a possibly accepted provider call freezes
+the row and keeps the reservation for reconciliation.
 
 ### 8.3 Interrupt and terminal operations
 
@@ -350,12 +398,27 @@ freezes the row and keeps the reservation for reconciliation.
 then requires an exact same-turn terminal read before committing the terminal
 state. A lost response remains `dead-suspected` with an unresolved operation;
 it is not retried. A live-host `kill` uses the same proof rule; only proof that
-the recorded host incarnation itself is gone can bypass the turn read.
+the recorded host incarnation itself is gone can bypass the turn read. Kill
+refuses any pending native operation, including `thread/resume`, and revalidates
+the unchanged row at its terminal write; a concurrent reattachment can never be
+silently reported as killed. An expired launch preclaim with no provider thread
+binding is cleared by that unchanged-row path. A bound row with no recorded turn
+first requires an exact same-generation `thread/read`: only an idle thread with
+zero turns is safe to clear. Any observed provider turn may be the accepted turn
+whose registry commit was lost, so kill refuses with that identity instead of
+allowing a later respawn to duplicate its work.
 `respawn` requires old-turn terminal proof, creates a new
-provider-minted thread, records the retired thread/turn/proof tuple, and carries
-the durable brief, journal, and pending mail. `resume-limited` reads public
+provider-minted thread only after a full-row reservation of that actionable
+post-proof state, records the retired thread/turn/proof tuple, and carries the
+durable brief, journal, and pending mail. A concurrent kill that commits first
+wins that compare-and-swap; fresh-thread and turn commits also require their
+complete reserved rows and cannot resurrect it. `resume-limited` reads public
 rate-limit state, records an authoritative future reset when supplied, and
 starts one same-thread turn only after explicit allowance or an elapsed reset.
+If respawn finds a replacement host generation, it first performs the same
+exact-thread `thread/resume` and conditional generation adoption as send. The
+re-attached thread supplies the required terminal proof; respawn never treats
+host loss alone as proof and never creates the fresh thread before that proof.
 
 Interrupt uses only `turn/interrupt` with recorded real IDs. Fleet commits
 `interrupted` only after event/read proves that same turn terminal. Timeout,
@@ -396,6 +459,25 @@ Completed turn status and usage alone cannot authorize a result. The owner-only
 evidence survives host replacement.
 
 ## 9. Permissions and blocking requests
+
+**Implemented 2026-10-04 for native workers:** every new worker thread,
+including a context-reset respawn, reads `configRequirements/read` before
+`thread/start`, refuses an explicitly requested approval or sandbox mode that
+managed requirements exclude, and records the effective approval, reviewer,
+and sandbox returned by the provider. App-server blocking requests are stored
+atomically under the exact home with their real request/thread and applicable
+turn/item identity plus host generation before status exposes them. They survive a host
+restart as visible generation-bound waits; a request from a replaced
+generation is stale and cannot be answered on the new connection.
+
+`fleet codex-respond NAME REQUEST_ID DECISION` is the only response path.
+`DECISION` is an offered literal, an explicit JSON response object, or `@file`;
+the host validates it against the stored request, marks the request consumed
+before writing the JSON-RPC response, and never retries an uncertain write.
+Repeated, resolved, wrong-home, wrong-thread, wrong-turn, stale-generation,
+and unknown-kind responses refuse. `serverRequest/resolved` closes the durable
+wait; user-input and elicitation values are not retained in response evidence.
+No mode supplies `acceptForSession` or user input implicitly.
 
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
 | --- | --- | --- | --- |
@@ -492,6 +574,15 @@ same-user process, reused PID, nearer forked Codex process, or stale predecessor
 fails closed. Other platforms remain unsupported until they have equivalent
 peer-process and PID-reuse acceptance proof.
 
+Interface provider registration is exclusive. A successful native Codex
+registration removes the Claude session and tmux pane identities; a successful
+Claude/tmux registration removes the native Codex claim. Both routes take the
+target home's same `fleet.lock` and perform the competing-provider cleanup
+inside it, so concurrent cross-provider registrations cannot leave both
+families present. Receipt verification
+also rejects a home containing both provider families, so legacy or raced stale
+identity files cannot preserve authority after a provider rotation.
+
 An external Interface bridge may register or read an authorized Interface
 thread, but remains observational: it never resumes or owns that same thread,
 starts a turn on it, or creates a second writer. A bridge that needs active
@@ -507,7 +598,7 @@ registration, and claim. No home is discovered from private Codex state.
 
 1. Existing Codex rows continue through mcx.
 2. Doctor counts mcx, native, mixed-invalid, and unavailable-helper rows.
-3. After live acceptance, new `codex:<model>` uses app-server; explicit
+3. New `codex:<model>` uses app-server by default; explicit
    `--codex-adapter mcx` remains during soak.
 4. Active mcx rows never convert in place. Idle/terminal respawn may migrate
    only with an explicit flag, retaining old `mcx_id` as evidence.

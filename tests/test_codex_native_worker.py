@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -14,6 +15,103 @@ THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
 TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
 NEXT_THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9"
 NEXT_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
+
+
+QUEUE_RECOVERY_APP_SERVER = r'''#!__PYTHON__
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+state_path = Path(os.environ["FAKE_QUEUE_RECOVERY_STATE"])
+log_path = Path(os.environ["FAKE_QUEUE_RECOVERY_LOG"])
+
+def load():
+    return json.loads(state_path.read_text()) if state_path.exists() else {}
+
+def save(value):
+    state_path.write_text(json.dumps(value, sort_keys=True))
+
+def log(method):
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"method": method}) + "\n")
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+def public_thread(state):
+    thread = state["thread"]
+    turns = state.get("turns", [])
+    return {
+        "id": thread["id"], "cwd": thread["cwd"],
+        "threadSource": thread["threadSource"], "turns": turns,
+        "status": {"type": "active" if turns else "idle", "activeFlags": []},
+    }
+
+first = json.loads(sys.stdin.readline())
+send({"id": first["id"], "result": {
+    "serverInfo": {"name": "fake-codex", "version": "0.155.1"}}})
+if json.loads(sys.stdin.readline()) != {"method": "initialized"}:
+    raise SystemExit(31)
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    params = message.get("params", {})
+    log(method)
+    state = load()
+    if method == "configRequirements/read":
+        send({"id": message["id"], "result": {"requirements": None}})
+    elif method == "thread/start":
+        if os.environ.get("FAKE_QUEUE_RECOVERY_CREATE_THREAD", "1") == "1":
+            sandbox = {"danger-full-access": "dangerFullAccess",
+                       "workspace-write": "workspaceWrite",
+                       "read-only": "readOnly"}[params["sandbox"]]
+            state = {"thread": {
+                "id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7",
+                "cwd": params["cwd"], "threadSource": params["threadSource"],
+                "model": params["model"],
+                "approvalPolicy": params["approvalPolicy"],
+                "sandbox": {"type": sandbox},
+            }, "turns": []}
+            save(state)
+        # With a queue bound of one, the second notification makes the stdio
+        # response unknowable while the provider-side state above survives.
+        send({"method": "thread/status/changed", "params": {"seq": 1}})
+        send({"method": "thread/status/changed", "params": {"seq": 2}})
+        time.sleep(0.1)
+        send({"id": message["id"], "result": {}})
+    elif method == "thread/list":
+        data = [public_thread(state)] if "thread" in state else []
+        send({"id": message["id"], "result": {"data": data,
+                                                "nextCursor": None}})
+    elif method == "thread/resume":
+        thread = state["thread"]
+        send({"id": message["id"], "result": {
+            "thread": public_thread(state), "cwd": thread["cwd"],
+            "model": thread["model"],
+            "approvalPolicy": thread["approvalPolicy"],
+            "approvalsReviewer": "user", "sandbox": thread["sandbox"],
+        }})
+    elif method == "turn/start":
+        state["turns"] = [{
+            "id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8",
+            "status": "inProgress", "items": [], "itemsView": "full",
+        }]
+        save(state)
+        send({"method": "thread/status/changed", "params": {"seq": 3}})
+        send({"method": "turn/started", "params": {"seq": 4}})
+        time.sleep(0.1)
+        send({"id": message["id"], "result": {}})
+    elif method == "thread/read":
+        send({"id": message["id"], "result": {
+            "thread": public_thread(state)}})
+    else:
+        send({"id": message["id"], "error": {
+            "code": -32601, "message": "unsupported fake method"}})
+'''
 
 
 @pytest.fixture
@@ -43,7 +141,7 @@ def native_home(tmp_path, monkeypatch):
 def _args(lane, **updates):
     values = dict(
         name="cx-native", dir=str(lane), task="implement the bounded change",
-        mode="accept", model="codex:gpt-5.6-luna", codex_adapter="native",
+        mode="accept", model="codex:gpt-5.6-luna",
         max_budget_usd=None, setting_sources=None, token_ceiling=None,
         category=None, nonce=None, force_band=False, context=None,
     )
@@ -94,6 +192,12 @@ class FakeClient:
             assert record["cwd"] == str(self.lane)
             result = {"turn": {"id": TURN_ID, "status": "inProgress",
                                "items": []}}
+        elif method == "thread/read":
+            result = {"thread": {
+                "id": THREAD_ID, "cwd": str(self.lane),
+                "status": {"type": "idle", "activeFlags": []},
+                "turns": [],
+            }}
         else:
             raise AssertionError(f"unexpected public method: {method}")
         digest = "a" * 64
@@ -193,6 +297,102 @@ def test_lost_thread_start_response_freezes_preclaim_without_retry(
     assert record["status"] == "dead-suspected"
     assert record["codex_thread_id"] is None
     assert len(client.operations) == 1
+
+
+def _queue_recovery_client(home, tmp_path, *, create_thread=True):
+    import fleet_codex
+
+    app_server = tmp_path / "queue-recovery-app-server"
+    app_server.write_text(
+        QUEUE_RECOVERY_APP_SERVER.replace("__PYTHON__", sys.executable),
+        encoding="utf-8")
+    app_server.chmod(0o700)
+    state = tmp_path / "provider-state.json"
+    log = tmp_path / "provider-requests.jsonl"
+    env = dict(os.environ)
+    env.update({
+        "FAKE_QUEUE_RECOVERY_STATE": str(state),
+        "FAKE_QUEUE_RECOVERY_LOG": str(log),
+        "FAKE_QUEUE_RECOVERY_CREATE_THREAD": "1" if create_thread else "0",
+        "FLEET_CODEX_EVENT_QUEUE_MAX": "1",
+    })
+    client = fleet_codex.CodexHostClient.ensure(
+        home, app_server_command=[str(app_server)], env=env,
+        ready_timeout=20, idle_timeout=30)
+    return client, log
+
+
+def _stop_queue_recovery_client(client):
+    from test_codex_host_ipc import _shutdown
+
+    _shutdown(client)
+    client.wait_for_exit(2)
+
+
+def test_native_spawn_adopts_queue_overflows_through_production_journal(
+        native_home, monkeypatch):
+    home, lane = native_home
+    client, log = _queue_recovery_client(home, home)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    try:
+        assert fleet.cmd_spawn(_args(lane)) == 0
+        record = fleet.load_registry()["workers"]["cx-native"]
+        assert record["adapter_state"] == "active"
+        assert record["codex_thread_id"] == THREAD_ID
+        assert record["codex_turn_id"] == TURN_ID
+
+        operations = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (home / "state" / "codex" / "operations").glob(
+                "worker-cx-native-*.json")
+        ]
+        assert len(operations) == 2
+        assert {item["state"] for item in operations} == {"committed"}
+        assert all(item["result"].get("adoptedFromQueueOverflow") is True
+                   for item in operations)
+        recovery_operations = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (home / "state" / "codex" / "operations").glob(
+                "queue-recovery-*.json")
+        ]
+        assert len(recovery_operations) == 1
+        assert recovery_operations[0]["state"] == "committed"
+        assert recovery_operations[0]["public_method"] == "thread/resume"
+        methods = [json.loads(line)["method"]
+                   for line in log.read_text(encoding="utf-8").splitlines()]
+        assert methods.count("thread/start") == 1
+        assert methods.count("turn/start") == 1
+        assert methods.count("thread/list") == 1
+        assert methods.count("thread/resume") == 1
+        assert methods.count("thread/read") == 1
+    finally:
+        _stop_queue_recovery_client(client)
+
+
+def test_native_spawn_refuses_unprovable_queue_overflow_without_replay(
+        native_home, monkeypatch):
+    home, lane = native_home
+    client, log = _queue_recovery_client(home, home, create_thread=False)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    try:
+        with pytest.raises(
+                fleet.FleetCliError,
+                match="mutation was not replayed.*public recovery failed"):
+            fleet.cmd_spawn(_args(lane))
+        record = fleet.load_registry()["workers"]["cx-native"]
+        assert record["adapter_state"] == "uncertain"
+        assert record["status"] == "dead-suspected"
+        methods = [json.loads(line)["method"]
+                   for line in log.read_text(encoding="utf-8").splitlines()]
+        assert methods.count("thread/start") == 1
+        assert methods.count("thread/list") == 1
+        operation = next(
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (home / "state" / "codex" / "operations").glob(
+                "worker-cx-native-thread-*.json"))
+        assert operation["state"] == "uncertain"
+    finally:
+        _stop_queue_recovery_client(client)
 
 
 def test_wrong_provider_cwd_freezes_without_starting_a_turn(
@@ -351,6 +551,70 @@ def test_concurrent_preclaim_change_never_binds_or_starts_the_body(
     assert client.commits == []
 
 
+def test_kill_fences_a_delayed_initial_turn_start(native_home, monkeypatch):
+    home, lane = native_home
+    client = FakeClient(home, lane)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client", lambda _home: client, raising=False)
+    original_commit = fleet._commit_codex_journal
+    killed = {"done": False}
+
+    def kill_after_thread_bind(client_arg, name, journal_operation_id,
+                               record_operation_id):
+        original_commit(
+            client_arg, name, journal_operation_id, record_operation_id)
+        if killed["done"]:
+            return
+        killed["done"] = True
+        bound = dict(fleet.load_registry()["workers"][name])
+        assert bound["adapter_state"] == "bound"
+        assert fleet._cmd_kill_codex_native(
+            name, bound, connect=lambda _home: client) == 0
+
+    monkeypatch.setattr(fleet, "_commit_codex_journal", kill_after_thread_bind)
+
+    assert fleet.cmd_spawn(_args(lane)) == 1
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/start", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+
+
+def test_journal_failure_cannot_downgrade_a_concurrent_terminal_kill(
+        native_home, monkeypatch):
+    home, lane = native_home
+    client = FakeClient(home, lane)
+    monkeypatch.setattr(
+        fleet, "_codex_native_client", lambda _home: client, raising=False)
+    commit_attempted = {"done": False}
+
+    def kill_then_fail_commit(operation_id):
+        assert not commit_attempted["done"]
+        commit_attempted["done"] = True
+        client.commits.append(operation_id)
+        bound = dict(fleet.load_registry()["workers"]["cx-native"])
+        assert bound["adapter_state"] == "bound"
+        assert fleet._cmd_kill_codex_native(
+            "cx-native", bound, connect=lambda _home: client) == 0
+        raise OSError("journal commit lost after terminal kill")
+
+    client.commit = kill_then_fail_commit
+
+    with pytest.raises(fleet.FleetCliError, match="journal commit failed"):
+        fleet.cmd_spawn(_args(lane))
+
+    assert commit_attempted["done"] is True
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/start", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+
+
 @pytest.mark.parametrize("commit_number,provider_calls", [(1, 1), (2, 2)])
 def test_journal_commit_failure_freezes_the_bound_row(
         native_home, monkeypatch, commit_number, provider_calls):
@@ -368,13 +632,21 @@ def test_journal_commit_failure_freezes_the_bound_row(
     assert len(client.operations) == provider_calls
 
 
-def test_spawn_parser_keeps_mcx_default_and_allows_explicit_native():
+def test_spawn_parser_defaults_codex_models_to_native_and_allows_explicit_mcx():
     parser = fleet.build_parser()
     common = ["spawn", "cx", "--dir", "/tmp", "--task", "brief",
               "--model", "codex:gpt-5.6-luna"]
-    assert parser.parse_args(common).codex_adapter == "mcx"
-    assert parser.parse_args(common + ["--codex-adapter", "native"]).codex_adapter \
-        == "native"
+    assert parser.parse_args(common).codex_adapter == "native"
+    assert parser.parse_args(common + ["--codex-adapter", "mcx"]).codex_adapter \
+        == "mcx"
+
+
+def test_spawn_help_names_native_default_and_mcx_fallback():
+    help_text = fleet.build_parser()._subparsers._group_actions[0].choices[
+        "spawn"].format_help()
+
+    assert "default: native" in help_text
+    assert "--codex-adapter {native,mcx}" in help_text
 
 
 def test_wave_close_mixed_codex_row_never_reaches_mcx(tmp_path, monkeypatch):
@@ -429,8 +701,10 @@ class WorkerVerbClient:
     def __init__(self, lane, *, provider_status="active",
                  turn_status="inProgress", active_flags=None,
                  error_code=None, evidence=None, fail_method=None,
-                 rate_result=None):
+                 rate_result=None, generation=None):
         self.lane = str(lane)
+        if generation is not None:
+            self.generation = generation
         self.provider_status = provider_status
         self.turn_status = turn_status
         self.active_flags = list(active_flags or [])
@@ -491,6 +765,13 @@ class WorkerVerbClient:
                 "approvalPolicy": "on-request", "approvalsReviewer": "user",
                 "sandbox": {"type": "workspaceWrite"},
             }
+        elif public == "thread/resume":
+            result = {
+                "thread": {"id": THREAD_ID, "cwd": self.lane},
+                "cwd": self.lane, "model": "gpt-5.6-luna",
+                "approvalPolicy": "on-request", "approvalsReviewer": "user",
+                "sandbox": {"type": "workspaceWrite"},
+            }
         elif public == "account/rateLimits/read":
             result = self.rate_result
         else:
@@ -501,6 +782,37 @@ class WorkerVerbClient:
 
     def commit(self, operation_id):
         self.commits.append(operation_id)
+
+
+class BlockingResumeClient(WorkerVerbClient):
+    def __init__(self, lane, **kwargs):
+        super().__init__(lane, **kwargs)
+        self.resume_entered = threading.Event()
+        self.resume_release = threading.Event()
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") == "thread/resume":
+            self.resume_entered.set()
+            if not self.resume_release.wait(timeout=5):
+                raise AssertionError("test did not release thread/resume")
+        return super().call(operation, timeout)
+
+
+class TerminalDuringResumeClient(WorkerVerbClient):
+    def commit(self, operation_id):
+        super().commit(operation_id)
+        operation = next(
+            op for op in self.operations
+            if op["operation_id"] == operation_id)
+        if operation.get("payload", {}).get("method") != "thread/resume":
+            return
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            record = data["workers"]["cx-native"]
+            record["status"] = "dead"
+            record["adapter_state"] = "idle"
+            record["dead_reason"] = "concurrent terminal action"
+            fleet.save_registry(data)
 
 
 @pytest.mark.parametrize("provider_status,turn_status,error_code,expected", [
@@ -541,6 +853,129 @@ def test_native_worker_host_down_is_dead_suspected_without_mcx(
 
     assert fleet.recompute_worker_codex("cx-native", record)["status"] \
         == "dead-suspected"
+
+
+@pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
+def test_native_worker_completed_evidence_and_live_turn_agree_on_completion(
+        native_home, monkeypatch, provider_status, capsys):
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence = {
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "turn_status": "completed", "result_item_id": "item-final",
+        "result_text": "durably finished", "result_truncated": False,
+        "usage": {
+            "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+            "input_tokens": 10, "output_tokens": 3,
+            "reasoning_output_tokens": 1, "total_tokens": 16,
+        },
+    }
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps(evidence), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status=provider_status, turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    # This is the same exact-turn evidence accepted by the file-only result
+    # surface; liveness must not contradict it merely because the live host no
+    # longer has an actionable provider thread.
+    assert fleet._cmd_result_codex("cx-native", record) == 0
+    capsys.readouterr()
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert client.generation == record["codex_host_generation"]
+    assert updated["status"] == "idle"
+    assert updated["adapter_state"] == "idle"
+    assert updated["provider_status"] == provider_status
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+@pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
+@pytest.mark.parametrize("turn_status", ["inProgress", "failed", "interrupted"])
+def test_native_worker_completed_evidence_cannot_override_live_noncompletion(
+        native_home, monkeypatch, provider_status, turn_status):
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "turn_status": "completed",
+        }), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status=provider_status, turn_status=turn_status)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "dead-suspected"
+    assert updated["adapter_state"] == "uncertain"
+    assert updated["provider_status"] == provider_status
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+def test_native_worker_status_persists_completed_evidence_as_idle(
+        native_home, monkeypatch, capsys):
+    home, lane = native_home
+    _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "turn_status": "completed", "result_item_id": "item-final",
+            "result_text": "status-visible completion",
+            "result_truncated": False,
+            "usage": {
+                "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+                "input_tokens": 10, "output_tokens": 3,
+                "reasoning_output_tokens": 1, "total_tokens": 16,
+            },
+        }), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    notifications = []
+    monkeypatch.setattr(
+        fleet, "notify_lane_done",
+        lambda name, status, **_kwargs: notifications.append((name, status)))
+
+    assert fleet.cmd_status(SimpleNamespace(
+        name="cx-native", all=False, stale_ok=False, json=True)) == 0
+
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["workers"][0]["status"] == "idle"
+    assert fleet.load_registry()["workers"]["cx-native"]["status"] == "idle"
+    assert notifications == [("cx-native", "idle")]
+
+
+def test_native_worker_completed_evidence_cannot_clear_pending_operation(
+        native_home, monkeypatch):
+    home, lane = native_home
+    record = _install_record(lane, pending_operation={
+        "operation_id": "unresolved-op", "kind": "turn/start",
+        "at": "2026-09-20T00:00:00Z",
+    })
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "turn_status": "completed",
+        }), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="notLoaded", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "dead-suspected"
+    assert updated["adapter_state"] == "uncertain"
 
 
 @pytest.mark.parametrize("provider_status,active_flags,expected_status,expected_adapter", [
@@ -671,6 +1106,126 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     record = fleet.load_registry()["workers"]["cx-native"]
     assert record["codex_turn_id"] == expected_turn
     assert record["status"] == "working"
+
+
+def test_native_worker_send_resumes_live_thread_after_host_generation_change(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    assert fleet._cmd_send_codex("cx-native", "continue after restart") == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "turn/steer"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == THREAD_ID
+    assert stored["codex_turn_id"] == TURN_ID
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert stored["status"] == "working"
+    assert stored["adapter_state"] == "active"
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_lost_restart_resume_freezes_without_replaying_turn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = WorkerVerbClient(
+        lane, generation="host-generation-2", fail_method="thread/resume")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="restart reconciliation"):
+        fleet._cmd_send_codex("cx-native", "must not be replayed")
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_host_generation"] == "host-generation-1"
+    assert stored["status"] == "dead-suspected"
+    assert stored["adapter_state"] == "uncertain"
+    assert stored["pending_operation"]["kind"] == "thread/resume"
+
+
+def test_native_worker_kill_refuses_while_restart_resume_is_pending(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = BlockingResumeClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    kill_connect_entered = threading.Event()
+    kill_connect_release = threading.Event()
+    send_outcome = {}
+    kill_outcome = {}
+
+    def send_after_restart():
+        try:
+            send_outcome["rc"] = fleet._cmd_send_codex(
+                "cx-native", "continue after restart")
+        except BaseException as exc:  # surfaced in the test thread below
+            send_outcome["error"] = exc
+
+    def connect_during_kill(_home):
+        kill_connect_entered.set()
+        if not kill_connect_release.wait(timeout=5):
+            raise AssertionError("test did not release kill host lookup")
+        return client
+
+    def kill_old_generation():
+        try:
+            kill_outcome["rc"] = fleet._cmd_kill_codex_native(
+                "cx-native", record, connect=connect_during_kill)
+        except BaseException as exc:  # surfaced in the test thread below
+            kill_outcome["error"] = exc
+
+    killer = threading.Thread(target=kill_old_generation)
+    killer.start()
+    assert kill_connect_entered.wait(timeout=5)
+    sender = threading.Thread(target=send_after_restart)
+    sender.start()
+    try:
+        assert client.resume_entered.wait(timeout=5)
+        kill_connect_release.set()
+        killer.join(timeout=5)
+    finally:
+        kill_connect_release.set()
+        client.resume_release.set()
+        killer.join(timeout=5)
+        sender.join(timeout=5)
+
+    assert not killer.is_alive()
+    assert not sender.is_alive()
+    assert isinstance(kill_outcome.get("error"), fleet.FleetCliError)
+    assert "thread/resume" in str(kill_outcome["error"])
+    assert "refusing kill" in str(kill_outcome["error"])
+    assert send_outcome == {"rc": 0}
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "working"
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_resume_adoption_preserves_concurrent_terminal_state(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane)
+    client = TerminalDuringResumeClient(
+        lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="changed during host restart"):
+        fleet._cmd_send_codex("cx-native", "must not continue after kill")
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert stored["codex_host_generation"] == "host-generation-1"
+    assert stored["pending_operation"]["kind"] == "thread/resume"
 
 
 @pytest.mark.parametrize("verb", ["send", "interrupt"])
@@ -887,3 +1442,77 @@ def test_native_worker_respawn_uses_fresh_thread_after_old_terminal_proof(
     prompt = fleet.task_file_path("cx-native").read_text(encoding="utf-8")
     assert "preserve the full worker brief" in prompt
     assert "checkpoint from the previous thread" in prompt
+
+
+def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "preserve the restart-safe brief")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed",
+        generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    args = SimpleNamespace(
+        name="cx-native", task=None, force=False, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+    assert fleet._cmd_respawn_codex(args, record) == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "thread/start", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == NEXT_THREAD_ID
+    assert stored["codex_turn_id"] == NEXT_TURN_ID
+    assert stored["codex_host_generation"] == "host-generation-2"
+    assert stored["retired_codex_threads"] == [{
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "terminal_status": "completed",
+    }]
+    assert "preserve the restart-safe brief" in \
+        fleet.task_file_path("cx-native").read_text(encoding="utf-8")
+
+
+def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
+        native_home, monkeypatch):
+    home, lane = native_home
+    record = _install_record(lane, status="idle", adapter_state="idle")
+    fleet.write_brief("cx-native", "preserve the terminal worker brief")
+    mailbox = home / "mailbox" / f"{THREAD_ID}.md"
+    mailbox.write_text("preserve this queued direction", encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    original_reserve = fleet._reserve_codex_worker_operation
+    killed = {"done": False}
+
+    def kill_before_respawn_reservation(binding, operation_id, kind, **kwargs):
+        if kind == "respawn/thread-start" and not killed["done"]:
+            killed["done"] = True
+            current = dict(fleet.load_registry()["workers"][binding.name])
+            assert fleet._cmd_kill_codex_native(
+                binding.name, current, connect=lambda _home: client) == 0
+        return original_reserve(binding, operation_id, kind, **kwargs)
+
+    monkeypatch.setattr(
+        fleet, "_reserve_codex_worker_operation",
+        kill_before_respawn_reservation)
+    args = SimpleNamespace(
+        name="cx-native", task=None, force=False, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+    with pytest.raises(fleet.FleetCliError, match="changed concurrently"):
+        fleet._cmd_respawn_codex(args, record)
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "idle"
+    assert "pending_operation" not in stored
+    assert mailbox.read_text(encoding="utf-8") == \
+        "preserve this queued direction"
+    assert list(mailbox.parent.glob(f"{THREAD_ID}.md.claimed.*")) == []

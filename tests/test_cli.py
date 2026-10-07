@@ -185,6 +185,7 @@ class TestSpawnStampsLineage:
         rec = fleet.load_registry()["workers"]["probe-1"]
         assert rec["spawned_by"] == "sid-sup"
         assert rec["spawned_by_lineage"] == "lin-L"
+        assert fleet.read_incarnation()["heartbeat_at"] > "2026-07-23T00:00:00Z"
 
     def test_spawn_with_no_claim_records_a_null_lineage(
             self, isolated_home, tmp_path, monkeypatch):

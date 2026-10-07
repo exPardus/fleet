@@ -380,7 +380,7 @@ class TestTheCensus:
         assert len(shaped) >= 6, f"sweep found only {sorted(shaped)}"
 
     def test_the_heartbeat_census_has_no_hole(self, tree):
-        """MEASURED: 17 write sites (9 Claude-route, 8 native Codex route),
+        """MEASURED: 19 write sites (11 Claude-route, 8 native Codex route),
         all inside a supervisor claim-holder verb or its Codex counterpart.
 
         `cmd_wave_close` joined on 2026-09-11 and is named explicitly rather
@@ -408,9 +408,11 @@ class TestTheCensus:
             "_reconcile_codex_activating", "_dispatch_codex_supervisor_body",
             "_rollback_codex_handoff_activation", "_cmd_codex_sup_handoff_begin",
         }
-        assert len(writes) == 17, f"heartbeat writers moved: {writes}"
+        assert len(writes) == 19, f"heartbeat writers moved: {writes}"
         assert all(s.startswith("cmd_sup_") or s.startswith("_cmd_sup_")
-                   or s == "cmd_wave_close" or s in codex_route
+                   or s == "cmd_wave_close"
+                   or s == "_refresh_supervisor_heartbeat_for_dispatch"
+                   or s in codex_route
                    for s in scopes), scopes
 
         # CONTROL: reconcile against the raw text. Anything the AST did not

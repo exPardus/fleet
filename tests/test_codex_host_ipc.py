@@ -330,6 +330,32 @@ def test_rpc_runs_through_the_single_owned_app_server(tmp_path):
         _shutdown(client)
 
 
+def test_notification_drain_durably_freezes_non_object_request_params(tmp_path):
+    module = _modules()
+    import fleet_codex_host as host_module
+
+    host = host_module.Host.__new__(host_module.Host)
+    host.home = _home(tmp_path)
+    host.approvals = module.CodexApprovalStore(host.home, "generation-1")
+
+    class Client:
+        @staticmethod
+        def notifications():
+            return [{
+                "id": "request-1",
+                "method": "item/permissions/requestApproval",
+                "params": [],
+            }]
+
+    host.client = Client()
+    host._drain_notifications()
+
+    record = host.approvals.records()[0]
+    assert record["request_id"] == "request-1"
+    assert record["state"] == "unknown"
+    assert record["params"] == []
+
+
 def test_interface_claim_authorizes_current_peer_and_refuses_stale_sources(
         tmp_path, monkeypatch):
     import fleet_codex_host as host_module
@@ -365,6 +391,36 @@ def test_interface_claim_authorizes_current_peer_and_refuses_stale_sources(
                 Peer(), "turn/start", {"params": {"threadId": "worker-thread"}})
         source.clear()
         source.update(original)
+
+
+def test_identity_invalid_unknown_request_freezes_all_provider_mutations(
+        tmp_path, monkeypatch):
+    module = _modules()
+    import fleet_codex_host as host_module
+
+    host = host_module.Host.__new__(host_module.Host)
+    host.home = _home(tmp_path)
+    host.approvals = module.CodexApprovalStore(host.home, "generation-1")
+    record = host.approvals.record_request({
+        "id": "request-1",
+        "method": "item/commandExecution/requestApproval",
+        "params": {
+            "threadId": "invalid-thread-id",
+            "turnId": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8",
+            "itemId": "item-1", "startedAtMs": 1,
+        },
+    })
+    assert record["state"] == "unknown"
+    assert record["thread_id"] == "invalid-thread-id"
+    monkeypatch.setattr(
+        host_module, "read_interface_claim",
+        lambda _home: pytest.fail("unknown request did not freeze before authorization"))
+
+    with pytest.raises(host_module.HostRejected, match="freezes provider mutations"):
+        host._authorize_public_mutation(
+            object(), "turn/start", {"params": {
+                "threadId": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7",
+            }})
 
 
 def test_external_interface_thread_is_observe_only(tmp_path, monkeypatch):
