@@ -232,7 +232,7 @@ home's own checks.
 
 ## Handoff
 
-When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin --complete-timeout 300 --nonce <value>`; it dispatches the successor, waits lock-free for its token-backed handshake, and completes or aborts in one process using that single nonce presentation. The separate `sup-handoff-begin` then `sup-handoff-complete` sequence remains available. Run `sup-release` only when the handoff is stillborn, then stop.
+When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin --complete-timeout 300 --nonce <value>`; it dispatches the successor, waits lock-free for its token-backed handshake, and completes or aborts in one process using that single nonce presentation. Every pre-transfer exception aborts; a changed claim refuses completion but still stops the token/incarnation-proven successor without writing the new claim. The separate `sup-handoff-begin` then `sup-handoff-complete` sequence remains available. Run `sup-release` only when the handoff is stillborn, then stop.
 
 ## Safety
 
