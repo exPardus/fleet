@@ -2870,9 +2870,10 @@ class TestHandoff:
             self.t += dt
 
     def _begin(self, run, sid="sid-old", clock=None, model=None,
-               permission_mode=None):
+               permission_mode=None, setting_sources=None):
         args = SimpleNamespace(sid=sid, model=model,
-                               permission_mode=permission_mode)
+                               permission_mode=permission_mode,
+                               setting_sources=setting_sources)
         if clock is None:
             return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
                                                sleep=lambda s: None)
@@ -3031,6 +3032,59 @@ class TestHandoff:
         successor = next(r for n, r in fleet.load_registry()["workers"].items()
                          if n.endswith("|successor"))
         assert successor.get("setting_sources") is None
+
+    def test_successor_dispatch_inherits_model_mode_and_setting_sources(
+            self, sup_home):
+        """An omitted handoff flag keeps the predecessor's launch contract."""
+        self._hold()
+        self._seed_holder_record(model="claude-sonnet-5-5",
+                                 setting_sources="project,local")
+        holder = next(iter(fleet.load_registry()["workers"].values()))
+        holder["mode"] = "plan"
+        fleet.save_registry({"workers": {"sup|inc-old|boot": holder}})
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[dispatch.index("--model") + 1] == "claude-sonnet-5-5"
+        assert dispatch[dispatch.index("--permission-mode") + 1] == "plan"
+        assert dispatch[dispatch.index("--setting-sources") + 1] == "project,local"
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor["model"] == "claude-sonnet-5-5"
+        assert successor["mode"] == "plan"
+        assert successor["setting_sources"] == "project,local"
+
+    def test_explicit_handoff_flags_override_holder_launch_contract(self, sup_home):
+        self._hold()
+        self._seed_holder_record(model="claude-sonnet-5-5",
+                                 setting_sources="project,local")
+        holder = next(iter(fleet.load_registry()["workers"].values()))
+        holder["mode"] = "plan"
+        fleet.save_registry({"workers": {"sup|inc-old|boot": holder}})
+        run = self._dispatch_then_roster()
+        assert self._begin(run, model="claude-opus-5-5",
+                           permission_mode="bypass",
+                           setting_sources="user") == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[dispatch.index("--model") + 1] == "claude-opus-5-5"
+        assert "--dangerously-skip-permissions" in dispatch
+        assert dispatch[dispatch.index("--setting-sources") + 1] == "user"
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor["model"] == "claude-opus-5-5"
+        assert successor["mode"] == "bypass"
+        assert successor["setting_sources"] == "user"
+
+    def test_successor_without_predecessor_model_omits_model_flag(self, sup_home):
+        self._hold()
+        self._seed_holder_record()
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--model" not in dispatch
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor["model"] is None
 
     def test_an_unresolvable_holder_record_does_not_break_the_handoff(self, sup_home):
         """The carry is a best-effort READ of a dispatch flag, not a
