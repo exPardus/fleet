@@ -329,6 +329,9 @@ verbs classify by their **worst irreversible effect in the wrong home**, enumera
 The parenthetical registry/roster note in this row applies to `address` and
 `watch`; `pr-poll` only invokes the bounded GitHub CLI call described above,
 and `mail verify` reads only its receipt plus Interface registration files.
+Claude/tmux and native Codex registrations are mutually exclusive: registering
+one provider removes the other's identity files, and a receipt fails verification
+if both provider families coexist.
 
 **When armed: destructive via env/legacy requires the flag; disruptive via env/legacy
 proceeds but renders its resolution provenance in output** (a wrong-home kill is loud where a

@@ -12,6 +12,8 @@ import fleet
 INTERFACE_SID = "abcd0000-1111-2222-3333-444455556666"
 HOLDER_SID = "99998888-7777-6666-5555-444433332222"
 SUPERVISOR = "sup|inc-mail|boot"
+CODEX_THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1"
+CODEX_CLAIM = "c1705ad1-8530-4e90-a8fc-869a7450d77b"
 
 
 def _iso():
@@ -37,6 +39,26 @@ def _issue(body="land the reviewed lane"):
     notice, mail_id = fleet._issue_verified_supervisor_mail(SUPERVISOR, body)
     assert mail_id is not None
     return notice, mail_id
+
+
+def _codex_claim(home):
+    import fleet_codex
+
+    return {
+        "schema": fleet_codex.INTERFACE_CLAIM_SCHEMA,
+        "home": str(home.resolve()),
+        "thread_id": CODEX_THREAD,
+        "claim_id": CODEX_CLAIM,
+        "ancestor_pid": 41,
+        "ancestor_start_identity": "100",
+        "uid": 1000,
+    }
+
+
+class _CodexReadClient:
+    def call(self, _operation, timeout):
+        assert timeout == 10
+        return SimpleNamespace(result={"thread": {"id": CODEX_THREAD}})
 
 
 def test_registered_interface_receipt_verifies_and_prints_canonical_body(
@@ -80,10 +102,74 @@ def test_registration_rotation_invalidates_old_receipt_and_withholds_body(
     assert "do not disclose" not in out
 
 
+def test_claude_to_codex_rotation_invalidates_old_receipt(
+        home, monkeypatch, capsys):
+    import fleet_codex
+
+    _notice, mail_id = _issue("old Claude direction must stay hidden")
+    (home / "state" / "interface-pane").write_text("%42\n", encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    monkeypatch.setattr(
+        fleet_codex, "codex_process_source",
+        lambda _pid, thread: {
+            "thread_id": thread, "ancestor_pid": 41,
+            "ancestor_start_identity": "100", "ancestor_cwd": "/fleet",
+            "uid": 1000,
+        })
+    monkeypatch.setattr(
+        fleet, "_codex_existing_client", lambda _home: _CodexReadClient())
+
+    assert fleet.cmd_interface_register(SimpleNamespace(
+        codex_thread=CODEX_THREAD, session_id=None,
+        _fleet_home_explicit=True)) == 0
+    assert not (home / "state" / "interface-session").exists()
+    assert not (home / "state" / "interface-pane").exists()
+    assert (home / "state" / "interface-codex.json").exists()
+
+    assert fleet.cmd_mail_verify(SimpleNamespace(mail_id=mail_id)) == 1
+    out = capsys.readouterr().out
+    assert f"UNVERIFIED {mail_id}" in out
+    assert "old Claude direction" not in out
+
+
+def test_codex_to_claude_rotation_invalidates_old_receipt(
+        home, monkeypatch, capsys):
+    import fleet_codex
+
+    (home / "state" / "interface-session").unlink()
+    codex_path = home / "state" / "interface-codex.json"
+    fleet_codex._atomic_json(codex_path, _codex_claim(home))
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    monkeypatch.setattr(
+        fleet_codex, "codex_process_source",
+        lambda _pid: {
+            "thread_id": CODEX_THREAD, "ancestor_pid": 41,
+            "ancestor_start_identity": "100", "ancestor_cwd": "/fleet",
+            "uid": 1000,
+        })
+    _notice, mail_id = _issue("old Codex direction must stay hidden")
+
+    monkeypatch.delenv("CODEX_THREAD_ID")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", INTERFACE_SID)
+    assert fleet.cmd_interface_register(SimpleNamespace(
+        codex_thread=None, session_id=None)) == 0
+    assert not (home / "state" / "interface-codex.json").exists()
+    assert (home / "state" / "interface-session").read_text(
+        encoding="utf-8") == INTERFACE_SID + "\n"
+
+    assert fleet.cmd_mail_verify(SimpleNamespace(mail_id=mail_id)) == 1
+    out = capsys.readouterr().out
+    assert f"UNVERIFIED {mail_id}" in out
+    assert "old Codex direction" not in out
+
+
 def test_codex_source_is_authenticated_at_issue_but_verify_stays_file_only(
         home, monkeypatch, capsys):
     import fleet_codex
 
+    (home / "state" / "interface-session").unlink()
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     monkeypatch.setenv(
         "CODEX_THREAD_ID", "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1")

@@ -1463,6 +1463,28 @@ def _registration_token(path: Path) -> str | None:
     return lines[0]
 
 
+def _registration_path_present(path: Path) -> bool:
+    """Fail closed when checking for a competing Interface registration."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _mail_provider_registration_is_exclusive(provider: str) -> bool:
+    """Require one provider family for receipt issuance and verification."""
+    state = state_dir()
+    if provider == "claude":
+        return not _registration_path_present(state / "interface-codex.json")
+    if provider == "codex":
+        return not any(_registration_path_present(state / name) for name in (
+            "interface-session", "interface-pane"))
+    return False
+
+
 def _registered_interface_mail_source() -> dict | None:
     """Authenticate this send invocation against the registered Interface.
 
@@ -1474,12 +1496,16 @@ def _registered_interface_mail_source() -> dict | None:
     """
     caller_sid = current_caller_session()
     if caller_sid is not None:
+        if not _mail_provider_registration_is_exclusive("claude"):
+            return None
         registered = _registration_token(state_dir() / "interface-session")
         if registered == caller_sid:
             return {"kind": "claude-session", "session_id": caller_sid}
         return None
 
     if os.environ.get("CODEX_THREAD_ID"):
+        if not _mail_provider_registration_is_exclusive("codex"):
+            return None
         try:
             from fleet_codex import codex_process_source, read_interface_claim
             claim = read_interface_claim(FLEET_HOME)
@@ -1499,7 +1525,8 @@ def _registered_interface_mail_source() -> dict | None:
 
     pane = os.environ.get("TMUX_PANE")
     registered = _registration_token(state_dir() / "interface-pane")
-    if pane is not None and pane == registered:
+    if (pane is not None and pane == registered
+            and _mail_provider_registration_is_exclusive("claude")):
         return {"kind": "tmux-pane", "pane": pane}
     return None
 
@@ -1510,14 +1537,18 @@ def _mail_source_is_current(source: dict) -> bool:
         return False
     kind = source.get("kind")
     if kind == "claude-session":
-        return (set(source) == {"kind", "session_id"}
+        return (_mail_provider_registration_is_exclusive("claude")
+                and set(source) == {"kind", "session_id"}
                 and _registration_token(state_dir() / "interface-session")
                 == source.get("session_id"))
     if kind == "tmux-pane":
-        return (set(source) == {"kind", "pane"}
+        return (_mail_provider_registration_is_exclusive("claude")
+                and set(source) == {"kind", "pane"}
                 and _registration_token(state_dir() / "interface-pane")
                 == source.get("pane"))
     if kind == "codex":
+        if not _mail_provider_registration_is_exclusive("codex"):
+            return False
         expected = {"kind", "claim_id", "thread_id", "ancestor_pid",
                     "ancestor_start_identity", "uid"}
         if set(source) != expected:
@@ -19405,6 +19436,19 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
     return 0
 
 
+def _clear_competing_interface_registration(path: Path) -> bool:
+    """Remove one superseded provider identity or fail registration closed."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise FleetCliError(
+            "interface-register: could not clear competing provider identity; "
+            "registration was not written") from exc
+    return True
+
+
 def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
     """Register the current interface pane or session.
 
@@ -19452,7 +19496,10 @@ def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
             existing_sid = session_path.read_text(encoding="utf-8").strip()
         except FileNotFoundError:
             existing_sid = None
-        changed = existing != pane or existing_sid != registered_sid
+        cleared_codex = _clear_competing_interface_registration(
+            root / "state" / "interface-codex.json")
+        changed = (existing != pane or existing_sid != registered_sid
+                   or cleared_codex)
         if changed:
             path.parent.mkdir(parents=True, exist_ok=True)
             if registered_sid is None:
@@ -19483,7 +19530,9 @@ def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
         existing = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         pass
-    if existing != sid:
+    cleared_codex = _clear_competing_interface_registration(
+        root / "state" / "interface-codex.json")
+    if existing != sid or cleared_codex:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(sid + "\n", encoding="utf-8")
         print(f"interface session registered: {sid}")
@@ -19542,18 +19591,27 @@ def _cmd_interface_register_codex(args, root: Path) -> int:
                      and prior.get("ancestor_pid") == source["ancestor_pid"]
                      and prior.get("ancestor_start_identity")
                      == source["ancestor_start_identity"])
-        if unchanged:
+        cleared_claude = any([
+            _clear_competing_interface_registration(
+                root / "state" / "interface-session"),
+            _clear_competing_interface_registration(
+                root / "state" / "interface-pane"),
+        ])
+        if unchanged and not cleared_claude:
             print(f"Codex interface already registered: {requested_thread}")
             return 0
-        claim = {
-            "schema": INTERFACE_CLAIM_SCHEMA, "home": str(root),
-            "thread_id": requested_thread, "claim_id": str(uuid.uuid4()),
-            "ancestor_pid": source["ancestor_pid"],
-            "ancestor_start_identity": source["ancestor_start_identity"],
-            "uid": source["uid"], "registered_at": now_iso(),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_json(path, claim)
+        if unchanged:
+            claim = prior
+        else:
+            claim = {
+                "schema": INTERFACE_CLAIM_SCHEMA, "home": str(root),
+                "thread_id": requested_thread, "claim_id": str(uuid.uuid4()),
+                "ancestor_pid": source["ancestor_pid"],
+                "ancestor_start_identity": source["ancestor_start_identity"],
+                "uid": source["uid"], "registered_at": now_iso(),
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_json(path, claim)
     print(f"Codex interface registered: {requested_thread}")
     append_interface_log(
         "REGISTER", f"codex_thread={requested_thread} claim={claim['claim_id']}",
