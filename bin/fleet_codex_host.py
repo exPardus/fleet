@@ -235,19 +235,15 @@ class Host:
     def _settle_uncertain_thread_result(
             self, operation_id: str, deadline: float) -> Any:
         record = self.journal.load(operation_id)
-        result = record.get("result")
-        thread = result.get("thread") if isinstance(result, dict) else None
-        thread_id = thread.get("id") if isinstance(thread, dict) else None
         recovery = record.get("recovery")
-        if not isinstance(thread_id, str) and isinstance(recovery, dict):
-            thread_id = recovery.get("thread_id")
+        public_method = record.get("public_method")
         if (record.get("state") != "uncertain"
-                or record.get("public_method") not in {
-                    "thread/start", "thread/resume"}):
+                or public_method not in {"thread/start", "thread/resume"}):
             raise ValueError("uncertain thread result has no exact public identity")
-        if not isinstance(thread_id, str) and record.get(
-                "public_method") == "thread/start" and isinstance(
-                    recovery, Mapping):
+        thread_id = recovery.get("thread_id") \
+            if public_method == "thread/resume" and isinstance(
+                recovery, Mapping) else None
+        if public_method == "thread/start" and isinstance(recovery, Mapping):
             try:
                 candidate = self._find_recovery_thread(recovery, deadline)
             except Exception as exc:
@@ -261,9 +257,16 @@ class Host:
             self.journal.settle_failed(
                 operation_id, "exact public thread identity is unknown")
             raise ValueError("uncertain thread result has no exact public identity")
-        observed = self._recovery_request(
-            "thread/read", {"threadId": thread_id, "includeTurns": True},
-            deadline)
+        try:
+            observed = self._recovery_request(
+                "thread/read", {"threadId": thread_id, "includeTurns": True},
+                deadline)
+        except Exception as exc:
+            self.journal.settle_failed(
+                operation_id,
+                "public thread lookup failed: "
+                f"{type(exc).__name__}: {exc}")
+            raise
         return self.journal.adopt_thread_read(
             operation_id, observed).get("result")
 

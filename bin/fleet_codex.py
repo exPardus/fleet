@@ -1530,8 +1530,6 @@ class OperationJournal:
         if not isinstance(thread, Mapping):
             reject_settlement("public thread evidence is malformed")
         expected_thread_id = recovery.get("thread_id")
-        if not isinstance(expected_thread_id, str) and isinstance(prior_thread, Mapping):
-            expected_thread_id = prior_thread.get("id")
         expected_cwd = recovery.get("canonical_cwd")
         if not isinstance(expected_cwd, str) and isinstance(prior_thread, Mapping):
             expected_cwd = prior_thread.get("cwd")

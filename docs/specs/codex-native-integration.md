@@ -331,16 +331,18 @@ otherwise retains a result-less uncertain record; it never leaves the entry in
 `accepted` or replays the mutation.
 
 An uncertain thread operation settles through public `thread/read` with turns
-included. `thread/resume` uses the exact requested thread ID. `thread/start`
+included. `thread/resume` uses the immutable requested thread ID, never an ID
+from its bounded result projection. `thread/start`
 uses its provider-persisted operation source to identify one exact empty
 thread before reading it. Settlement validates canonical cwd, history count and
 newest turn identity. Because `thread/read` does not return the top-level
 effective model or permission tuple, settlement restores those fields from the
 bounded prior projection or the immutable request intent. Only uniquely known
 values that the intent actually sent may be restored; an implicit default such
-as `approvalsReviewer` is not intent evidence. A failed operation-source lookup,
-or unknown or mismatched identity, history or effective settings, settles
-terminally as `failed`. Matching evidence becomes `observed` and the caller then
+as `approvalsReviewer` is not intent evidence. A failed operation-source lookup
+or public thread lookup, or unknown or mismatched identity, history or effective
+settings, settles terminally as `failed`. Matching evidence becomes `observed`
+and the caller then
 makes it terminal as `committed`. Both terminal outcomes clear the predecessor
 fence, while only the committed projection may be adopted into Fleet state.
 Later native mutations may proceed only after one of those terminal outcomes.

@@ -345,14 +345,14 @@ fields needed by replay readers, while omitting turn item bodies. A failure to
 persist the observed projection after provider acceptance durably changes the
 operation to `uncertain` with a reason, retaining the projection when the
 metadata store can accept it; it never leaves the entry `accepted`. The host may
-settle that uncertain entry without replaying the mutation by reading the exact
-projected or recovery-bound thread and matching its cwd, turn count, and newest
-turn identity. A result-less record restores only uniquely known fields actually
-sent by its immutable intent, never inferred defaults. An unsuccessful source
-lookup or incomplete or mismatched identity, history, or effective settings
-settles terminally failed and is never adopted. A committed adoption or terminal
-settlement failure clears the predecessor fence so later native mutations may
-proceed.
+settle that uncertain entry without replaying the mutation by reading the
+immutable resume-intent thread or source-identified start thread and matching
+its cwd, turn count, and newest turn identity. A result-less record restores
+only uniquely known fields actually sent by its immutable intent, never inferred
+defaults. An unsuccessful source or thread lookup, or incomplete or mismatched
+identity, history, or effective settings settles terminally failed and is never
+adopted. A committed adoption or terminal settlement failure clears the
+predecessor fence so later native mutations may proceed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

@@ -36,7 +36,8 @@ def test_codex_integration_spec_pins_general_operation_journal_contract():
             "`thread/start`", "`thread/resume`", "bounded projection",
             "message bodies", "moves to `uncertain`", "public `thread/read`",
             "immutable request intent", "intent actually sent",
-            "failed operation-source lookup", "terminally as `failed`",
+            "failed operation-source lookup", "public thread lookup",
+            "terminally as `failed`",
             "terminal as `committed`", "predecessor fence"):
         assert phrase in section
 
@@ -625,6 +626,39 @@ def test_failed_thread_start_source_lookup_settles_and_clears_fence(tmp_path):
     settled = journal.load(operation["operation_id"])
     assert settled["state"] == "failed"
     assert "source lookup failed" in settled["reason"]
+    assert journal.unresolved_predecessor("later-operation") is None
+
+
+def test_failed_resume_lookup_uses_immutable_id_and_clears_fence(tmp_path):
+    module, _home, journal, operation, _record = _prepared_record(
+        tmp_path, "thread/resume", "after-send")
+    oversized = _resume_result()
+    oversized["thread"]["id"] = "x" * 300
+    journal.observe(operation["operation_id"], oversized)
+    journal._transition(
+        operation["operation_id"], {"observed"}, "uncertain",
+        reason="projection persistence uncertain")
+    assert journal.load(operation["operation_id"])["result"]["thread"][
+        "id"] == "<oversized>"
+
+    host_module = _host_module()
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    reads = []
+
+    def fail_thread_read(method, params, _deadline):
+        reads.append((method, params))
+        raise ValueError("thread/read failed")
+
+    host._recovery_request = fail_thread_read
+    with pytest.raises(ValueError, match="thread/read failed"):
+        host._settle_uncertain_thread_result(operation["operation_id"], 1.0)
+
+    assert reads == [("thread/read", {
+        "threadId": "thread-1", "includeTurns": True})]
+    settled = journal.load(operation["operation_id"])
+    assert settled["state"] == "failed"
+    assert "public thread lookup failed" in settled["reason"]
     assert journal.unresolved_predecessor("later-operation") is None
 
 
