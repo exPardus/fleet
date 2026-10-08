@@ -582,7 +582,10 @@ predecessor. If acceptance is unknown, the claim stays activating and PAGE;
 Fleet neither restores the predecessor nor starts another successor. After
 promotion, interrupt the predecessor through the supported operation if active
 and retire it only after terminal proof. Existing Claude token/nonce handoff is
-unchanged on Claude routes.
+unchanged on Claude routes. A handoff never switches provider: `sup-handoff-begin --model
+codex:<model>` on a Claude-held claim refuses before dispatch. Move a Claude
+supervisor to Codex by checkpoint, `sup-release`, then `sup-spawn --model
+codex:<model>`.
 
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and

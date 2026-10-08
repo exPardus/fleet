@@ -2061,3 +2061,28 @@ class TestReleaseMidHandoffDoesNotStrandTheSuccessor(_HandoffBase):
             "incarnation_id", "lineage_id", "claimed_via", "released_at",
             "released_by_sid", "reason", "state"}
         assert inc not in json.dumps(fleet.read_incarnation())
+
+
+class TestClaudeClaimRefusesCodexSuccessor(_HandoffBase):
+    """A Claude-held claim handed `--model codex:<m>` used to launch
+    `claude --model codex:<m>`, which never handshakes.  It now refuses
+    before dispatch and names the release + sup-spawn route."""
+
+    def test_codex_model_on_a_claude_claim_refuses_without_dispatch(
+            self, sup_home, capsys):
+        self._hold()
+        before = fleet.read_incarnation()
+        calls = []
+
+        def run(*a, **k):
+            calls.append(a)
+            raise AssertionError("nothing may be dispatched")
+
+        args = SimpleNamespace(sid="sid-old", model="codex:gpt-6.1-sol",
+                               permission_mode=None, nonce=None)
+        with pytest.raises(fleet.FleetCliError, match="sup-spawn --model codex:gpt-6.1-sol"):
+            fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
+                                        sleep=lambda s: None)
+        assert calls == []
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+        assert fleet.read_incarnation()["session_id"] == before["session_id"]

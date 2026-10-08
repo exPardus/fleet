@@ -21208,9 +21208,18 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         _enforce_tier_policy(
             "supervisor", getattr(args, "model", None) or persisted_model)
         return _cmd_codex_sup_handoff_begin(args)
+    explicit_model = getattr(args, "model", None)
+    if _codex_model_slug(explicit_model) is not None:
+        # The Claude handoff route would launch `claude --model codex:<m>`,
+        # which never handshakes.  A provider switch is release + sup-spawn.
+        raise FleetCliError(
+            "sup-handoff-begin: the current supervisor claim is a Claude body; "
+            f"a handoff cannot switch it to {explicit_model}. To move to Codex, "
+            "checkpoint, `fleet sup-release`, then `fleet sup-spawn --model "
+            f"{explicit_model} --task @<brief>` -- nothing dispatched; claim "
+            "unchanged, duty continues")
     holder_snapshot = _claim_holder_dispatch_snapshot(selected_claim)
     holder_settings = holder_snapshot[1] if holder_snapshot is not None else None
-    explicit_model = getattr(args, "model", None)
     explicit_mode = getattr(args, "permission_mode", None)
     explicit_setting_sources = getattr(args, "setting_sources", None)
     inherited_model = (holder_settings.get("model")
