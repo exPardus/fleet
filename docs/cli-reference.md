@@ -875,6 +875,7 @@ usage: fleet sup-handoff-begin [-h] [--model MODEL]
                                [--permission-mode {bypass,accept,dontask,plan,omit}]
                                [--setting-sources SETTING_SOURCES] [--sid SID]
                                [--nonce NONCE]
+                               [--complete-timeout COMPLETE_TIMEOUT]
 
 options:
   -h, --help            show this help message and exit
@@ -892,6 +893,10 @@ options:
   --nonce NONCE         the generation this body was last given (claim-nonce
                         §5.3); the ONLY presentation channel -- there is no
                         env-var fallback
+  --complete-timeout COMPLETE_TIMEOUT
+                        wait up to SECONDS for HANDSHAKE, then complete in
+                        this process; automatically abort the successor on
+                        timeout or failure
 ```
 
 ### fleet sup-handoff-complete
