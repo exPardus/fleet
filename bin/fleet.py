@@ -22161,7 +22161,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
-                         help="Codex reasoning effort when --model is codex:<model>")
+                         help="legacy mcx reasoning effort; ignored by the native "
+                              "Codex adapter")
     p_spawn.add_argument(
         "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
@@ -22255,7 +22256,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
-    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach = sub.add_parser("attach", help=argparse.SUPPRESS)
     p_attach.add_argument("name")
     p_attach.add_argument("--force", action="store_true")
 
@@ -22268,7 +22269,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("--task", default=None)
     p_respawn.add_argument("--force", action="store_true")
     p_respawn.add_argument("--force-band", action="store_true",
-                           help="override the supervisor soft context-band refusal; never the hard ceiling")
+                           help="with --task: override the supervisor soft context-band "
+                                "refusal; never the hard ceiling")
     p_respawn.add_argument("--yes", action="store_true",
                            help="confirm respawning a worker this session did not spawn")
     p_respawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)

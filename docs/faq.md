@@ -63,9 +63,10 @@ leftovers.
 ## What is a nonce?
 
 A short value that the current supervisor generation prints once. Mutating
-supervisor verbs require the newest printed nonce. It stops two live supervisor
-bodies from changing one campaign at the same time. Record each nonce as it is
-printed. Do not invent one, and do not reuse an old one. See
+supervisor verbs require the newest printed nonce. It detects some divergent-body
+continuity failures, but it is a knowingly bypassable speed-bump, not authorization
+or proof of single-supervisor ownership. Record each nonce as it is printed. Do not
+invent one, and do not reuse an old one. See
 [troubleshooting.md](troubleshooting.md#lost-supervisor-nonce).
 
 ## Why do some verbs start with `sup-`?

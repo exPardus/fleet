@@ -23,13 +23,14 @@ piece.
 
 ```sh
 fleet spawn NAME --dir PATH --model codex:<model> --task "..."
-fleet spawn NAME --dir PATH --model codex:<model> --effort high --task "..."
+fleet spawn NAME --dir PATH --model codex:<model> --codex-adapter mcx --effort high --task "..."
 ```
 
 - `--model codex:<model>` selects a Codex model. The `codex:` prefix is what routes
   the lane to Codex. Use the model name your Codex installation accepts.
-- `--effort` sets Codex's reasoning effort: `low`, `medium`, `high` or `xhigh`.
-  The default is `medium`.
+- `--effort` applies only to the legacy mcx adapter, where it accepts `low`,
+  `medium`, `high` or `xhigh` and defaults to `medium`. The native adapter ignores
+  this option; omit it on native lanes.
 - `--codex-adapter native|mcx` picks the transport. The default is `native`. New
   rows use `native` unless you say otherwise.
 

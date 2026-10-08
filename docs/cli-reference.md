@@ -37,7 +37,6 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet mail verify`](#fleet-mail-verify) — verify one Interface-mail receipt and print its canonical body
 - [`fleet codex-respond`](#fleet-codex-respond) — answer one current native Codex approval/input request exactly once
 - [`fleet interrupt`](#fleet-interrupt) — kill a worker's running turn
-- [`fleet attach`](#fleet-attach) — attach an interactive terminal to a worker
 - [`fleet release`](#fleet-release) — release an attached worker back to idle
 - [`fleet respawn`](#fleet-respawn) — fresh session for a worker (context-reset lever)
 - [`fleet resume-limited`](#fleet-resume-limited) — relaunch limited workers whose reset horizon has passed
@@ -152,7 +151,8 @@ options:
   --mode {bypass,accept,dontask,plan,omit}
   --model MODEL
   --effort {low,medium,high,xhigh}
-                        Codex reasoning effort when --model is codex:<model>
+                        legacy mcx reasoning effort; ignored by the native
+                        Codex adapter
   --codex-adapter {native,mcx}
                         Codex transport for codex:<model> (default: native;
                         use mcx for the legacy compatibility adapter)
@@ -337,19 +337,6 @@ options:
                  workers (§6.2)
 ```
 
-### fleet attach
-
-```text
-usage: fleet attach [-h] [--force] name
-
-positional arguments:
-  name
-
-options:
-  -h, --help  show this help message and exit
-  --force
-```
-
 ### fleet release
 
 ```text
@@ -382,8 +369,8 @@ options:
   -h, --help            show this help message and exit
   --task TASK
   --force
-  --force-band          override the supervisor soft context-band refusal;
-                        never the hard ceiling
+  --force-band          with --task: override the supervisor soft context-band
+                        refusal; never the hard ceiling
   --yes                 confirm respawning a worker this session did not spawn
   --nonce NONCE         the current supervisor generation (claim-nonce §5.3):
                         clears §7's claim gate for a mutating verb while a

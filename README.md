@@ -134,9 +134,10 @@ anything you did not ask for.
 - **Explicit destruction.** `kill`, `clean`, `archive`, repair and home retirement
   need an explicit confirmation flag or operator decision. `clean` moves evidence to
   `logs/archive/` before it deletes anything.
-- **Ownership by nonce.** Supervisor verbs that change state require the nonce printed
-  by the current supervisor generation, so two live supervisors cannot silently
-  share one job.
+- **Continuity speed-bump.** Supervisor verbs that change state require the nonce
+  printed by the current supervisor generation. A stale generation is evidence of
+  divergence, but the nonce is knowingly bypassable: it is neither authorization
+  nor proof that only one supervisor body is live.
 - **Least permission.** Each worker runs in the permission mode you choose. The mode
   `bypass` skips permission prompts entirely; use it only for a task you have
   scoped tightly.

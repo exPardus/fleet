@@ -132,10 +132,11 @@ the operator has approved, or run `fleet kill NAME` if the work is no longer nee
 ## Context band refusals
 
 A supervisor past its soft context band (350k tokens) refuses `spawn`, `send`,
-`respawn` and `sup-spawn`. It does this on purpose: a body near its limit should hand
-off, not keep working. Hand off with `fleet sup-handoff-begin`. Use `--force-band`
-only for a single call the operator has approved. It never overrides the hard
-ceiling.
+`sup-spawn`, and `respawn --task`. A bare `respawn` remains available as a
+context-reset recovery. The refusal exists because a body near its limit should
+hand off, not start new work. Hand off with `fleet sup-handoff-begin`. Use
+`--force-band` only for a single call the operator has approved. It never overrides
+the hard ceiling.
 
 Measure a session's occupancy with `fleet sup-context`.
 

@@ -152,6 +152,20 @@ def test_no_hidden_nested_command_is_documented():
     assert not leaked, f"hidden commands appear in the reference: {leaked}"
 
 
+def test_always_refusing_attach_is_hidden_from_the_reference():
+    assert "attach" in _shipped_all_commands()
+    assert "attach" not in _shipped_visible_commands()
+    assert "attach" not in set(_documented_commands())
+
+
+def test_spawn_effort_help_names_legacy_mcx_and_native_ignored():
+    text = REFERENCE.read_text(encoding="utf-8")
+    flattened = re.sub(r"\s+", " ", text)
+    assert (
+        "legacy mcx reasoning effort; ignored by the native Codex adapter"
+        in flattened)
+
+
 @pytest.mark.parametrize("command", sorted(_shipped_visible_commands()))
 def test_each_command_section_carries_its_own_usage_line(command):
     text = REFERENCE.read_text(encoding="utf-8")
