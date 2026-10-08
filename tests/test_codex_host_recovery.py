@@ -35,7 +35,8 @@ def test_codex_integration_spec_pins_general_operation_journal_contract():
     for phrase in (
             "`thread/start`", "`thread/resume`", "bounded projection",
             "message bodies", "moves to `uncertain`", "public `thread/read`",
-            "immutable request intent", "terminally as `failed`",
+            "immutable request intent", "intent actually sent",
+            "failed operation-source lookup", "terminally as `failed`",
             "terminal as `committed`", "predecessor fence"):
         assert phrase in section
 
@@ -44,7 +45,6 @@ def _expected_effective():
     return {
         "model": "gpt-5.6-luna",
         "approval_policies": ["on-request"],
-        "approvals_reviewer": "user",
         "sandbox_types": ["workspaceWrite"],
     }
 
@@ -396,29 +396,22 @@ def _queue_recovery_resume(home, journal, parent_operation_id):
     return operation_id, result, public_read
 
 
-@pytest.mark.parametrize("state", ["observed", "uncertain"])
-def test_queue_recovery_resume_finalizes_without_replaying_mutation(
-        tmp_path, state):
+def test_queue_recovery_resume_finalizes_observed_without_replaying_mutation(
+        tmp_path):
     module = _module()
     host_module = _host_module()
-    home = (tmp_path / state).resolve()
+    home = (tmp_path / "observed").resolve()
     (home / "state").mkdir(parents=True)
     journal = module.OperationJournal(home, "generation-1")
-    parent_operation_id = f"parent-{state}"
+    parent_operation_id = "parent-observed"
     operation_id, result, public_read = _queue_recovery_resume(
         home, journal, parent_operation_id)
-    if state == "observed":
-        journal.observe(operation_id, result)
-    else:
-        journal.uncertain(operation_id, "injected projection write failure")
+    journal.observe(operation_id, result)
 
     requests = []
 
     def recovery_request(method, params, _deadline):
         requests.append((method, params))
-        assert state == "uncertain"
-        assert method == "thread/read"
-        assert params == {"threadId": "thread-1", "includeTurns": True}
         return public_read
 
     host = object.__new__(host_module.Host)
@@ -430,8 +423,7 @@ def test_queue_recovery_resume_finalizes_without_replaying_mutation(
 
     assert resumed["thread"]["id"] == "thread-1"
     assert journal.load(operation_id)["state"] == "committed"
-    assert requests == ([] if state == "observed" else [
-        ("thread/read", {"threadId": "thread-1", "includeTurns": True})])
+    assert requests == []
 
 
 def test_queue_recovery_resume_settles_observe_persistence_failure(
@@ -530,32 +522,27 @@ def test_observe_persistence_failure_moves_accepted_operation_to_uncertain(
     assert "result" not in record
 
 
-def test_uncertain_resume_settles_from_exact_public_thread_and_unblocks_mutation(
-        tmp_path):
-    _module_value, _home, journal, operation, _record = _prepared_record(
+def test_resultless_resume_does_not_invent_unrequested_reviewer(tmp_path):
+    module, _home, journal, operation, _record = _prepared_record(
         tmp_path, "thread/resume", "after-send")
     journal.uncertain(operation["operation_id"], "provider response lost")
 
-    adopted = journal.adopt_thread_read(
-        operation["operation_id"],
-        _thread_read_result(item_text="public read body"))
-    assert adopted["state"] == "observed"
-    assert adopted["result"]["newestTurn"] == {
-        "id": "turn-1", "status": "completed"}
-    assert adopted["result"]["cwd"] == "/project"
-    assert adopted["result"]["model"] == "gpt-5.6-luna"
-    assert adopted["result"]["approvalPolicy"] == "on-request"
-    assert adopted["result"]["approvalsReviewer"] == "user"
-    assert adopted["result"]["sandbox"] == {"type": "workspaceWrite"}
-    journal.commit(operation["operation_id"])
+    with pytest.raises(module.HostRejected, match="effective settings"):
+        journal.adopt_thread_read(
+            operation["operation_id"],
+            _thread_read_result(item_text="public read body"))
 
+    settled = journal.load(operation["operation_id"])
+    assert settled["state"] == "failed"
+    assert "result" not in settled
+    assert "approvals_reviewer" not in settled["recovery"]["expected_effective"]
     next_operation = _mutation("next-operation", "turn/start")
     journal.prepare(next_operation)
     assert journal.unresolved_predecessor("next-operation") is None
     assert journal.accept("next-operation")["state"] == "accepted"
 
 
-def test_resultless_uncertain_thread_start_settles_from_public_read_and_intent(
+def test_resultless_thread_start_read_does_not_invent_reviewer(
         tmp_path):
     module = _module()
     host_module = _host_module()
@@ -591,16 +578,54 @@ def test_resultless_uncertain_thread_start_settles_from_public_read_and_intent(
         return _thread_read_result(turns=0)
 
     host._recovery_request = recovery_request
-    host._settle_uncertain_thread_result(operation["operation_id"], 1.0)
-    adopted = journal.load(operation["operation_id"])
+    with pytest.raises(module.HostRejected, match="effective settings"):
+        host._settle_uncertain_thread_result(operation["operation_id"], 1.0)
 
-    assert adopted["state"] == "observed"
-    assert adopted["result"]["thread"]["id"] == "thread-1"
-    assert adopted["result"]["turnCount"] == 0
-    assert adopted["result"]["approvalPolicy"] == "on-request"
-    assert adopted["result"]["sandbox"] == {"type": "workspaceWrite"}
+    settled = journal.load(operation["operation_id"])
+    assert settled["state"] == "failed"
+    assert "result" not in settled
     assert reads == [("thread/read", {
         "threadId": "thread-1", "includeTurns": True})]
+
+
+def test_failed_thread_start_source_lookup_settles_and_clears_fence(tmp_path):
+    module = _module()
+    host_module = _host_module()
+    home = (tmp_path / "thread-start-source-failure").resolve()
+    (home / "state").mkdir(parents=True)
+    journal = module.OperationJournal(home, "generation-1")
+    operation = {
+        "operation_id": "thread-start-source-failure",
+        "method": "rpc",
+        "payload": {"method": "thread/start", "params": {
+            "cwd": "/project", "model": "gpt-5.6-luna",
+            "approvalPolicy": "on-request", "sandbox": "workspace-write",
+            "threadSource": "fleet-missing-source",
+        }},
+        "recovery": {
+            "kind": "thread/start", "canonical_cwd": "/project",
+            "thread_source": "fleet-missing-source",
+            "expected_effective": _expected_effective(),
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(operation["operation_id"])
+    journal.uncertain(operation["operation_id"], "projection write failed")
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+
+    def fail_source_lookup(recovery, deadline):
+        raise ValueError("found 0 exact operation-tagged threads")
+
+    host._find_recovery_thread = fail_source_lookup
+
+    with pytest.raises(ValueError, match="found 0 exact"):
+        host._settle_uncertain_thread_result(operation["operation_id"], 1.0)
+
+    settled = journal.load(operation["operation_id"])
+    assert settled["state"] == "failed"
+    assert "source lookup failed" in settled["reason"]
+    assert journal.unresolved_predecessor("later-operation") is None
 
 
 @pytest.mark.parametrize("mismatch", ["turn-count", "newest-turn"])

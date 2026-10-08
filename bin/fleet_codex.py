@@ -1603,11 +1603,6 @@ class OperationJournal:
             if isinstance(policies, list) and len(policies) == 1 \
                     and isinstance(policies[0], str):
                 projection["approvalPolicy"] = policies[0]
-        if "approvalsReviewer" not in projection and isinstance(
-                expected_effective, Mapping):
-            reviewer = expected_effective.get("approvals_reviewer")
-            if isinstance(reviewer, str):
-                projection["approvalsReviewer"] = reviewer
         if "sandbox" not in projection and isinstance(
                 expected_effective, Mapping):
             sandbox_types = expected_effective.get("sandbox_types")
@@ -1625,19 +1620,17 @@ class OperationJournal:
         if isinstance(expected_effective, Mapping):
             expected_model = expected_effective.get("model")
             policies = expected_effective.get("approval_policies")
-            expected_reviewer = expected_effective.get("approvals_reviewer")
             sandbox_types = expected_effective.get("sandbox_types")
             if (not isinstance(expected_model, str)
                     or not isinstance(policies, list) or not policies
                     or any(not isinstance(value, str) for value in policies)
-                    or not isinstance(expected_reviewer, str)
                     or not isinstance(sandbox_types, list) or not sandbox_types
                     or any(not isinstance(value, str)
                            for value in sandbox_types)):
                 reject_settlement("recorded effective intent is malformed")
             if (model != expected_model
                     or approval not in policies
-                    or reviewer != expected_reviewer
+                    or reviewer != "user"
                     or sandbox_type not in sandbox_types):
                 reject_settlement("effective settings are unknown or mismatched")
         elif (not isinstance(model, str)

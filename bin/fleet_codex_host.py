@@ -248,7 +248,14 @@ class Host:
         if not isinstance(thread_id, str) and record.get(
                 "public_method") == "thread/start" and isinstance(
                     recovery, Mapping):
-            candidate = self._find_recovery_thread(recovery, deadline)
+            try:
+                candidate = self._find_recovery_thread(recovery, deadline)
+            except Exception as exc:
+                self.journal.settle_failed(
+                    operation_id,
+                    "public thread source lookup failed: "
+                    f"{type(exc).__name__}: {exc}")
+                raise
             thread_id = candidate.get("id")
         if not isinstance(thread_id, str):
             self.journal.settle_failed(

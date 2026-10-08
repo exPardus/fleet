@@ -337,12 +337,13 @@ thread before reading it. Settlement validates canonical cwd, history count and
 newest turn identity. Because `thread/read` does not return the top-level
 effective model or permission tuple, settlement restores those fields from the
 bounded prior projection or the immutable request intent. Only uniquely known
-values may be restored. Unknown or mismatched identity, history or effective
-settings settles terminally as `failed`; matching evidence becomes `observed`
-and the caller then makes it terminal as `committed`. Both terminal outcomes
-clear the predecessor fence, while only the committed projection may be
-adopted into Fleet state. Later native mutations may proceed only after one of
-those terminal outcomes.
+values that the intent actually sent may be restored; an implicit default such
+as `approvalsReviewer` is not intent evidence. A failed operation-source lookup,
+or unknown or mismatched identity, history or effective settings, settles
+terminally as `failed`. Matching evidence becomes `observed` and the caller then
+makes it terminal as `committed`. Both terminal outcomes clear the predecessor
+fence, while only the committed projection may be adopted into Fleet state.
+Later native mutations may proceed only after one of those terminal outcomes.
 
 ## 8. Worker lifecycle and no-duplicate recovery
 
