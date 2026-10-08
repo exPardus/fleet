@@ -12,13 +12,13 @@ commands.
   to pip install. The floor is declared once as `fleet.MIN_PYTHON_VERSION`.
 - **Claude Code CLI 2.1.202 or newer**, logged in. Fleet shells out to
   `claude` for every dispatch.
-- Optional: **Codex CLI** and [mcx](https://github.com/acme/multi-codex)
+- Optional: **Codex CLI** and [mcx](https://github.com/exPardus/multi-codex)
   for Codex workers; **tmux** and **systemd** for the unattended keeper.
 
 ## Install
 
 ```sh
-git clone https://github.com/acme/fleet.git
+git clone https://github.com/exPardus/fleet.git
 cd fleet
 export PATH="$PWD/bin:$PATH"      # put this line in your shell rc to keep it
 fleet --help
@@ -80,7 +80,7 @@ fleet init --statusline # optional: fleet's row in the Claude Code status line
 `fleet init` does not register the home in the machine-wide list
 (`~/.claude/fleet-homes.list`). Do that with `fleet homes --add <path>` when
 you want `fleet homes` and the keeper to see it; the list is append-only and a
-mistaken add is reversed with `fleet homes --retire`.
+mistaken add is reversed with `fleet homes --retire PATH`.
 
 ## Your first job
 
@@ -121,7 +121,7 @@ band on their own.
 
 The keeper can run `bin/fleet_keeper.py --once` for every home you name. It
 pages the interface's tmux pane when a human is needed, wakes an idle
-supervisor with `fleet send` when it only needs a turn, and never dispatches.
+supervisor with `fleet send supervisor` when it only needs a turn, and never dispatches.
 Store host-specific service units and recipes in local operator storage, not
 in the public repository. If your shell exports a long-lived
 `CLAUDE_CODE_OAUTH_TOKEN`, launch interface sessions with
