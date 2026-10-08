@@ -328,7 +328,8 @@ Spawn reserves the exact bound row immediately before its initial
 `turn/start`: a kill that commits first fences the delayed launcher, while a
 reservation that commits first makes kill refuse until acceptance is resolved.
 Lost or conflicting resume evidence remains reserved and uncertain without a
-retry. Interrupt uses `turn/interrupt` and commits only after same-turn
+retry until replacement-host recovery terminally settles its exact journal
+operation. Interrupt uses `turn/interrupt` and commits only after same-turn
 terminal proof. Other ambiguous mutation responses are likewise durably
 reserved and never retried. Respawn requires old-turn terminal proof before
 creating a fresh provider thread, reserves only by full-row compare-and-swap,
@@ -356,10 +357,17 @@ defaults. An unsuccessful source or thread lookup, or incomplete or mismatched
 identity, history, or effective settings settles terminally failed and is never
 adopted. A committed adoption or terminal settlement failure clears the
 predecessor fence so later native mutations may proceed. On the first later
-mutation after host replacement, prior-generation `thread/start` and
-`thread/resume` predecessors take this public-read settlement path before the
-fence is evaluated; they are never replayed or left permanently unresolved
-merely because their host generation changed.
+mutation, every unfinished journal predecessor takes a terminal path before the
+fence is evaluated: `prepared` fails without provider IO, `observed` commits,
+and accepted/uncertain thread and turn methods settle through public
+`thread/read` keyed by immutable intent. `turn/start` requires exactly one new
+turn, `turn/interrupt` requires its exact target terminal, and an uncorrelated
+`turn/steer` fails terminally because thread history cannot prove acceptance.
+Replacement-host row recovery sends a durable `pending_operation` through
+authenticated `operation/settle` IPC before reserving a new `thread/resume`;
+the row reservation clears only after `committed` or `failed`. No operation is
+replayed or left permanently unresolved merely because its host generation
+changed. A failed terminal journal write retains the fence for a safe retry.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

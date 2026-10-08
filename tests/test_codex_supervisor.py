@@ -133,6 +133,7 @@ class FakeLifecycleClient:
         self.operations = []
         self.commits = []
         self.handoff_commits = []
+        self.settlements = []
 
     def call(self, operation, timeout):
         self.operations.append(operation)
@@ -255,6 +256,10 @@ class FakeLifecycleClient:
 
     def commit_handoff_turn_start(self, operation_id, **evidence):
         self.handoff_commits.append((operation_id, evidence))
+
+    def settle_operation(self, operation_id, timeout=10):
+        self.settlements.append((operation_id, timeout))
+        return {"operation_id": operation_id, "state": "committed"}
 
 
 class JournalLifecycleClient(FakeLifecycleClient):

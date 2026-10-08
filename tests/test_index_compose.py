@@ -917,9 +917,10 @@ class TestContextDigest:
           * N distinct files cost the sum of their digests -- there is no
             budget, so the manager's `--context` list IS the budget.
 
-        Measured 2026-07-27 at this fix wave's base commit: `bin/fleet.py`
-        (16,075 source lines) rendered **539 digest lines / 27,835 chars**,
-        and fifty distinct files of that size would render ~1.39 MB into a
+        Re-measured 2026-10-08 after the native Codex journal recovery work:
+        `bin/fleet.py` (23,305 source lines) rendered **886 digest lines /
+        50,190 chars**, and fifty distinct files of that size would render
+        ~2.51 MB into a
         single prompt. No cap was added: §11.1 states the digest and
         `q --outline` differ only when the cap truncates, so capping here
         would silently impose `q`'s limit on a path the spec exempts, and that
@@ -1327,11 +1328,11 @@ class TestTheDigestSizeCap:
         and a warning genuinely means "more than the biggest file here".
 
         Re-derived against `bin/fleet.py`, the file the M4 cost pin uses and
-        the one that grows every wave. Measured 2026-07-30: 27,741 chars.
-        `tests/test_native.py` is actually this repo's largest digest at
-        40,993 chars -- also under the threshold -- but it is not staged here,
-        because this test's job is to guarantee the M4 pin's `warnings == []`
-        keeps holding as `bin/fleet.py` grows."""
+        the one that grows every wave. Re-measured 2026-10-08: 50,190 chars.
+        `tests/test_native.py` was the previous largest digest at 40,993
+        chars; `bin/fleet.py` has now overtaken it. This test stages the
+        growing module directly so the M4 pin's `warnings == []` stays
+        grounded."""
         root = tmp_path / "real"
         _write(root / "bin" / "fleet.py",
                Path(fleet.__file__).read_text(encoding="utf-8"))
@@ -1341,7 +1342,7 @@ class TestTheDigestSizeCap:
         assert warnings == [], (
             f"bin/fleet.py's own digest is {len(digest)} chars and now trips "
             f"the {fleet.INDEX_DIGEST_WARN_CHARS}-char warn threshold. The "
-            f"threshold was measured against a 27,741-char digest; re-measure "
+            f"threshold was measured against a 50,190-char digest; re-measure "
             f"it and move it, and move the M4 pin's docstring with it")
         assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS
 

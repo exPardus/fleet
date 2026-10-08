@@ -377,14 +377,31 @@ Later native mutations may proceed only after one of those terminal outcomes.
 Replacement-host startup may first convert a prior-generation `accepted`
 record to `uncertain` without a public observer. On the first later native
 mutation, before testing its predecessor fence, the host settles every such
-prior-generation thread record. `thread/resume` reads the immutable intent's
-thread ID directly; `thread/start` resolves its immutable operation source to
-one exact thread ID and then reads it. Matching evidence becomes `committed`;
-missing, conflicting, or incomplete proof becomes terminally `failed`. An
-already `observed` prior-generation record is committed directly. No path
-replays the old mutation. If the terminal journal write itself cannot be
-persisted, the new mutation refuses and retains the fence for a later safe
-attempt.
+record through a method-specific public-read path. `thread/resume` reads the
+immutable intent's thread ID directly; `thread/start` resolves its immutable
+operation source to one exact thread ID and then reads it. `turn/start`,
+`turn/steer`, and `turn/interrupt` read the immutable intent's thread ID.
+A start commits only on exactly one new turn beyond its history watermark; an
+interrupt commits only when the exact intent turn is newest and terminal.
+Thread history cannot prove a steer, so a steer commits only when a retained
+bounded provider result names that same current turn. Missing, malformed,
+conflicting, incomplete, or otherwise unprovable evidence settles terminally
+`failed`, never as a permanent fence.
+
+The same settlement pass covers same-generation leftovers. An abandoned
+`prepared` predecessor terminally fails because the host never accepted it; an
+already `observed` predecessor commits directly. No path replays the old
+mutation. If the terminal journal write itself cannot be persisted, the new
+mutation refuses and retains the fence for a later safe attempt.
+
+A Fleet row may retain `pending_operation` across loss of the host that
+accepted its mutation. Replacement-host recovery sends that exact operation ID
+through authenticated `operation/settle` IPC before reserving a new
+`thread/resume`. The row reservation clears only after the host reports
+`committed` or `failed`; a missing journal file proves the provider operation
+was never prepared. A concurrent row change wins the compare-and-swap and is
+never overwritten. Supervisor reconcile and handoff-predecessor retirement use
+the same terminal settlement rule.
 
 ## 8. Worker lifecycle and no-duplicate recovery
 

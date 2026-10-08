@@ -270,46 +270,86 @@ class Host:
         return self.journal.adopt_thread_read(
             operation_id, observed).get("result")
 
-    def _settle_prior_generation_thread_predecessors(
-            self, operation_id: str, deadline: float) -> None:
-        """Terminally settle old thread intents before a fresh mutation.
+    def _settle_uncertain_operation_result(
+            self, operation_id: str, deadline: float) -> Any:
+        """Settle any public mutation from bounded public read evidence."""
+        record = self.journal.load(operation_id)
+        public_method = record.get("public_method")
+        if public_method in {"thread/start", "thread/resume"}:
+            return self._settle_uncertain_thread_result(operation_id, deadline)
+        if public_method not in {"turn/start", "turn/steer", "turn/interrupt"}:
+            self.journal.settle_failed(
+                operation_id,
+                f"{public_method or 'unknown mutation'} has no settlement path")
+            raise ValueError("uncertain operation has no public settlement path")
+        recovery = record.get("recovery")
+        thread_id = recovery.get("thread_id") \
+            if isinstance(recovery, Mapping) else None
+        if not isinstance(thread_id, str):
+            self.journal.settle_failed(
+                operation_id, "immutable intent has no exact thread id")
+            raise ValueError("uncertain turn result has no exact thread identity")
+        try:
+            observed = self._recovery_request(
+                "thread/read", {"threadId": thread_id, "includeTurns": True},
+                deadline)
+        except Exception as exc:
+            self.journal.settle_failed(
+                operation_id,
+                "public thread lookup failed: "
+                f"{type(exc).__name__}: {exc}")
+            raise
+        return self.journal.adopt_turn_read(
+            operation_id, observed).get("result")
 
-        Replacement-host startup conservatively changes accepted operations to
-        uncertain without an app-server observer.  The first later mutation is
-        therefore the bounded public-observation opportunity: thread operations
-        have immutable recovery identity and may be read, never replayed.  A
-        proved projection commits; absent or conflicting proof fails terminally
-        so the old generation cannot remain a permanent predecessor fence.
+    def _settle_operation_terminal(
+            self, operation_id: str, deadline: float) -> dict[str, Any]:
+        """Move one durable intent to committed or failed without replaying it."""
+        record = self.journal.load(operation_id)
+        state = record.get("state")
+        if state in {"committed", "failed"}:
+            return record
+        if state == "prepared":
+            return self.journal.fail(
+                operation_id,
+                "prepared operation was never provider-accepted before recovery")
+        if state == "observed":
+            return self.journal.commit(operation_id)
+        if state == "accepted":
+            self.journal.uncertain(
+                operation_id,
+                "provider acceptance lost before terminal Fleet persistence; "
+                "public settlement required")
+        elif state != "uncertain":
+            raise ValueError("operation journal has unknown settlement state")
+        try:
+            self._settle_uncertain_operation_result(operation_id, deadline)
+        except Exception:
+            current = self.journal.load(operation_id)
+            if current.get("state") == "failed":
+                return current
+            raise
+        return self.journal.commit(operation_id)
+
+    def _settle_unresolved_predecessors(
+            self, operation_id: str, deadline: float) -> None:
+        """Terminally settle every older intent before a fresh mutation.
+
+        Client preparation precedes IPC, so an abandoned ``prepared`` record is
+        proof that this host never accepted that mutation. Accepted/uncertain
+        records settle through an exact public read keyed by immutable recovery
+        identity. Observed records only need their terminal journal write. This
+        applies to same-generation and replacement-host crashes alike: no
+        journal boundary may become a permanent predecessor fence.
         """
         for predecessor in self.journal.records():
             predecessor_id = predecessor.get("operation_id")
-            if (predecessor_id == operation_id
-                    or predecessor.get("generation") == self.generation
-                    or predecessor.get("public_method") not in {
-                        "thread/start", "thread/resume"}):
+            if predecessor_id == operation_id:
                 continue
             state = predecessor.get("state")
-            if state == "observed":
-                self.journal.commit(predecessor_id)
+            if state not in {"prepared", "accepted", "observed", "uncertain"}:
                 continue
-            if state not in {"accepted", "uncertain"}:
-                continue
-            if state == "accepted":
-                self.journal.uncertain(
-                    predecessor_id,
-                    "prior host generation ended after provider acceptance; "
-                    "public thread settlement required")
-            try:
-                self._settle_uncertain_thread_result(
-                    predecessor_id, deadline)
-            except Exception:
-                # Identity, read, history, and effective-setting failures are
-                # terminalized by the settlement helper.  Storage failures are
-                # not proof and must retain the fence for a later safe retry.
-                if self.journal.load(predecessor_id).get("state") != "failed":
-                    raise
-            else:
-                self.journal.commit(predecessor_id)
+            self._settle_operation_terminal(predecessor_id, deadline)
 
     def _recover_spawn_queue_overflow(
             self, operation_id: str, deadline: float) -> Any:
@@ -629,16 +669,15 @@ class Host:
                         state = record.get("state")
                         if state in {"observed", "committed"}:
                             result = record.get("result")
-                        elif state == "uncertain" and public_method in {
-                                "thread/start", "thread/resume"}:
-                            result = self._settle_uncertain_thread_result(
+                        elif state == "uncertain":
+                            result = self._settle_uncertain_operation_result(
                                 operation_id, deadline)
-                        elif state in {"accepted", "uncertain"}:
+                        elif state == "accepted":
                             raise ValueError("operation acceptance is uncertain; reconcile before retry")
                         elif state == "failed":
                             raise ValueError("operation is terminally failed")
                         elif state == "prepared":
-                            self._settle_prior_generation_thread_predecessors(
+                            self._settle_unresolved_predecessors(
                                 operation_id, deadline)
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
@@ -714,13 +753,55 @@ class Host:
                                 try:
                                     self.journal.observe(operation_id, result)
                                 except Exception:
-                                    if public_method not in {
-                                            "thread/start", "thread/resume"}:
+                                    if self.journal.load(operation_id).get(
+                                            "state") != "uncertain":
                                         raise
-                                    result = self._settle_uncertain_thread_result(
+                                    result = self._settle_uncertain_operation_result(
                                         operation_id, deadline)
                         else:
                             raise ValueError("operation journal has unknown state")
+                elif method == "operation/settle":
+                    if not isinstance(payload, dict):
+                        raise ValueError("operation settlement payload is malformed")
+                    target_id = payload.get("operation_id")
+                    target_path = self.journal.path(target_id)
+                    try:
+                        record = self.journal.load(target_id)
+                    except HostRejected:
+                        if target_path.exists():
+                            raise
+                        # Fleet reserves its row before the client prepares the
+                        # journal. A replacement host finding no journal file
+                        # therefore proves the provider call was never issued.
+                        result = {
+                            "operation_id": target_id,
+                            "public_method": None,
+                            "state": "failed",
+                            "reason": "no durable provider operation intent exists",
+                        }
+                        record = None
+                    if record is None:
+                        pass
+                    else:
+                        public_method = record.get("public_method")
+                        recovery = record.get("recovery")
+                        if (public_method not in {
+                                "thread/start", "thread/resume", "turn/start",
+                                "turn/steer", "turn/interrupt"}
+                                or not isinstance(recovery, Mapping)):
+                            raise ValueError(
+                                "operation settlement target is not a public mutation")
+                        self._authorize_public_mutation(
+                            connection, public_method, {"params": {
+                                "threadId": recovery.get("thread_id")}})
+                        terminal = self._settle_operation_terminal(
+                            target_id, deadline)
+                        result = {
+                            "operation_id": target_id,
+                            "public_method": public_method,
+                            "state": terminal.get("state"),
+                            "reason": terminal.get("reason"),
+                        }
                 elif method == "public-evidence/read":
                     if not isinstance(payload, dict):
                         raise ValueError("public evidence payload is malformed")

@@ -502,7 +502,7 @@ def _index_glob_match(path, pattern) -> bool:
 # Argument length and file count do not bound the generated context.
 # The warning allows an ordinary single-file digest; refusal limits large
 # combined requests. TestTheDigestSizeCap checks these operating margins.
-INDEX_DIGEST_WARN_CHARS = 50_000
+INDEX_DIGEST_WARN_CHARS = 60_000
 INDEX_DIGEST_REFUSE_CHARS = 250_000
 
 
@@ -1477,4 +1477,3 @@ def cmd_q(args) -> int:
     if args.outline is not None:
         return _cmd_q_outline(root, args)
     return _cmd_q_query(root, args)
-

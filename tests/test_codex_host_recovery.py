@@ -746,31 +746,46 @@ def test_authenticated_raw_mutation_without_prepared_intent_is_rejected_safely(
         _shutdown(client)
 
 
-def test_replacement_host_conservatively_reconciles_accepted_intent_before_ready(
-        tmp_path):
+@pytest.mark.parametrize("public_method,terminal_state", [
+    ("turn/start", "failed"),
+    ("turn/steer", "failed"),
+    ("turn/interrupt", "committed"),
+])
+def test_replacement_host_terminally_settles_every_turn_predecessor(
+        tmp_path, public_method, terminal_state):
     module = _module()
-    home = tmp_path / "restart-home"
+    host_module = _host_module()
+    home = tmp_path / public_method.replace("/", "-")
     (home / "state").mkdir(parents=True)
     journal = module.OperationJournal(home.resolve(), "old-generation")
-    operation = _mutation("accepted-before-restart", "turn/steer")
+    operation = _mutation("accepted-before-restart", public_method)
     journal.prepare(operation)
     journal.accept(operation["operation_id"])
+    module.reconcile_home(home.resolve())
+    assert journal.load(operation["operation_id"])["state"] == "uncertain"
 
-    _module_value, client, log = _ensure(tmp_path, home=home.resolve())
-    try:
-        record = json.loads(_operation_file(
-            client, operation["operation_id"]).read_text())
-        assert record["state"] == "uncertain"
-        assert "observer unavailable" in record["reason"]
-        assert _app_requests(log, "turn/steer") == []
-        with pytest.raises(module.HostRejected, match="unresolved predecessor"):
-            client.call(_mutation("must-not-bypass", "turn/start"), timeout=1)
-        assert _app_requests(log, "turn/start") == []
-        assert client.call({"operation_id": "restart-ping", "method": "ping",
-                            "payload": {}}, timeout=1).result["generation"] \
-            == client.generation
-    finally:
-        _shutdown(client)
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host.generation = "replacement-generation"
+    reads = []
+
+    def public_read(method, params, deadline):
+        reads.append((method, params))
+        return _thread_read_result()
+
+    host._recovery_request = public_read
+    host._settle_unresolved_predecessors("later-operation", 1.0)
+
+    terminal = journal.load(operation["operation_id"])
+    assert terminal["state"] == terminal_state
+    if terminal_state == "failed":
+        assert terminal["settled_from_public_read"] is True
+    assert reads == [("thread/read", {
+        "threadId": "thread-1", "includeTurns": True})]
+    assert journal.unresolved_predecessor("later-operation") is None
+    later = _mutation("later-operation", "turn/start")
+    journal.prepare(later)
+    assert journal.accept("later-operation")["state"] == "accepted"
 
 
 def test_replacement_host_settles_accepted_resume_then_allows_next_mutation(
@@ -811,3 +826,91 @@ def test_replacement_host_settles_accepted_resume_then_allows_next_mutation(
                     "thread/resume", "thread/read", "turn/start"]
     finally:
         _shutdown(replacement)
+
+
+def test_later_mutation_terminalizes_prepared_and_observed_predecessors(
+        tmp_path):
+    module = _module()
+    host_module = _host_module()
+    home = (tmp_path / "journal-boundaries").resolve()
+    (home / "state").mkdir(parents=True)
+    journal = module.OperationJournal(home, "current-generation")
+    prepared = _mutation("abandoned-before-accept", "turn/steer")
+    observed = _mutation("persisted-before-fleet-commit", "turn/steer")
+    journal.prepare(prepared)
+    journal.prepare(observed)
+    journal.accept(observed["operation_id"])
+    journal.observe(observed["operation_id"], {"turnId": "turn-1"})
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host.generation = "current-generation"
+    host._recovery_request = lambda *_args: pytest.fail(
+        "prepared/observed settlement must not read provider state")
+
+    host._settle_unresolved_predecessors(
+        "after-journal-boundaries", 1.0)
+
+    assert journal.load(prepared["operation_id"])["state"] == "failed"
+    assert journal.load(observed["operation_id"])["state"] == "committed"
+    assert journal.unresolved_predecessor("after-journal-boundaries") is None
+
+
+def test_terminal_settlement_write_failure_retains_retryable_fence(
+        tmp_path, monkeypatch):
+    module = _module()
+    host_module = _host_module()
+    _module_value, home, journal, operation, _record = _prepared_record(
+        tmp_path, "turn/steer", "after-send")
+    journal.uncertain(operation["operation_id"], "provider response lost")
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host._recovery_request = lambda *_args: _thread_read_result()
+    real_atomic_json = module._atomic_json
+    failed_once = False
+
+    def fail_first_terminal_write(path, value):
+        nonlocal failed_once
+        if not failed_once and value.get("state") == "failed":
+            failed_once = True
+            raise OSError("injected settlement persistence failure")
+        return real_atomic_json(path, value)
+
+    monkeypatch.setattr(module, "_atomic_json", fail_first_terminal_write)
+    with pytest.raises(OSError, match="settlement persistence"):
+        host._settle_operation_terminal(operation["operation_id"], 1.0)
+    assert journal.load(operation["operation_id"])["state"] == "uncertain"
+
+    terminal = host._settle_operation_terminal(operation["operation_id"], 1.0)
+    assert terminal["state"] == "failed"
+    assert journal.unresolved_predecessor("later-operation") is None
+
+
+@pytest.mark.parametrize("public_method", [
+    "turn/start", "turn/steer", "turn/interrupt",
+])
+def test_each_turn_method_commits_only_from_exact_public_proof(
+        tmp_path, public_method):
+    host_module = _host_module()
+    _module_value, _home, journal, operation, _record = _prepared_record(
+        tmp_path, public_method, "after-send")
+    if public_method == "turn/steer":
+        journal.observe(operation["operation_id"], {"turnId": "turn-1"})
+        journal._transition(
+            operation["operation_id"], {"observed"}, "uncertain",
+            reason="terminal projection write uncertain")
+    else:
+        journal.uncertain(operation["operation_id"], "provider response lost")
+    result = _thread_read_result()
+    if public_method == "turn/start":
+        result["thread"]["turns"].append({
+            "id": "turn-2", "status": "inProgress", "items": []})
+    host = object.__new__(host_module.Host)
+    host.journal = journal
+    host._recovery_request = lambda method, params, deadline: result
+
+    terminal = host._settle_operation_terminal(
+        operation["operation_id"], 1.0)
+
+    assert terminal["state"] == "committed"
+    assert terminal["result"]["adoptedFromPublicRead"] is True
+    assert journal.unresolved_predecessor("later-operation") is None

@@ -1803,6 +1803,101 @@ class OperationJournal:
         return self._transition(
             operation_id, {"uncertain"}, "observed", result=projection)
 
+    def adopt_turn_read(
+            self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
+        """Settle one uncertain turn mutation from its immutable thread intent.
+
+        ``thread/read`` can prove a start only from exactly one turn beyond the
+        recorded watermark, and an interrupt only from the exact target turn's
+        terminal state.  A steer has no public correlation in thread history;
+        it is adoptable only when the bounded provider result was already
+        retained before persistence became uncertain.  Every other shape is
+        terminally failed rather than left as a permanent predecessor fence.
+        """
+        record = self.load(operation_id)
+        public_method = record.get("public_method")
+        recovery = record.get("recovery")
+        prior = record.get("result")
+        if (record.get("state") != "uncertain"
+                or public_method not in {
+                    "turn/start", "turn/steer", "turn/interrupt"}
+                or not isinstance(recovery, Mapping)
+                or not isinstance(result, Mapping)):
+            raise HostRejected(
+                f"operation {operation_id} is not an uncertain turn intent")
+
+        def reject_settlement(detail: str) -> None:
+            reason = self.settle_failed(
+                operation_id, detail,
+                from_public_read=True).get("reason", str(detail))
+            raise HostRejected(reason)
+
+        projection = _thread_result_projection(result)
+        thread = projection.get("thread")
+        thread_id = recovery.get("thread_id")
+        expected_cwd = recovery.get("canonical_cwd")
+        newest = projection.get("newestTurn")
+        turn_count = projection.get("turnCount")
+        if (not isinstance(thread, Mapping)
+                or not isinstance(thread_id, str)
+                or thread.get("id") != thread_id
+                or not isinstance(expected_cwd, str)
+                or thread.get("cwd") != expected_cwd
+                or not isinstance(turn_count, int)
+                or isinstance(turn_count, bool)
+                or turn_count < 0):
+            reject_settlement("public turn thread identity or history is malformed")
+
+        newest_id = newest.get("id") if isinstance(newest, Mapping) else None
+        newest_status = newest.get("status") if isinstance(newest, Mapping) else None
+        if newest_status not in {
+                "inProgress", "completed", "failed", "interrupted"}:
+            reject_settlement("newest public turn status is unknown")
+
+        evidence: dict[str, Any] = {
+            "threadId": thread_id,
+            "canonicalCwd": expected_cwd,
+            "observedTurnCount": turn_count,
+            "adoptedFromPublicRead": True,
+        }
+        if public_method == "turn/start":
+            watermark = recovery.get("history_watermark")
+            if (not isinstance(watermark, int) or isinstance(watermark, bool)
+                    or watermark < 0 or turn_count != watermark + 1
+                    or not isinstance(newest_id, str)):
+                reject_settlement(
+                    "turn/start public read did not prove exactly one new turn")
+            returned = prior.get("turn") if isinstance(prior, Mapping) else None
+            returned_id = returned.get("id") if isinstance(returned, Mapping) else None
+            if returned_id is not None and returned_id != newest_id:
+                reject_settlement("turn/start result conflicts with public history")
+            evidence.update({
+                "historyWatermark": watermark,
+                "turn": {"id": newest_id, "status": newest_status},
+            })
+        elif public_method == "turn/steer":
+            target = recovery.get("previous_turn_id")
+            if not isinstance(target, str):
+                target = recovery.get("turn_id")
+            returned_id = prior.get("turnId") if isinstance(prior, Mapping) else None
+            if (not isinstance(target, str) or newest_id != target
+                    or returned_id != target):
+                reject_settlement(
+                    "turn/steer acceptance is unprovable from public thread state")
+            evidence.update({"turnId": target, "turnStatus": newest_status})
+        else:
+            target = recovery.get("turn_id")
+            if not isinstance(target, str):
+                target = recovery.get("previous_turn_id")
+            if (not isinstance(target, str) or newest_id != target
+                    or newest_status not in _TERMINAL_TURN_STATES):
+                reject_settlement(
+                    "turn/interrupt public read lacks exact terminal proof")
+            evidence.update({"turnId": target, "turnStatus": newest_status})
+
+        return self._transition(
+            operation_id, {"uncertain"}, "observed", result=evidence)
+
     def uncertain(self, operation_id: str, reason: str) -> dict[str, Any]:
         return self._transition(
             operation_id, {"accepted", "prepared"}, "uncertain",
@@ -2178,6 +2273,23 @@ class CodexHostClient:
         result = self.call(operation, timeout=timeout).result
         if not isinstance(result, dict):
             raise HostUnavailable("Codex host returned malformed approval response state")
+        return result
+
+    def settle_operation(self, operation_id: str,
+                         timeout: float = 10.0) -> dict[str, Any]:
+        """Ask the current host to terminalize one durable mutation intent."""
+        target = OperationJournal._validate_id(operation_id)
+        operation = {
+            "operation_id": f"settle-{uuid.uuid4()}",
+            "method": "operation/settle",
+            "payload": {"operation_id": target},
+        }
+        result = self.call(operation, timeout=timeout).result
+        if (not isinstance(result, dict)
+                or result.get("operation_id") != target
+                or result.get("state") not in {"committed", "failed"}):
+            raise HostUnavailable(
+                "Codex host returned non-terminal operation settlement")
         return result
 
     def commit(self, operation_id: str) -> None:

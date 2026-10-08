@@ -728,6 +728,7 @@ class WorkerVerbClient:
         })
         self.operations = []
         self.commits = []
+        self.settlements = []
 
     def _thread(self):
         turn = {
@@ -793,6 +794,10 @@ class WorkerVerbClient:
 
     def commit(self, operation_id):
         self.commits.append(operation_id)
+
+    def settle_operation(self, operation_id, timeout=10):
+        self.settlements.append((operation_id, timeout))
+        return {"operation_id": operation_id, "state": "failed"}
 
 
 class BlockingResumeClient(WorkerVerbClient):
@@ -1346,6 +1351,31 @@ def test_native_worker_lost_restart_resume_freezes_without_replaying_turn(
     assert stored["status"] == "dead-suspected"
     assert stored["adapter_state"] == "uncertain"
     assert stored["pending_operation"]["kind"] == "thread/resume"
+
+
+def test_native_worker_replacement_host_settles_pending_resume_before_recovery(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    operation_id = "worker-cx-native-resume-lost"
+    _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain",
+        last_operation_id=operation_id,
+        pending_operation={
+            "operation_id": operation_id, "kind": "thread/resume",
+            "at": "2026-09-20T00:00:00Z",
+        })
+    client = WorkerVerbClient(lane, generation="host-generation-2")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._cmd_send_codex(
+        "cx-native", "continue after settled recovery") == 0
+
+    assert client.settlements == [(operation_id, 30)]
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume", "thread/read", "turn/steer"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert "pending_operation" not in stored
+    assert stored["codex_host_generation"] == "host-generation-2"
 
 
 def test_native_worker_kill_refuses_while_restart_resume_is_pending(

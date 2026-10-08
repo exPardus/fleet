@@ -190,7 +190,8 @@ ALLOWED = {
     # reserve/clear/freeze helpers are called only from those mutating verbs;
     # every load is lexically inside fleet_lock and paired with a save/event.
     "_reserve_codex_worker_operation", "_clear_codex_worker_operation",
-    "_freeze_codex_worker_operation", "_cmd_send_codex_native",
+    "_freeze_codex_worker_operation", "_settle_codex_worker_pending_operation",
+    "_cmd_send_codex_native",
     "_reserve_codex_initial_turn_start", "_resume_codex_worker_on_current_host",
     "_resume_one_limited_codex", "_cmd_respawn_codex_native",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
