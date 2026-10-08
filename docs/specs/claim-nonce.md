@@ -1529,6 +1529,29 @@ reading a runbook and an agent reading stderr are different audiences with
 different capabilities; this is the one place where the absence of a privilege boundary is worked
 around by an **audience** boundary, and it is a convention, not a mechanism.
 
+**FOUNDER OVERRIDE (2026-10-08) of the audience rule above.** A handoff stalled when a holder
+copied the literal `<value>` from a printed `--nonce <value>` recipe; the refusal named no way out
+and the claim went unowned until an operator recovered it by hand. The founder overrode the
+audience boundary for this path. Binding from 2026-10-08:
+
+- A continuity refusal (`_continuity_refusal`) now appends exact recovery steps: end the turn;
+  once the holder row is idle (the refusal shows its current status), the Interface or operator
+  runs the exact `send supervisor` command printed, which wakes the same incarnation with a fresh
+  nonce; and the exact `sup-handoff-abort --successor-sid` / `--successor-inc` handle of each
+  pending successor. The wake bootstrap renders those aborts as complete commands carrying the
+  wake nonce, which `sup-boot`'s `resume` makes the live generation.
+- No string fleet prints carries an identity placeholder token (`<value>`, `<nonce>`, `<sid>`,
+  `<inc>`, ...). A recipe either carries the exact generation (the value the caller just
+  presented, which stays live until a newer one is presented, or a legacy upgrade's freshly
+  minted value) or ends at a bare `--nonce`, which argparse refuses verbatim with no state change.
+  `tests/test_no_placeholder.py` scans every printed string and every verb's help.
+- A placeholder-looking `--nonce` or `--handoff-token` (empty, whitespace-only, anything with
+  `<` or `>`, or the bare words value/nonce/token in any case) is refused before any lock, log
+  append, rotation or dispatch, with an error naming the recovery path. Minted values are
+  url-safe base64, so no real value is refused.
+
+The convention paragraph above is kept as history; where they differ, this override governs.
+
 **Accepted cost, stated plainly:** without a registered Interface, or while its holder remains busy, a
 supervisor that loses its nonce catastrophically is locked out of `sup-*` for up to an hour. §5.4(b)
 removes the common causes; compaction remains. Shortening

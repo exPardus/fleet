@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11915) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12917) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16376) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11922) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12924) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16386) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3740) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
       * `_read_registry_readonly` (:4435) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13167) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16250) -- describe the incident-specific absence.
+      * `_doctor_check_registry` (:13174) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16259) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:7108) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18030) -- render the release explanation.
+      * `_tombstone_releasing_body` (:18040) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3722,7 +3722,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16376`), because legacy upgrades also require a complete registry.
+    (`:16386`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -8135,7 +8135,7 @@ def _mint_wake_nonce(claim: dict, now=None) -> str:
 
 
 def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str,
-                                 message: str) -> str:
+                                 message: str, pending_handles=()) -> str:
     """Render the wake bootstrap for an idle supervisor body's fresh, unforked
     turn (Cut 1, w87). No new generation is minted: sup-boot's own `resume`
     verdict (claim-nonce doctrine) restamps THIS incarnation onto the new sid
@@ -8149,6 +8149,9 @@ def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str
     home = FLEET_HOME.as_posix()
     bundle = boot_bundle_path(name).as_posix()
     mail_block = f"<MANAGER MESSAGE>\n{message.strip()}\n</MANAGER MESSAGE>\n\n" if message.strip() else ""
+    aborts = "".join(
+        f'   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort {h} --nonce {wake_nonce}\n'
+        for h in pending_handles) or "   (none recorded at wake time)\n"
     return f"""You are the claude-fleet supervisor, incarnation {incarnation_id}, woken from idle
 by `fleet send`. This is NOT a new generation -- you are the SAME incarnation continuing on a
 fresh session; never a successor, never a fork.
@@ -8177,8 +8180,9 @@ fresh session; never a successor, never a fork.
    file.
 4. Before any campaign action, run:
    "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
-   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE:
-   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort --successor-inc <inc> [--successor-sid <sid>] --nonce <CURRENT-NONCE>
+   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE.
+   Run exactly these first; each presents the wake nonce, which step 1 made your live generation:
+{aborts}   For any other successor status lists, run the same command with its exact handle.
    If a sid-less attempt is still inside its join window, wait until it becomes resolvable, then retry. Run each nonce-minting
    verb directly: never pipe or filter its output, and record every newly printed NONCE before the
    next abort. A lost-nonce wake must not leave a successor able to take over afterward.
@@ -8231,6 +8235,7 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
         else:
             wake_nonce = _mint_wake_nonce(claim)
             write_incarnation(claim)
+            pending_handles = _handoff_abort_handles(claim)
     if claim_changed:
         _rollback_pre_claim()
         raise FleetCliError(
@@ -8238,7 +8243,8 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
             f"{incarnation_id}) -- refusing to dispatch a wake that "
             f"cannot resume it; another body may already hold the claim")
 
-    prompt_body = _render_supervisor_wake_task(name, incarnation_id, wake_nonce, mail)
+    prompt_body = _render_supervisor_wake_task(name, incarnation_id, wake_nonce, mail,
+                                               pending_handles=pending_handles)
     try:
         result = dispatch_bg(
             name, cwd, prompt_body, mode, model=model,
@@ -10258,7 +10264,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10173` / `cmd_respawn:9464`, before
+    # resolution that runs from `cmd_kill:10179` / `cmd_respawn:9470`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10289,9 +10295,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10173` / `cmd_respawn:9464`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10179` / `cmd_respawn:9470`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9485-9494` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9491-9500` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -10399,8 +10405,9 @@ def _steer_supervisor_release(name, reason, *, run, which, sleep):
         f"Stop what you are doing. Release the supervisor claim yourself -- fleet "
         f"cannot do it for you (three-tier §10.4 B5: `sup-release` requires YOUR "
         f"current generation, which only you hold).\n\n"
-        f"Run exactly this, presenting your own nonce:\n"
-        f'  "{py}" "{fleet_py}" sup-release --reason "{reason}" --nonce <your nonce>\n\n'
+        f"Run this, appending a space and your current generation (the exact value "
+        f"after your last `NONCE:` line) after the final --nonce:\n"
+        f'  "{py}" "{fleet_py}" sup-release --reason "{reason}" --nonce\n\n'
         f"Then take NO further fleet actions and END YOUR TURN. The body is stopped "
         f"as soon as the claim reads `released`.")
     try:
@@ -12687,7 +12694,7 @@ def _doctor_check_orphaned_claims(workers=None):
                               if p.is_file() and not p.name.endswith(".tmp") and p.name not in known_sids)
         if orphan_ceils:
             parts.append(
-                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings/<sid> matching no "
+                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings/ files whose sid matches no "
                 f"registered worker; run `fleet clean` or remove manually): {', '.join(orphan_ceils)}")
     if parts:
         return ("orphaned-claims", True, " | ".join(parts))
@@ -14055,7 +14062,7 @@ _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
 Append-only checkpoint log (spec §4). Single writer: the current claim
 holder, via `fleet sup-*` commands only. Never edit or delete entries.
-Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
+Entry header format: `## UTC-ISO KIND inc=INCARNATION-ID sid=SESSION-ID`
 plus an optional trailing ` substrate=<substrate>` when the body's registry row
 records one (item 28, e.g. `substrate=openrouter/stealth/union-alpha`).
 Kinds: BOOT, CHECKPOINT, PROPOSAL, PARKED, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
@@ -14755,7 +14762,7 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
             f"successors answer to it ("
             + ", ".join(f"{e.get('successor_inc')}" for e in rivals)
             + "). Refusing to guess which session to stop; name one with "
-              "`--successor-inc <inc>`")}
+            + " or ".join(f"`--successor-inc {e.get('successor_inc')}`" for e in rivals))}
     entry = rivals[0] if rivals else None
     if entry is None:
         named = successor_sid or successor_inc
@@ -15269,10 +15276,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
-    :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
-    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20718, :22713`).
+    :3747, :3827, :4832, :10282, :10445, :10709, :10938, :10974, :11216, :11217,
+    :11306, :11316, :11327, :11425, :11948, :15227, :19138, :19139, :19243, :19304, :20728, :22885`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8754, :9338, :13501, :21456. This makes union identity
+    OWN prior sid alone: :8760, :9344, :13508, :21467. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15708,6 +15715,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     path (morning / post-reboot / post-handoff, spec §4). Epoch check runs
     BEFORE the claim decision; the roster subprocess runs OUTSIDE fleet_lock
     (F4 doctrine: never hold the lock across a subprocess)."""
+    _refuse_placeholder_minted_values(args)      # before roster, lock or write
     caller_sid = getattr(args, "sid", None) or current_caller_session()
     if not caller_sid:
         raise FleetCliError("sup-boot: caller session unknown -- run from a Claude "
@@ -15956,6 +15964,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     frame must carry the exemption. Send to the current claim holder has its
     own identity-checked mailbox carve-out below. Validation never rotates a nonce.
     """
+    _refuse_placeholder_value("--nonce", nonce)
     caller = current_caller_session()
     if caller is None:
         return
@@ -15990,8 +15999,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8754, :9338, :13501,
-    # :21456) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8760, :9344, :13508,
+    # :21467) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15999,7 +16008,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15194`).
+        # names this gate as its reason (`:15201`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16011,9 +16020,9 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Only offer --nonce when the actual entry point accepts it; the gate frame
     # label can differ from the command the caller ran.
     if verb in GATE_VERBS_ACCEPTING_NONCE:
-        remedy = ("Present the current generation with `--nonce <value>` "
-                  "(the value the last `sup-*` verb printed), or escalate to "
-                  "the supervisor session.")
+        remedy = ("Present the current generation with `--nonce`: the exact "
+                  "value the last `sup-*` verb printed after `NONCE:`. Or "
+                  "escalate to the supervisor session.")
     else:
         remedy = (f"THERE IS NOTHING YOU CAN PRESENT: `fleet {verb}` declares no "
                   f"`--nonce` flag, so this refusal cannot be satisfied by any "
@@ -16199,15 +16208,15 @@ def _acknowledge_pending(claim: dict) -> None:
 
 
 def _continuity_refusal(verb, claim: dict) -> FleetCliError:
-    """Build an agent-facing refusal naming ambiguity and human escalation.
-    Do not name a unilateral recovery lever: either indistinguishable body may
-    be legitimate. Human recovery instructions live in the supervisor runbook.
+    """Build an agent-facing refusal naming ambiguity, escalation and recovery.
+    Founder override 2026-10-08 (claim-nonce §5.7): name the exact idle-holder
+    wake and successor abort handles; see _continuity_recovery_steps.
     """
     return SupervisorContinuityError(
         f"{verb}: continuity proof failed (expected generation "
         f"{claim.get('nonce_seq', '?')}) -- a second body of your lineage may be "
         f"acting. STOP: take no further supervisor actions and escalate to the "
-        f"operator.")
+        f"operator." + _continuity_recovery_steps(claim))
 
 
 SPEED_BUMP_NOTE = (
@@ -16308,6 +16317,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # Resolve caller identity once, including --sid, for role and continuity checks.
     # SPEC.md:281 makes refused the doctor alarm kind, so role classification must
     # use the same caller whose continuity is being tested.
+    _refuse_placeholder_value("--nonce", nonce)  # before any read, log or write
     caller = sid_override or current_caller_session()
     if not caller:
         raise FleetCliError("caller session unknown -- pass --sid or run from a Claude session")
@@ -16369,7 +16379,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11912`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11919`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19067,7 +19077,7 @@ def cmd_sup_status(args) -> int:
     for entry in info["incarnation"].get(HANDOFF_PENDING_KEY, []) if info["incarnation"] else []:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry['successor_inc']}")
-        recipe = (f"abort with `fleet sup-handoff-abort {handle} --nonce <value>`")
+        recipe = "abort with " + _holder_recipe(f"sup-handoff-abort {handle}")
         if entry.get("state") == HANDOFF_JOINING and not entry.get("successor_sid"):
             try:
                 minted = _parse_iso(entry.get("minted_at"))
@@ -19076,16 +19086,16 @@ def cmd_sup_status(args) -> int:
             if minted is None:
                 recipe = (f"NOT retirable by age -- its minted_at "
                           f"({entry.get('minted_at')!r}) cannot be read, so it will "
-                          f"never age out: `fleet sup-handoff-abort {handle} --force "
-                          f"--nonce <value>`")
+                          f"never age out: " + _holder_recipe(
+                              f"sup-handoff-abort {handle} --force"))
             else:
                 when = (minted + timedelta(
                     seconds=SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS)
                         ).strftime("%Y-%m-%dT%H:%M:%SZ")
-                recipe = (f"still joining -- retirable at {when}, then `fleet "
-                          f"sup-handoff-abort {handle} --nonce <value>` "
-                          f"(before that the abort is refused: a join in progress is "
-                          f"not a dead successor)")
+                recipe = (f"still joining -- retirable at {when}, then "
+                          + _holder_recipe(f"sup-handoff-abort {handle}")
+                          + " (before that the abort is refused: a join in progress "
+                          "is not a dead successor)")
         print(f"pending successor: {entry.get('successor_inc')} [{entry.get('state')}]"
               f" minted {entry.get('minted_at')} -- {recipe}")
     if info["abort_flag"]:
@@ -20192,8 +20202,8 @@ Do exactly this, in order:
      SUP-BOOT-FROZEN <reason>
 5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
    content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
-   value from step 2, then begin the campaign brief below. The flag is not optional: every
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "boot: campaign start" --nonce
+   with a space and the exact NONCE value from step 2 appended, then begin the campaign brief below. The flag is not optional: every
    `sup-*` holder verb is refused without it.
 
 --- CAMPAIGN BRIEF ---
@@ -20687,8 +20697,8 @@ Do exactly this, in order:
 4. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
 5. Poll every ~30s (up to 10 minutes): "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
-     substituting the NONCE value step 2 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
+     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce
+     with a space and the exact NONCE value step 2 printed appended. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
      is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
      files a false second-body row in `fleet doctor` -- a permanently-red row trains the
      operator to ignore the row that will one day be real.
@@ -21369,13 +21379,14 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
 
     print(f"SUCCESSOR-INC: {successor_inc}")
     print(f"SUCCESSOR-SID: {successor_sid}")
-    # Both recipes present --nonce because both verbs require continuity.
+    # Both recipes present --nonce because both verbs require continuity; begin
+    # mints nothing, so the presented generation stays live (founder 2026-10-08).
+    gen = _recipe_generation(getattr(args, "nonce", None), notices)
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
-          f"  fleet sup-handoff-complete --expect-inc {successor_inc} "
-          f"--expect-sid {successor_sid} --nonce <value>\n"
+          f"  {_holder_recipe(f'sup-handoff-complete --expect-inc {successor_inc} --expect-sid {successor_sid}', gen, quote=False)}\n"
           f"On timeout/failure instead run:\n"
-          f"  fleet sup-handoff-abort --successor-sid {successor_sid} --nonce <value>")
+          f"  {_holder_recipe(f'sup-handoff-abort --successor-sid {successor_sid}', gen, quote=False)}")
     return 0
 
 
@@ -21494,9 +21505,11 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
             raise FleetCliError(
                 f"supervisor/HANDSHAKE is present (inc={hs.get('incarnation_id')} "
                 f"sid={hs.get('session_id')}) -- a successor got far enough to write "
-                f"one, so this succession is still live. Complete it "
-                f"(`sup-handoff-complete --expect-inc {hs.get('incarnation_id')} "
-                f"--nonce <value>`) or abort it by handle first; --retire-all is for "
+                f"one, so this succession is still live. Complete it ("
+                + _holder_recipe(f"sup-handoff-complete --expect-inc "
+                                 f"{hs.get('incarnation_id')}",
+                                 _recipe_generation(getattr(args, "nonce", None)))
+                + ") or abort it by handle first; --retire-all is for "
                 f"attempts no session answers for")
         now = datetime.now(timezone.utc)
         torn = handoff_pending_torn(claim)
@@ -21518,7 +21531,7 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
                 for e, s in standing) or "none recorded"
             raise FleetCliError(
                 f"nothing to retire: {detail}. An entry bearing a sid is stopped by "
-                f"handle (`--successor-sid <sid>`); one still inside the join window "
+                f"its own `--successor-sid` handle (sid above); one in the join window "
                 f"becomes retirable when it ages out. --force adds only entries whose "
                 f"minted_at cannot be read at all -- it is not a way out of the join "
                 f"window, and forcing one would unlink a still-joining successor's "
@@ -21557,7 +21570,8 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry.get('successor_inc')}")
         print(f"STILL STANDING: {entry.get('successor_inc')} [{state}] -- "
-              f"`fleet sup-handoff-abort {handle} --nonce <value>`")
+              + _holder_recipe(f"sup-handoff-abort {handle}",
+                               _recipe_generation(getattr(args, "nonce", None))))
     _deliver_notices(notices)
     return 0
 
@@ -21883,11 +21897,11 @@ def _doctor_check_supervisor_handoff():
         torn = handoff_pending_torn(claim)
         # Retirement needs a holder; after release, tell the operator to boot
         # before presenting a generation to --retire-all.
-        recipe = ("`fleet sup-handoff-abort --retire-all --nonce <value>`"
+        recipe = (_holder_recipe("sup-handoff-abort --retire-all")
                   if not (isinstance(claim, dict) and claim.get("state") == "released")
                   else "`fleet sup-boot` (the claim is RELEASED -- there is no holder to "
-                       "present a nonce to), then `fleet sup-handoff-abort --retire-all "
-                       "--nonce <value>`")
+                       "present a nonce to), then "
+                       + _holder_recipe("sup-handoff-abort --retire-all"))
         if stranded:
             ok = False
             parts.append(
@@ -21941,7 +21955,8 @@ def _doctor_check_supervisor_handoff():
                 f"({', '.join(sorted(orphans))}) -- residue from a handoff that "
                 f"crashed before unlinking. Each carries a handoff token that is still "
                 f"LIVE if the claim still holds its hash; delete them (claim-nonce §5.9), "
-                f"and prefer `fleet sup-handoff-abort --successor-inc <inc>`, which "
+                f"and prefer `fleet sup-handoff-abort --successor-inc` with the inc in "
+                f"the file name, which "
                 f"retires the pending entry and the token hash with the file")
     except OSError:
         pass
@@ -22517,6 +22532,160 @@ def _wake_incarnation(name: str, old_sid: str) -> str:
     return incarnation_id
 
 
+# PRIORITY 1 (founder override, 2026-10-08): a lost or mistyped generation must
+# never stall a handoff. Placeholder tokens are refused before any state change,
+# and a continuity refusal names the exact recovery commands. Defined here, after
+# every cited line, so these helpers shift no self-citation.
+_PLACEHOLDER_WORDS = frozenset({
+    "value", "nonce", "your-nonce", "current-nonce", "nonce-value", "the-nonce",
+    "my-nonce", "token", "handoff-token", "generation", "current-generation",
+})
+
+SUPERVISOR_RECOVERY_WAKE_MESSAGE = (
+    "Continuity recovery: resume this incarnation and abort every pending "
+    "handoff successor before any other supervisor verb.")
+
+
+def _minted_value_is_placeholder(value) -> bool:
+    """True when a presented --nonce/--handoff-token value is template text.
+    Minted values are url-safe base64, so angle brackets never occur in one;
+    empty, whitespace-only and the bare words value/nonce (any case, with
+    brackets, braces, quotes or a shell `$`) are refused too.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or "<" in text or ">" in text:
+        return True
+    bare = text.strip("{}[]()$'\"` ").lower().replace("_", "-").replace(" ", "-")
+    return bare in _PLACEHOLDER_WORDS
+
+
+def _supervisor_wake_command() -> str:
+    """The exact runnable `send supervisor` that wakes an idle holder with a
+    fresh nonce (claim-nonce §5.7 Interface wake)."""
+    py = Path(sys.executable).as_posix()
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
+    home = Path(FLEET_HOME).as_posix()
+    return (f'"{py}" "{fleet_py}" --fleet-home "{home}" send supervisor '
+            f'"{SUPERVISOR_RECOVERY_WAKE_MESSAGE}"')
+
+
+def _handoff_abort_handles(claim) -> list:
+    """Exact abort handles for every readable pending successor of `claim`."""
+    handles = []
+    for entry in handoff_pending_entries(claim):
+        sid = entry.get("successor_sid")
+        handles.append(f"--successor-sid {sid}" if isinstance(sid, str) and sid
+                       else f"--successor-inc {entry['successor_inc']}")
+    return handles
+
+
+def _claim_holder_row(claim):
+    """Return (name, status) of the claim holder's registry row, or (None, None).
+    Read-only: never quarantines, never raises."""
+    try:
+        records = _registry_records_or_none()
+        workers = records.get("workers") if isinstance(records, dict) else None
+        if isinstance(workers, dict):
+            for name, rec in workers.items():
+                if _record_is_supervisor_claim_holder(rec, claim=claim) is True:
+                    return name, rec.get("status")
+    except Exception:  # noqa: BLE001 -- refusal text must not mask the refusal
+        pass
+    return None, None
+
+
+def _continuity_recovery_steps(claim) -> str:
+    """Exact recovery steps appended to a continuity refusal. FOUNDER OVERRIDE
+    (2026-10-08) of claim-nonce §5.7's audience rule: agent-facing output now
+    names the idle-holder wake and the exact successor handles."""
+    try:
+        inc = claim.get("incarnation_id", "?") if isinstance(claim, dict) else "?"
+        name, status = _claim_holder_row(claim)
+        row = (f"the holder row {name} (status now: {status})" if name
+               else "the holder row (`fleet status` lists it)")
+        lines = [
+            "",
+            "RECOVERY (claim-nonce §5.7 founder override, 2026-10-08):",
+            "1. End this turn now; run no further supervisor verbs from this body.",
+            f"2. Once {row} is idle, the Interface or operator runs exactly:",
+            f"   {_supervisor_wake_command()}",
+            f"   This wakes the same incarnation {inc} on a fresh session with a "
+            f"fresh nonce. A busy holder only queues the mail: wait for idle.",
+        ]
+        handles = _handoff_abort_handles(claim)
+        if handles:
+            lines.append("3. With that fresh nonce, the woken body's bootstrap aborts "
+                         "each pending successor by its exact handle:")
+            lines.extend(f"   sup-handoff-abort {h}" for h in handles)
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 -- refusal text must not mask the refusal
+        return ""
+
+
+def _recipe_generation(nonce, notices=()):
+    """The generation a printed recipe may carry, or None.
+    The presented value stays valid (live) until the holder presents a newer
+    one; a legacy upgrade's freshly minted live value serves when none was
+    presented. Never a placeholder."""
+    if isinstance(nonce, str) and nonce and not _minted_value_is_placeholder(nonce):
+        return nonce
+    for line in notices or ():
+        if isinstance(line, str) and line.startswith("NONCE: "):
+            value = line[len("NONCE: "):].strip()
+            if value and not value.startswith("unchanged"):
+                return value
+    return None
+
+
+def _holder_recipe(tail, nonce=None, quote=True) -> str:
+    """Render a holder verb recipe: exact and runnable when the generation is
+    known, else ending at a bare `--nonce` (argparse refuses it verbatim, with
+    no state change) plus where the value comes from. Never a placeholder."""
+    q = "`" if quote else ""
+    if nonce:
+        return f"{q}fleet {tail} --nonce {nonce}{q}"
+    return (f"{q}fleet {tail} --nonce{q} followed by the holder's current "
+            f"generation (the value after its last `NONCE:` line)")
+
+
+def _refuse_placeholder_minted_values(args) -> None:
+    """Refuse a placeholder --nonce/--handoff-token before any verb runs.
+    Runs ahead of every lock, log append, rotation and dispatch, so a refused
+    placeholder changes no registry, claim, journal or rejection-log byte."""
+    for flag, attr in (("--nonce", "nonce"), ("--handoff-token", "handoff_token")):
+        _refuse_placeholder_value(flag, getattr(args, attr, None))
+
+
+def _refuse_placeholder_value(flag, value) -> None:
+    """Raise FleetCliError naming the recovery path when `value` is a placeholder.
+    Shared by main() and every in-process nonce presentation entry point."""
+    if value is None or not _minted_value_is_placeholder(value):
+        return
+    shown = repr(value if len(value) <= 40 else value[:40] + "...")
+    if flag == "--nonce":
+        recovery = (
+            "Present the exact value printed after `NONCE:` by your last "
+            "sup-* verb, sup-boot or wake bootstrap. If that value is lost, "
+            "do not guess and do not retry:\n"
+            "1. End this turn now; run no further supervisor verbs.\n"
+            "2. Once the holder row is idle, the Interface or operator runs "
+            f"exactly:\n   {_supervisor_wake_command()}\n"
+            "   This wakes the same incarnation with a fresh nonce; its "
+            "bootstrap aborts every pending handoff successor by exact "
+            "handle before any other work.")
+    else:
+        recovery = (
+            "Present the exact token from your successor task file. If it is "
+            "lost, end this turn: the holder aborts this attempt with "
+            "sup-handoff-abort and begins a new one.")
+    raise FleetCliError(
+        f"{flag} {shown} is a placeholder, not a minted value -- refused "
+        f"before any state change (nothing written, logged or rotated). "
+        f"{recovery}")
+
+
 def main(argv=None) -> int:
     # Use UTF-8 with replacement before output: legacy Windows code pages
     # cannot encode arbitrary Unicode roster and transcript text.
@@ -22553,6 +22722,7 @@ def main(argv=None) -> int:
         # machine-list entry and invokes the destructive tier.
         if (args.command == "init" and args.home is None
                 and home_flag is None and not args.statusline):
+            _refuse_placeholder_minted_values(args)
             return cmd_init(args, create_in=Path.cwd())
         if args.command == "watch":
             if home_flag:
@@ -22564,6 +22734,8 @@ def main(argv=None) -> int:
         terminus_rc = apply_resolved_home(args, flag=home_flag)
         if terminus_rc is not None:
             return terminus_rc
+        # Template tokens never reach a nonce check or any state change.
+        _refuse_placeholder_minted_values(args)
         if args.command == "home":
             return cmd_home(args)
         if args.command == "knowledge":

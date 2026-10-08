@@ -1972,7 +1972,8 @@ class TestReleaseMidHandoffDoesNotStrandTheSuccessor(_HandoffBase):
         _n, ok, held_detail = fleet._doctor_check_supervisor_handoff()
         assert ok is False, held_detail
         assert "`fleet sup-boot`" not in held_detail
-        assert "sup-handoff-abort --retire-all --nonce <value>" in held_detail
+        assert "sup-handoff-abort --retire-all --nonce` followed by" in held_detail
+        assert "<value>" not in held_detail
 
     def test_the_next_boot_does_not_sweep_the_stranded_task_file(
             self, sup_home, capsys):
