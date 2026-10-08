@@ -3185,6 +3185,54 @@ class TestHandoff:
             fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
         assert final_flag == newer_flag
 
+    def test_scoped_abort_revalidates_before_external_stop(
+            self, sup_home, monkeypatch):
+        """A transfer landing after the abort-decision lock must not be stopped.
+
+        A heartbeat changes the claim, so the automatic abort takes the
+        successor-scoped path and releases its decision lock. Before the
+        external stop, a late boot + complete makes the successor the holder.
+        The stop revalidates under the lock and becomes a no-op.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        real_finish = fleet._finish_successor_scoped_abort
+        transferred = False
+
+        def heartbeat(seconds):
+            with fleet.fleet_lock():
+                claim = fleet.read_incarnation()
+                claim["heartbeat_at"] = "2099-01-01T00:00:00Z"
+                fleet.write_incarnation(claim)
+            clock.advance(seconds)
+
+        def transfer_then_finish(target_sid, *args, **kwargs):
+            nonlocal transferred
+            with fleet.fleet_lock():
+                claim = fleet.read_incarnation()
+                inc = fleet.handoff_pending_entries(claim)[0]["successor_inc"]
+                new_claim = {
+                    "incarnation_id": inc, "session_id": target_sid,
+                    "claimed_at": fleet.now_iso(),
+                    "heartbeat_at": fleet.now_iso(),
+                    "claimed_via": "handoff", "nonce_seq": 1,
+                    "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                    "lineage_id": claim.get("lineage_id")}
+                fleet.write_incarnation(new_claim)
+            transferred = True
+            return real_finish(target_sid, *args, **kwargs)
+
+        monkeypatch.setattr(
+            fleet, "_finish_successor_scoped_abort", transfer_then_finish)
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=heartbeat,
+                complete_timeout=0.5, nonce=live)
+        assert transferred is True
+        assert fleet.read_incarnation()["claimed_via"] == "handoff"
+        assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+
     def test_begin_complete_timeout_does_not_stop_concurrently_committed_successor(
             self, sup_home, monkeypatch):
         """A second complete may win while the one-command form is polling.

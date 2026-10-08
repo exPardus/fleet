@@ -1872,7 +1872,9 @@ equality — the same root cause, third instance.
    takes the ordinary abort transition, a completed transfer to that successor is a no-op, and any
    other changed claim prepares only the retained incarnation/token-proven cleanup. Scoped cleanup
    commits its abort flag in that decision; only stop and console output remain outside the lock, so they cannot
-   resurrect an older flag. Without the option, the separate `sup-handoff-complete` and
+   resurrect an older flag. Immediately before the external stop, scoped cleanup revalidates under
+   `fleet.lock` that the target is still a pending non-holder of the current claim; a successor that
+   a late boot and complete made the holder is never stopped. Without the option, the separate `sup-handoff-complete` and
    `sup-handoff-abort` commands remain unchanged.
 
 `sup-handoff-abort` is unchanged — **both** of its sid checks (the HANDSHAKE arm @7441-7445 and the
