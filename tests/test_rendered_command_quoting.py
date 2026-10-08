@@ -425,6 +425,10 @@ EXPECTED_RENDERS = (
     ("bin/fleet.py", "_render_sup_spawn_task"),
     ("bin/fleet.py", "_render_successor_task"),
     ("bin/fleet.py", "_render_supervisor_wake_task"),
+    # 2026-10-08: the wake's exact pending-successor aborts, and the
+    # idle-holder wake command a continuity refusal prints.
+    ("bin/fleet.py", "_render_supervisor_wake_task"),
+    ("bin/fleet.py", "_supervisor_wake_command"),
 )
 
 
@@ -638,7 +642,13 @@ def _drive_render_successor_task(tmp_path, monkeypatch):
 
 
 def _drive_render_supervisor_wake_task(tmp_path, monkeypatch):
-    return fleet._render_supervisor_wake_task("sup|inc-l1|boot", "inc-l1", "tok", "wake up")
+    return fleet._render_supervisor_wake_task(
+        "sup|inc-l1|boot", "inc-l1", "tok", "wake up",
+        pending_handles=["--successor-sid sid-l1"])
+
+
+def _drive_supervisor_wake_command(tmp_path, monkeypatch):
+    return fleet._supervisor_wake_command()
 
 
 RENDER_DRIVERS = {
@@ -647,6 +657,7 @@ RENDER_DRIVERS = {
     "_render_sup_spawn_task": _drive_render_sup_spawn_task,
     "_render_successor_task": _drive_render_successor_task,
     "_render_supervisor_wake_task": _drive_render_supervisor_wake_task,
+    "_supervisor_wake_command": _drive_supervisor_wake_command,
 }
 
 
