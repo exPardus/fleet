@@ -39,13 +39,13 @@ import fleet
 INCIDENT_LOCK = {
     "pid": 15740,
     "version": "2.1.216",
-    "jsonPath": "C:\\Users\\Techn\\.claude\\daemon.json",
-    "logPath": "C:\\Users\\Techn\\.claude\\daemon.log",
+    "jsonPath": "C:\\Users\\user\\.claude\\daemon.json",
+    "logPath": "C:\\Users\\user\\.claude\\daemon.log",
     "startedAt": 1784589928352,          # 2026-07-20T23:25:28.352Z
     "origin": "transient",
     "spawnedBy": {"label": "claude", "cwd": "C:\\projects\\claude-fleet", "pid": 16144},
     "procStart": "639202047274516770",   # .NET ticks, LOCAL -- deliberately unused
-    "launchTarget": "C:\\Users\\Techn\\.local\\bin\\claude.exe",
+    "launchTarget": "C:\\Users\\user\\.local\\bin\\claude.exe",
     "processWrapper": "",
 }
 
