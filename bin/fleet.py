@@ -15263,9 +15263,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20706, :20745, :22846`).
+    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20699, :22829`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13494, :21581. This makes union identity
+    OWN prior sid alone: :8747, :9331, :13494, :21564. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15984,7 +15984,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:8747, :9331, :13494,
-    # :21581) -- so union identity cannot make one body answer for another.
+    # :21564) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -20675,13 +20675,8 @@ Do exactly this, in order:
 """
 
 
-def _claim_holder_dispatch_settings(claim, registry=None):
-    """Read the claim holder's persisted dispatch settings, or ``None``.
-    A missing holder row is unresolved, not permission to invent a launch
-    policy. Corrupt/unreadable registry state refuses the handoff without
-    quarantine; the caller can report the repair path. A caller holding the
-    fleet lock may pass its already-read registry snapshot so the holder and
-    every inherited setting can be revalidated atomically."""
+def _claim_holder_row(claim, registry=None):
+    """``(name, record)`` of the single supervisor holder row, or None."""
     if not isinstance(claim, dict):
         return None
     holder_sid = claim.get("session_id")
@@ -20700,60 +20695,51 @@ def _claim_holder_dispatch_settings(claim, registry=None):
     workers = data.get("workers", {}) if isinstance(data, dict) else {}
     if not isinstance(workers, dict):
         return None
-    for rec in workers.values():
-        if not isinstance(rec, dict):
-            continue
-        if holder_sid in _record_sids(rec):
-            return {
-                "model": rec.get("model"),
-                "mode": rec.get("mode"),
-                "setting_sources": rec.get("setting_sources"),
-                # A null model only says the predecessor omitted --model; it
-                # does not identify the provider model that actually ran. A
-                # successor cannot inherit or accurately record that unknown
-                # value, so legacy null rows require an explicit override.
-                "model_resolved": (isinstance(rec.get("model"), str)
-                                   and bool(_normalise_model(rec.get("model")))),
-                "mode_resolved": rec.get("mode") in MODE_FLAGS,
-                "setting_sources_resolved": "setting_sources" in rec and (
-                    rec.get("setting_sources") is None
-                    or (isinstance(rec.get("setting_sources"), str)
-                        and bool(rec.get("setting_sources")))),
-            }
-    return None
+    matches = [(name, rec) for name, rec in workers.items()
+               if isinstance(rec, dict) and holder_sid in _record_sids(rec)]
+    if not matches:
+        return None
+    if len(matches) > 1 or not _is_supervisor_shaped(matches[0][0]):
+        raise FleetCliError(
+            "sup-handoff-begin: predecessor identity is ambiguous: "
+            f"{len(matches)} registry row(s) match the claim session and the "
+            "match is not exactly one supervisor holder row; refusing handoff "
+            "-- nothing dispatched. Run `fleet doctor` and repair the registry")
+    return matches[0]
+
+
+def _claim_holder_dispatch_settings(claim, registry=None):
+    """The claim holder's persisted dispatch settings, or ``None`` if no row."""
+    found = _claim_holder_row(claim, registry=registry)
+    if found is None:
+        return None
+    rec = found[1]
+    return {
+        "model": rec.get("model"),
+        "mode": rec.get("mode"),
+        "setting_sources": rec.get("setting_sources"),
+        # A null model is unknown, not inheritable: require an override.
+        "model_resolved": (isinstance(rec.get("model"), str)
+                           and bool(_normalise_model(rec.get("model")))),
+        "mode_resolved": rec.get("mode") in MODE_FLAGS,
+        "setting_sources_resolved": "setting_sources" in rec and (
+            rec.get("setting_sources") is None
+            or (isinstance(rec.get("setting_sources"), str)
+                and bool(rec.get("setting_sources")))),
+    }
 
 
 def _claim_holder_dispatch_snapshot(claim, registry=None):
-    """Return ``(holder_name, settings)`` for atomic handoff race validation.
-    Include row identity so equal settings on a replacement row cannot pass."""
-    settings = _claim_holder_dispatch_settings(claim, registry=registry)
-    if settings is None:
+    """``(holder_name, settings)``; row identity defeats a same-settings swap."""
+    found = _claim_holder_row(claim, registry=registry)
+    if found is None:
         return None
-    holder_sid = claim.get("session_id") if isinstance(claim, dict) else None
-    workers = (registry.get("workers") if isinstance(registry, dict)
-               else None)
-    if workers is None:
-        try:
-            registry = read_registry_no_repair(hint=False)
-        except RegistryCorruptError as exc:
-            raise FleetCliError(
-                "sup-handoff-begin: predecessor registry could not be validated; "
-                f"refusing handoff ({exc}). Run `fleet doctor` and repair the "
-                "registry before retrying") from exc
-        workers = registry.get("workers")
-    if not isinstance(workers, dict):
-        return None
-    for name, rec in workers.items():
-        if isinstance(rec, dict) and holder_sid in _record_sids(rec):
-            return name, settings
-    return None
+    return found[0], _claim_holder_dispatch_settings(claim, registry=registry)
 
 
 def _claim_holder_setting_sources(claim):
     """Read the claim holder's persisted setting_sources, or None.
-    Kept as a narrow compatibility helper for callers that only need this
-    field; successor dispatch uses `_claim_holder_dispatch_settings` so model,
-    mode and setting-source inheritance are resolved from one holder row."""
+    Narrow helper; dispatch resolves all inherited settings from one holder row."""
     value = (_claim_holder_dispatch_settings(claim) or {}).get("setting_sources")
     return value if isinstance(value, str) and value else None
 
@@ -21188,12 +21174,9 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     Carry --settings for hooks and _worker_env to strip the predecessor's sid;
     a successor inheriting that sid could produce a false HANDSHAKE identity.
     Inherit the holder's model, permission mode and setting_sources when the
-    corresponding flag is omitted, and persist the effective values for the
-    next handoff in the chain. No --add-dir is needed because the task file is
-    inside cwd=FLEET_HOME.
-    Render the inherited or explicit permission mode through mode_flags. A
-    missing predecessor setting refuses the handoff instead of silently
-    selecting the unrestricted bypass mode."""
+    flag is omitted; persist the effective values for the next handoff. No
+    --add-dir: the task file is inside cwd=FLEET_HOME. A missing predecessor
+    setting refuses instead of selecting the unrestricted bypass mode."""
     # Empty values from a quoted `--model ""` are equivalent to omission;
     # normalise before either handoff policy branch evaluates the model.
     args.model = _normalise_model(getattr(args, "model", None))
@@ -21257,9 +21240,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues") from exc
     with fleet_lock():
         try:
-            # Revalidate immediately before writing the handoff task and later
-            # dispatch. This read is deliberately no-repair: corruption must
-            # refuse without quarantining evidence on an unlocked path.
+            # Revalidate before writing the task; no-repair, so corruption refuses.
             live_registry = read_registry_no_repair(hint=False)
         except RegistryCorruptError as exc:
             raise FleetCliError(

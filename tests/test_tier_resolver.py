@@ -201,9 +201,12 @@ class TestParsing:
     def test_handoff_blank_model_is_refused_by_command_policy(self, goals_home,
                                                                monkeypatch):
         self._forbid_default_goals(goals_home)
-        monkeypatch.setattr(fleet, "_claim_uses_native_codex", lambda: False)
+        monkeypatch.setattr(fleet, "_claim_uses_native_codex",
+                            lambda claim=None: False)
         args = SimpleNamespace(sid="sid-old", model="", permission_mode=None)
-        with pytest.raises(fleet.FleetCliError, match="Anthropic default"):
+        # A blank --model is omission; with no resolvable predecessor the
+        # handoff refuses before any default model can be chosen.
+        with pytest.raises(fleet.FleetCliError, match=r"unresolved.*pass --model"):
             fleet.cmd_sup_handoff_begin(args)
 
 
