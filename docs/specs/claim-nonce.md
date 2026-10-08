@@ -1538,13 +1538,16 @@ audience boundary for this path. Binding from 2026-10-08:
   once the holder row is idle (the refusal shows its current status), the Interface or operator
   runs the exact `send supervisor` command printed, which wakes the same incarnation with a fresh
   nonce; and the exact `sup-handoff-abort --successor-sid` / `--successor-inc` handle of each
-  pending successor. The wake bootstrap renders those aborts as complete commands carrying the
-  wake nonce, which `sup-boot`'s `resume` makes the live generation.
+  pending successor. Refusal, status, and handoff-recovery text never repeats a live generation:
+  the woken body takes it from its own `sup-boot` output, then presents it to the printed abort
+  handle. The private wake bootstrap still carries its one-time wake proof so that boot can resume
+  the same incarnation.
 - No string fleet prints carries an identity placeholder token (`<value>`, `<nonce>`, `<sid>`,
-  `<inc>`, ...). A recipe either carries the exact generation (the value the caller just
-  presented, which stays live until a newer one is presented, or a legacy upgrade's freshly
-  minted value) or ends at a bare `--nonce`, which argparse refuses verbatim with no state change.
-  `tests/test_no_placeholder.py` scans every printed string and every verb's help.
+  `<inc>`, ...). A holder recipe ends at a bare `--nonce`, which argparse refuses verbatim with no
+  state change, and adjacent prose names the holder body's own boot output as the credential
+  source. It never embeds a presented or freshly minted generation. `tests/test_no_placeholder.py`
+  scans every printed string and every verb's help and exercises refusal stderr and exceptions for
+  credential leakage; the handoff seam also pins stdout.
 - A placeholder-looking `--nonce` or `--handoff-token` (empty, whitespace-only, anything with
   `<` or `>`, or the bare words value/nonce/token in any case) is refused before any lock, log
   append, rotation or dispatch, with an error naming the recovery path. Minted values are

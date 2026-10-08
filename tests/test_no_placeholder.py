@@ -17,6 +17,7 @@ until an operator recovered it by hand. Three properties are pinned here:
 import ast
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -174,7 +175,7 @@ class TestPlaceholderNonceIsRefusedBeforeAnyStateChange:
 
     def test_a_real_minted_value_is_never_mistaken_for_one(self):
         for _ in range(200):
-            assert not fleet._is_placeholder(fleet.mint_nonce())
+            assert not fleet._is_ph(fleet.mint_nonce())
 
     def test_the_real_generation_still_passes(self, held, capsys):
         _home, live = held
@@ -184,9 +185,10 @@ class TestPlaceholderNonceIsRefusedBeforeAnyStateChange:
 
 class TestContinuityRefusalNamesTheRecovery:
     def test_refusal_prints_wake_and_exact_abort_handle(self, held, capsys):
-        home, _live = held
+        home, live = held
+        rejected = fleet.mint_nonce()
         rc = fleet.main(["sup-checkpoint", "body", "--sid", "sid-me",
-                         "--nonce", fleet.mint_nonce()])
+                         "--nonce", rejected])
         err = capsys.readouterr().err
         assert rc == fleet.SUPERVISOR_CONTINUITY_RC
         assert "escalate" in err
@@ -194,15 +196,35 @@ class TestContinuityRefusalNamesTheRecovery:
         assert (f'--fleet-home "{home.as_posix()}" send supervisor '
                 '"Continuity recovery: ') in err
         assert "sup-handoff-abort --successor-sid sid-succ-exact" in err
+        assert "woken body's own `sup-boot` output" in err
+        assert live not in err and rejected not in err
         assert "2026-10-08" in err
         assert not _offending_tokens(err)
+
+    def test_live_handshake_exception_never_repeats_presented_generation(
+            self, held):
+        _home, live = held
+        fleet.write_handshake("inc-20261008T000000Z-ab12", "sid-succ-exact")
+        args = SimpleNamespace(
+            sid="sid-me", nonce=live, successor_sid=None, successor_inc=None,
+            force=False, retire_all=True)
+        with pytest.raises(fleet.FleetCliError) as caught:
+            fleet.cmd_sup_handoff_abort(args)
+        text = str(caught.value)
+        assert live not in text
+        assert fleet._wake_cmd() in text
+        assert "sup-handoff-abort --successor-sid sid-succ-exact --nonce" in text
+        assert "woken body's own `sup-boot` output" in text
+        assert not _offending_tokens(text)
 
 
 class TestPrintedRecipesAreExact:
     def test_sup_status_recipe_has_no_placeholder(self, held, capsys):
+        _home, live = held
         assert fleet.cmd_sup_status(type("A", (), {"json": False})()) == 0
         out = capsys.readouterr().out
         assert "sup-handoff-abort --successor-sid sid-succ-exact --nonce" in out
+        assert live not in out
         assert not _offending_tokens(out)
 
     def test_wake_template_renders_exact_aborts(self):

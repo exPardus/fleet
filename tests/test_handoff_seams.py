@@ -883,7 +883,7 @@ class TestViewsPublishThePendingSuccessors(_HandoffBase):
         assert "still" in detail and "LIVE" in detail
 
 
-class TestAbortRecipeCarriesTheNonce:
+class TestAbortRecipeCarriesTheNonce(_HandoffBase):
     """D3: `sup-handoff-abort` is NOT exempt from the §7 continuity gate. The
     runbook showed it without `--nonce`, and following it verbatim earned an
     rc 4 mid-succession on 2026-07-24 -- the moment a wrong recipe costs most.
@@ -937,6 +937,27 @@ class TestAbortRecipeCarriesTheNonce:
         for match in self.RECIPE.finditer(out):
             assert "--nonce" in match.group(0), match.group(0)
         assert "sup-handoff-abort" in out and "sup-handoff-complete" in out
+
+    def test_the_hint_never_repeats_the_live_generation(self, sup_home, capsys):
+        """The recovery handle is public operator guidance, not a second
+        delivery channel for the holder's bearer generation."""
+        self._hold()
+        live = "LIVE-GENERATION-MUST-NOT-APPEAR-IN-RECOVERY"
+        claim = fleet.read_incarnation()
+        claim.update(nonce_hash=fleet.nonce_digest(live), nonce_seq=1,
+                     lineage_id="lineage-private-generation")
+        fleet.write_incarnation(claim)
+        args = SimpleNamespace(
+            sid="sid-old", model=None, permission_mode=None,
+            setting_sources=None, nonce=live)
+        assert fleet.cmd_sup_handoff_begin(
+            args, which=_fake_which, run=_dispatch_then_roster(),
+            sleep=lambda s: None) == 0
+        out = capsys.readouterr().out
+        assert live not in out
+        assert "send supervisor" in out
+        assert "sup-handoff-abort --successor-sid succ0001-full --nonce" in out
+        assert "woken body's own `sup-boot` output" in out
 
 
 class TestAtMostOneBootableSuccessor(_HandoffBase):
