@@ -5,7 +5,7 @@
 **Owner:** the operator
 **Design doc:** `docs/superpowers/specs/2026-07-22-fleet-index-design.md`
 **Adversarial review:** `a local review record` (10 defects — 2 CRITICAL, 5 HIGH, 2 MED, 1 LOW). Disposition in §13.
-**Economics evidence:** `a local campaign record` (2026-07-23 M-F dogfood read-duplication harvest). §1 is grounded on it.
+**Economics evidence:** `a local campaign record` (multi-worker read-duplication measurement). §1 is grounded on it.
 **Operator decisions folded:** `the local operator decision record` fleet-index sub-decisions (a) gitignored-only bundle and (b) tokens-primary acceptance (both 2026-07-23); full M1+M2 build ordered 2026-07-24 on the value case stated in §1.
 **Parent spec:** `docs/SPEC.md` v3 (§16 invariants).
 
@@ -13,7 +13,7 @@
 
 ## 1. Problem
 
-An earlier draft of this section opened: *"Fleet's dominant recurring cost is workers re-reading the same code."* That claim has since been measured, and **for parallel fleet workers it is refuted** by the 2026-07-23 M-F dogfood harvest (`a local campaign record` — 3 workers, 27 transcripts, reads deduped across fork copies, token totals deduped by requestId):
+An earlier draft of this section opened: *"Fleet's dominant recurring cost is workers re-reading the same code."* That claim has since been measured, and **for parallel fleet workers it is refuted** by a measured multi-worker harvest (`a local campaign record` — 3 workers, 27 transcripts, reads deduped across fork copies, token totals deduped by requestId):
 
 - Cross-worker duplicated Read payload: **≤41k tokens = 2.5% of the campaign's fresh input.**
 - All duplicated Read payload (cross-worker ∪ within-lineage rebuild, no double count): 55.7k–94.8k tokens = 3.5–5.9% of fresh input, and ~0.27% of total input processed.
@@ -405,7 +405,7 @@ An unauthorised tool call under a non-bypass headless worker hangs on a permissi
 
    **Execution status: `[VERIFIED — live two-arm experiment, 2026-07-27]`.** The hard M2 build-gate item below is **closed, and it came back positive.**
 
-   The claim it was raised against was a real one. No receipt used to show a `--settings`-file `allow` taking effect for a `--bg` `dontask` worker, and the evidence pointed the other way: the 2026-07-23 overnight incident record shows working allowlists only via a per-worktree `.claude/settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` **UNOBSERVED** (`bin/fleet.py:8265-8268`). The gate item was therefore: before M2 ships, a live experiment must prove a default-spawned `dontask` `--bg` worker executes a granted command via the template grant alone, with no per-worktree allowlist present.
+   The claim it was raised against was a real one. No receipt used to show a `--settings`-file `allow` taking effect for a `--bg` `dontask` worker, and the evidence pointed the other way: the recorded incident evidence shows working allowlists only via a per-worktree `.claude/settings.local.json`, and `dispatch_bg`'s own comment marks `--setting-sources`' runtime effect under `--bg` **UNOBSERVED** (`bin/fleet.py:8265-8268`). The gate item was therefore: before M2 ships, a live experiment must prove a default-spawned `dontask` `--bg` worker executes a granted command via the template grant alone, with no per-worktree allowlist present.
 
    **The experiment, run 2026-07-27** (supervisor checkpoint G-B; the transcript is in the supervisor journal under the fleet home). Two arms, one variable — same task file, same cwd, same mode (`dontask`), same model, same everything except the grant. The cwd was a scratch directory with **no `.claude/` in it at all**, confirmed by `ls -a` showing only `./` and `../`:
 
