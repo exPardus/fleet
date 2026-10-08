@@ -2856,6 +2856,12 @@ class TestHandoff:
         fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
                                  "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
                                  "claimed_via": "fresh"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
 
     def _hold_v2(self, sid="sid-old", inc="inc-old"):
         value = fleet.mint_nonce()
@@ -2864,6 +2870,12 @@ class TestHandoff:
                                  "claimed_via": "fresh", "nonce_seq": 1,
                                  "nonce_hash": fleet.nonce_digest(value),
                                  "lineage_id": "lin-20260101T000000Z-aaaa"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
         return value
 
     class _Clock:
@@ -2880,10 +2892,11 @@ class TestHandoff:
             self.t += dt
 
     def _begin(self, run, sid="sid-old", clock=None, model=None,
-               permission_mode=None, complete_timeout=None, nonce=None,
-               sleep=None):
+               permission_mode=None, setting_sources=None,
+               complete_timeout=None, nonce=None, sleep=None):
         args = SimpleNamespace(sid=sid, model=model,
                                permission_mode=permission_mode,
+                               setting_sources=setting_sources,
                                complete_timeout=complete_timeout, nonce=nonce)
         if clock is None:
             sleep = sleep or (lambda s: None)
@@ -3472,6 +3485,7 @@ class TestHandoff:
         """The claim holder's own registry record -- the body running the
         verb. `cmd_sup_handoff_begin` already resolves the caller by this sid
         to authorise it; I4 reads the same record for its dispatch flags."""
+        over.setdefault("model", "claude-sonnet-5-5")
         rec = fleet.new_worker_record(sid, fleet.FLEET_HOME, "campaign", "bypass",
                                       dispatch_kind="bg", **over)
         data = fleet.load_registry()
@@ -3510,15 +3524,118 @@ class TestHandoff:
                          if n.endswith("|successor"))
         assert successor.get("setting_sources") is None
 
-    def test_an_unresolvable_holder_record_does_not_break_the_handoff(self, sup_home):
-        """The carry is a best-effort READ of a dispatch flag, not a
-        precondition: a claim whose holder sid matches no record (the
-        stranded-stamp window) still hands off."""
+    def test_successor_dispatch_inherits_model_mode_and_setting_sources(
+            self, sup_home):
+        """An omitted handoff flag keeps the predecessor's launch contract."""
         self._hold()
+        self._seed_holder_record(model="claude-sonnet-5-5",
+                                 setting_sources="project,local")
+        holder = next(iter(fleet.load_registry()["workers"].values()))
+        holder["mode"] = "plan"
+        fleet.save_registry({"workers": {"sup|inc-old|boot": holder}})
         run = self._dispatch_then_roster()
         assert self._begin(run) == 0
         dispatch = next(c for c in run.calls if "--bg" in c)
-        assert "--setting-sources" not in dispatch
+        assert dispatch[dispatch.index("--model") + 1] == "claude-sonnet-5-5"
+        assert dispatch[dispatch.index("--permission-mode") + 1] == "plan"
+        assert dispatch[dispatch.index("--setting-sources") + 1] == "project,local"
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor["model"] == "claude-sonnet-5-5"
+        assert successor["mode"] == "plan"
+        assert successor["setting_sources"] == "project,local"
+
+    def test_supervisor_launch_contract_has_no_effort(self, sup_home):
+        """Supervisor spawn/handoff carry model, mode and setting_sources only."""
+        parser = fleet.build_parser()
+        for argv in (["sup-spawn", "--task", "campaign", "--effort", "high"],
+                     ["sup-handoff-begin", "--effort", "high"]):
+            with pytest.raises(SystemExit):
+                parser.parse_args(argv)
+
+        self._hold()
+        self._seed_holder_record(model="claude-sonnet-5-5",
+                                 setting_sources="project,local")
+        run = self._dispatch_then_roster()
+        assert self._begin(run) == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert "--effort" not in dispatch
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert {"model", "mode", "setting_sources"}.issubset(successor)
+        assert "effort" not in successor
+        assert "mcx_effort" not in successor
+
+    def test_explicit_handoff_flags_override_holder_launch_contract(self, sup_home):
+        self._hold()
+        self._seed_holder_record(model="claude-sonnet-5-5",
+                                 setting_sources="project,local")
+        holder = next(iter(fleet.load_registry()["workers"].values()))
+        holder["mode"] = "plan"
+        fleet.save_registry({"workers": {"sup|inc-old|boot": holder}})
+        run = self._dispatch_then_roster()
+        assert self._begin(run, model="claude-opus-5-5",
+                           permission_mode="bypass",
+                           setting_sources="user") == 0
+        dispatch = next(c for c in run.calls if "--bg" in c)
+        assert dispatch[dispatch.index("--model") + 1] == "claude-opus-5-5"
+        assert "--dangerously-skip-permissions" in dispatch
+        assert dispatch[dispatch.index("--setting-sources") + 1] == "user"
+        successor = next(r for n, r in fleet.load_registry()["workers"].items()
+                         if n.endswith("|successor"))
+        assert successor["model"] == "claude-opus-5-5"
+        assert successor["mode"] == "bypass"
+        assert successor["setting_sources"] == "user"
+
+    def test_successor_without_predecessor_model_refuses_before_dispatch(
+            self, sup_home):
+        self._hold()
+        self._seed_holder_record(model=None)
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match=r"model \(pass --model\)"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert not any(n.endswith("|successor")
+                       for n in fleet.load_registry()["workers"])
+
+    def test_an_unresolvable_holder_record_refuses_the_handoff(self, sup_home):
+        """A claim without a validated predecessor row cannot invent settings."""
+        self._hold()
+        fleet.save_registry({"workers": {}})
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="launch settings are unresolved"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+
+    def test_corrupt_predecessor_registry_refuses_before_dispatch(self, sup_home):
+        """Registry validation is a pre-dispatch gate and never quarantines evidence."""
+        self._hold()
+        fleet.registry_path().write_text("{not json", encoding="utf-8")
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="registry could not be validated"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert not list(fleet.registry_path().parent.glob("fleet.json.corrupt.*"))
+
+    def test_handoff_revalidates_holder_settings_under_the_lock(
+            self, sup_home, monkeypatch):
+        """A settings read before dispatch must not authorize a changed row."""
+        self._hold()
+        original = fleet._openrouter_dispatch_args
+
+        def mutate_holder(model, settings_path):
+            data = fleet.load_registry()
+            holder = data["workers"]["sup|inc-old|boot"]
+            holder["mode"] = "plan"
+            fleet.save_registry(data)
+            return original(model, settings_path)
+
+        monkeypatch.setattr(fleet, "_openrouter_dispatch_args", mutate_holder)
+        run = self._dispatch_then_roster()
+        with pytest.raises(fleet.FleetCliError, match="settings changed"):
+            self._begin(run)
+        assert not any("--bg" in c for c in run.calls)
+        assert fleet.supervisor_journal_entries() == []
 
     def test_successor_dispatch_refused_without_rendered_settings(self, sup_home):
         """Same doctrine as cmd_spawn's `_require_instance_settings`: claude
@@ -3615,6 +3732,16 @@ class TestHandoff:
             with pytest.raises(SystemExit):
                 parser.parse_args(
                     ["sup-handoff-begin", "--complete-timeout", value])
+
+    def test_handoff_help_describes_inheritance_and_fail_closed(self, capsys):
+        parser = fleet.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["sup-handoff-begin", "--help"])
+        out = capsys.readouterr().out
+        assert "inherit the predecessor" in out
+        assert "refuses if unavailable" in out
+        assert "validated predecessor" in out
+        assert "default: bypass" not in out
 
     def test_missing_claude_refuses_before_journal_and_taskfile(self, sup_home):
         """B5: `resolve_claude_executable` is the same class of pre-flight as
@@ -4221,6 +4348,12 @@ class TestHandoffToken:
                                  "claimed_at": beat, "heartbeat_at": beat,
                                  "claimed_via": "fresh", "nonce_hash": fleet.nonce_digest(value),
                                  "nonce_seq": 2, "lineage_id": "lin-20260101T000000Z-aaaa"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
         return value
 
     @staticmethod

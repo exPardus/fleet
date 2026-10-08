@@ -94,6 +94,12 @@ def _hold(sid="sid-old", inc="inc-old"):
                              "claimed_at": "2026-07-14T12:00:00Z",
                              "heartbeat_at": "2026-07-14T12:00:00Z",
                              "claimed_via": "fresh"})
+    data = fleet.load_registry()
+    data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+        sid, fleet.FLEET_HOME, "campaign", "bypass",
+        model="claude-sonnet-5-5",
+        setting_sources=None, dispatch_kind="bg", category=None)
+    fleet.save_registry(data)
 
 
 def _dispatch_then_roster(calls):
@@ -479,3 +485,32 @@ class TestEveryFirstTurnStampIsAlsoAnEvent:
         assert not _emits_turn_started(body)
         body.append(ast.parse("append_event('turn_started', name)").body[0])
         assert _emits_turn_started(body)
+
+
+class TestHandoffPredecessorIdentityFailsClosed:
+    """The handoff predecessor is exactly one supervisor holder row.
+    Resolving the first SID match let a duplicate or non-supervisor row
+    supply the inherited launch settings."""
+
+    def _begin_refused(self, calls):
+        run = _dispatch_then_roster(calls)
+        with pytest.raises(fleet.FleetCliError, match="ambiguous"):
+            _begin(run, model="claude-sonnet-5-5", permission_mode="bypass")
+        assert not any("--bg" in argv for argv in calls)
+
+    def test_two_rows_with_the_claim_sid_refuse(self, sup_home):
+        _hold()
+        data = fleet.load_registry()
+        data["workers"]["sup|inc-old|dup"] = fleet.new_worker_record(
+            "sid-old", fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-opus-5-5",
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
+        self._begin_refused([])
+
+    def test_non_supervisor_row_refuses(self, sup_home):
+        _hold()
+        data = fleet.load_registry()
+        data["workers"]["lane-x"] = data["workers"].pop("sup|inc-old|boot")
+        fleet.save_registry(data)
+        self._begin_refused([])
