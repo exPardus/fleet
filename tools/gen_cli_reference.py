@@ -99,8 +99,9 @@ def render(fleet_module=None) -> str:
     os.environ["COLUMNS"] = PINNED_COLUMNS
     try:
         parser = fleet_module.build_parser()
-        # The top-level help lists every verb, hidden ones included, so it is
-        # not pasted whole. Its description and epilog carry the global rules.
+        # Keep the global synopsis stable and compact rather than pasting the
+        # width-sensitive top-level help. Its description and epilog carry the
+        # global rules.
         out = [HEADER, "## Global options\n"]
         out.append(_block(f"usage: {parser.prog} <verb> [options]\n\n"
                           f"{parser.description}\n\n{parser.epilog}"))

@@ -22108,11 +22108,21 @@ def _watch_timeout_arg(value: str) -> float:
     return timeout
 
 
+class _FleetHelpFormatter(argparse.HelpFormatter):
+    """Hide suppressed subcommands instead of printing argparse's sentinel."""
+
+    def _format_action(self, action):
+        if action.help == argparse.SUPPRESS:
+            return ""
+        return super()._format_action(action)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
     parser = argparse.ArgumentParser(
         prog="fleet", description="claude-fleet manager CLI",
+        formatter_class=_FleetHelpFormatter,
         epilog="global: --fleet-home <PATH> selects which fleet home to act on "
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -22609,6 +22619,13 @@ def build_parser() -> argparse.ArgumentParser:
                               "DECLINED on an entry whose minted_at reads fine")
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
+
+    hidden_commands = {
+        choice.dest for choice in sub._choices_actions
+        if choice.help == argparse.SUPPRESS
+    }
+    sub.metavar = "{" + ",".join(
+        name for name in sub.choices if name not in hidden_commands) + "}"
 
     return parser
 

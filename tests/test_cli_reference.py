@@ -152,10 +152,17 @@ def test_no_hidden_nested_command_is_documented():
     assert not leaked, f"hidden commands appear in the reference: {leaked}"
 
 
-def test_always_refusing_attach_is_hidden_from_the_reference():
-    assert "attach" in _shipped_all_commands()
-    assert "attach" not in _shipped_visible_commands()
-    assert "attach" not in set(_documented_commands())
+def test_always_refusing_attach_is_hidden_from_actual_help():
+    result = subprocess.run(
+        [sys.executable, str(REPO / "bin" / "fleet.py"), "--help"],
+        cwd=REPO, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    choice_list = re.search(
+        r"usage: fleet \[-h\]\s+\{([^}]+)\}", result.stdout)
+    assert choice_list, result.stdout
+    assert "attach" not in choice_list.group(1).split(",")
+    assert re.search(r"(?m)^\s+attach(?:\s|$)", result.stdout) is None
+    assert "==SUPPRESS==" not in result.stdout
 
 
 def test_spawn_effort_help_names_legacy_mcx_and_native_ignored():

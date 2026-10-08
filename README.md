@@ -81,12 +81,15 @@ fleet doctor      # health checks; no line should read FAIL
 fleet status      # the worker table, empty for now
 ```
 
-Start one worker on a small, bounded task. It runs as a Claude Code session in
-the directory you name. Its permission mode defaults to `dontask`, which runs
-without interactive prompts. A worker uses your Claude usage, so start small:
+Start one worker on a small, bounded task. Direct `fleet spawn` uses the exact
+directory you name; it does not create a branch or worktree. Create those first
+so the worker has an isolated checkout. Its permission mode defaults to
+`dontask`, which runs without interactive prompts. A worker uses your Claude
+usage, so start small:
 
 ```sh
-fleet spawn hello --dir . --task "Add a short CONTRIBUTING section on running the tests"
+git worktree add -b fleet/hello ../my-project-hello
+fleet spawn hello --dir ../my-project-hello --task "Add a short CONTRIBUTING section on running the tests"
 fleet peek hello                           # what it is doing now
 fleet send hello "keep the change small"   # steer it mid-turn, or start its next turn
 fleet result hello                         # the final answer, once its turn ends
