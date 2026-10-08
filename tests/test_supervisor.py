@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2862,6 +2863,21 @@ class TestHandoff:
             setting_sources=None, dispatch_kind="bg", category=None)
         fleet.save_registry(data)
 
+    def _hold_v2(self, sid="sid-old", inc="inc-old"):
+        value = fleet.mint_nonce()
+        fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
+                                 "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
+                                 "claimed_via": "fresh", "nonce_seq": 1,
+                                 "nonce_hash": fleet.nonce_digest(value),
+                                 "lineage_id": "lin-20260101T000000Z-aaaa"})
+        data = fleet.load_registry()
+        data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+            sid, fleet.FLEET_HOME, "campaign", "bypass",
+            model="claude-sonnet-5-5",
+            setting_sources=None, dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
+        return value
+
     class _Clock:
         """Injectable monotonic clock; pairing sleep=advance exercises
         dispatch_bg's real 60s join window in zero wall-clock time (same
@@ -2876,15 +2892,19 @@ class TestHandoff:
             self.t += dt
 
     def _begin(self, run, sid="sid-old", clock=None, model=None,
-               permission_mode=None, setting_sources=None):
+               permission_mode=None, setting_sources=None,
+               complete_timeout=None, nonce=None, sleep=None):
         args = SimpleNamespace(sid=sid, model=model,
                                permission_mode=permission_mode,
-                               setting_sources=setting_sources)
+                               setting_sources=setting_sources,
+                               complete_timeout=complete_timeout, nonce=nonce)
         if clock is None:
+            sleep = sleep or (lambda s: None)
             return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
-                                               sleep=lambda s: None)
+                                               sleep=sleep)
+        sleep = sleep or clock.advance
         return fleet.cmd_sup_handoff_begin(args, which=_fake_which, run=run,
-                                           sleep=clock.advance, clock=clock)
+                                           sleep=sleep, clock=clock)
 
     @staticmethod
     def _dispatch_then_roster(successor_sid="succ0001-full", short_id="succ0001"):
@@ -2924,6 +2944,470 @@ class TestHandoff:
         assert "sup-boot --handoff-inc" in body and "NO spawn" in body
         dispatch = next(c for c in run.calls if "--bg" in c)
         assert any(a.startswith("sup|inc-") for a in dispatch)
+
+    def test_begin_complete_timeout_transfers_in_one_process(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        successor_nonce = fleet.mint_nonce()
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
+
+        def successor_boots(seconds):
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            if fleet.read_handshake() is None:
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(successor_nonce))
+            clock.advance(seconds)
+
+        assert self._begin(
+            run, clock=clock, sleep=successor_boots,
+            complete_timeout=2, nonce=live) == 0
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "handoff"
+        assert claim["nonce_hash"] == fleet.nonce_digest(successor_nonce)
+        assert fleet.read_handshake() is None
+        assert not fleet.handoff_abort_flag_path().exists()
+
+    def test_begin_complete_timeout_invokes_abort_on_timeout(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        aborted = []
+        real_prepare = fleet._prepare_sup_handoff_abort_locked
+
+        def prepare(args, force=False):
+            aborted.append(args)
+            return real_prepare(args, force=force)
+
+        monkeypatch.setattr(fleet, "_prepare_sup_handoff_abort_locked", prepare)
+        with pytest.raises(fleet.FleetCliError, match="timed out after 0s"):
+            self._begin(run, complete_timeout=0, nonce=live)
+        assert len(aborted) == 1
+        assert aborted[0].successor_sid == "succ0001-full"
+        assert aborted[0].successor_inc.startswith("inc-")
+
+    def test_begin_complete_timeout_stops_a_successor_that_never_handshakes(
+            self, sup_home):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        with pytest.raises(fleet.FleetCliError, match="timed out"):
+            self._begin(
+                run, clock=clock, complete_timeout=0.5, nonce=live)
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+        assert fleet.read_handshake() is None
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "aborted"
+
+    def test_begin_complete_timeout_aborts_if_registry_setup_fails_after_sid(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+
+        def fail_registry_load():
+            raise OSError("registry unavailable after sid join")
+
+        monkeypatch.setattr(fleet, "load_registry", fail_registry_load)
+        with pytest.raises(OSError, match="registry unavailable after sid join"):
+            self._begin(run, complete_timeout=2, nonce=live)
+        assert sum("--bg" in call for call in run.calls) == 1
+        assert sum(call[-2:] == ["stop", "succ0001"] for call in run.calls) == 1
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+        assert not list((sup_home / "state").glob("supervisor-handoff-*.md"))
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "aborted"
+
+    def test_begin_sid_stamp_keeps_original_proof_across_concurrent_begin(
+            self, sup_home, monkeypatch):
+        """A rival begin may replace the token hash before our SID stamp.
+
+        The live claim reread is the right CAS snapshot, but it carries the
+        rival token.  If that snapshot later changes, scoped cleanup must still
+        authenticate our successor with our original retained token and SID.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        rival_run = self._dispatch_then_roster(
+            successor_sid="succ0002-full", short_id="succ0002")
+        clock = self._Clock()
+        real_lock = fleet.fleet_lock
+        lock_calls = 0
+        rival_started = False
+        original_task = None
+        rival_task = None
+        replacement_claim = None
+
+        @contextmanager
+        def concurrent_begin_before_sid_stamp(*args, **kwargs):
+            nonlocal lock_calls, rival_started, original_task, rival_task
+            lock_calls += 1
+            if lock_calls == 2:
+                before = fleet.read_incarnation()
+                original = fleet.handoff_pending_entries(before)[0]
+                original_task = Path(original["task_file"])
+                original_hash = before["handoff_token_hash"]
+                monkeypatch.setattr(fleet, "fleet_lock", real_lock)
+                try:
+                    assert self._begin(
+                        rival_run, nonce=live, complete_timeout=None) == 0
+                    rival_started = True
+                finally:
+                    monkeypatch.setattr(
+                        fleet, "fleet_lock", concurrent_begin_before_sid_stamp)
+                after = fleet.read_incarnation()
+                assert after["handoff_token_hash"] != original_hash
+                rival = fleet.handoff_pending_entries(after)[-1]
+                assert rival["successor_sid"] == "succ0002-full"
+                rival_task = Path(rival["task_file"])
+            with real_lock(*args, **kwargs):
+                yield
+
+        def replace_claim(seconds):
+            nonlocal replacement_claim
+            replacement_claim = {
+                "incarnation_id": "inc-other", "session_id": "sid-other",
+                "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                "claimed_via": "fresh", "nonce_seq": 1,
+                "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                "lineage_id": "lin-other"}
+            with real_lock():
+                fleet.write_incarnation(replacement_claim)
+            clock.advance(seconds)
+
+        monkeypatch.setattr(
+            fleet, "fleet_lock", concurrent_begin_before_sid_stamp)
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=replace_claim,
+                complete_timeout=0.5, nonce=live)
+        assert rival_started is True
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert not any(call[-2:] == ["stop", "succ0002"] for call in rival_run.calls)
+        assert fleet.read_incarnation() == replacement_claim
+        assert original_task is not None and not original_task.exists()
+        assert rival_task is not None and rival_task.exists()
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-scoped-abort"
+
+    def test_begin_complete_timeout_aborts_a_failed_handshake(
+            self, sup_home):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+
+        def invalid_handshake(seconds):
+            entry = fleet.handoff_pending_entries(fleet.read_incarnation())[0]
+            if fleet.read_handshake() is None:
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=fleet.nonce_digest("wrong-token"),
+                    nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.FleetCliError, match="token mismatch"):
+            self._begin(
+                run, clock=clock, sleep=invalid_handshake,
+                complete_timeout=2, nonce=live)
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert fleet.read_handshake() is None
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+
+    def test_begin_complete_timeout_refuses_if_claim_changes_while_waiting(
+            self, sup_home):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        changed = False
+        replacement_claim = None
+
+        def replace_claim(seconds):
+            nonlocal changed, replacement_claim
+            if not changed:
+                changed = True
+                replacement = fleet.mint_nonce()
+                replacement_claim = {
+                    "incarnation_id": "inc-other", "session_id": "sid-other",
+                    "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                    "claimed_via": "fresh", "nonce_seq": 1,
+                    "nonce_hash": fleet.nonce_digest(replacement),
+                    "lineage_id": "lin-other"}
+                with fleet.fleet_lock():
+                    fleet.write_incarnation(replacement_claim)
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=replace_claim,
+                complete_timeout=0.5, nonce=live)
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert fleet.read_incarnation() == replacement_claim
+        flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert flag["reason"] == "successor-scoped-abort"
+        assert flag["claim_untouched"] is True
+
+    def test_successor_scoped_abort_flag_is_committed_before_unlocked_stop(
+            self, sup_home):
+        live = self._hold_v2()
+        base_run = self._dispatch_then_roster()
+        clock = self._Clock()
+        replacement_claim = None
+        newer_flag = {"aborted_at": "newer", "reason": "newer-abort"}
+
+        def run(argv, **kwargs):
+            if argv[-2:] == ["stop", "succ0001"]:
+                base_run.calls.append(argv)
+                locked_flag = json.loads(
+                    fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+                assert locked_flag["reason"] == "successor-scoped-abort"
+                with fleet.fleet_lock():
+                    fleet._write_json_atomic(
+                        fleet.handoff_abort_flag_path(), newer_flag)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return base_run(argv, **kwargs)
+
+        run.calls = base_run.calls
+
+        def replace_claim(seconds):
+            nonlocal replacement_claim
+            replacement_claim = {
+                "incarnation_id": "inc-other", "session_id": "sid-other",
+                "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso(),
+                "claimed_via": "fresh", "nonce_seq": 1,
+                "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                "lineage_id": "lin-other"}
+            with fleet.fleet_lock():
+                fleet.write_incarnation(replacement_claim)
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=replace_claim,
+                complete_timeout=0.5, nonce=live)
+        assert fleet.read_incarnation() == replacement_claim
+        final_flag = json.loads(
+            fleet.handoff_abort_flag_path().read_text(encoding="utf-8"))
+        assert final_flag == newer_flag
+
+    def test_scoped_abort_revalidates_before_external_stop(
+            self, sup_home, monkeypatch):
+        """A transfer landing after the abort-decision lock must not be stopped.
+
+        A heartbeat changes the claim, so the automatic abort takes the
+        successor-scoped path and releases its decision lock. Before the
+        external stop, a late boot + complete makes the successor the holder.
+        The stop revalidates under the lock and becomes a no-op.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        real_finish = fleet._finish_successor_scoped_abort
+        transferred = False
+
+        def heartbeat(seconds):
+            with fleet.fleet_lock():
+                claim = fleet.read_incarnation()
+                claim["heartbeat_at"] = "2099-01-01T00:00:00Z"
+                fleet.write_incarnation(claim)
+            clock.advance(seconds)
+
+        def transfer_then_finish(target_sid, *args, **kwargs):
+            nonlocal transferred
+            with fleet.fleet_lock():
+                claim = fleet.read_incarnation()
+                inc = fleet.handoff_pending_entries(claim)[0]["successor_inc"]
+                new_claim = {
+                    "incarnation_id": inc, "session_id": target_sid,
+                    "claimed_at": fleet.now_iso(),
+                    "heartbeat_at": fleet.now_iso(),
+                    "claimed_via": "handoff", "nonce_seq": 1,
+                    "nonce_hash": fleet.nonce_digest(fleet.mint_nonce()),
+                    "lineage_id": claim.get("lineage_id")}
+                fleet.write_incarnation(new_claim)
+            transferred = True
+            return real_finish(target_sid, *args, **kwargs)
+
+        monkeypatch.setattr(
+            fleet, "_finish_successor_scoped_abort", transfer_then_finish)
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=heartbeat,
+                complete_timeout=0.5, nonce=live)
+        assert transferred is True
+        assert fleet.read_incarnation()["claimed_via"] == "handoff"
+        assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+
+    def test_begin_complete_timeout_does_not_stop_concurrently_committed_successor(
+            self, sup_home, monkeypatch):
+        """A second complete may win while the one-command form is polling.
+
+        The waiting invocation observes a changed claim after the other complete
+        has already transferred this successor.  That is a successful handoff,
+        not a limbo body to stop.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        completed = False
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
+
+        def concurrent_complete(seconds):
+            nonlocal completed
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            if not completed:
+                completed = True
+                successor_nonce = fleet.mint_nonce()
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(successor_nonce))
+                assert fleet.cmd_sup_handoff_complete(
+                    SimpleNamespace(
+                        sid="sid-old", nonce=live,
+                        expect_inc=entry["successor_inc"],
+                        expect_sid=entry["successor_sid"]),
+                    run=run, which=_fake_which) == 0
+            clock.advance(seconds)
+
+        with pytest.raises(fleet.SupervisorContinuityError, match="claim changed"):
+            self._begin(
+                run, clock=clock, sleep=concurrent_complete,
+                complete_timeout=2, nonce=live)
+        assert completed is True
+        assert fleet.read_incarnation()["claimed_via"] == "handoff"
+        assert fleet.read_incarnation()["incarnation_id"].startswith("inc-")
+        assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+
+    def test_begin_timeout_decides_after_transfer_at_abort_lock(
+            self, sup_home, monkeypatch):
+        """The successor may take the claim as automatic abort takes its lock.
+
+        The outer complete fails first. Immediately before abort acquires its
+        decision lock, a competing two-verb complete commits the successor.
+        """
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        real_lock = fleet.fleet_lock
+        armed = False
+        armed_lock_calls = 0
+        transferred = False
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line", lambda **_kw: "reaped: 0 rows")
+
+        @contextmanager
+        def racing_lock(*args, **kwargs):
+            nonlocal armed_lock_calls, transferred
+            if armed:
+                armed_lock_calls += 1
+            if armed and armed_lock_calls == 2:
+                claim = fleet.read_incarnation()
+                entry = fleet.handoff_pending_entries(claim)[0]
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+                monkeypatch.setattr(fleet, "fleet_lock", real_lock)
+                try:
+                    assert fleet.cmd_sup_handoff_complete(
+                        SimpleNamespace(
+                            sid="sid-old", nonce=live,
+                            expect_inc=entry["successor_inc"],
+                            expect_sid=entry["successor_sid"]),
+                        run=run, which=_fake_which) == 0
+                    transferred = True
+                finally:
+                    monkeypatch.setattr(fleet, "fleet_lock", racing_lock)
+            with real_lock(*args, **kwargs):
+                yield
+
+        def arm_race(seconds):
+            nonlocal armed
+            armed = True
+            clock.advance(seconds)
+
+        monkeypatch.setattr(fleet, "fleet_lock", racing_lock)
+        with pytest.raises(fleet.FleetCliError, match="timed out after 0.25s"):
+            self._begin(
+                run, clock=clock, sleep=arm_race,
+                complete_timeout=0.25, nonce=live)
+        assert transferred is True
+        assert armed_lock_calls == 2
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "handoff"
+        assert not any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert not fleet.handoff_abort_flag_path().exists()
+        assert not fleet.nonce_rejection_log_path().exists()
+
+    def test_begin_complete_timeout_aborts_on_pretransfer_oserror(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+        real_append = fleet.supervisor_journal_append
+
+        def successor_boots(seconds):
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            if fleet.read_handshake() is None:
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+            clock.advance(seconds)
+
+        def fail_complete_journal(kind, *args, **kwargs):
+            if kind == "HANDOFF-COMPLETE":
+                raise OSError("journal unavailable")
+            return real_append(kind, *args, **kwargs)
+
+        monkeypatch.setattr(
+            fleet, "supervisor_journal_append", fail_complete_journal)
+        with pytest.raises(OSError, match="journal unavailable"):
+            self._begin(
+                run, clock=clock, sleep=successor_boots,
+                complete_timeout=2, nonce=live)
+        assert any(call[-2:] == ["stop", "succ0001"] for call in run.calls)
+        assert fleet.read_incarnation()["incarnation_id"] == "inc-old"
+        assert fleet.handoff_pending_entries(fleet.read_incarnation()) == []
+
+    def test_begin_complete_timeout_does_not_abort_after_transfer_commit(
+            self, sup_home, monkeypatch):
+        live = self._hold_v2()
+        run = self._dispatch_then_roster()
+        clock = self._Clock()
+
+        def successor_boots(seconds):
+            claim = fleet.read_incarnation()
+            entry = fleet.handoff_pending_entries(claim)[0]
+            if fleet.read_handshake() is None:
+                fleet.write_handshake(
+                    entry["successor_inc"], entry["successor_sid"],
+                    handoff_token_hash=claim["handoff_token_hash"],
+                    nonce_hash=fleet.nonce_digest(fleet.mint_nonce()))
+            clock.advance(seconds)
+
+        monkeypatch.setattr(
+            fleet, "_supervisor_reap_line",
+            lambda **_kw: (_ for _ in ()).throw(OSError("reap unavailable")))
+        with pytest.raises(OSError, match="reap unavailable"):
+            self._begin(
+                run, clock=clock, sleep=successor_boots,
+                complete_timeout=2, nonce=live)
+        claim = fleet.read_incarnation()
+        assert claim["claimed_via"] == "handoff"
+        assert not any("stop" in call for call in run.calls)
 
     def test_successor_boot_is_fresh_never_a_resume_or_fork(self, sup_home):
         """Cut 2 (w87): a successor boots from the checkpoint/journal trail
@@ -3238,6 +3722,16 @@ class TestHandoff:
         assert args.permission_mode == "accept"
         with pytest.raises(SystemExit):
             parser.parse_args(["sup-handoff-begin", "--permission-mode", "acceptEdits"])
+
+    def test_complete_timeout_is_finite_and_nonnegative(self):
+        parser = fleet.build_parser()
+        args = parser.parse_args(
+            ["sup-handoff-begin", "--complete-timeout", "12.5"])
+        assert args.complete_timeout == 12.5
+        for value in ("-1", "inf", "nan"):
+            with pytest.raises(SystemExit):
+                parser.parse_args(
+                    ["sup-handoff-begin", "--complete-timeout", value])
 
     def test_handoff_help_describes_inheritance_and_fail_closed(self, capsys):
         parser = fleet.build_parser()

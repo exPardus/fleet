@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11915) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12917) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16376) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11909) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12911) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16370) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3740) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:3738) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4435) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13167) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16250) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4433) -- expose that distinction to views.
+      * `_doctor_check_registry` (:13161) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16244) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7108) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18030) -- render the release explanation.
+      * `_print_snapshot_table` (:7106) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:18024) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2441,7 +2441,7 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
     }
 
 
-def _codex_worker_status(observed: dict) -> tuple[str, str]:
+def _codex_worker_status(observed):
     """Map a validated public observation to registry and adapter states."""
     provider = observed["provider_status"]
     turn = observed["turn_status"]
@@ -2459,8 +2459,7 @@ def _codex_worker_status(observed: dict) -> tuple[str, str]:
 
 
 def _resume_codex_worker_on_current_host(
-        binding: CodexWorkerBinding, client, *, require_full=False
-) -> tuple[dict, dict]:
+        binding, client, *, require_full=False):
     """Validate and resume one exact thread before adopting a new host."""
     if client.generation == binding.host_generation:
         return dict(binding.record), _codex_worker_observe(
@@ -2584,11 +2583,10 @@ def _guard_codex_worker_operation(name: str, record: dict, action: str, *,
             f"{name}: native Codex adapter state is {label}; refusing {action}")
 
 
-def _reserve_codex_worker_operation(binding: CodexWorkerBinding,
-                                    operation_id: str, kind: str, *,
-                                    allowed_statuses: set | None = None,
-                                    allowed_adapter_states: set | None = None,
-                                    expected_record: dict | None = None) -> dict:
+def _reserve_codex_worker_operation(binding, operation_id, kind, *,
+                                    allowed_statuses=None,
+                                    allowed_adapter_states=None,
+                                    expected_record=None):
     """Durably serialize Fleet mutations for one exact worker incarnation."""
     with fleet_lock():
         data = load_registry()
@@ -3722,7 +3720,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16376`), because legacy upgrades also require a complete registry.
+    (`:16370`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -8487,8 +8485,7 @@ def _cmd_send_codex_supervisor(name: str, message: str) -> int:
     return 0
 
 
-def _cmd_send_codex_native(name: str, message: str, rec: dict, *,
-                           allow_limited: bool = False) -> int:
+def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
     """Steer an active turn or start one successor turn on the same thread."""
     binding = _codex_worker_binding(name, rec)
     allowed_statuses = {"working", "idle"}
@@ -10258,7 +10255,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10173` / `cmd_respawn:9464`, before
+    # resolution that runs from `cmd_kill:10170` / `cmd_respawn:9461`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10289,9 +10286,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10173` / `cmd_respawn:9464`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10170` / `cmd_respawn:9461`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9485-9494` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9482-9491` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -10758,9 +10755,8 @@ def _restore_clean_moves(moved: list[tuple[Path, Path]]) -> None:
                   file=sys.stderr)
 
 
-def _archive_clean_evidence(name: str, sid: str, retired_sids: list = (), *,
-                            moved_out: list | None = None,
-                            created_out: list | None = None) -> tuple[Path | None, list[Path]]:
+def _archive_clean_evidence(name, sid, retired_sids=(), *,
+                            moved_out=None, created_out=None):
     """Move clean's evidence to a recoverable archive before deletion.
 
     ``fleet clean`` is the irreversible registry/file-deletion verb, so a
@@ -10842,9 +10838,8 @@ def _archive_clean_evidence(name: str, sid: str, retired_sids: list = (), *,
     return dest_dir, pending
 
 
-def _remove_worker_files(name: str, sid: str, retired_sids: list = (), *,
-                         preserve_archive: bool = False,
-                         preserve_mailbox: bool = False) -> list:
+def _remove_worker_files(name, sid, retired_sids=(), *,
+                         preserve_archive=False, preserve_mailbox=False):
     """Best-effort delete artifacts for a removed dead worker; return removed paths.
     Include logs, journals, tasks, outcomes, current mailbox/claimed files
     (unless ``preserve_mailbox`` is set), retired-sid outcomes/ceilings and the
@@ -11370,9 +11365,9 @@ def _reap_eligible(name: str, record: dict, roster_entries: list, claim,
     return False, "session-not-idle"
 
 
-def _archive_eligible(name: str, record: dict, roster_entries: list, now,
-                      ttl_hours: float = ARCHIVE_TTL_HOURS_DEFAULT,
-                      reap: bool = False, reap_caller_sid=None) -> tuple:
+def _archive_eligible(name, record, roster_entries, now,
+                      ttl_hours=ARCHIVE_TTL_HOURS_DEFAULT,
+                      reap=False, reap_caller_sid=None):
     """Return eligibility or the first failed gate, protecting the claim holder first.
     Indeterminate claims protect supervisor-shaped names only. Internal reap=True
     first applies age-independent eligibility and shared PID/mail/claim vetoes.
@@ -11512,10 +11507,9 @@ def _archive_resume_pending(name: str, record: dict) -> bool:
     return any(src.exists() for src, _dest in _archive_file_pairs(name, sid, retired))
 
 
-def _archive_move_and_rm(n: str, sid: str, retired: list, dest_dir: Path,
-                         roster_entries: list, run, which, reap: bool = False,
-                         reap_caller_sid=None, remove_sessions: bool = True,
-                         lane_state=None) -> None:
+def _archive_move_and_rm(n, sid, retired, dest_dir, roster_entries, run, which,
+                         reap=False, reap_caller_sid=None,
+                         remove_sessions=True, lane_state=None):
     """Move evidence, then best-effort remove current and retired native sessions.
     Use the eligibility roster snapshot to skip every live sid, including retired
     forks, except an idle PID-bearing spare on a terminal lane row; current-sid
@@ -15197,7 +15191,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1091`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4423`) applies here too. An unreadable registry
+    rule for the view path (`:4421`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -15272,7 +15266,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
     :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20723, :22873`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8754, :9338, :13501, :21588. This makes union identity
+    OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15990,8 +15984,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8754, :9338, :13501,
-    # :21588) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8751, :9335, :13495,
+    # :21639) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15999,7 +15993,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15194`).
+        # names this gate as its reason (`:15188`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16369,7 +16363,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11912`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11906`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -21333,6 +21327,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     # After the commit and on every subsequent path (success, DOA, dispatch
     # failure): the generation the validator settled on is committed, so the
     # predecessor must learn it. Empty for the common live-claim case.
+    continuity_nonce = getattr(args, "nonce", None)
+    for notice in notices:
+        if notice.startswith("NONCE: ") and not notice.startswith("NONCE: unchanged"):
+            continuity_nonce = notice.removeprefix("NONCE: ")
     _deliver_notices(notices)
     holder_inc = claim["incarnation_id"]
 
@@ -21461,46 +21459,96 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
               f"Claim unchanged -- duty continues; re-run sup-handoff-begin to retry.")
         return 1
 
-    # Register the verified successor body with its provisional sid and turns=1.
-    # The sid lets hooks resolve its name before completion.
-    succ_mode = effective_mode
-    with fleet_lock():
-        # Re-read under the lock and stamp only our successor_inc. Reusing the
-        # pre-dispatch claim could erase a concurrent begin; positional stamping
-        # could put our sid on a rival attempt and aim abort at the wrong body.
-        live = read_incarnation()
-        entry = handoff_entry_matching(live, successor_inc=successor_inc)
-        if entry is not None:
-            entry["successor_sid"] = successor_sid
-            write_incarnation(live)
-        data = load_registry()
-        if name not in data["workers"]:
-            succ_rec = new_worker_record(
-                successor_sid, FLEET_HOME,
-                f"supervisor successor {successor_inc} (handoff from {holder_inc})",
-                succ_mode, model=effective_model,
-                setting_sources=succ_setting_sources,
-                spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
-                dispatch_kind="bg", category=None,
-                # Item 28: same substrate stamping as the gen-0 dispatch.
-                substrate=_openrouter_substrate(effective_model))
-            succ_rec["turns"] = 1
-            succ_rec["last_dispatch_at"] = now_iso()
-            data["workers"][name] = succ_rec
-            save_registry(data)
-            append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
-            # Record turn_started beside the turns=1 registry stamp. The other initial
-            # dispatch sites are cmd_spawn, _cmd_respawn_native and
-            # _dispatch_supervisor_body, each in fast-completion and joined arms.
-            # spawned has no session_id, so this event keeps ownership discoverable
-            # even if completion never runs and clean later removes the registry row.
-            # It proves dispatch, not successful boot; completion emits its own event.
-            # Best effort: an event-log error must not hide SUCCESSOR-SID after dispatch
-            # and registry commit, because abort needs that handle.
-            _append_event_quiet("turn_started", name, session_id=successor_sid)
+    complete_timeout = getattr(args, "complete_timeout", None)
+    handoff_proof_snapshot = json.loads(json.dumps(claim))
+    snapshot_entry = handoff_entry_matching(
+        handoff_proof_snapshot, successor_inc=successor_inc)
+    if snapshot_entry is not None:
+        snapshot_entry["successor_sid"] = successor_sid
+    handoff_cas_snapshot = json.loads(json.dumps(handoff_proof_snapshot))
+    transfer_committed = False
 
-    print(f"SUCCESSOR-INC: {successor_inc}")
-    print(f"SUCCESSOR-SID: {successor_sid}")
+    def mark_transfer_committed():
+        nonlocal transfer_committed
+        transfer_committed = True
+
+    try:
+        # Register the verified successor body with its provisional sid and turns=1.
+        # The sid lets hooks resolve its name before completion.
+        succ_mode = effective_mode
+        with fleet_lock():
+            # Re-read only into the CAS snapshot: a rival begin may replace its token,
+            # but never the original proof. Stamp by inc; reusing the old claim could
+            # erase the rival, while positional stamping could aim abort at its body.
+            live = read_incarnation()
+            entry = handoff_entry_matching(live, successor_inc=successor_inc)
+            if entry is not None:
+                entry["successor_sid"] = successor_sid
+                write_incarnation(live)
+            handoff_cas_snapshot = json.loads(json.dumps(live))
+            data = load_registry()
+            if name not in data["workers"]:
+                succ_rec = new_worker_record(
+                    successor_sid, FLEET_HOME,
+                    f"supervisor successor {successor_inc} (handoff from {holder_inc})",
+                    succ_mode, model=effective_model,
+                    setting_sources=succ_setting_sources,
+                    spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
+                    dispatch_kind="bg", category=None,
+                    # Item 28: same substrate stamping as the gen-0 dispatch.
+                    substrate=_openrouter_substrate(effective_model))
+                succ_rec["turns"] = 1
+                succ_rec["last_dispatch_at"] = now_iso()
+                data["workers"][name] = succ_rec
+                save_registry(data)
+                append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
+                # Record turn_started beside the turns=1 registry stamp. The other initial
+                # dispatch sites are cmd_spawn, _cmd_respawn_native and
+                # _dispatch_supervisor_body, each in fast-completion and joined arms.
+                # spawned has no session_id, so this event keeps ownership discoverable
+                # even if completion never runs and clean later removes the registry row.
+                # It proves dispatch, not successful boot; completion emits its own event.
+                # Best effort: an event-log error must not hide SUCCESSOR-SID after dispatch
+                # and registry commit, because abort needs that handle.
+                _append_event_quiet("turn_started", name, session_id=successor_sid)
+
+        print(f"SUCCESSOR-INC: {successor_inc}")
+        print(f"SUCCESSOR-SID: {successor_sid}")
+        if complete_timeout is not None:
+            deadline = clock() + complete_timeout
+            timed_out = False
+            while read_handshake() is None:
+                if read_incarnation() != handoff_cas_snapshot:
+                    raise SupervisorContinuityError(
+                        "sup-handoff-begin: supervisor claim changed while waiting "
+                        "for HANDSHAKE -- refusing completion")
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                sleep(min(0.25, remaining))
+            complete_args = SimpleNamespace(
+                sid=caller, nonce=continuity_nonce,
+                expect_inc=successor_inc, expect_sid=successor_sid)
+            try:
+                result = cmd_sup_handoff_complete(
+                    complete_args, run=run, which=which,
+                    on_transfer_commit=mark_transfer_committed)
+            except FleetCliError as exc:
+                if timed_out and not isinstance(exc, SupervisorContinuityError):
+                    raise FleetCliError(
+                        f"handoff timed out after {complete_timeout:g}s: {exc}") from exc
+                raise
+            return result
+    finally:
+        if complete_timeout is not None and not transfer_committed:
+            _auto_handoff_abort(
+                caller=caller, nonce=continuity_nonce,
+                successor_sid=successor_sid, successor_inc=successor_inc,
+                cas_snap=handoff_cas_snapshot,
+                proof_snap=handoff_proof_snapshot,
+                token=handoff_token, holder_inc=holder_inc,
+                run=run, which=which)
     # Both recipes present --nonce because both verbs require continuity.
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
@@ -21511,7 +21559,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     return 0
 
 
-def cmd_sup_handoff_complete(args, run=subprocess.run, which=shutil.which) -> int:
+def cmd_sup_handoff_complete(args, run=subprocess.run, which=shutil.which,
+                             on_transfer_commit=None):
     """Verify the successor token and incarnation, then transfer the claim.
     HANDSHAKE must match the incarnation and token hash recorded by begin.
     An optional --expect-sid mismatch warns about a fork but does not refuse:
@@ -21576,6 +21625,8 @@ def cmd_sup_handoff_complete(args, run=subprocess.run, which=shutil.which) -> in
             new_claim["nonce_hash"] = succ_nonce_hash
             new_claim["nonce_seq"] = 1
         write_incarnation(new_claim)
+        if on_transfer_commit is not None:
+            on_transfer_commit()
         # Stamp the authoritative HANDSHAKE sid so logical supervisor resolution
         # reaches the successor despite fork-steer. Missing/cleaned records leave
         # the committed claim transfer intact.
@@ -21694,74 +21745,177 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
     return 0
 
 
-def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
-    """Resolve and abort one recorded successor, or bulk-retire eligible entries.
-    Cross-check HANDSHAKE and pending records through resolve_handoff_abort;
-    never stop an arbitrary unverified sid. Use claude stop, not a raw kill,
-    then remove HANDSHAKE and raise the doctor-visible abort flag. Claude stop
-    fires no Stop hook, so it supplies no successor journal entry.
-    An incarnation handle can also retire an aged-out sid-less entry; that
-    path stops nothing and reports retirement without claiming a stop."""
-    successor_sid = getattr(args, "successor_sid", None)
-    successor_inc = getattr(args, "successor_inc", None)
-    force = bool(getattr(args, "force", False))
-    if getattr(args, "retire_all", False):
-        if successor_sid or successor_inc:
-            raise FleetCliError(
-                "--retire-all takes no handle: it retires EVERY retirable entry. "
-                "Drop --successor-sid/--successor-inc, or drop --retire-all to "
-                "retire exactly one")
-        return _cmd_sup_handoff_retire_all(args, force=force)
-    if not successor_sid and not successor_inc:
-        raise FleetCliError("sup-handoff-abort needs --successor-sid, --successor-inc "
-                            "or --retire-all "
-                            "(see `fleet sup-status --json` for the pending successors)")
-    with fleet_lock():
-        # The old side RESUMES duty here (it rewrites its own heartbeat
-        # below), so it mints and is delivered a fresh generation like any
-        # other continuing verb.
-        claim, caller, notices = _require_claim_holder(
-            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
-            verb="sup-handoff-abort")
-        verdict = resolve_handoff_abort(claim, read_handshake(),
-                                        successor_sid=successor_sid,
-                                        successor_inc=successor_inc,
-                                        force=force)
-        if verdict["action"] == "refuse":
-            raise FleetCliError(verdict["reason"])
-        retiring = verdict["action"] == "retire"
-        target_sid, aborted_inc = verdict["sid"], verdict["inc"]
+def _is_transferred_successor(claim, successor_inc):
+    return (isinstance(claim, dict)
+            and claim.get("claimed_via") == "handoff"
+            and claim.get("incarnation_id") == successor_inc
+            and isinstance(claim.get("session_id"), str)
+            and bool(claim.get("session_id")))
+
+
+def _scoped_abort_locked(
+        successor_inc, successor_sid, proof_snap,
+        token, holder):
+    expected_hash = proof_snap.get("handoff_token_hash")
+    entry = handoff_entry_matching(
+        proof_snap, successor_sid=successor_sid,
+        successor_inc=successor_inc)
+    if (entry is None or not expected_hash
+            or nonce_digest(token) != expected_hash):
+        raise FleetCliError(
+            "automatic successor-scoped abort lacks the original "
+            "incarnation/token proof")
+    current = read_incarnation()
+    if _is_transferred_successor(current, successor_inc):
+        return None
+    hs = read_handshake()
+    target_sid = successor_sid
+    if (isinstance(hs, dict)
+            and hs.get("incarnation_id") == successor_inc
+            and hs.get("handoff_token_hash") == expected_hash
+            and isinstance(hs.get("session_id"), str)
+            and hs.get("session_id")):
+        target_sid = hs["session_id"]
+    if (isinstance(hs, dict)
+            and hs.get("incarnation_id") == successor_inc
+            and (hs.get("handoff_token_hash") == expected_hash
+                 or hs.get("session_id") == successor_sid)):
         try:
             handshake_path().unlink()
         except FileNotFoundError:
             pass
-        # Unlink the aborted token file. Only absence is silent: failure to remove
-        # a plaintext token must remain visible.
-        if aborted_inc:
-            unlink_handoff_task_file(aborted_inc, context=" (handoff abort)")
-        supervisor_journal_append(
-            "HANDOFF-ABORT", claim["incarnation_id"], caller,
-            f"retiring stale successor {aborted_inc} (no sid was ever recorded; "
-            f"via {verdict.get('via')})"
-            if retiring else
-            f"stopping limbo successor sid={target_sid} inc={aborted_inc} "
-            f"(via {verdict.get('via')})")
-        _write_json_atomic(handoff_abort_flag_path(), {
-            "aborted_at": now_iso(),
-            "reason": "stale-entry-retired" if retiring else "aborted",
-            "successor_sid": target_sid,
-            "successor_inc": aborted_inc,
-            "holder": claim["incarnation_id"],
-        })
-        claim["heartbeat_at"] = now_iso()   # old resumes duty
-        # Retire only this attempt. Drop the claim token hash with the last entry
-        # so stranded plaintext no longer validates.
-        if verdict.get("entry") is not None:
-            drop_handoff_entry(claim, verdict["entry"])
-        write_incarnation(claim)
-        # D2/R2: age-gated, fail-closed sweep of ownerless residue, under the
-        # lock we already hold. It cannot reach a surviving entry's file.
-        sweep_handoff_task_files(claim)
+    unlink_handoff_task_file(
+        successor_inc, context=" (successor-scoped abort)")
+    _write_json_atomic(handoff_abort_flag_path(), {
+        "aborted_at": now_iso(), "reason": "successor-scoped-abort",
+        "successor_sid": target_sid, "successor_inc": successor_inc,
+        "holder": holder, "claim_untouched": True,
+    })
+    return target_sid
+
+
+def _finish_successor_scoped_abort(target_sid, inc, *, run, which):
+    with fleet_lock():
+        current = read_incarnation()
+        if (_is_transferred_successor(current, inc)
+                or (isinstance(current, dict)
+                    and current.get("session_id") == target_sid)):
+            print(f"automatic abort skipped: successor {inc} now holds the "
+                  "supervisor claim; nothing stopped")
+            return
+    stopped = _stop_native_session(
+        target_sid, run=run, which=which, timeout=60)
+    if stopped:
+        print(f"limbo successor {target_sid} stopped by successor-scoped "
+              "abort; the changed supervisor claim was not modified")
+    else:
+        print(f"WARNING: successor-scoped `claude stop {target_sid}` failed; "
+              "the changed supervisor claim was not modified")
+
+
+def _auto_handoff_abort(*, caller, nonce, successor_sid,
+                              successor_inc, cas_snap,
+                              proof_snap,
+                              token, holder_inc, run, which):
+    abort_args = SimpleNamespace(
+        sid=caller, nonce=nonce,
+        successor_sid=successor_sid, successor_inc=successor_inc,
+        retire_all=False, force=False)
+    ordinary_plan = None
+    scoped_sid = None
+    transfer_won = False
+    try:
+        with fleet_lock():
+            current = read_incarnation()
+            if _is_transferred_successor(current, successor_inc):
+                transfer_won = True
+            elif current == cas_snap:
+                ordinary_plan = _prepare_sup_handoff_abort_locked(
+                    abort_args, force=False)
+            else:
+                scoped_sid = _scoped_abort_locked(
+                    successor_inc, successor_sid, proof_snap,
+                    token, holder_inc)
+                transfer_won = scoped_sid is None
+    except Exception as abort_exc:
+        print(f"WARNING: locked automatic abort failed: {abort_exc}")
+        try:
+            with fleet_lock():
+                scoped_sid = _scoped_abort_locked(
+                    successor_inc, successor_sid, proof_snap,
+                    token, holder_inc)
+                transfer_won = scoped_sid is None
+        except Exception as scoped_exc:
+            print(f"WARNING: successor-scoped automatic abort failed: "
+                  f"{scoped_exc}")
+            return
+    if transfer_won:
+        print(f"automatic abort skipped: successor {successor_inc} "
+              "already holds the committed supervisor claim")
+    elif ordinary_plan is not None:
+        _finish_sup_handoff_abort(ordinary_plan, run=run, which=which)
+    elif scoped_sid is not None:
+        _finish_successor_scoped_abort(
+            scoped_sid, successor_inc, run=run, which=which)
+
+
+def _prepare_sup_handoff_abort_locked(args, force=False):
+    successor_sid = getattr(args, "successor_sid", None)
+    successor_inc = getattr(args, "successor_inc", None)
+    # The old side RESUMES duty here (it rewrites its own heartbeat
+    # below), so it mints and is delivered a fresh generation like any
+    # other continuing verb.
+    claim, caller, notices = _require_claim_holder(
+        getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+        verb="sup-handoff-abort")
+    verdict = resolve_handoff_abort(claim, read_handshake(),
+                                    successor_sid=successor_sid,
+                                    successor_inc=successor_inc,
+                                    force=force)
+    if verdict["action"] == "refuse":
+        raise FleetCliError(verdict["reason"])
+    retiring = verdict["action"] == "retire"
+    target_sid, aborted_inc = verdict["sid"], verdict["inc"]
+    try:
+        handshake_path().unlink()
+    except FileNotFoundError:
+        pass
+    # Unlink the aborted token file. Only absence is silent: failure to remove
+    # a plaintext token must remain visible.
+    if aborted_inc:
+        unlink_handoff_task_file(aborted_inc, context=" (handoff abort)")
+    supervisor_journal_append(
+        "HANDOFF-ABORT", claim["incarnation_id"], caller,
+        f"retiring stale successor {aborted_inc} (no sid was ever recorded; "
+        f"via {verdict.get('via')})"
+        if retiring else
+        f"stopping limbo successor sid={target_sid} inc={aborted_inc} "
+        f"(via {verdict.get('via')})")
+    _write_json_atomic(handoff_abort_flag_path(), {
+        "aborted_at": now_iso(),
+        "reason": "stale-entry-retired" if retiring else "aborted",
+        "successor_sid": target_sid,
+        "successor_inc": aborted_inc,
+        "holder": claim["incarnation_id"],
+    })
+    claim["heartbeat_at"] = now_iso()   # old resumes duty
+    # Retire only this attempt. Drop the claim token hash with the last entry
+    # so stranded plaintext no longer validates.
+    if verdict.get("entry") is not None:
+        drop_handoff_entry(claim, verdict["entry"])
+    write_incarnation(claim)
+    # D2/R2: age-gated, fail-closed sweep of ownerless residue, under the
+    # lock we already hold. It cannot reach a surviving entry's file.
+    sweep_handoff_task_files(claim)
+    return {"retiring": retiring, "target_sid": target_sid,
+            "aborted_inc": aborted_inc, "claim": claim,
+            "notices": notices, "verdict": verdict}
+
+
+def _finish_sup_handoff_abort(plan, *, run, which):
+    retiring = plan["retiring"]
+    target_sid, aborted_inc = plan["target_sid"], plan["aborted_inc"]
+    claim, notices, verdict = plan["claim"], plan["notices"], plan["verdict"]
     if retiring:
         why = {
             "stale-entry": "no sid was ever recorded for it (dispatch never joined "
@@ -21788,6 +21942,33 @@ def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
               f"{claim['incarnation_id']}. Doctor will flag until the abort flag is cleared.")
     _deliver_notices(notices)
     return 0
+
+
+def cmd_sup_handoff_abort(args, which=shutil.which, run=subprocess.run) -> int:
+    """Resolve and abort one recorded successor, or bulk-retire eligible entries.
+    Cross-check HANDSHAKE and pending records through resolve_handoff_abort;
+    never stop an arbitrary unverified sid. Use claude stop, not a raw kill,
+    then remove HANDSHAKE and raise the doctor-visible abort flag. Claude stop
+    fires no Stop hook, so it supplies no successor journal entry.
+    An incarnation handle can also retire an aged-out sid-less entry; that
+    path stops nothing and reports retirement without claiming a stop."""
+    successor_sid = getattr(args, "successor_sid", None)
+    successor_inc = getattr(args, "successor_inc", None)
+    force = bool(getattr(args, "force", False))
+    if getattr(args, "retire_all", False):
+        if successor_sid or successor_inc:
+            raise FleetCliError(
+                "--retire-all takes no handle: it retires EVERY retirable entry. "
+                "Drop --successor-sid/--successor-inc, or drop --retire-all to "
+                "retire exactly one")
+        return _cmd_sup_handoff_retire_all(args, force=force)
+    if not successor_sid and not successor_inc:
+        raise FleetCliError("sup-handoff-abort needs --successor-sid, --successor-inc "
+                            "or --retire-all "
+                            "(see `fleet sup-status --json` for the pending successors)")
+    with fleet_lock():
+        plan = _prepare_sup_handoff_abort_locked(args, force=force)
+    return _finish_sup_handoff_abort(plan, run=run, which=which)
 
 
 def supervisor_goals_active() -> bool:
@@ -22585,6 +22766,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "if unavailable unless explicitly supplied)")
     p_suphb.add_argument("--sid", help="override caller session id")
     p_suphb.add_argument("--nonce", help=NONCE_ARG_HELP)
+    p_suphb.add_argument(
+        "--complete-timeout", dest="complete_timeout", type=_watch_timeout_arg,
+        help="wait up to SECONDS for HANDSHAKE, then complete in this process; "
+             "automatically abort the successor on timeout or failure")
 
     p_suphc = sub.add_parser("sup-handoff-complete", help="verify HANDSHAKE and transfer the claim")
     # R6: an incarnation id is a PATH COMPONENT (`handoff_task_file_path`).

@@ -412,6 +412,9 @@ class TestTheCensus:
         assert all(s.startswith("cmd_sup_") or s.startswith("_cmd_sup_")
                    or s == "cmd_wave_close"
                    or s == "_refresh_supervisor_heartbeat_for_dispatch"
+                   # The locked body of `sup-handoff-abort`, split out so the
+                   # automatic abort can reuse it; the old holder resumes duty.
+                   or s == "_prepare_sup_handoff_abort_locked"
                    or s in codex_route
                    for s in scopes), scopes
 
