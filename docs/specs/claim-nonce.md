@@ -1423,7 +1423,7 @@ session transcript:
 # at 091d5fa (existence and count only; no transcript contents were read)
 # volatile: a live box mints sessions continuously; the count and the mtime drift by the minute
 $ ls -ld ~/.claude/projects && find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l
-drwxr-xr-x 1 Techn 197609 0 Jul 21 20:54 /c/Users/user/.claude/projects
+drwxr-xr-x 1 <owner> <group> 0 <date> <time> <home>/.claude/projects
 762
 ```
 
