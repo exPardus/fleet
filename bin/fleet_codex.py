@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import hmac
 import json
@@ -18,6 +19,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -31,10 +33,14 @@ HOST_LOCK_STALE_SECONDS = 30.0
 HOST_HEARTBEAT_STALE_SECONDS = 3.0
 IPC_AUTH_CHALLENGE_BYTES = 32
 MAX_OPERATION_TIMEOUT_SECONDS = 120.0
-SCHEMA_MANIFEST = (
+SCHEMA_FIXTURES = (
     Path(__file__).resolve().parents[1]
-    / "tests" / "fixtures" / "codex_app_server" / "0.155.1" / "manifest.json"
+    / "tests" / "fixtures" / "codex_app_server"
 )
+REVIEWED_SCHEMA_MANIFESTS = {
+    version: SCHEMA_FIXTURES / version / "manifest.json"
+    for version in ("0.155.1", "0.160.0")
+}
 
 
 class UnsafeHostState(FleetCliError):
@@ -47,6 +53,34 @@ class HostUnavailable(FleetCliError):
 
 class HostRejected(FleetCliError):
     """The home host refused an invalid or unauthorized operation."""
+
+
+def _reviewed_schema_manifest(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> Path:
+    """Select an explicit reviewed schema from the installed Codex version."""
+    if not command or not all(isinstance(item, str) and item for item in command):
+        raise ValueError("Codex schema command must be a non-empty argv")
+    try:
+        completed = subprocess.run(
+            [*command, "--version"], cwd=cwd, env=env,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HostUnavailable("could not read installed Codex version") from exc
+    words = completed.stdout.strip().split()
+    if (completed.returncode != 0 or len(words) != 2
+            or words[0] != "codex-cli"):
+        raise HostUnavailable("could not parse installed Codex version")
+    version = words[1]
+    manifest = REVIEWED_SCHEMA_MANIFESTS.get(version)
+    if manifest is None:
+        raise HostUnavailable(
+            f"installed Codex version {version!r} has no reviewed schema")
+    return manifest
 
 
 @dataclass(frozen=True)
@@ -465,10 +499,134 @@ def _host_lock(path: Path, timeout: float) -> Iterator[None]:
             pass
 
 
+class _DarwinTimeval(ctypes.Structure):
+    _fields_ = [("tv_sec", ctypes.c_long), ("tv_usec", ctypes.c_int)]
+
+
+class _DarwinExternProcPrefix(ctypes.Structure):
+    # ``extern_proc.p_un.p_starttime`` is the first field of ``extern_proc``.
+    _fields_ = [("p_starttime", _DarwinTimeval)]
+
+
+class _DarwinKinfoProcPrefix(ctypes.Structure):
+    # ``kp_proc`` is the first field of ``kinfo_proc``.  sysctl supplies the
+    # complete structure; this prefix names only the public start-time field.
+    _fields_ = [("kp_proc", _DarwinExternProcPrefix)]
+
+
+def _darwin_sysctl_process_identity(
+    pid: int, *, sysctl: Any | None = None,
+) -> str | None:
+    """Read ``KERN_PROC_PID``'s ``kp_proc.p_starttime`` through libc."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    if sysctl is None:
+        try:
+            sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+        except (AttributeError, OSError):
+            return None
+        sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 4)(1, 14, 1, pid)  # CTL_KERN, KERN_PROC, KERN_PROC_PID
+    size = ctypes.c_size_t()
+    try:
+        if sysctl(mib, 4, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        minimum = ctypes.sizeof(_DarwinKinfoProcPrefix)
+        if size.value < minimum or size.value > MAX_METADATA_BYTES:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value < minimum:
+            return None
+        process = ctypes.cast(
+            buffer, ctypes.POINTER(_DarwinKinfoProcPrefix)).contents
+        seconds = int(process.kp_proc.p_starttime.tv_sec)
+        microseconds = int(process.kp_proc.p_starttime.tv_usec)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if seconds <= 0 or not 0 <= microseconds < 1_000_000:
+        return None
+    return f"darwin:{seconds}.{microseconds:06d}"
+
+
+def _darwin_ps_process_identity(
+    pid: int, *, run: Any | None = None,
+) -> str | None:
+    """Fall back to Darwin ``ps``'s second-resolution kernel start time."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    run = subprocess.run if run is None else run
+    environment = dict(os.environ)
+    environment.update({"LC_ALL": "C", "LC_TIME": "C"})
+    try:
+        completed = run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            env=environment, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    fields = completed.stdout.strip().split()
+    if len(fields) != 5:
+        return None
+    weekday, month, day, clock, year = fields
+    months = {
+        "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+        "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+    }
+    if weekday not in {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}:
+        return None
+    try:
+        hour, minute, second = (int(part) for part in clock.split(":"))
+        started = datetime(
+            int(year), months[month], int(day), hour, minute, second)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return f"darwin-ps:{started:%Y-%m-%dT%H:%M:%S}"
+
+
+def _darwin_process_identity(pid: int) -> str | None:
+    return (_darwin_sysctl_process_identity(pid)
+            or _darwin_ps_process_identity(pid))
+
+
+def _process_identities_match(expected: str, observed: str) -> bool | None:
+    """Compare process identities, returning ``None`` when sources differ.
+
+    Darwin's sysctl identity has microsecond precision while the ps fallback
+    exposes a local wall-clock value with second precision.  Neither can be
+    losslessly converted to the other, so a source transition is unknown
+    rather than evidence that a live PID was reused.
+    """
+    sources = {
+        "darwin:": "sysctl",
+        "darwin-ps:": "ps",
+    }
+
+    def source(value: str) -> str | None:
+        return next((name for prefix, name in sources.items()
+                     if value.startswith(prefix)), None)
+
+    expected_source = source(expected)
+    observed_source = source(observed)
+    if (expected_source is not None and observed_source is not None
+            and expected_source != observed_source):
+        return None
+    return hmac.compare_digest(expected, observed)
+
+
 def _process_identity(pid: int) -> str | None:
-    """Return a PID-reuse-resistant Linux identity when public procfs exposes one."""
+    """Return a PID-reuse-resistant identity from the current OS."""
     if _platform().is_windows:
         return None
+    if not _platform().is_linux:
+        return _darwin_process_identity(pid)
     try:
         fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").split()
         return fields[21]
@@ -487,7 +645,11 @@ def _lock_holder_is_live(path: Path) -> bool:
         return True
     current = _process_identity(pid)
     if current is not None:
-        return isinstance(identity, str) and hmac.compare_digest(current, identity)
+        if not isinstance(identity, str):
+            return False
+        matches = _process_identities_match(identity, current)
+        if matches is not None:
+            return matches
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -1479,6 +1641,7 @@ class CodexHostClient:
         home: Path,
         *,
         app_server_command: Sequence[str] | None = None,
+        schema_command: Sequence[str] | None = None,
         env: Mapping[str, str] | None = None,
         ready_timeout: float = 10.0,
         idle_timeout: float = 0.0,
@@ -1493,6 +1656,11 @@ class CodexHostClient:
                 and (not existing._metadata_stale() or existing._owner_live())):
             raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
 
+        child_env = dict(os.environ if env is None else env)
+        child_env.pop("CLAUDE_CODE_SESSION_ID", None)
+        schema_command_argv = list(
+            ["codex"] if schema_command is None else schema_command)
+
         with _host_lock(state_dir / "codex-host.lock", ready_timeout):
             _validate_fixed_paths(state_dir)
             existing = cls._existing(home)
@@ -1501,6 +1669,8 @@ class CodexHostClient:
             if (existing is not None
                     and (not existing._metadata_stale() or existing._owner_live())):
                 raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
+            schema_manifest = _reviewed_schema_manifest(
+                schema_command_argv, env=child_env, cwd=home)
             key_path = state_dir / "host.key"
             if key_path.exists():
                 _read_key(key_path)
@@ -1525,12 +1695,10 @@ class CodexHostClient:
                 "--endpoint", endpoint,
                 "--transport", family,
                 "--app-server-command-json", json.dumps(command),
-                "--schema-manifest", str(SCHEMA_MANIFEST),
-                "--schema-command-json", json.dumps(["codex"]),
+                "--schema-manifest", str(schema_manifest),
+                "--schema-command-json", json.dumps(schema_command_argv),
                 "--idle-timeout", str(idle_timeout),
             ]
-            child_env = dict(os.environ if env is None else env)
-            child_env.pop("CLAUDE_CODE_SESSION_ID", None)
             popen_args: dict[str, Any] = {
                 "cwd": str(home),
                 "env": child_env,
@@ -1567,7 +1735,6 @@ class CodexHostClient:
             if key_path.exists() or key_path.is_symlink():
                 _read_key(key_path)
             return None
-        manifest = json.loads(SCHEMA_MANIFEST.read_text(encoding="utf-8"))
         endpoint, transport = _endpoint_for(home, state_dir)
         required = {
             "schema", "home", "generation", "endpoint", "transport", "ready",
@@ -1579,6 +1746,17 @@ class CodexHostClient:
         }
         if not required.issubset(metadata) or metadata.get("home") != str(home):
             raise UnsafeHostState("Codex host metadata has wrong home or missing fields")
+        version = metadata.get("codex_version")
+        schema_manifest = (REVIEWED_SCHEMA_MANIFESTS.get(version)
+                           if isinstance(version, str) else None)
+        if schema_manifest is None:
+            raise UnsafeHostState(
+                "Codex host metadata names an unreviewed Codex version")
+        try:
+            manifest = json.loads(schema_manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise UnsafeHostState(
+                "reviewed Codex schema manifest is unreadable") from exc
         try:
             generation = uuid.UUID(metadata["generation"])
         except (ValueError, TypeError, AttributeError) as exc:
@@ -1625,7 +1803,9 @@ class CodexHostClient:
     def _owner_live(self) -> bool:
         current = _process_identity(self._pid)
         if current is not None:
-            return hmac.compare_digest(current, self._process_identity)
+            matches = _process_identities_match(self._process_identity, current)
+            if matches is not None:
+                return matches
         try:
             os.kill(self._pid, 0)
         except ProcessLookupError:
