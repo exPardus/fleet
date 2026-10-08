@@ -342,20 +342,44 @@ def _step_move(home, name, v: Verdict, prims: Prims):
     raw, problem = read_mail(src)
     if problem is not None or hashlib.sha256(raw).hexdigest() != v.sha:
         raise _Changed(name)
-    dest = done_dir(home) / name
-    done_dir(home).mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        old, _ = read_mail(dest)
-        if old is None or hashlib.sha256(old).hexdigest() != v.sha:
-            stem, suffix = os.path.splitext(name)
-            dest = done_dir(home) / f"{stem}.{v.sha[:12]}{suffix}"
+    target_dir = done_dir(home)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stem, suffix = os.path.splitext(name)
+    collision = False
+    attempt = 0
+    while True:
+        if attempt == 0:
+            dest = target_dir / name
+        elif attempt == 1:
+            dest = target_dir / f"{stem}.{v.sha[:12]}{suffix}"
+        else:
+            dest = target_dir / f"{stem}.{v.sha[:12]}.{attempt - 1}{suffix}"
+
+        try:
+            os.link(src, dest)
+        except FileExistsError:
+            old, _ = read_mail(dest)
+            if old is not None and hashlib.sha256(old).hexdigest() == v.sha:
+                try:
+                    os.unlink(src)
+                except FileNotFoundError:
+                    pass
+                return
+            collision = True
+            attempt += 1
+            continue
+        except FileNotFoundError:
+            return
+
+        if collision:
             prims.append(log_path(home), (
                 f"{prims.now()} mailman done-collision {clean_name(name)} -> "
                 f"{clean_name(dest.name)}\n").encode("utf-8", "replace"))
-    try:
-        prims.replace(str(src), str(dest))
-    except FileNotFoundError:
-        pass
+        try:
+            os.unlink(src)
+        except FileNotFoundError:
+            pass
+        return
 
 
 class _Changed(Exception):

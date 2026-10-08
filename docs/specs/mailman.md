@@ -218,7 +218,9 @@ For a FILED mail `N` (name) with `sha12` = first 12 hex of sha256:
 2. **Relay log line**, appended to `interface_log_path(home)` (the same log `relay-ack` writes):
    `<ts> mailman filed <N> (<from>/<kind>): <summary> [mailman:<sha12>]`
 3. **Watch cursor** gains `N` (same cursor `relay-ack` updates), so `fleet watch` stops reporting it.
-4. **Move** `mailbox/to-fleet/N` → `mailbox/done/N` by `os.replace`. This is the commit point.
+4. **Move** `mailbox/to-fleet/N` → `mailbox/done/N` with an exclusive hard link followed by
+   unlinking the inbox copy. This is the commit point; the exclusive create prevents a concurrent
+   run from overwriting an existing destination.
 
 `summary` = first non-empty body line, control characters removed, whitespace collapsed, truncated to
 `summary_max`; if the body is empty, `(no body)`. `from` and `kind` are reduced to
@@ -226,7 +228,7 @@ For a FILED mail `N` (name) with `sha12` = first 12 hex of sha256:
 treat them as instructions.
 
 **Shared primitives, not a shared function.** Mailman uses the same log file, watch cursor,
-`_atomic_append_bytes`, `_write_json_atomic` and `_replace_with_retry` as `relay-ack` (injected into
+`_atomic_append_bytes` and `_write_json_atomic` as `relay-ack` (injected into
 `bin/fleet_mailman.py` through `fleet._mailman_prims`), but does not call `cmd_relay_ack`: that verb
 refuses an existing `done/<name>` and is not idempotent, and changing it is out of scope.
 `relay-ack` is untouched; the interface still uses it to acknowledge wake mails.
@@ -241,17 +243,18 @@ or in `done/` (complete); there is no state in which the mail exists nowhere.
   present. Step 3 is naturally idempotent (the cursor is a set by name). Re-running after a crash
   between any two steps therefore completes the remaining ones without duplicating the earlier ones.
 - **Done-collision.** If `done/N` already exists: identical sha256 ⇒ the earlier run finished the move
-  and crashed before returning; `os.replace` over it is lossless. Different sha256 ⇒ never overwrite:
-  the incoming file moves to `done/<stem>.<sha12><suffix>` and a log line records the rename.
+  and crashed before returning; the inbox copy is removed without replacing the completed destination.
+  Different sha256 ⇒ never overwrite: the incoming file moves to the first free name in
+  `done/<stem>.<sha12><suffix>`, `done/<stem>.<sha12>.1<suffix>`, … and a log line records the rename.
 - **Appends vs rewrites.** `digest.md` and the log are append-only (`_atomic_append_bytes`, one
   syscall; a torn tail is at worst one marker-less line, which the reader ignores). The state file
   (§6.4) and the cursor are whole-file rewrites through `_write_json_atomic` (write temp, then rename).
-  The move is `os.replace`. Nothing is truncated in place.
+  The move is an exclusive link plus unlink. Nothing is truncated in place.
 - **Re-check before move.** Immediately before step 4, re-read the file and compare sha256 with the
   classified one; a mismatch (the mail changed under us) aborts that mail's filing and leaves it for
   the next pass. A mail that classified WAKE is never passed to step 1–4 at all (§6.5).
 - **Lock-free.** Mailman takes no `fleet.lock` (like `relay-ack` and `watch`). Two concurrent runs are
-  safe: the second `os.replace` finds the source gone (`FileNotFoundError`) and treats it as filed;
+  safe: the second exclusive link finds the source gone (`FileNotFoundError`) and treats it as filed;
   the worst case is one duplicate digest line, which `digest` collapses by marker.
 
 ### 6.4 State: "already reported" wake mails

@@ -162,6 +162,23 @@ def test_done_collision_never_overwrites(home, capsys):
     assert (home / "mailbox" / "done" / other).read_text() == text
 
 
+def test_done_collision_skips_an_occupied_suffixed_name(home, capsys):
+    seed(home)
+    done_dir = home / "mailbox" / "done"
+    done_dir.mkdir(parents=True)
+    text = mail()
+    sha12 = hashlib.sha256(text.encode()).hexdigest()[:12]
+    (done_dir / "a.md").write_text("OLD BASE")
+    (done_dir / f"a.{sha12}.md").write_text("OLD SUFFIX")
+    put(home, "a.md", text)
+
+    run(home, capsys)
+
+    assert (done_dir / "a.md").read_text() == "OLD BASE"
+    assert (done_dir / f"a.{sha12}.md").read_text() == "OLD SUFFIX"
+    assert (done_dir / f"a.{sha12}.1.md").read_text() == text
+
+
 def test_changed_mail_not_filed(home, monkeypatch):
     seed(home)
     p = put(home, "a.md", mail())
