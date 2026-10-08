@@ -1544,8 +1544,9 @@ audience boundary for this path. Binding from 2026-10-08:
   the same incarnation.
 - No string fleet prints carries an identity placeholder token (`<value>`, `<nonce>`, `<sid>`,
   `<inc>`, ...). A holder recipe ends at a bare `--nonce`, which argparse refuses verbatim with no
-  state change, and adjacent prose names the holder body's own boot output as the credential
-  source. It never embeds a presented or freshly minted generation. `tests/test_no_placeholder.py`
+  state change, and adjacent prose names the holder body's most recent `NONCE:` output as the
+  credential source (promotion can make the boot generation stale). It never embeds a presented or
+  freshly minted generation. `tests/test_no_placeholder.py`
   scans every printed string and every verb's help and exercises refusal stderr and exceptions for
   credential leakage; the handoff seam also pins stdout.
 - A placeholder-looking `--nonce` or `--handoff-token` (empty, whitespace-only, anything with

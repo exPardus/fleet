@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11925) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12927) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16386) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11919) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12921) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16380) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3738) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4435) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13177) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16259) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4433) -- expose that distinction to views.
+      * `_doctor_check_registry` (:13171) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16253) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7108) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18040) -- render the release explanation.
+      * `_print_snapshot_table` (:7106) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:18034) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1192,7 +1192,7 @@ a whole one must not fail at all."""
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
                        spawned_by=None, dispatch_kind=None, category=None,
-                       spawned_by_lineage=None, substrate=None, branch=None) -> dict:
+                       spawned_by_lineage=None, substrate=None, branch=None):
     """Build a SPEC §4 worker record.
     Persist launch budgets and settings sources so every subsequent dispatch uses
     the same policy. Nullable additive fields preserve compatibility on reads.
@@ -3720,7 +3720,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16386`), because legacy upgrades also require a complete registry.
+    (`:16380`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -10264,7 +10264,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10182` / `cmd_respawn:9473`, before
+    # resolution that runs from `cmd_kill:10179` / `cmd_respawn:9470`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10295,9 +10295,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10170` / `cmd_respawn:9461`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10179` / `cmd_respawn:9470`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9482-9491` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9491-9493` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15273,10 +15273,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
-    :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    :3745, :3825, :4830, :10282, :10445, :10709, :10936, :10972, :11214, :11215,
+    :11304, :11314, :11325, :11423, :11945, :15224, :19138, :19139, :19243, :19304, :20733, :23163`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
+    OWN prior sid alone: :8760, :9344, :13505, :21660. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15632,7 +15632,7 @@ def _select_boot_journal_inline_indices(tail: list) -> set:
 
 
 def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
-                        caller_sid=None, run=subprocess.run) -> str:
+                        caller_sid=None, run=subprocess.run):
     """Render GOALS, journal tail, knowledge index, roster and fleet status.
     Registry verdicts come from status_snapshot.
     """
@@ -15996,8 +15996,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8751, :9335, :13495,
-    # :21639) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8760, :9344, :13505,
+    # :21660) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -16005,7 +16005,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15188`).
+        # names this gate as its reason (`:15198`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16373,7 +16373,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11906`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11916`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19072,8 +19072,8 @@ def cmd_sup_status(args) -> int:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry['successor_inc']}")
         recipe = (f"abort with `fleet sup-handoff-abort {handle} --nonce` followed "
-                  f"by the generation printed by that holder body's own `sup-boot` "
-                  f"output (it is not repeated here)")
+                  f"by the generation from that holder body's most recent "
+                  f"`NONCE:` output (not necessarily `sup-boot`; it is not repeated here)")
         if entry.get("state") == HANDOFF_JOINING and not entry.get("successor_sid"):
             try:
                 minted = _parse_iso(entry.get("minted_at"))
@@ -19083,15 +19083,17 @@ def cmd_sup_status(args) -> int:
                 recipe = (f"NOT retirable by age -- its minted_at "
                           f"({entry.get('minted_at')!r}) cannot be read, so it will "
                           f"never age out: `fleet sup-handoff-abort {handle} --force "
-                          f"--nonce` followed by the generation printed by that "
-                          f"holder body's own `sup-boot` output")
+                          f"--nonce` followed by the generation from that holder "
+                          f"body's most recent `NONCE:` output (not necessarily "
+                          f"`sup-boot`; it is not repeated here)")
             else:
                 when = (minted + timedelta(
                     seconds=SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS)
                         ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 recipe = (f"still joining -- retirable at {when}, then `fleet "
                           f"sup-handoff-abort {handle} --nonce` followed by the "
-                          f"generation printed by that holder body's own `sup-boot` output"
+                          f"generation from that holder body's most recent `NONCE:` "
+                          f"output (not necessarily `sup-boot`; it is not repeated here)"
                           + " (before that the abort is refused: a join in progress "
                           "is not a dead successor)")
         print(f"pending successor: {entry.get('successor_inc')} [{entry.get('state')}]"
@@ -21567,7 +21569,8 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
           f"  fleet sup-handoff-complete --expect-inc {successor_inc} "
           f"--expect-sid {successor_sid} --nonce followed by the generation from "
-          f"that holder body's own `sup-boot` output (it is not repeated here)\n"
+          f"that holder body's most recent `NONCE:` output (not necessarily "
+          f"`sup-boot`; it is not repeated here)\n"
           f"On timeout/failure, end this turn. Once the holder row is idle, run exactly:\n"
           f"  {_wake_cmd()}\n"
           f"That wakes the same incarnation. The nonce comes from the woken body's "
@@ -23177,18 +23180,16 @@ def _last_assistant_uuid(name: str, sid) -> str | None:
     return newest
 
 
-def _lane_done_turn_key(name: str, rec: dict) -> list:
+def _lane_done_turn_key(name, rec):
     sid = rec.get("session_id") or rec.get("codex_thread_id")
     key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
     tail = None if _is_codex_record(rec) else _last_assistant_uuid(name, sid)
     return key + [tail] if tail else key
 
 
-def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
-                     expected_mcx_id: str | None = None,
-                     expected_status: str | None = None,
-                     expected_last_dispatch_at: str | None = None,
-                     run=subprocess.run, sleep=time.sleep) -> bool:
+def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
+                     expected_status=None, expected_last_dispatch_at=None,
+                     run=subprocess.run, sleep=time.sleep):
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
     if _is_supervisor_shaped(name):
@@ -23281,7 +23282,7 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
 
 def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
                       expected_status=None, expected_last_dispatch_at=None,
-                      delivered: bool) -> None:
+                      delivered):
     with fleet_lock():
         data = read_registry_no_repair()
         current = data["workers"].get(name)
