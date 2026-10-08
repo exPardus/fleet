@@ -15262,9 +15262,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
-    :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
-    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20723, :22873`).
+    sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
+    :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
+    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23062`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -21745,14 +21745,6 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
     return 0
 
 
-def _is_transferred_successor(claim, successor_inc):
-    return (isinstance(claim, dict)
-            and claim.get("claimed_via") == "handoff"
-            and claim.get("incarnation_id") == successor_inc
-            and isinstance(claim.get("session_id"), str)
-            and bool(claim.get("session_id")))
-
-
 def _scoped_abort_locked(
         successor_inc, successor_sid, proof_snap,
         token, holder):
@@ -21766,7 +21758,11 @@ def _scoped_abort_locked(
             "automatic successor-scoped abort lacks the original "
             "incarnation/token proof")
     current = read_incarnation()
-    if _is_transferred_successor(current, successor_inc):
+    if (isinstance(current, dict)
+            and current.get("claimed_via") == "handoff"
+            and current.get("incarnation_id") == successor_inc
+            and isinstance(current.get("session_id"), str)
+            and bool(current.get("session_id"))):
         return None
     hs = read_handshake()
     target_sid = successor_sid
@@ -21797,7 +21793,11 @@ def _scoped_abort_locked(
 def _finish_successor_scoped_abort(target_sid, inc, *, run, which):
     with fleet_lock():
         current = read_incarnation()
-        if (_is_transferred_successor(current, inc)
+        if (isinstance(current, dict)
+                and current.get("claimed_via") == "handoff"
+                and current.get("incarnation_id") == inc
+                and isinstance(current.get("session_id"), str)
+                and bool(current.get("session_id"))
                 or (isinstance(current, dict)
                     and current.get("session_id") == target_sid)):
             print(f"automatic abort skipped: successor {inc} now holds the "
@@ -21827,7 +21827,11 @@ def _auto_handoff_abort(*, caller, nonce, successor_sid,
     try:
         with fleet_lock():
             current = read_incarnation()
-            if _is_transferred_successor(current, successor_inc):
+            if (isinstance(current, dict)
+                    and current.get("claimed_via") == "handoff"
+                    and current.get("incarnation_id") == successor_inc
+                    and isinstance(current.get("session_id"), str)
+                    and bool(current.get("session_id"))):
                 transfer_won = True
             elif current == cas_snap:
                 ordinary_plan = _prepare_sup_handoff_abort_locked(
