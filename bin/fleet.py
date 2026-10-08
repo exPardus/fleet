@@ -8235,7 +8235,7 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
         else:
             wake_nonce = _mint_wake_nonce(claim)
             write_incarnation(claim)
-            pending_handles = _handoff_abort_handles(claim)
+            pending_handles = _abort_handles(claim)
     if claim_changed:
         _rollback_pre_claim()
         raise FleetCliError(
@@ -15277,7 +15277,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10282, :10445, :10709, :10938, :10974, :11216, :11217,
-    :11306, :11316, :11327, :11425, :11948, :15227, :19135, :19136, :19240, :19301, :20725, :22854`).
+    :11306, :11316, :11327, :11425, :11948, :15227, :19135, :19136, :19240, :19301, :20725, :22837`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8760, :9344, :13508, :21463. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -15715,7 +15715,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     path (morning / post-reboot / post-handoff, spec §4). Epoch check runs
     BEFORE the claim decision; the roster subprocess runs OUTSIDE fleet_lock
     (F4 doctrine: never hold the lock across a subprocess)."""
-    _refuse_placeholder_minted_values(args)
+    _refuse_placeholders(args)
     caller_sid = getattr(args, "sid", None) or current_caller_session()
     if not caller_sid:
         raise FleetCliError("sup-boot: caller session unknown -- run from a Claude "
@@ -15964,7 +15964,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     frame must carry the exemption. Send to the current claim holder has its
     own identity-checked mailbox carve-out below. Validation never rotates a nonce.
     """
-    _refuse_placeholder_value("--nonce", nonce)
+    _refuse_placeholders(nonce=nonce)
     caller = current_caller_session()
     if caller is None:
         return
@@ -16314,7 +16314,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # Resolve caller identity once, including --sid, for role and continuity checks.
     # SPEC.md:281 makes refused the doctor alarm kind, so role classification must
     # use the same caller whose continuity is being tested.
-    _refuse_placeholder_value("--nonce", nonce)
+    _refuse_placeholders(nonce=nonce)
     caller = sid_override or current_caller_session()
     if not caller:
         raise FleetCliError("caller session unknown -- pass --sid or run from a Claude session")
@@ -22528,17 +22528,7 @@ def _wake_incarnation(name: str, old_sid: str) -> str:
     return incarnation_id
 
 
-_PLACEHOLDER_WORDS = frozenset({
-    "value", "nonce", "your-nonce", "current-nonce", "nonce-value", "the-nonce",
-    "my-nonce", "token", "handoff-token", "generation", "current-generation",
-})
-
-SUPERVISOR_RECOVERY_WAKE_MESSAGE = (
-    "Continuity recovery: resume this incarnation and abort every pending "
-    "handoff successor before any other supervisor verb.")
-
-
-def _minted_value_is_placeholder(value) -> bool:
+def _is_placeholder(value):
     """True for template text; minted url-safe base64 never contains <>."""
     if not isinstance(value, str):
         return False
@@ -22546,18 +22536,21 @@ def _minted_value_is_placeholder(value) -> bool:
     if not text or "<" in text or ">" in text:
         return True
     bare = text.strip("{}[]()$'\"` ").lower().replace("_", "-").replace(" ", "-")
-    return bare in _PLACEHOLDER_WORDS
+    return bare in ("value", "nonce", "your-nonce", "current-nonce", "nonce-value",
+                    "the-nonce", "my-nonce", "token", "handoff-token", "generation",
+                    "current-generation")
 
 
-def _supervisor_wake_command() -> str:
+def _supervisor_wake_command():
     py = Path(sys.executable).as_posix()
     fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
     home = Path(FLEET_HOME).as_posix()
     return (f'"{py}" "{fleet_py}" --fleet-home "{home}" send supervisor '
-            f'"{SUPERVISOR_RECOVERY_WAKE_MESSAGE}"')
+            f'"Continuity recovery: resume this incarnation and abort every '
+            f'pending handoff successor before any other supervisor verb."')
 
 
-def _handoff_abort_handles(claim) -> list:
+def _abort_handles(claim):
     handles = []
     for entry in handoff_pending_entries(claim):
         sid = entry.get("successor_sid")
@@ -22566,26 +22559,17 @@ def _handoff_abort_handles(claim) -> list:
     return handles
 
 
-def _claim_holder_row(claim):
-    try:
-        records = _registry_records_or_none()
-        workers = records.get("workers") if isinstance(records, dict) else None
-        if isinstance(workers, dict):
-            for name, rec in workers.items():
-                if _record_is_supervisor_claim_holder(rec, claim=claim) is True:
-                    return name, rec.get("status")
-    except Exception:
-        pass
-    return None, None
-
-
-def _continuity_recovery_steps(claim) -> str:
+def _continuity_recovery_steps(claim):
     """Exact recovery steps: founder override of claim-nonce §5.7, 2026-10-08."""
     try:
         inc = claim.get("incarnation_id", "?") if isinstance(claim, dict) else "?"
-        name, status = _claim_holder_row(claim)
-        row = (f"the holder row {name} (status now: {status})" if name
-               else "the holder row (`fleet status` lists it)")
+        row = "the holder row (`fleet status` lists it)"
+        records = _registry_records_or_none()
+        workers = records.get("workers") if isinstance(records, dict) else None
+        for name, rec in (workers.items() if isinstance(workers, dict) else ()):
+            if _record_is_supervisor_claim_holder(rec, claim=claim) is True:
+                row = f"the holder row {name} (status now: {rec.get('status')})"
+                break
         lines = [
             "",
             "RECOVERY (claim-nonce §5.7 founder override, 2026-10-08):",
@@ -22595,7 +22579,7 @@ def _continuity_recovery_steps(claim) -> str:
             f"   This wakes the same incarnation {inc} on a fresh session with a "
             f"fresh nonce. A busy holder only queues the mail: wait for idle.",
         ]
-        handles = _handoff_abort_handles(claim)
+        handles = _abort_handles(claim)
         if handles:
             lines.append("3. With that fresh nonce, the woken body's bootstrap aborts "
                          "each pending successor by its exact handle:")
@@ -22606,7 +22590,7 @@ def _continuity_recovery_steps(claim) -> str:
 
 
 def _recipe_generation(nonce, notices=()):
-    if isinstance(nonce, str) and nonce and not _minted_value_is_placeholder(nonce):
+    if isinstance(nonce, str) and nonce and not _is_placeholder(nonce):
         return nonce
     for line in notices or ():
         if isinstance(line, str) and line.startswith("NONCE: "):
@@ -22616,7 +22600,7 @@ def _recipe_generation(nonce, notices=()):
     return None
 
 
-def _holder_recipe(tail, nonce=None, quote=True) -> str:
+def _holder_recipe(tail, nonce=None, quote=True):
     """Exact recipe; unknown generation ends at a bare --nonce argparse refuses."""
     q = "`" if quote else ""
     if nonce:
@@ -22625,35 +22609,34 @@ def _holder_recipe(tail, nonce=None, quote=True) -> str:
             f"generation (the value after its last `NONCE:` line)")
 
 
-def _refuse_placeholder_minted_values(args) -> None:
-    for flag, attr in (("--nonce", "nonce"), ("--handoff-token", "handoff_token")):
-        _refuse_placeholder_value(flag, getattr(args, attr, None))
-
-
-def _refuse_placeholder_value(flag, value) -> None:
-    if value is None or not _minted_value_is_placeholder(value):
-        return
-    shown = repr(value if len(value) <= 40 else value[:40] + "...")
-    if flag == "--nonce":
-        recovery = (
-            "Present the exact value printed after `NONCE:` by your last "
-            "sup-* verb, sup-boot or wake bootstrap. If that value is lost, "
-            "do not guess and do not retry:\n"
-            "1. End this turn now; run no further supervisor verbs.\n"
-            "2. Once the holder row is idle, the Interface or operator runs "
-            f"exactly:\n   {_supervisor_wake_command()}\n"
-            "   This wakes the same incarnation with a fresh nonce; its "
-            "bootstrap aborts every pending handoff successor by exact "
-            "handle before any other work.")
-    else:
-        recovery = (
-            "Present the exact token from your successor task file. If it is "
-            "lost, end this turn: the holder aborts this attempt with "
-            "sup-handoff-abort and begins a new one.")
-    raise FleetCliError(
-        f"{flag} {shown} is a placeholder, not a minted value -- refused "
-        f"before any state change (nothing written, logged or rotated). "
-        f"{recovery}")
+def _refuse_placeholders(args=None, nonce=None):
+    pairs = ((("--nonce", getattr(args, "nonce", None)),
+              ("--handoff-token", getattr(args, "handoff_token", None)))
+             if args is not None else (("--nonce", nonce),))
+    for flag, value in pairs:
+        if value is None or not _is_placeholder(value):
+            continue
+        shown = repr(value if len(value) <= 40 else value[:40] + "...")
+        if flag == "--nonce":
+            recovery = (
+                "Present the exact value printed after `NONCE:` by your last "
+                "sup-* verb, sup-boot or wake bootstrap. If that value is lost, "
+                "do not guess and do not retry:\n"
+                "1. End this turn now; run no further supervisor verbs.\n"
+                "2. Once the holder row is idle, the Interface or operator runs "
+                f"exactly:\n   {_supervisor_wake_command()}\n"
+                "   This wakes the same incarnation with a fresh nonce; its "
+                "bootstrap aborts every pending handoff successor by exact "
+                "handle before any other work.")
+        else:
+            recovery = (
+                "Present the exact token from your successor task file. If it is "
+                "lost, end this turn: the holder aborts this attempt with "
+                "sup-handoff-abort and begins a new one.")
+        raise FleetCliError(
+            f"{flag} {shown} is a placeholder, not a minted value -- refused "
+            f"before any state change (nothing written, logged or rotated). "
+            f"{recovery}")
 
 
 def main(argv=None) -> int:
@@ -22692,7 +22675,7 @@ def main(argv=None) -> int:
         # machine-list entry and invokes the destructive tier.
         if (args.command == "init" and args.home is None
                 and home_flag is None and not args.statusline):
-            _refuse_placeholder_minted_values(args)
+            _refuse_placeholders(args)
             return cmd_init(args, create_in=Path.cwd())
         if args.command == "watch":
             if home_flag:
@@ -22704,7 +22687,7 @@ def main(argv=None) -> int:
         terminus_rc = apply_resolved_home(args, flag=home_flag)
         if terminus_rc is not None:
             return terminus_rc
-        _refuse_placeholder_minted_values(args)
+        _refuse_placeholders(args)
         if args.command == "home":
             return cmd_home(args)
         if args.command == "knowledge":

@@ -174,7 +174,7 @@ class TestPlaceholderNonceIsRefusedBeforeAnyStateChange:
 
     def test_a_real_minted_value_is_never_mistaken_for_one(self):
         for _ in range(200):
-            assert not fleet._minted_value_is_placeholder(fleet.mint_nonce())
+            assert not fleet._is_placeholder(fleet.mint_nonce())
 
     def test_the_real_generation_still_passes(self, held, capsys):
         _home, live = held
@@ -192,7 +192,7 @@ class TestContinuityRefusalNamesTheRecovery:
         assert "escalate" in err
         assert "status now: idle" in err
         assert (f'--fleet-home "{home.as_posix()}" send supervisor '
-                f'"{fleet.SUPERVISOR_RECOVERY_WAKE_MESSAGE}"') in err
+                '"Continuity recovery: ') in err
         assert "sup-handoff-abort --successor-sid sid-succ-exact" in err
         assert "2026-10-08" in err
         assert not _offending_tokens(err)
