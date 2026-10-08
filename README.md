@@ -39,8 +39,8 @@ For the full picture, read [docs/concepts.md](docs/concepts.md).
 - **Linux or macOS**, or Windows through Git Bash (see [Windows](docs/getting-started.md#windows)).
 - **Python 3.10 or newer** on `PATH`. Fleet's `bin/fleet.py` uses only the standard
   library, so there is nothing to `pip install`.
-- **Claude Code CLI 2.1.202 or newer**, logged in. Fleet starts every session through `claude`.
-- **Optional:** the Codex CLI, for Codex workers. [mcx](https://github.com/acme/multi-codex)
+- **Claude Code CLI 2.1.202 or newer**, logged in. Fleet starts Claude workers and supervisors through `claude`. Native Codex lanes do not use `claude`; they talk to the Codex app-server through a fleet host process.
+- **Optional:** the Codex CLI, for Codex workers. [mcx](https://github.com/exPardus/multi-codex)
   is needed only for the legacy `--codex-adapter mcx` route. **tmux** and
   **systemd** are needed only for the unattended keeper.
 
@@ -49,7 +49,7 @@ For the full picture, read [docs/concepts.md](docs/concepts.md).
 Clone the repository and put its `bin/` directory on your `PATH`:
 
 ```sh
-git clone https://github.com/acme/fleet.git
+git clone https://github.com/exPardus/fleet.git
 cd fleet
 export PATH="$PWD/bin:$PATH"      # add this line to your shell rc to keep it
 fleet --help

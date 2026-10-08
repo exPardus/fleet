@@ -1,11 +1,17 @@
 # Troubleshooting
 
-Start with the two read-only checks. They change nothing:
+Start with two checks:
 
 ```sh
 fleet doctor          # health: registry, claude on PATH, hooks, settings freshness
 fleet status          # every worker: state, turns, pending mail
 ```
+
+Neither is a pure view. `fleet status` and `fleet doctor` are authoritative: they
+can update registry verdicts such as `dead-suspected` while they run. The
+statusline and the `/fleet:*` views do not do that. They read a status snapshot
+(`fleet.status_snapshot()`), take no lock, and write nothing. Use the verbs above
+when you need a verdict to be recorded.
 
 For the supervisor, add `fleet sup-status` and `fleet sup-guard`. The operating
 rules behind each recovery step are in [skills/fleet/SKILL.md](../skills/fleet/SKILL.md)
@@ -43,9 +49,9 @@ do not guess it and do not spawn a second body.
 Fleet wakes the same supervisor incarnation in a fresh body with a new nonce. Its
 bootstrap then aborts any pending handoff successor before it does campaign work.
 
-If the supervisor is still busy, `send` only queues the message. The message is not
-read until the body finishes its turn. Do not spawn a replacement while the busy
-body is alive.
+If the supervisor is still busy, `send` queues the message. The busy body receives
+it at its next tool boundary, inside the running turn; it does not wait for the turn
+to end. Do not spawn a replacement while the busy body is alive.
 
 A verb that gets no nonce is refused with a message about a second body. That
 refusal is the guard working. It is not a fault in the fleet.

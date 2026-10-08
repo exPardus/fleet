@@ -6,10 +6,15 @@ Fleet has one supported line: the `main` branch of this repository. Fixes land t
 
 ## Reporting a vulnerability
 
-Report security problems privately. Use GitHub's private vulnerability reporting
-for this repository. Do not open a public issue for a vulnerability.
+Private vulnerability reporting is not enabled on this repository. Do not put
+vulnerability details in a public issue. Instead:
 
-Include:
+1. Open a public issue titled `Security contact request`. Say only that you have a
+   security report and need a private channel. Do not include exploit details,
+   reproduction steps, or secrets.
+2. A maintainer replies on that issue with a private channel. Send the report there.
+
+Include in the private report:
 
 - the fleet command or hook involved, and the version or commit;
 - the steps that reproduce the problem;
