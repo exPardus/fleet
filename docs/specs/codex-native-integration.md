@@ -367,17 +367,24 @@ wrong-effective-settings, or conflicting observations become
 
 ### 8.2 State, send, and wake
 
-**Implemented 2026-10-04:** ordinary native worker `status` and `wait` validate
-the exact recorded thread, newest recorded turn, canonical cwd, and host
-generation through the existing exact-home host. They also read the bounded
-public-evidence file for the exact bound thread and turn: a durable
+**Implemented 2026-10-04, bounded 2026-10-08:** ordinary native worker `status`
+and `wait` validate the exact recorded thread, newest recorded turn, canonical
+cwd, and host generation through the existing exact-home host. The observation
+uses a metadata-only `thread/read(includeTurns=false)` followed by exactly one
+descending `thread/turns/list` row with `itemsView=notLoaded`. Hydrated
+`thread/read` is forbidden on this path: its response grows with the rollout,
+and a healthy multi-megabyte turn can exceed the authenticated host's 1 MiB IPC
+frame. They also read the bounded public-evidence file for the exact bound
+thread and turn: a durable
 `completed` event yields `idle` after `notLoaded` or `systemError` only when
 the validated live read finds that same exact newest turn and also reports it
 `completed`. In-progress, failed, interrupted, missing, or conflicting live
 turn evidence stays non-idle. An unresolved mutation prevents an older
 completion from vouching for unknown provider work. Host loss, a failed live
-read, malformed evidence, or conflicting identity maps to
-`dead-suspected`, never to a proved death. File-only views remain file-only.
+identity, or conflicting turn maps to `dead-suspected`, never to a proved
+death. A lost read response from an already joined, live same-generation host
+is not evidence that its thread died; reconciliation preserves the committed
+verdict and retries on a later observation. File-only views remain file-only.
 `fleet doctor --repair` backfills rows that were already committed
 `dead-suspected` before this completion rule shipped. It requires the same
 exact bound thread/turn in durable evidence and a validated live `thread/read`,
@@ -400,9 +407,15 @@ keeps that reservation and retained mail instead of retrying.
 | exact newest turn is `completed` in both durable evidence and validated live read | `idle`, including after live-view eviction |
 | `notLoaded` with missing or disagreeing completion evidence | `dead-suspected`; explicit recovery is required, never inferred death |
 | `systemError` with missing or disagreeing completion evidence | `dead-suspected`/PAGE |
-| host loss, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
+| host absent, replaced generation, dead host PID, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
+| read response lost from a live same-generation host | preserve the committed verdict; retry later |
 | limit error + authoritative future reset | `limited` |
 | limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
+
+The worker `result` view treats exact-turn public evidence that has item/usage
+updates but no terminal `turn_status` as a running turn, not malformed durable
+state. Success still requires terminal `completed`, full bounded result text,
+and complete usage.
 
 Send to a matching active steerable turn calls
 `turn/steer(expectedTurnId=codex_turn_id)`. Active mismatch or

@@ -300,12 +300,19 @@ Rows with
 verb by that durable discriminator; they never fall through to mcx. Ordinary
 `status`/`wait` validate the exact provider-minted thread and newest bound turn
 through the existing exact-home host and reconcile that observation with the
-bounded exact-turn public-evidence file. Durable `completed` evidence for the
-current bound turn yields `idle` after `notLoaded` or `systemError` only when
-the validated live read also reports that exact newest turn as `completed`.
+bounded exact-turn public-evidence file. The live read is bounded at the
+provider: metadata-only `thread/read(includeTurns=false)`, followed by
+`thread/turns/list(limit=1, sortDirection=desc, itemsView=notLoaded)`. It never
+hydrates a rollout-sized turn into the host's 1 MiB IPC response. Durable
+`completed` evidence for the current bound turn yields `idle` after `notLoaded`
+or `systemError` only when the bounded live read also reports that exact newest
+turn as `completed`.
 An in-progress, failed, interrupted, missing, or conflicting live turn remains
 non-idle; an unresolved mutation never lets older completion evidence vouch
-for unknown provider work, and a failed live read remains uncertain.
+for unknown provider work. A missing host, replaced generation, dead host PID,
+or conflicting public identity is positive `dead-suspected` evidence; a lost
+response from a joined, live same-generation host preserves the last committed
+verdict for a later observation instead of guessing that the turn died.
 `doctor --repair` applies that same two-witness rule to `dead-suspected` rows
 committed before the rule shipped. It snapshots only unarchived native worker
 rows under `fleet.lock`, probes unlocked, and changes only rows whose complete
@@ -313,9 +320,10 @@ registry value still equals the snapshot; a concurrent terminal or resume
 write wins without being overwritten. Bare `doctor` performs no such probe or
 write.
 Stale/file-only views remain probe-free. `peek` and `result` read only the
-bounded exact-turn public-evidence file; `result` requires complete durable
-item text and token usage and takes no lock, performs no RPC, and writes
-nothing. Busy `send` uses
+bounded exact-turn public-evidence file; `result` reports a partial evidence
+record with no terminal `turn_status` as still running, and requires complete
+durable item text and token usage for success. It takes no lock, performs no
+RPC, and writes nothing. Busy `send` uses
 `turn/steer` with `expectedTurnId`; idle send and `resume-limited` start one
 turn on the same thread. When a replacement host has a new generation, `send`
 and `respawn` first reserve one `thread/resume` for the exact recorded provider

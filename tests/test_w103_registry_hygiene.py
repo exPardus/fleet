@@ -172,8 +172,16 @@ class _FakeHost:
             return SimpleNamespace(result={"thread": {
                 "id": THREAD_ID, "cwd": str(Path("/tmp/lane").resolve()),
                 "status": {"type": self.provider_status, "activeFlags": []},
-                "turns": self.turns,
+                "turns": ([] if operation["payload"]["params"].get(
+                    "includeTurns") is False else self.turns),
             }}, generation=self.generation)
+        if method == "thread/turns/list":
+            turn = dict(self.turns[-1])
+            turn.update({"itemsView": "notLoaded", "items": []})
+            return SimpleNamespace(
+                result={"data": [turn], "nextCursor": None,
+                        "backwardsCursor": None},
+                generation=self.generation)
         return SimpleNamespace(result={}, generation=self.generation)
 
     def commit(self, operation_id):
@@ -213,10 +221,11 @@ class TestNativeCodexKill:
 
         assert fleet.cmd_kill(argparse.Namespace(name="cx-native", yes=True, nonce=None)) == 0
 
-        op, proof = host.calls
+        op, metadata, proof = host.calls
         assert op["payload"] == {"method": "turn/interrupt", "params": {
             "threadId": THREAD_ID, "turnId": TURN_ID}}
-        assert proof["payload"]["method"] == "thread/read"
+        assert metadata["payload"]["method"] == "thread/read"
+        assert proof["payload"]["method"] == "thread/turns/list"
         assert host.commits == [op["operation_id"]]
         assert fleet.load_registry()["workers"]["cx-native"]["status"] == "dead"
 

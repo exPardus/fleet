@@ -15,6 +15,7 @@ THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
 TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
 NEXT_THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9"
 NEXT_TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
+BOUNDED_OBSERVE_METHODS = ["thread/read", "thread/turns/list"]
 
 
 QUEUE_RECOVERY_APP_SERVER = r'''#!__PYTHON__
@@ -52,7 +53,8 @@ def public_thread(state):
 
 first = json.loads(sys.stdin.readline())
 send({"id": first["id"], "result": {
-    "serverInfo": {"name": "fake-codex", "version": "0.155.1"}}})
+    "serverInfo": {"name": "fake-codex",
+                   "version": os.environ["FAKE_QUEUE_RECOVERY_VERSION"]}}})
 if json.loads(sys.stdin.readline()) != {"method": "initialized"}:
     raise SystemExit(31)
 
@@ -107,7 +109,17 @@ for line in sys.stdin:
         send({"id": message["id"], "result": {}})
     elif method == "thread/read":
         send({"id": message["id"], "result": {
-            "thread": public_thread(state)}})
+            "thread": ({**public_thread(state), "turns": []}
+                       if params.get("includeTurns") is False
+                       else public_thread(state))}})
+    elif method == "thread/turns/list":
+        turns = state.get("turns", [])
+        turn = dict(turns[-1]) if turns else None
+        if turn is not None:
+            turn.update({"items": [], "itemsView": "notLoaded"})
+        send({"id": message["id"], "result": {
+            "data": ([turn] if turn is not None else []),
+            "nextCursor": None, "backwardsCursor": None}})
     else:
         send({"id": message["id"], "error": {
             "code": -32601, "message": "unsupported fake method"}})
@@ -198,6 +210,11 @@ class FakeClient:
                 "status": {"type": "idle", "activeFlags": []},
                 "turns": [],
             }}
+        elif method == "thread/turns/list":
+            result = {"data": [{
+                "id": TURN_ID, "status": "completed",
+                "itemsView": "notLoaded", "items": [],
+            }], "nextCursor": None, "backwardsCursor": None}
         else:
             raise AssertionError(f"unexpected public method: {method}")
         digest = "a" * 64
@@ -301,6 +318,7 @@ def test_lost_thread_start_response_freezes_preclaim_without_retry(
 
 def _queue_recovery_client(home, tmp_path, *, create_thread=True):
     import fleet_codex
+    from tools.codex_schema_fixture import generate_contract
 
     app_server = tmp_path / "queue-recovery-app-server"
     app_server.write_text(
@@ -316,9 +334,22 @@ def _queue_recovery_client(home, tmp_path, *, create_thread=True):
         "FAKE_QUEUE_RECOVERY_CREATE_THREAD": "1" if create_thread else "0",
         "FLEET_CODEX_EVENT_QUEUE_MAX": "1",
     })
-    client = fleet_codex.CodexHostClient.ensure(
-        home, app_server_command=[str(app_server)], env=env,
-        ready_timeout=20, idle_timeout=30)
+    # This test exercises queue recovery, not the product version allowlist.
+    # Give its subprocess an exact ephemeral manifest for the installed Codex
+    # so an unrelated local upgrade cannot turn the host fixture red.
+    reviewed = tmp_path / "queue-recovery-reviewed-schema"
+    manifest = generate_contract("codex", reviewed)
+    env["FAKE_QUEUE_RECOVERY_VERSION"] = manifest.codex_version
+    manifests = dict(fleet_codex.REVIEWED_SCHEMA_MANIFESTS)
+    fleet_codex.REVIEWED_SCHEMA_MANIFESTS[manifest.codex_version] = \
+        reviewed / "manifest.json"
+    try:
+        client = fleet_codex.CodexHostClient.ensure(
+            home, app_server_command=[str(app_server)], env=env,
+            ready_timeout=20, idle_timeout=30)
+    finally:
+        fleet_codex.REVIEWED_SCHEMA_MANIFESTS.clear()
+        fleet_codex.REVIEWED_SCHEMA_MANIFESTS.update(manifests)
     return client, log
 
 
@@ -712,7 +743,8 @@ class WorkerVerbClient:
     def __init__(self, lane, *, provider_status="active",
                  turn_status="inProgress", active_flags=None,
                  error_code=None, evidence=None, fail_method=None,
-                 rate_result=None, generation=None):
+                 rate_result=None, generation=None,
+                 reject_hydrated_thread=False):
         self.lane = str(lane)
         if generation is not None:
             self.generation = generation
@@ -722,6 +754,7 @@ class WorkerVerbClient:
         self.error_code = error_code
         self.evidence = evidence
         self.fail_method = fail_method
+        self.reject_hydrated_thread = reject_hydrated_thread
         self.rate_result = (rate_result if rate_result is not None else {
             "ordinaryUsageAllowed": True,
             "primary": {"resetsAt": 4070908800},
@@ -757,7 +790,20 @@ class WorkerVerbClient:
             from fleet_codex import HostUnavailable
             raise HostUnavailable("response lost")
         if public == "thread/read":
+            if (self.reject_hydrated_thread
+                    and operation["payload"]["params"].get("includeTurns")
+                    is not False):
+                from fleet_codex import HostUnavailable
+                raise HostUnavailable("oversized hydrated thread response")
             result = self._thread()
+            if operation["payload"]["params"].get("includeTurns") is False:
+                result["thread"]["turns"] = []
+        elif public == "thread/turns/list":
+            turn = self._thread()["thread"]["turns"][-1]
+            turn["itemsView"] = "notLoaded"
+            turn["items"] = []
+            result = {"data": [turn], "nextCursor": None,
+                      "backwardsCursor": None}
         elif operation["method"] == "public-evidence/read":
             result = self.evidence
         elif public == "turn/steer":
@@ -846,8 +892,8 @@ def test_native_worker_transition_matrix_uses_exact_public_turn(
     updated = fleet.recompute_worker_codex("cx-native", record)
 
     assert updated["status"] == expected
-    assert [op["payload"]["method"] for op in client.operations][:1] == [
-        "thread/read"]
+    assert [op["payload"]["method"] for op in client.operations[:2]] \
+        == BOUNDED_OBSERVE_METHODS
 
 
 def test_native_worker_host_down_is_dead_suspected_without_mcx(
@@ -864,6 +910,91 @@ def test_native_worker_host_down_is_dead_suspected_without_mcx(
 
     assert fleet.recompute_worker_codex("cx-native", record)["status"] \
         == "dead-suspected"
+
+
+def test_native_worker_live_host_read_failure_preserves_working_verdict(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = WorkerVerbClient(lane, fail_method="thread/read")
+    client._owner_live = lambda: True
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "working"
+    assert updated["adapter_state"] == "active"
+
+
+def test_native_worker_large_mid_turn_uses_bounded_liveness_and_stays_working(
+        native_home, monkeypatch, capsys):
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+            "result_item_id": "item-progress", "result_text": "still working",
+            "result_truncated": False,
+            "usage": {
+                "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+                "input_tokens": 10, "output_tokens": 3,
+                "reasoning_output_tokens": 1, "total_tokens": 16,
+            },
+        }), encoding="utf-8")
+    client = WorkerVerbClient(lane, reject_hydrated_thread=True)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "working"
+    assert updated["adapter_state"] == "active"
+    assert [op["payload"]["method"] for op in client.operations] \
+        == BOUNDED_OBSERVE_METHODS
+    assert client.operations[0]["payload"]["params"]["includeTurns"] is False
+    assert client.operations[1]["payload"]["params"] == {
+        "threadId": THREAD_ID, "limit": 1,
+        "sortDirection": "desc", "itemsView": "notLoaded",
+    }
+    assert fleet._cmd_result_codex("cx-native", record) == 1
+    assert "still running" in capsys.readouterr().err
+
+
+def test_native_worker_large_just_completed_turn_becomes_idle_with_result(
+        native_home, monkeypatch, capsys):
+    home, lane = native_home
+    _install_record(lane)
+    evidence = {
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "turn_status": "completed", "result_item_id": "item-final",
+        "result_text": "bounded completion", "result_truncated": False,
+        "usage": {
+            "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+            "input_tokens": 10, "output_tokens": 3,
+            "reasoning_output_tokens": 1, "total_tokens": 16,
+        },
+    }
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps(evidence), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed",
+        reject_hydrated_thread=True)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "notify_lane_done", lambda *_args, **_kwargs: None)
+
+    assert fleet.cmd_status(SimpleNamespace(
+        name="cx-native", all=False, stale_ok=False, json=True)) == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["workers"][0]["status"] == "idle"
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "idle"
+    assert fleet._cmd_result_codex("cx-native", stored) == 0
+    streams = capsys.readouterr()
+    assert streams.out.strip() == "bounded completion"
+    assert "tokens in=10 out=3" in streams.err
 
 
 @pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
@@ -900,8 +1031,8 @@ def test_native_worker_completed_evidence_and_live_turn_agree_on_completion(
     assert updated["status"] == "idle"
     assert updated["adapter_state"] == "idle"
     assert updated["provider_status"] == provider_status
-    assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+    assert [op["payload"]["method"] for op in client.operations] \
+        == BOUNDED_OBSERVE_METHODS
 
 
 @pytest.mark.parametrize("provider_status", ["notLoaded", "systemError"])
@@ -926,8 +1057,8 @@ def test_native_worker_completed_evidence_cannot_override_live_noncompletion(
     assert updated["status"] == "dead-suspected"
     assert updated["adapter_state"] == "uncertain"
     assert updated["provider_status"] == provider_status
-    assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+    assert [op["payload"]["method"] for op in client.operations] \
+        == BOUNDED_OBSERVE_METHODS
 
 
 def test_native_worker_status_persists_completed_evidence_as_idle(
@@ -1014,8 +1145,8 @@ def test_doctor_repair_reconciles_pre_fix_dead_suspected_completion(
     assert stored["status"] == "idle"
     assert stored["adapter_state"] == "idle"
     assert stored["provider_status"] == "notLoaded"
-    assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+    assert [op["payload"]["method"] for op in client.operations] \
+        == BOUNDED_OBSERVE_METHODS
 
 
 @pytest.mark.parametrize(
@@ -1037,9 +1168,9 @@ def test_doctor_repair_reconciles_pre_fix_dead_suspected_completion(
          "notLoaded", "completed", 0),
         ("durable-noncompletion", {}, {"turn_status": "failed"},
          "notLoaded", "completed", 0),
-        ("live-in-progress", {}, {}, "notLoaded", "inProgress", 1),
-        ("live-failed", {}, {}, "systemError", "failed", 1),
-        ("live-interrupted", {}, {}, "notLoaded", "interrupted", 1),
+        ("live-in-progress", {}, {}, "notLoaded", "inProgress", 2),
+        ("live-failed", {}, {}, "systemError", "failed", 2),
+        ("live-interrupted", {}, {}, "notLoaded", "interrupted", 2),
     ],
 )
 def test_doctor_repair_completion_reconciliation_negative_matrix(
@@ -1085,8 +1216,10 @@ def test_doctor_repair_completion_reconciliation_rejects_live_identity_mismatch(
 
     assert fleet._reconcile_dead_suspected_codex_completions() == []
     assert fleet.load_registry()["workers"]["cx-native"] == original
-    assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+    expected_methods = (["thread/read"] if mismatch == "thread"
+                        else BOUNDED_OBSERVE_METHODS)
+    assert [op["payload"]["method"] for op in client.operations] \
+        == expected_methods
 
 
 @pytest.mark.parametrize("race", ["terminal", "resume"])
@@ -1291,7 +1424,7 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     assert fleet._cmd_send_codex("cx-native", "continue safely") == 0
 
     methods = [op["payload"]["method"] for op in client.operations]
-    assert methods == ["thread/read", expected_method]
+    assert methods == BOUNDED_OBSERVE_METHODS + [expected_method]
     mutation = client.operations[-1]["payload"]["params"]
     assert mutation["threadId"] == THREAD_ID
     if expected_method == "turn/steer":
@@ -1313,7 +1446,7 @@ def test_native_worker_send_resumes_live_thread_after_host_generation_change(
     assert fleet._cmd_send_codex("cx-native", "continue after restart") == 0
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/resume", "thread/read", "turn/steer"]
+        "thread/resume", *BOUNDED_OBSERVE_METHODS, "turn/steer"]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["codex_thread_id"] == THREAD_ID
     assert stored["codex_turn_id"] == TURN_ID
@@ -1413,7 +1546,7 @@ def test_native_worker_resume_adoption_preserves_concurrent_terminal_state(
         fleet._cmd_send_codex("cx-native", "must not continue after kill")
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/resume", "thread/read"]
+        "thread/resume", *BOUNDED_OBSERVE_METHODS]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["status"] == "dead"
     assert stored["adapter_state"] == "idle"
@@ -1491,7 +1624,8 @@ def test_native_worker_mailbox_io_failure_releases_mutation_reservation(
     with pytest.raises(fleet.FleetCliError, match="mailbox"):
         fleet._cmd_send_codex("cx-native", "continue safely")
 
-    assert [op["payload"]["method"] for op in client.operations] == ["thread/read"]
+    assert [op["payload"]["method"] for op in client.operations] \
+        == BOUNDED_OBSERVE_METHODS
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert "pending_operation" not in stored
     assert stored["status"] == "working"
@@ -1535,7 +1669,8 @@ def test_native_worker_interrupt_requires_terminal_public_proof(
     assert fleet._cmd_interrupt_codex("cx-native", record) == 0
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "turn/interrupt", "thread/read"]
+        *BOUNDED_OBSERVE_METHODS, "turn/interrupt",
+        *BOUNDED_OBSERVE_METHODS]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["status"] == "interrupted"
     assert stored["adapter_state"] == "idle"
@@ -1552,7 +1687,7 @@ def test_native_worker_interrupt_lost_response_is_uncertain_and_not_retried(
         fleet._cmd_interrupt_codex("cx-native", record)
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "turn/interrupt"]
+        *BOUNDED_OBSERVE_METHODS, "turn/interrupt"]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["status"] == "dead-suspected"
     assert stored["adapter_state"] == "uncertain"
@@ -1573,7 +1708,8 @@ def test_native_worker_resume_limited_records_provider_horizon_and_starts_one_tu
         "cx-native", lambda *_: None, lambda *_: None) is True
 
     methods = [op["payload"]["method"] for op in client.operations]
-    assert methods == ["account/rateLimits/read", "thread/read", "turn/start"]
+    assert methods == ["account/rateLimits/read", *BOUNDED_OBSERVE_METHODS,
+                       "turn/start"]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["limit_reset_at"] == "2099-01-01T00:00:00Z"
     assert stored["codex_turn_id"] == NEXT_TURN_ID
@@ -1624,7 +1760,7 @@ def test_native_worker_respawn_uses_fresh_thread_after_old_terminal_proof(
     assert fleet._cmd_respawn_codex(args, record) == 0
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "thread/start", "turn/start"]
+        *BOUNDED_OBSERVE_METHODS, "thread/start", "turn/start"]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["codex_thread_id"] == NEXT_THREAD_ID
     assert stored["codex_turn_id"] == NEXT_TURN_ID
@@ -1655,7 +1791,8 @@ def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
     assert fleet._cmd_respawn_codex(args, record) == 0
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/resume", "thread/read", "thread/start", "turn/start"]
+        "thread/resume", *BOUNDED_OBSERVE_METHODS,
+        "thread/start", "turn/start"]
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["codex_thread_id"] == NEXT_THREAD_ID
     assert stored["codex_turn_id"] == NEXT_TURN_ID
@@ -1700,8 +1837,8 @@ def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
     with pytest.raises(fleet.FleetCliError, match="changed concurrently"):
         fleet._cmd_respawn_codex(args, record)
 
-    assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+    assert [op["payload"]["method"] for op in client.operations] \
+        == BOUNDED_OBSERVE_METHODS
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["status"] == "dead"
     assert stored["adapter_state"] == "idle"
