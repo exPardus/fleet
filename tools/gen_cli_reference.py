@@ -52,16 +52,18 @@ def load_fleet(repo: Path = REPO):
     return module
 
 
-def _subparser_actions(parser: argparse.ArgumentParser):
+def _subparser_action(parser: argparse.ArgumentParser):
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             return action
-    raise SystemExit("fleet parser has no subcommands")
+    return None
 
 
 def _visible_verbs(parser: argparse.ArgumentParser):
     """(name, summary, subparser) for every verb whose help is not SUPPRESS."""
-    subs = _subparser_actions(parser)
+    subs = _subparser_action(parser)
+    if subs is None:
+        raise SystemExit("fleet parser has no subcommands")
     summaries = {choice.dest: choice.help for choice in subs._choices_actions}
     rows = []
     for name, subparser in subs.choices.items():
@@ -69,6 +71,23 @@ def _visible_verbs(parser: argparse.ArgumentParser):
         if summary == argparse.SUPPRESS:
             continue
         rows.append((name, summary or "", subparser))
+    return rows
+
+
+def _visible_commands(parser: argparse.ArgumentParser, prefix=()):
+    """(path, summary, parser) for every visible command below *parser*."""
+    subs = _subparser_action(parser)
+    if subs is None:
+        return []
+    summaries = {choice.dest: choice.help for choice in subs._choices_actions}
+    rows = []
+    for name, subparser in subs.choices.items():
+        summary = summaries.get(name)
+        if summary == argparse.SUPPRESS:
+            continue
+        path = (*prefix, name)
+        rows.append((path, summary or "", subparser))
+        rows.extend(_visible_commands(subparser, path))
     return rows
 
 
@@ -86,12 +105,18 @@ def render(fleet_module=None) -> str:
         out.append(_block(f"usage: {parser.prog} <verb> [options]\n\n"
                           f"{parser.description}\n\n{parser.epilog}"))
         out.append("## Verbs\n")
-        rows = _visible_verbs(parser)
-        for name, summary, _ in rows:
-            out.append(f"- [`fleet {name}`](#fleet-{name}) — {summary}")
+        rows = _visible_commands(parser)
+        for path, summary, _ in rows:
+            command = " ".join(path)
+            anchor = "-".join(path)
+            indent = "  " * (len(path) - 1)
+            out.append(
+                f"{indent}- [`fleet {command}`](#fleet-{anchor}) — {summary}")
         out.append("")
-        for name, _, subparser in rows:
-            out.append(f"### fleet {name}\n")
+        for path, _, subparser in rows:
+            command = " ".join(path)
+            heading = "#" * min(2 + len(path), 6)
+            out.append(f"{heading} fleet {command}\n")
             out.append(_block(subparser.format_help()))
         return "\n".join(out).rstrip("\n") + "\n"
     finally:

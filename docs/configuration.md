@@ -41,8 +41,9 @@ default. In another repository, add them to that repository's `.gitignore`.
 
 ## `worker-settings.json`
 
-Each worker is a Claude Code session started with a settings file. `fleet init`
-renders `state/worker-settings.json` from the template at
+Each Claude Code worker is started with a settings file. Native Codex lanes do
+not use this file; they communicate through the persistent Codex host for the
+fleet home. `fleet init` renders `state/worker-settings.json` from the template at
 [`worker-settings.template.json`](../worker-settings.template.json). The rendered
 file contains:
 

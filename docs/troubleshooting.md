@@ -7,11 +7,12 @@ fleet doctor          # health: registry, claude on PATH, hooks, settings freshn
 fleet status          # every worker: state, turns, pending mail
 ```
 
-Neither is a pure view. `fleet status` and `fleet doctor` are authoritative: they
-can update registry verdicts such as `dead-suspected` while they run. The
-statusline and the `/fleet:*` views do not do that. They read a status snapshot
-(`fleet.status_snapshot()`), take no lock, and write nothing. Use the verbs above
-when you need a verdict to be recorded.
+`fleet status` is authoritative and can update registry verdicts such as
+`dead-suspected` while it runs. Plain `fleet doctor` is report-only: it diagnoses
+the home without changing or quarantining state. Only `fleet doctor --repair`
+performs the repairs described below. The statusline and the `/fleet:*` views
+read a status snapshot (`fleet.status_snapshot()`), take no lock, and write
+nothing. Use `fleet status` when you need a verdict to be recorded.
 
 For the supervisor, add `fleet sup-status` and `fleet sup-guard`. The operating
 rules behind each recovery step are in [skills/fleet/SKILL.md](../skills/fleet/SKILL.md)
@@ -28,7 +29,7 @@ are the authority. This page is the short version.
 | `posttooluse-hook-smoke`, `stop-hook-smoke` | a hook script does not run end to end | check the Python path in `state/worker-settings.json`; run `fleet init` again |
 | `local-seeds` | a local storage file that `fleet init` seeds is missing | run `fleet init` in the home |
 
-Run `fleet doctor` without `--repair` first. `--repair` quarantines a corrupt
+Run report-only `fleet doctor` first. `fleet doctor --repair` quarantines a corrupt
 `state/fleet.json` and reconciles finished Codex turns. It changes state, so run it
 only when the operator has authorised it. See
 [cli-reference.md](cli-reference.md#fleet-doctor).

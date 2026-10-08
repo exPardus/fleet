@@ -9,16 +9,18 @@ they produce, lands the verified changes, and reports back. Fleet keeps its stat
 on disk, so the work survives context limits, crashed sessions, reboots and
 usage limits.
 
-Fleet is not a coding assistant. A plain Claude Code session is one. Fleet is the
-layer that keeps several of them working on one job over hours or days.
+Fleet is not a coding assistant. Claude Code and Codex are. Fleet is the layer
+that keeps several model sessions working on one job over hours or days.
 
 ## How it fits together
 
-Fleet has three tiers. Each tier is a Claude Code session with a defined role.
+Fleet has three tiers. Each tier is a session with a defined role. Claude Code
+and native Codex lanes use the same worker and supervisor lifecycle; native
+Codex lanes run through a persistent fleet host for that home.
 
 | Tier | What it is | What it does |
 |---|---|---|
-| **Interface** | your own Claude Code session in a repository | turns your intent into a brief, reports progress, and decides anything irreversible |
+| **Interface** | your own Claude Code or Codex session in a repository | turns your intent into a brief, reports progress, and decides anything irreversible |
 | **Supervisor** | a session that fleet starts and hands over at its context limit | splits the job into lanes, dispatches workers, reviews results, lands them, closes waves |
 | **Workers** | Claude Code or Codex sessions, each on its own branch | do one bounded piece of the work and stop |
 

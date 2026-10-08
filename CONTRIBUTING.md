@@ -32,9 +32,10 @@ Live integration under `tests/integration/` is explicitly gated by
 - Receipts in `docs/specs/` must reproduce through
   `tools/verify_receipts.py`; use `# live:` only for a deliberate claim about
   the current working tree.
-- `docs/cli-reference.md` is generated from `build_parser()`. After any change to
-  a verb or option, run `python tools/gen_cli_reference.py`; then
-  `tests/test_cli_reference.py` passes. Do not edit the generated file by hand.
+- `docs/cli-reference.md` is generated recursively from `build_parser()`, including
+  visible nested subcommands. After any change to a command or option, run
+  `python tools/gen_cli_reference.py`; then `tests/test_cli_reference.py` passes.
+  Do not edit the generated file by hand.
 
 To extend the public hygiene guard with local identifiers, create
 `state/leak-denylist.txt` with one literal string per line. Blank lines and

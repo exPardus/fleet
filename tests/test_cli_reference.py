@@ -50,6 +50,31 @@ def _shipped_all_verbs() -> set[str]:
     raise AssertionError("parser has no subcommands")
 
 
+def _commands(parser, prefix=(), *, visible_only: bool) -> dict[str, argparse.ArgumentParser]:
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            continue
+        summaries = {choice.dest: choice.help for choice in action._choices_actions}
+        commands = {}
+        for name, subparser in action.choices.items():
+            if visible_only and summaries.get(name) == argparse.SUPPRESS:
+                continue
+            path = (*prefix, name)
+            commands[" ".join(path)] = subparser
+            commands.update(_commands(
+                subparser, path, visible_only=visible_only))
+        return commands
+    return {}
+
+
+def _shipped_visible_commands() -> dict[str, argparse.ArgumentParser]:
+    return _commands(fleet.build_parser(), visible_only=True)
+
+
+def _shipped_all_commands() -> dict[str, argparse.ArgumentParser]:
+    return _commands(fleet.build_parser(), visible_only=False)
+
+
 def test_committed_reference_matches_the_parser():
     rendered = gen.render(fleet)
     committed = REFERENCE.read_text(encoding="utf-8")
@@ -84,6 +109,11 @@ def _documented_verbs() -> list[str]:
     return re.findall(r"^### fleet (\S+)$", text, flags=re.MULTILINE)
 
 
+def _documented_commands() -> list[str]:
+    text = REFERENCE.read_text(encoding="utf-8")
+    return re.findall(r"^#{3,6} fleet (.+)$", text, flags=re.MULTILINE)
+
+
 def test_every_documented_verb_is_shipped():
     documented = _documented_verbs()
     assert documented, "no verb sections found in docs/cli-reference.md"
@@ -104,7 +134,25 @@ def test_hidden_verbs_are_not_documented():
     assert not leaked, f"hidden verbs appear in the reference: {leaked}"
 
 
-@pytest.mark.parametrize("verb", sorted(_shipped_visible_verbs()))
-def test_each_verb_section_carries_its_own_usage_line(verb):
+def test_every_visible_nested_command_has_a_section_and_its_options():
+    documented = set(_documented_commands())
+    shipped = _shipped_visible_commands()
+    assert documented == set(shipped)
+    expected_nested = {
+        "mail verify", "index init", "index build", "index update", "index status"}
+    assert expected_nested <= documented
     text = REFERENCE.read_text(encoding="utf-8")
-    assert f"usage: fleet {verb}" in text
+    for command in expected_nested:
+        assert shipped[command].format_help().rstrip() in text
+
+
+def test_no_hidden_nested_command_is_documented():
+    hidden = set(_shipped_all_commands()) - set(_shipped_visible_commands())
+    leaked = sorted(hidden & set(_documented_commands()))
+    assert not leaked, f"hidden commands appear in the reference: {leaked}"
+
+
+@pytest.mark.parametrize("command", sorted(_shipped_visible_commands()))
+def test_each_command_section_carries_its_own_usage_line(command):
+    text = REFERENCE.read_text(encoding="utf-8")
+    assert f"usage: fleet {command}" in text

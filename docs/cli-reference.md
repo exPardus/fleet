@@ -34,6 +34,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet wait`](#fleet-wait) — block until turn(s) end
 - [`fleet send`](#fleet-send) — send a message to a worker (mailbox or resume)
 - [`fleet mail`](#fleet-mail) — read-only verification of authenticated Interface mail
+  - [`fleet mail verify`](#fleet-mail-verify) — verify one Interface-mail receipt and print its canonical body
 - [`fleet codex-respond`](#fleet-codex-respond) — answer one current native Codex approval/input request exactly once
 - [`fleet interrupt`](#fleet-interrupt) — kill a worker's running turn
 - [`fleet attach`](#fleet-attach) — attach an interactive terminal to a worker
@@ -45,6 +46,10 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet archive`](#fleet-archive) — auto-archive terminal-state native workers past a TTL
 - [`fleet autoclean`](#fleet-autoclean) — staleness sweep: archive TTL pass + fleet-owned daemon-husk rm (docs/specs/autoclean.md)
 - [`fleet index`](#fleet-index) — per-project symbol index (opt-in)
+  - [`fleet index init`](#fleet-index-init) — opt in: create .fleet-index/ and run the first build
+  - [`fleet index build`](#fleet-index-build) — rebuild an existing index
+  - [`fleet index update`](#fleet-index-update) — refresh named files only
+  - [`fleet index status`](#fleet-index-status) — counts and stale shards
 - [`fleet land`](#fleet-land) — stage a lane result, rebase its branch, and run its checks
 - [`fleet brief`](#fleet-brief) — render a validated brief from a task file
 - [`fleet q`](#fleet-q) — query this project's symbol index (M2)
@@ -286,6 +291,18 @@ options:
   -h, --help  show this help message and exit
 ```
 
+#### fleet mail verify
+
+```text
+usage: fleet mail verify [-h] mail_id
+
+positional arguments:
+  mail_id
+
+options:
+  -h, --help  show this help message and exit
+```
+
 ### fleet codex-respond
 
 ```text
@@ -481,6 +498,48 @@ positional arguments:
 
 options:
   -h, --help            show this help message and exit
+```
+
+#### fleet index init
+
+```text
+usage: fleet index init [-h] [--path PATH]
+
+options:
+  -h, --help   show this help message and exit
+  --path PATH  index root (default: the current directory)
+```
+
+#### fleet index build
+
+```text
+usage: fleet index build [-h] [--force] [--path PATH]
+
+options:
+  -h, --help   show this help message and exit
+  --force      re-parse every file, not just the changed ones
+  --path PATH  index root (default: the current directory)
+```
+
+#### fleet index update
+
+```text
+usage: fleet index update [-h] --files FILES [--path PATH]
+
+options:
+  -h, --help     show this help message and exit
+  --files FILES  comma-separated source paths, relative to the index root
+  --path PATH    index root (default: the current directory)
+```
+
+#### fleet index status
+
+```text
+usage: fleet index status [-h] [--path PATH]
+
+options:
+  -h, --help   show this help message and exit
+  --path PATH  index root (default: the current directory)
 ```
 
 ### fleet land

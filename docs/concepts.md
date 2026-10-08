@@ -31,23 +31,23 @@ Fleet is that missing layer.
 
 > **State is plain files + a CLI. Every surface is a disposable view.**
 
-Everything fleet knows lives on disk as plain files: a registry, mailboxes, journals, outcome records, git-tracked knowledge. There is no server holding truth in memory. The statusline, the `/fleet:*` slash commands, the manager's Claude session — none of them *own* anything. They all read the same files and derive the same picture. Add a surface (a web UI, a Telegram bridge) or drop one, and the core never notices.
+Everything fleet knows lives on disk as plain files: a registry, mailboxes, journals, outcome records, git-tracked knowledge. There is no server holding truth in memory. The statusline, the `/fleet:*` slash commands, the manager's model session — none of them *own* anything. They all read the same files and derive the same picture. Add a surface (a web UI, a Telegram bridge) or drop one, and the core never notices.
 
 Every surface is also **pull-only**: fleet injects nothing into any session. The plugin manifest deliberately declares no hooks, because a globally-enabled plugin's `SessionStart` hook fires in *every* session on the machine — which is exactly how an earlier startup briefing leaked this fleet's operator gates and worker table into unrelated projects. It was removed and is not coming back. Fleet state reaches a session when that session asks for it, never before.
 
 Three rules fall out of that bet, and they're load-bearing:
 
 1. **One state, many views.** No surface owns data. The core never depends on any surface.
-2. **The daemon is additive, never required by fleet.** Fleet runs no persistent process of its own — every `fleet` command is a short-lived CLI invocation. (Process *hosting* is delegated to Claude's own background-agent daemon; that's Claude's, not fleet's.)
-3. **The intelligence is Claude.** Dashboards don't decide anything. A manager Claude Code session does. Surfaces route information to and from that intelligence.
+2. **Process hosting is provider-specific.** Every `fleet` command is a short-lived CLI invocation. Claude Code sessions are hosted by Claude's background-agent daemon. Native Codex lanes use one persistent fleet-owned host per fleet home; that host owns the Codex app-server connection and approval queue.
+3. **The intelligence is in the model session.** Dashboards don't decide anything. A Claude Code or Codex manager session does. Surfaces route information to and from that intelligence.
 
 ## The mental model
 
 ```mermaid
 flowchart TB
-    M["🧑‍✈️ Manager session<br/>(you, or a Claude Code session)"]
+    M["🧑‍✈️ Manager session<br/>(you, Claude Code, or Codex)"]
     R["📋 Registry · state/fleet.json<br/>single writer · lock-guarded"]
-    W["🤖 Workers · durable claude --bg sessions<br/>(worker A · worker B · worker C · …)"]
+    W["🤖 Workers · durable Claude Code or Codex sessions<br/>(worker A · worker B · worker C · …)"]
     F["🗂️ state files<br/>mailbox · journals · outcomes"]
     K["📚 knowledge/ · git-tracked<br/>INDEX · lessons · playbooks"]
     M -->|"fleet CLI"| R
@@ -57,30 +57,50 @@ flowchart TB
     M <-.->|"read at start · write after each campaign"| K
 ```
 
-- A **worker** is not a process fleet babysits — it's a durable Claude Code session on disk, addressed by session id. It survives crashes, reboots, and the manager's death.
+- A **worker** is a durable Claude Code or Codex session on disk, addressed by
+  its recorded session identity. It survives crashes, reboots, and the manager's
+  death. Claude's daemon hosts Claude workers; the per-home native Codex host
+  hosts Codex workers.
 - A **turn** is one short-lived unit of a worker's work. Workers do short turns, not marathon sessions. Between turns they sit idle, cheap, resumable.
-- The **manager** is whoever holds the fleet CLI — usually a Claude Code session that has become the fleet manager. `/fleet:overview` is the reliable way in: it is a slash command, so it cannot fail to match. (The phrase *"become the fleet manager"* is **not** one of the triggers `skills/fleet/SKILL.md` declares; activation is semantic, so it may match anyway, but nothing here guarantees it — see [Getting started](getting-started.md#your-first-job).)
+- The **manager** is whoever holds the fleet CLI — usually a Claude Code or Codex
+  session that has taken the interface or supervisor role. In Claude Code,
+  `/fleet:overview` is the reliable way in: it is a slash command, so it cannot
+  fail to match. (The phrase *"become the fleet manager"* is **not** one of the
+  triggers `skills/fleet/SKILL.md` declares; activation is semantic, so it may
+  match anyway, but nothing here guarantees it — see
+  [Getting started](getting-started.md#your-first-job).)
 - The **registry** (`state/fleet.json`) is the one file that decides truth. Only `bin/fleet.py` ever writes it, under a lock. Everything else reads.
 
 ## How it's layered
 
-Fleet doesn't host processes anymore — it rebased onto Claude Code's native background-agent substrate. The daemon owns the *process*; fleet owns the *meaning*.
+Fleet delegates Claude process hosting to Claude Code's native background-agent
+substrate: the daemon owns the *process* and fleet owns the *meaning*. Native
+Codex lanes take a parallel route through one persistent fleet host per home,
+which owns the Codex app-server connection, turns and approval queue.
 
 ```mermaid
 flowchart TD
     A["🖥️ agents screen — claude agents TUI<br/><i>the user's window (Anthropic UX)</i>"]
     B["⚙️ native daemon — ~/.claude/daemon, ~/.claude/jobs<br/><i>process hosting: spawn · liveness · attach · reap</i>"]
-    C["🤖 worker = claude --bg session<br/><i>dispatched from the project's cwd, fleet hooks running inside</i>"]
+    C["🤖 Claude worker = claude --bg session<br/><i>dispatched from the project's cwd, fleet hooks running inside</i>"]
+    X["⚙️ native Codex host · one per fleet home<br/><i>app-server connection · turns · approval queue</i>"]
+    Y["🤖 Codex worker or supervisor session"]
     D["🧩 fleet sidecar — bin/fleet.py + bin/hooks/<br/><i>semantics: registry · mailbox · ceilings · journal · outcomes · verdict engine · knowledge</i>"]
     E["🧭 supervisor = claim-holding session<br/><i>identity in files, body is any session</i>"]
     A --> B --> C --> D --> E
+    X --> Y --> D
 ```
 
 **The division of labor:**
 
 - **Daemon (Claude's):** spawns the process, tracks whether it's alive, handles attach, reaps it. Fleet never touches `~/.claude/daemon/` directly — it only ever talks to the daemon through the sanctioned `claude` CLI (`--bg`, `agents --json`, `stop`, `logs`, `rm`).
+- **Native Codex host (fleet's):** one persistent process per fleet home owns the
+  Codex app-server connection, turns and approval queue. Fleet's Codex verbs talk
+  to that host instead of the Claude daemon.
 - **Fleet sidecar (fleet's):** everything that makes a bag of processes into a managed fleet — task identity, mailbox steering, token budgets, journals, respawn continuity, outcome capture, archival hygiene, and the knowledge loop.
-- **Supervisor:** a long-lived *identity* (files on disk) with a disposable *body* (any Claude session that holds the claim). This is how one — and only one — manager owns the fleet across restarts and hands off cleanly.
+- **Supervisor:** a long-lived *identity* (files on disk) with a disposable *body*
+  (a Claude Code or Codex session that holds the claim). This is how one — and
+  only one — manager owns the fleet across restarts and hands off cleanly.
 
 ## The worker lifecycle
 
