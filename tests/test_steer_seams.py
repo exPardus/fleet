@@ -126,6 +126,12 @@ def _hold_predecessor(sid="sid-old", inc="inc-old"):
     fleet.write_incarnation({"incarnation_id": inc, "session_id": sid,
                              "claimed_at": _iso(NOW), "heartbeat_at": _iso(NOW),
                              "claimed_via": "fresh"})
+    data = fleet.load_registry()
+    data["workers"][f"sup|{inc}|boot"] = fleet.new_worker_record(
+        sid, str(fleet.FLEET_HOME), "campaign", "bypass",
+        model="claude-sonnet-5-5", setting_sources=None,
+        dispatch_kind="bg", category=None)
+    fleet.save_registry(data)
 
 
 def _begin(run, sid="sid-old"):

@@ -1,6 +1,7 @@
 """Targeted tests for the interface's two-live-body supervisor guard."""
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 
 import fleet
 import fleet_keeper
+import fleet_platform
 
 
 SID = "sid-current"
@@ -297,6 +299,146 @@ def test_unreadable_roster_is_page(home, capsys):
 def test_live_busy_body_is_page_not_dispatch(home, monkeypatch, capsys):
     run_guard(monkeypatch, snapshot(), [row(SID, status="busy")])
     assert capsys.readouterr().out == "PAGE roster says busy\n"
+
+
+def test_stale_busy_body_names_executable_without_leaking_argv(home, capsys):
+    calls = []
+    secret = "secret-password-7f21"
+
+    def process_tree(pid):
+        calls.append(pid)
+        return [
+            {"pid": 77, "ppid": pid, "age_seconds": 17 * 3600,
+             "executable": "/usr/bin/sh",
+             "command": f"sh -c worker --password={secret}"},
+            {"pid": 78, "ppid": pid, "age_seconds": 20,
+             "executable": "/opt/fleet/bin/fleet",
+             "command": f"fleet status --token={secret}"},
+        ]
+
+    fleet.cmd_sup_guard(
+        SimpleNamespace(do=False, json=True),
+        snapshot_fn=snapshot,
+        roster_fn=roster(row(SID, status="busy", pid=42)),
+        process_tree_fn=process_tree,
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert calls == [42]
+    assert result["busy_children"] == [{
+        "pid": 77, "age_seconds": 17 * 3600,
+        "executable": "sh",
+    }]
+    rendered = json.dumps(result)
+    assert "pid 77 age 17h0m executable sh" in result["reason"]
+    assert secret not in rendered
+    assert "password" not in rendered and "command" not in rendered
+
+
+def test_stale_busy_body_kept_busy_by_background_shell_names_it(home, capsys):
+    """A background-only task still makes the roster body busy.
+
+    The roster has no foreground/background discriminator, so the process tree
+    must diagnose the long-running shell descendant from the same busy shape.
+    """
+    fleet.cmd_sup_guard(
+        SimpleNamespace(do=False, json=False),
+        snapshot_fn=snapshot,
+        roster_fn=roster(row(SID, status="busy", pid=42)),
+        process_tree_fn=lambda pid: [{
+            "pid": 77, "ppid": pid, "age_seconds": 58 * 60,
+            "executable": "/bin/zsh",
+        }],
+    )
+    assert capsys.readouterr().out == (
+        "PAGE roster says busy; long-running child: "
+        "pid 77 age 58m executable zsh\n")
+
+
+def test_posix_process_tree_is_bounded_and_captures_no_arguments(monkeypatch):
+    calls = []
+    output = "\n".join(
+        f"{pid} 42 17:00:00 worker-{pid}"
+        for pid in range(100, 100 + fleet_platform.PROCESS_TREE_MAX_NODES + 10))
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout=output)
+
+    monkeypatch.setattr(fleet_platform.subprocess, "run", run)
+    rows = fleet_platform._PosixPlatform().process_tree(42)
+    assert len(rows) == fleet_platform.PROCESS_TREE_MAX_NODES
+    assert rows[0]["age_seconds"] == 17 * 3600
+    assert rows[0]["executable"] == "worker-100"
+    argv, kwargs = calls[0]
+    script = argv[2]
+    assert "pgrep -P" in script and "ps -p" in script
+    assert "ps -eo" not in script and "args=" not in script
+    assert "head -c" in script
+    assert str(fleet_platform.PROCESS_TREE_MAX_NODES) in argv
+    assert str(fleet_platform.PROCESS_TREE_OUTPUT_MAX_BYTES) in argv
+    assert kwargs["timeout"] == fleet_platform.PROCESS_TREE_TIMEOUT_SECONDS
+
+
+def test_posix_process_tree_walks_nested_descendants(tmp_path, monkeypatch):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    pgrep = tools / "pgrep"
+    pgrep.write_text(
+        "#!/bin/sh\ncase \"$2\" in 42) echo 77 ;; 77) echo 78 ;; esac\n",
+        encoding="utf-8")
+    ps = tools / "ps"
+    ps.write_text(
+        "#!/bin/sh\ncase \"$2\" in\n"
+        "77) echo '77 42 17:00:00 sh' ;;\n"
+        "78) echo '78 77 16:59:30 sleep' ;;\n"
+        "esac\n",
+        encoding="utf-8")
+    pgrep.chmod(0o755)
+    ps.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    rows = fleet_platform._PosixPlatform().process_tree(42)
+    assert {row["pid"] for row in rows} == {77, 78}
+    assert next(row for row in rows if row["pid"] == 77) == {
+        "pid": 77, "ppid": 42, "age_seconds": 17 * 3600,
+        "executable": "sh",
+    }
+
+
+def test_process_tree_output_cap_is_enforced(monkeypatch):
+    monkeypatch.setattr(
+        fleet_platform.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(
+            returncode=0,
+            stdout="x" * (fleet_platform.PROCESS_TREE_OUTPUT_MAX_BYTES + 1)))
+    assert fleet_platform._PosixPlatform().process_tree(42) == []
+    assert fleet_platform._WindowsPlatform().process_tree(42) == []
+
+
+def test_windows_process_tree_filters_each_parent_and_caps_nodes(monkeypatch):
+    calls = []
+    payload = [
+        {"pid": pid, "age_seconds": 600, "executable": "pwsh.exe",
+         "command": "pwsh.exe -Password secret-password-7f21"}
+        for pid in range(100, 100 + fleet_platform.PROCESS_TREE_MAX_NODES + 10)
+    ]
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload))
+
+    monkeypatch.setattr(fleet_platform.subprocess, "run", run)
+    rows = fleet_platform._WindowsPlatform().process_tree(42)
+    assert len(rows) == fleet_platform.PROCESS_TREE_MAX_NODES
+    assert all(row["executable"] == "pwsh.exe" for row in rows)
+    assert "secret-password-7f21" not in json.dumps(rows)
+    argv, kwargs = calls[0]
+    script = argv[4]
+    assert "Get-CimInstance Win32_Process -Filter" in script
+    assert "CommandLine" not in script
+    assert f"$limit={fleet_platform.PROCESS_TREE_MAX_NODES}" in script
+    assert f"$outputLimit={fleet_platform.PROCESS_TREE_OUTPUT_MAX_BYTES}" in script
+    assert kwargs["timeout"] == fleet_platform.PROCESS_TREE_TIMEOUT_SECONDS
 
 
 def test_pidless_listed_body_can_dispatch_when_stale(home, monkeypatch, capsys):

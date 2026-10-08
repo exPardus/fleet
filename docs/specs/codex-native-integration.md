@@ -2,7 +2,9 @@
 
 **Status:** Option A approved and native is the default for new Codex workers
 and Codex supervisor bodies. The explicit mcx compatibility selector remains.
-**Evidence baseline:** fleet `6fa06c9`; installed `codex-cli 0.155.1`; v2 JSON Schema generated locally with `codex app-server generate-json-schema`.  
+**Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1 and
+0.160.0 v2 JSON Schemas generated from isolated installs with
+`codex app-server generate-json-schema`.
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
 ## 1. Decision
@@ -85,10 +87,16 @@ That compatibility adapter cannot provide the target lifecycle:
 - Its steer deliberately stops and relaunches a run.
 - Its private job directory cannot be provider truth after restart.
 
-### 3.2 Generated Codex 0.155.1 v2 schema
+### 3.2 Reviewed Codex v2 schemas
 
-The adapter begins with `initialize` and `initialized`. The generated schema
-exposes:
+For a new host, the adapter selects an explicit reviewed manifest from exact
+`codex --version` output. Versions 0.155.1 and 0.160.0 are reviewed; any other
+version refuses before host startup, and an installed schema whose digest
+differs from its selected manifest never publishes ready. An already-live host
+is instead authenticated against the reviewed version and digest recorded in
+its metadata, so upgrading the installed CLI does not strand native work owned
+by the prior reviewed host. The adapter begins with `initialize` and
+`initialized`. Both reviewed generated schemas expose:
 
 | Concern | Exact public surface |
 | --- | --- |
@@ -124,6 +132,11 @@ The generated contract does **not** promise:
 
 A timeout is not evidence that Codex rejected a request. Fleet steers a known
 active turn or refuses; it never relies on unproven turn queueing.
+
+Review of 0.160.0 against 0.155.1 found no change to any Fleet-used method,
+required parameter, thread/turn/permission type, server notification, effective
+thread-start field, or no-inference RPC sequence. Its only extracted contract
+delta is the additive error codes `flexUnavailable` and `tooManyDenials`.
 
 ## 4. Alternatives
 
@@ -276,6 +289,17 @@ there is no durable host lifecycle log, so an unexpected predecessor exit can
 be unclassifiable after `host.json` is replaced. It stays alive while native
 rows, a Codex supervisor claim, or unresolved operations exist. Idle shutdown
 cannot occur during an accepted operation.
+
+Host and app-server PIDs are paired with a kernel start identity so a reused PID
+cannot validate stale metadata. Linux retains `/proc/<pid>/stat` field 22.
+Darwin reads `KERN_PROC_PID` through libc `sysctl` and uses
+`kinfo_proc.kp_proc.p_starttime` seconds plus microseconds; if that read is
+unavailable it falls back to `ps -o lstart= -p <pid>` under the C locale.
+Because those sources have incompatible precision and representation, a
+source change is treated as unknown and falls back to a conservative PID
+existence check; it never proves the owner dead or permits lock/host theft.
+Windows retains its existing unsupported identity result. A missing identity
+still prevents ready metadata from being accepted.
 
 The app-server notification queue is bounded at 8,192 events by default so a
 single busy home can multiplex several active lanes without the former 1,024-
@@ -708,7 +732,7 @@ Grade actions and side effects, not wording.
 
 | ID | Layer | Test | Required result |
 | --- | --- | --- | --- |
-| P1 | Schema | Generate 0.155.1 v2 schema; validate fixture digest | Exact version/digest accepted; drift disables native only |
+| P1 | Schema | Generate 0.155.1 and 0.160.0 v2 schemas; validate each fixture digest | Either reviewed exact version/digest accepted; unknown version or drift disables native only |
 | P2 | Protocol | Initialize; start/read/list/resume disposable thread at exact cwd | Real ID/cwd agree |
 | P3 | Protocol | Start, active, steer with expected turn, page history, complete | One real turn lineage; final result persisted |
 | P4 | Protocol | Interrupt active disposable turn | Supported request with real IDs; same turn observed terminal |

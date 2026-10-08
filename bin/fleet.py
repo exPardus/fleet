@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11927) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12929) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16388) -- legacy upgrades need complete records.
+      * `_sweep_husks` -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3764) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4459) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13179) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16262) -- describe the incident-specific absence.
+      * `_read_registry_readonly` -- expose that distinction to views.
+      * `_doctor_check_registry` -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7120) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18042) -- render the release explanation.
+      * `_print_snapshot_table` -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3746,7 +3746,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16388`), because legacy upgrades also require a complete registry.
+    (§9 arm), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -8187,7 +8187,14 @@ fresh session; never a successor, never a fork.
    rm "{bundle}"
    Carry the NONCE value in your working context ONLY -- never into the journal, never into any
    file.
-4. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
+4. Before any campaign action, run:
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
+   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE:
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort --successor-inc <inc> [--successor-sid <sid>] --nonce <CURRENT-NONCE>
+   If a sid-less attempt is still inside its join window, wait until it becomes resolvable, then retry. Run each nonce-minting
+   verb directly: never pipe or filter its output, and record every newly printed NONCE before the
+   next abort. A lost-nonce wake must not leave a successor able to take over afterward.
+5. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
    skills/fleet/supervisor.md. Refresh the heartbeat through the normal protocol
    (`sup-checkpoint`) before any other action; do not seize a changed claim or spawn another
    supervisor.
@@ -10270,7 +10277,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10185` / `cmd_respawn:9469`, before
+    # resolution that runs from `cmd_kill` / `cmd_respawn`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10301,9 +10308,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10185` / `cmd_respawn:9469`, ahead of either verb's `fleet_lock`,
-    # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9490-9499` spells out that design -- resolve under the lock.
+    # `cmd_kill` / `cmd_respawn`, ahead of either verb's `fleet_lock`, so corruption
+    # remains for the ordinary path's lock-held loader. `cmd_respawn` spells out that
+    # design: resolve the ordinary target under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15280,11 +15287,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3568, :3603, :3633, :3672, :3709,
-    :3771, :3851, :4856, :10288, :10450, :10714, :10943, :10979, :11221, :11222,
-    :11311, :11321, :11332, :11430, :11953, :15232, :19148, :19149, :19253, :19314, :20727, :22728`).
-    No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8759, :9343, :13513, :21471. This makes union identity
+    sites throughout lifecycle, guard, archive and cleanup code already key on that
+    union. No foreign sid enters a record's retired_sids: every writer appends the
+    same record's OWN prior sid alone. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -16002,8 +16007,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8759, :9343, :13513,
-    # :21471) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone -- so union identity cannot
+    # make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -16011,7 +16016,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15206`).
+        # names this gate as its reason.
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16381,7 +16386,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11924`. Rename preserves mtime, so age ordering cannot prove
+        # spells it. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19316,7 +19321,7 @@ def _sup_guard_body_name(sids):
     return None
 
 
-def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
+def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
     """Collect the read-only inputs for one two-live-body decision."""
     snapshot_fn = snapshot_fn or status_snapshot
     roster_fn = roster_fn or _fetch_agents_roster
@@ -19401,6 +19406,8 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
                       and _sup_guard_row_in_home(row, registry=registry)
                       and (row.get("name") == SUPERVISOR_BODY_NAME
                            or _is_supervisor_shaped(row.get("name")))]
+    busy_children = _sup_guard_busy_children(
+        body_rows, sup.get("heartbeat_age_seconds"), process_tree_fn)
     return {
         "snapshot": snapshot,
         "registry_ok": bool(snapshot.get("ok", True))
@@ -19414,6 +19421,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "roster_reason": None if roster_ok else str(roster_or_reason),
         "live_rows": live_rows,
         "live_body_rows": live_body_rows,
+        "busy_children": busy_children,
         "handshake_exists": handshake_exists,
         "handshake": handshake,
         "pending": pending,
@@ -19445,7 +19453,7 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
          "parked_wake_condition", "parked_age_seconds", "parked_active",
-         "parked_expired", "parked_finished_lanes")
+         "parked_expired", "parked_finished_lanes", "busy_children")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -19542,7 +19550,14 @@ def _sup_guard_decide(observation):
             detail["quiet"] = True
             return "OK", "fresh heartbeat with live body", detail
         if "busy" in statuses:
-            return "PAGE", "roster says busy", detail
+            reason = "roster says busy"
+            children = obs.get("busy_children") or []
+            if children:
+                rendered = ", ".join(
+                    f"pid {child['pid']} age {_format_process_age(child['age_seconds'])} "
+                    f"executable {child['executable']}" for child in children)
+                reason += f"; long-running child: {rendered}"
+            return "PAGE", reason, detail
         if statuses == {"idle"}:
             return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         return "PAGE", "live supervisor status unknown", detail
@@ -19694,7 +19709,8 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
     return rc
 
 
-def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
+def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
+                  process_tree_fn=None) -> int:
     """Observe twice before action; only WAKE acts, and never spawns.
 
     JSON includes explicit sent/quiet flags so the keeper does not derive
@@ -19706,13 +19722,17 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
     if isinstance(claim, dict) and claim.get("provider") == "codex":
         return _cmd_codex_sup_guard(args, lane_done=lane_done)
-    observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+    observation = _sup_guard_observe(
+        snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+        process_tree_fn=process_tree_fn)
     if do:
         # Only the WAKE path retries deferred fork retirement. OK and PAGE
         # must stay action-free. Re-observe after any retirement before send.
         if _sup_guard_decide(observation)[0] == "WAKE":
             _reap_current_supervisor_forks(roster_fn=roster_fn)
-        observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        observation = _sup_guard_observe(
+            snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+            process_tree_fn=process_tree_fn)
     verdict, reason, detail = _sup_guard_decide(observation)
     sent, rc = False, 0
     if do and verdict == "WAKE":
@@ -19740,7 +19760,9 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
         # Send can discover and persist a limit while recomputing its target.
         # Publish that park/horizon immediately; never turn it into timer retries
         # of a generic send failure. This is observation only, not a second send.
-        after = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        after = _sup_guard_observe(
+            snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+            process_tree_fn=process_tree_fn)
         next_verdict, next_reason, next_detail = _sup_guard_decide(after)
         if next_reason.startswith("supervisor limited"):
             verdict, reason, detail, rc = next_verdict, next_reason, next_detail, 0
@@ -20708,26 +20730,73 @@ Do exactly this, in order:
 """
 
 
-def _claim_holder_setting_sources(claim):
-    """Read the claim holder's persisted setting_sources, or None.
-    This best-effort read decides a dispatch flag, not handoff eligibility.
-    Unreadable identity or registry uses Claude's default settings merge.
-    Use read_registry_no_repair outside fleet_lock: load_registry could perform
-    an unlocked quarantine write."""
+def _claim_holder_row(claim, registry=None):
+    """``(name, record)`` of the single supervisor holder row, or None."""
+    if not isinstance(claim, dict):
+        return None
     holder_sid = claim.get("session_id")
     if not isinstance(holder_sid, str) or not holder_sid:
         return None
-    try:
-        data = read_registry_no_repair(hint=False)
-    except RegistryCorruptError:
+    if registry is None:
+        try:
+            data = read_registry_no_repair(hint=False)
+        except RegistryCorruptError as exc:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor registry could not be validated; "
+                f"refusing handoff ({exc}). Run `fleet doctor` and repair the "
+                "registry before retrying") from exc
+    else:
+        data = registry
+    workers = data.get("workers", {}) if isinstance(data, dict) else {}
+    if not isinstance(workers, dict):
         return None
-    for rec in data.get("workers", {}).values():
-        if not isinstance(rec, dict):
-            continue
-        if holder_sid in _record_sids(rec):
-            value = rec.get("setting_sources")
-            return value if isinstance(value, str) and value else None
-    return None
+    matches = [(name, rec) for name, rec in workers.items()
+               if isinstance(rec, dict) and holder_sid in _record_sids(rec)]
+    if not matches:
+        return None
+    if len(matches) > 1 or not _is_supervisor_shaped(matches[0][0]):
+        raise FleetCliError(
+            "sup-handoff-begin: predecessor identity is ambiguous: "
+            f"{len(matches)} registry row(s) match the claim session and the "
+            "match is not exactly one supervisor holder row; refusing handoff "
+            "-- nothing dispatched. Run `fleet doctor` and repair the registry")
+    return matches[0]
+
+
+def _claim_holder_dispatch_settings(claim, registry=None):
+    """The claim holder's persisted dispatch settings, or ``None`` if no row."""
+    found = _claim_holder_row(claim, registry=registry)
+    if found is None:
+        return None
+    rec = found[1]
+    return {
+        "model": rec.get("model"),
+        "mode": rec.get("mode"),
+        "setting_sources": rec.get("setting_sources"),
+        # A null model is unknown, not inheritable: require an override.
+        "model_resolved": (isinstance(rec.get("model"), str)
+                           and bool(_normalise_model(rec.get("model")))),
+        "mode_resolved": rec.get("mode") in MODE_FLAGS,
+        "setting_sources_resolved": "setting_sources" in rec and (
+            rec.get("setting_sources") is None
+            or (isinstance(rec.get("setting_sources"), str)
+                and bool(rec.get("setting_sources")))),
+    }
+
+
+def _claim_holder_dispatch_snapshot(claim, registry=None):
+    """``(holder_name, settings)``; row identity defeats a same-settings swap."""
+    found = _claim_holder_row(claim, registry=registry)
+    if found is None:
+        return None
+    return found[0], _claim_holder_dispatch_settings(claim, registry=registry)
+
+
+def _claim_holder_setting_sources(claim):
+    """Read the claim holder's persisted setting_sources, or None.
+    Narrow helper; dispatch resolves all inherited settings from one holder row."""
+    value = (_claim_holder_dispatch_settings(claim) or {}).get("setting_sources")
+    return value if isinstance(value, str) and value else None
 
 
 def _rollback_codex_handoff_activation(successor_inc, operation_id):
@@ -20860,9 +20929,34 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
         raise FleetCliError("native Codex handoff predecessor state is ambiguous")
     if observed["active_flags"]:
         raise FleetCliError("native Codex handoff predecessor is waiting")
-    mode = getattr(args, "permission_mode", None) or binding.record.get("mode") \
-        or SUCCESSOR_DEFAULT_MODE
+    explicit_mode = getattr(args, "permission_mode", None)
+    if explicit_mode is None:
+        if ("mode" not in binding.record
+                or binding.record.get("mode") not in MODE_FLAGS):
+            raise FleetCliError(
+                "native Codex handoff predecessor permission mode is unresolved; "
+                "pass --permission-mode explicitly")
+        mode = binding.record["mode"]
+    else:
+        mode = explicit_mode
     model = getattr(args, "model", None) or binding.record.get("model")
+    explicit_setting_sources = getattr(args, "setting_sources", None)
+    if explicit_setting_sources is None:
+        if "setting_sources" not in binding.record:
+            raise FleetCliError(
+                "native Codex handoff predecessor setting sources are unresolved; "
+                "pass --setting-sources explicitly (use an empty value to disable)")
+        setting_sources = binding.record["setting_sources"]
+        if (setting_sources is not None
+                and (not isinstance(setting_sources, str)
+                     or not setting_sources)):
+            raise FleetCliError(
+                "native Codex handoff predecessor setting sources are unresolved; "
+                "pass --setting-sources explicitly (use an empty value to disable)")
+    elif not explicit_setting_sources:
+        setting_sources = None
+    else:
+        setting_sources = explicit_setting_sources
     bare_model = _codex_model_slug(model)
     if bare_model is None:
         raise FleetCliError("native Codex handoff requires a codex:<model>")
@@ -20953,7 +21047,7 @@ def _cmd_codex_sup_handoff_begin(args) -> int:
                             for row in data["workers"].values())):
             successor = new_worker_record(
                 None, FLEET_HOME.resolve(), campaign, mode, model=model,
-                setting_sources=binding.record.get("setting_sources"),
+                setting_sources=setting_sources,
                 spawned_by=binding.authority.value,
                 spawned_by_lineage=claim.get("lineage_id"),
                 dispatch_kind="codex-app-server", category=None,
@@ -21140,16 +21234,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     and dispatch_bg's wedge retry could spawn two successors for one attempt.
     Carry --settings for hooks and _worker_env to strip the predecessor's sid;
     a successor inheriting that sid could produce a false HANDSHAKE identity.
-    Carry the holder's setting_sources and persist it for subsequent handoffs,
-    so the selected hook configuration survives the succession chain.
-    No --add-dir is needed because the task file is inside cwd=FLEET_HOME.
-    Render explicit and default permissions through mode_flags. The default
-    is SUCCESSOR_DEFAULT_MODE: a headless supervisor must be able to run its
-    bootstrap Bash command without an interactive permission prompt."""
+    Inherit the holder's model, permission mode and setting_sources when the
+    flag is omitted; persist the effective values for the next handoff. No
+    --add-dir: the task file is inside cwd=FLEET_HOME. A missing predecessor
+    setting refuses instead of selecting the unrestricted bypass mode."""
     # Empty values from a quoted `--model ""` are equivalent to omission;
     # normalise before either handoff policy branch evaluates the model.
     args.model = _normalise_model(getattr(args, "model", None))
-    if _claim_uses_native_codex():
+    selected_claim = read_incarnation()
+    if _claim_uses_native_codex(selected_claim):
         # Native claims persist their provider model in the registry.  Resolve
         # that model before enforcing forbid-default: omitting --model is safe
         # here because the handoff remains on the already selected Codex model.
@@ -21158,7 +21251,44 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         _enforce_tier_policy(
             "supervisor", getattr(args, "model", None) or persisted_model)
         return _cmd_codex_sup_handoff_begin(args)
-    _enforce_tier_policy("supervisor", getattr(args, "model", None))
+    holder_snapshot = _claim_holder_dispatch_snapshot(selected_claim)
+    holder_settings = holder_snapshot[1] if holder_snapshot is not None else None
+    explicit_model = getattr(args, "model", None)
+    explicit_mode = getattr(args, "permission_mode", None)
+    explicit_setting_sources = getattr(args, "setting_sources", None)
+    inherited_model = (holder_settings.get("model")
+                       if holder_settings is not None
+                       and holder_settings.get("model_resolved") else None)
+    inherited_mode = (holder_settings.get("mode")
+                      if holder_settings is not None
+                      and holder_settings.get("mode_resolved") else None)
+    inherited_setting_sources = (
+        holder_settings.get("setting_sources")
+        if holder_settings is not None
+        and holder_settings.get("setting_sources_resolved") else None)
+    unresolved = []
+    if holder_settings is None or not holder_settings.get("model_resolved"):
+        if not explicit_model:
+            unresolved.append("model (pass --model)")
+    if holder_settings is None or not holder_settings.get("mode_resolved"):
+        if not explicit_mode:
+            unresolved.append("permission mode (pass --permission-mode)")
+    if (holder_settings is None
+            or not holder_settings.get("setting_sources_resolved")):
+        if explicit_setting_sources is None:
+            unresolved.append(
+                "setting sources (pass --setting-sources, use an empty value to disable)")
+    if unresolved:
+        raise FleetCliError(
+            "sup-handoff-begin: predecessor launch settings are unresolved; "
+            "refusing to choose a successor policy. Resolve or explicitly "
+            "override: " + "; ".join(unresolved))
+    effective_model = explicit_model or inherited_model
+    effective_mode = explicit_mode or inherited_mode or SUCCESSOR_DEFAULT_MODE
+    effective_setting_sources = (
+        inherited_setting_sources if explicit_setting_sources is None
+        else (explicit_setting_sources or None))
+    _enforce_tier_policy("supervisor", effective_model)
     _require_instance_settings()
     try:
         exe = resolve_claude_executable(which=which)
@@ -21166,10 +21296,34 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues")
     try:
         successor_model, settings_arg = _openrouter_dispatch_args(
-            getattr(args, "model", None), instance_settings_path())
+            effective_model, instance_settings_path())
     except NativeDispatchError as exc:
         raise FleetCliError(f"{exc} -- nothing dispatched; claim unchanged, duty continues") from exc
     with fleet_lock():
+        try:
+            # Revalidate before writing the task; no-repair, so corruption refuses.
+            live_registry = read_registry_no_repair(hint=False)
+        except RegistryCorruptError as exc:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor registry became unreadable; "
+                f"refusing handoff ({exc}). Run fleet doctor and repair the "
+                "registry before retrying") from exc
+        live_claim = read_incarnation()
+        claim_key = lambda claim: (
+            claim.get("provider") if isinstance(claim, dict) else None,
+            claim.get("incarnation_id") if isinstance(claim, dict) else None,
+            claim.get("session_id") if isinstance(claim, dict) else None,
+        )
+        if claim_key(live_claim) != claim_key(selected_claim):
+            raise FleetCliError(
+                "sup-handoff-begin: selected predecessor holder changed while "
+                "preparing the handoff; retry")
+        live_snapshot = _claim_holder_dispatch_snapshot(
+            live_claim, registry=live_registry)
+        if live_snapshot != holder_snapshot:
+            raise FleetCliError(
+                "sup-handoff-begin: predecessor holder settings changed while "
+                "preparing the handoff; retry")
         # Do not mint a pending generation before lock-free dispatch and handoff.
         # Deliver notices after commit: legacy upgrade may still create a generation
         # the predecessor must know to complete or abort.
@@ -21259,14 +21413,14 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     argv = [exe, "--bg", "-n", name,
             "--settings", settings_arg]
     # Carry the claim holder's optional settings-source selection.
-    succ_setting_sources = _claim_holder_setting_sources(claim)
+    succ_setting_sources = effective_setting_sources
     if succ_setting_sources:
         argv += ["--setting-sources", succ_setting_sources]
-    if getattr(args, "model", None):
+    if effective_model:
         argv += ["--model", successor_model]
     # Map both explicit and default fleet permission modes through mode_flags;
     # the parser rejects raw Claude mode spellings before dispatch.
-    argv += mode_flags(getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE)
+    argv += mode_flags(effective_mode)
     # EXEMPT from the _dispatch_argv_prompt inlining fix: this launches a
     # FRESH session (no --resume, so no cached Read result to short-circuit
     # on) and its task path is already per-incarnation unique
@@ -21346,7 +21500,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
 
     # Register the verified successor body with its provisional sid and turns=1.
     # The sid lets hooks resolve its name before completion.
-    succ_mode = getattr(args, "permission_mode", None) or SUCCESSOR_DEFAULT_MODE
+    succ_mode = effective_mode
     with fleet_lock():
         # Re-read under the lock and stamp only our successor_inc. Reusing the
         # pre-dispatch claim could erase a concurrent begin; positional stamping
@@ -21361,12 +21515,12 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
             succ_rec = new_worker_record(
                 successor_sid, FLEET_HOME,
                 f"supervisor successor {successor_inc} (handoff from {holder_inc})",
-                succ_mode, model=getattr(args, "model", None),
+                succ_mode, model=effective_model,
                 setting_sources=succ_setting_sources,
                 spawned_by=caller, spawned_by_lineage=claim.get("lineage_id"),
                 dispatch_kind="bg", category=None,
                 # Item 28: same substrate stamping as the gen-0 dispatch.
-                substrate=_openrouter_substrate(getattr(args, "model", None)))
+                substrate=_openrouter_substrate(effective_model))
             succ_rec["turns"] = 1
             succ_rec["last_dispatch_at"] = now_iso()
             data["workers"][name] = succ_rec
@@ -22435,11 +22589,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_supnotify.add_argument("--nonce", help=NONCE_ARG_HELP)
 
     p_suphb = sub.add_parser("sup-handoff-begin", help="dispatch a handoff successor (claim holder only)")
-    p_suphb.add_argument("--model", help="model for the successor session")
+    p_suphb.add_argument(
+        "--model",
+        help="model for the successor session (default: inherit the validated "
+             "predecessor; refuses if unavailable unless explicitly supplied)")
     p_suphb.add_argument("--permission-mode", dest="permission_mode",
                          choices=list(MODE_FLAGS),
                          help="fleet mode name for the successor session "
-                              f"(default: {SUCCESSOR_DEFAULT_MODE})")
+                         "(default: inherit the predecessor; refuses if "
+                         "unavailable)")
+    p_suphb.add_argument("--setting-sources", dest="setting_sources",
+                         help="Claude setting-source selection for the successor "
+                         "(default: inherit the validated predecessor; refuses "
+                         "if unavailable unless explicitly supplied)")
     p_suphb.add_argument("--sid", help="override caller session id")
     p_suphb.add_argument("--nonce", help=NONCE_ARG_HELP)
 
@@ -23017,6 +23179,48 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
               f"{entry.get('waitingFor') or 'a prompt'}; a message queues "
               f"until that clears", file=sys.stderr)
     return 0
+
+
+def _sup_guard_busy_children(body_rows, heartbeat_age, process_tree_fn=None,
+                             min_age=300.0):
+    if (not isinstance(heartbeat_age, (int, float))
+            or heartbeat_age <= SUPERVISOR_CLAIM_STALE_SECONDS
+            or not any(row.get("status") == "busy" for row in body_rows)):
+        return []
+    read_tree = process_tree_fn or PLATFORM.process_tree
+    children = {}
+    for body in body_rows:
+        if body.get("status") != "busy":
+            continue
+        try:
+            descendants = read_tree(int(body.get("pid")))
+        except Exception:
+            continue
+        for child in descendants if isinstance(descendants, list) else ():
+            try:
+                pid = int(child["pid"])
+                age = float(child["age_seconds"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if age < min_age:
+                continue
+            executable = str(child.get("executable") or "").strip()
+            executable = executable.replace("\\", "/").rsplit("/", 1)[-1][:128]
+            if executable:
+                children[pid] = {"pid": pid, "age_seconds": age,
+                                 "executable": executable}
+    return sorted(children.values(), key=lambda row: (-row["age_seconds"], row["pid"]))[:3]
+
+
+def _format_process_age(seconds):
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400}d{seconds % 86400 // 3600}h"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{seconds % 3600 // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 if __name__ == "__main__":

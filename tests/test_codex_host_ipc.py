@@ -118,9 +118,30 @@ for line in sys.stdin:
 '''
 
 
-def _fake_app_server(tmp_path):
+def _fake_app_server(tmp_path, version="0.155.1"):
     script = tmp_path / "fake-app-server"
-    script.write_text(FAKE_APP_SERVER.format(python=sys.executable), encoding="utf-8")
+    source = FAKE_APP_SERVER.replace("0.155.1", version)
+    script.write_text(source.format(python=sys.executable), encoding="utf-8")
+    script.chmod(0o700)
+    return script
+
+
+def _fake_schema_command(tmp_path, version, schema_bytes):
+    script = tmp_path / f"codex-schema-{version}"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys\n"
+        f"VERSION = {version!r}\n"
+        f"SCHEMA = {schema_bytes!r}\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('codex-cli ' + VERSION)\n"
+        "elif sys.argv[1:3] == ['app-server', 'generate-json-schema']:\n"
+        "    out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+        "    out.mkdir(parents=True, exist_ok=True)\n"
+        "    (out / 'codex_app_server_protocol.v2.schemas.json').write_bytes(SCHEMA)\n"
+        "else:\n"
+        "    raise SystemExit(2)\n",
+        encoding="utf-8")
     script.chmod(0o700)
     return script
 
@@ -164,6 +185,10 @@ def test_connect_existing_never_ensures_or_launches_a_host(tmp_path, monkeypatch
     monkeypatch.setattr(
         module.CodexHostClient, "_existing",
         classmethod(lambda cls, exact_home: sentinel))
+    monkeypatch.setattr(
+        module, "_reviewed_schema_manifest",
+        lambda *args, **kwargs: pytest.fail(
+            "attaching to a reviewed live host must not inspect installed Codex"))
     monkeypatch.setattr(
         module.CodexHostClient, "ensure",
         classmethod(lambda cls, *args, **kwargs: pytest.fail(
@@ -716,7 +741,10 @@ def test_host_state_is_owner_only_and_pid_does_not_decide_identity(tmp_path):
     ("transport", "AF_PIPE"),
     ("ipc_protocol_version", 999),
     ("codex_protocol_version", 999),
+    ("codex_version", "9.9.9"),
     ("schema_digest", "0" * 64),
+    ("process_identity", None),
+    ("app_server_process_identity", None),
 ])
 def test_existing_host_metadata_must_match_the_exact_reviewed_contract(
         tmp_path, field, value):
@@ -733,6 +761,53 @@ def test_existing_host_metadata_must_match_the_exact_reviewed_contract(
         client.metadata_path.write_bytes(original)
         client.metadata_path.chmod(0o600)
         _shutdown(client)
+
+
+def test_live_old_host_remains_reachable_after_installed_version_change(
+        tmp_path, monkeypatch):
+    module = _modules()
+    home = _home(tmp_path)
+    schemas = {
+        version: (json.dumps({"reviewed": version}, sort_keys=True) + "\n").encode()
+        for version in ("0.155.1", "0.160.0")
+    }
+    manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
+    for version, schema_bytes in schemas.items():
+        value = json.loads(manifests[version].read_text(encoding="utf-8"))
+        value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
+        manifest = tmp_path / f"manifest-{version}.json"
+        manifest.write_text(json.dumps(value), encoding="utf-8")
+        manifests[version] = manifest
+    monkeypatch.setattr(module, "REVIEWED_SCHEMA_MANIFESTS", manifests)
+    log = tmp_path / "app-server.jsonl"
+    old_client = module.CodexHostClient.ensure(
+        home,
+        app_server_command=[str(_fake_app_server(tmp_path, "0.155.1"))],
+        schema_command=[str(_fake_schema_command(
+            tmp_path, "0.155.1", schemas["0.155.1"]))],
+        env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+        ready_timeout=5,
+        idle_timeout=0,
+    )
+    try:
+        new_client = module.CodexHostClient.ensure(
+            home,
+            app_server_command=[str(tmp_path / "must-not-start")],
+            schema_command=[str(_fake_schema_command(
+                tmp_path, "0.160.0", schemas["0.160.0"]))],
+            env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+            ready_timeout=2,
+            idle_timeout=0,
+        )
+
+        metadata = json.loads(new_client.metadata_path.read_text(encoding="utf-8"))
+        assert new_client.generation == old_client.generation
+        assert metadata["codex_version"] == "0.155.1"
+        assert [json.loads(line) for line in log.read_text().splitlines()] == [
+            {"event": "started", "inherited_claude_sid": False},
+        ]
+    finally:
+        _shutdown(old_client)
 
 
 def test_silent_and_disconnected_clients_cannot_wedge_or_crash_host(tmp_path):
@@ -791,6 +866,176 @@ def test_live_stale_lock_is_never_stolen_and_dead_lock_is_recoverable(tmp_path):
     os.utime(path, (old, old))
     with module._host_lock(path, 0.2):
         assert json.loads(path.read_text())["pid"] == os.getpid()
+
+
+def test_linux_process_identity_still_reads_proc_stat_field_22(monkeypatch):
+    module = _modules()
+    import fleet_platform
+
+    monkeypatch.setattr(
+        fleet_platform, "PLATFORM",
+        SimpleNamespace(is_windows=False, is_linux=True))
+    fields = [str(index) for index in range(1, 25)]
+    monkeypatch.setattr(
+        module.Path, "read_text",
+        lambda self, encoding=None: " ".join(fields))
+
+    assert module._process_identity(1234) == fields[21]
+
+
+def test_darwin_process_identity_reads_kern_proc_pid_start_time(monkeypatch):
+    module = _modules()
+    import fleet_platform
+
+    monkeypatch.setattr(
+        fleet_platform, "PLATFORM",
+        SimpleNamespace(is_windows=False, is_linux=False))
+    prefix = module._DarwinKinfoProcPrefix()
+    prefix.kp_proc.p_starttime.tv_sec = 1_800_000_001
+    prefix.kp_proc.p_starttime.tv_usec = 2345
+    payload = bytes(prefix) + b"\0" * 64
+    calls = []
+
+    def fake_sysctl(mib, length, oldp, oldlenp, newp, newlen):
+        calls.append((list(mib), length, oldp is None, newp, newlen))
+        oldlenp._obj.value = len(payload)
+        if oldp is not None:
+            module.ctypes.memmove(oldp, payload, len(payload))
+        return 0
+
+    sysctl_identity = module._darwin_sysctl_process_identity
+    monkeypatch.setattr(
+        module, "_darwin_sysctl_process_identity",
+        lambda pid: sysctl_identity(pid, sysctl=fake_sysctl))
+    monkeypatch.setattr(
+        module, "_darwin_ps_process_identity",
+        lambda pid: pytest.fail("ps fallback must not run after sysctl succeeds"))
+
+    assert module._process_identity(4321) == "darwin:1800000001.002345"
+    assert calls == [
+        ([1, 14, 1, 4321], 4, True, None, 0),
+        ([1, 14, 1, 4321], 4, False, None, 0),
+    ]
+
+
+def test_darwin_process_identity_falls_back_to_ps_lstart(monkeypatch):
+    module = _modules()
+    import fleet_platform
+
+    monkeypatch.setattr(
+        fleet_platform, "PLATFORM",
+        SimpleNamespace(is_windows=False, is_linux=False))
+    monkeypatch.setattr(
+        module, "_darwin_sysctl_process_identity", lambda pid: None)
+    observed = {}
+
+    def fake_run(argv, **kwargs):
+        observed.update({"argv": argv, **kwargs})
+        return SimpleNamespace(
+            returncode=0, stdout="Thu Oct  8 12:34:56 2026\n")
+
+    ps_identity = module._darwin_ps_process_identity
+    monkeypatch.setattr(
+        module, "_darwin_ps_process_identity",
+        lambda pid: ps_identity(pid, run=fake_run))
+
+    assert module._process_identity(4321) == "darwin-ps:2026-10-08T12:34:56"
+    assert observed["argv"] == ["ps", "-o", "lstart=", "-p", "4321"]
+    assert observed["env"]["LC_ALL"] == "C"
+    assert observed["env"]["LC_TIME"] == "C"
+
+
+def test_darwin_identity_source_change_does_not_make_live_lock_stealable(
+        tmp_path, monkeypatch):
+    module = _modules()
+    path = tmp_path / "host.lock"
+    path.write_text(json.dumps({
+        "pid": 4321,
+        "identity": "darwin:1800000001.002345",
+        "nonce": "live",
+    }), encoding="ascii")
+    monkeypatch.setattr(
+        module, "_process_identity",
+        lambda pid: "darwin-ps:2027-01-15T08:00:01")
+    kill_calls = []
+    monkeypatch.setattr(
+        module.os, "kill", lambda pid, signal: kill_calls.append((pid, signal)))
+
+    assert module._lock_holder_is_live(path) is True
+    assert kill_calls == [(4321, 0)]
+
+
+def test_darwin_identity_source_change_does_not_replace_live_host(monkeypatch):
+    module = _modules()
+    owner = SimpleNamespace(
+        _pid=4321,
+        _process_identity="darwin-ps:2027-01-15T08:00:01",
+    )
+    monkeypatch.setattr(
+        module, "_process_identity",
+        lambda pid: "darwin:1800000001.002345")
+    kill_calls = []
+    monkeypatch.setattr(
+        module.os, "kill", lambda pid, signal: kill_calls.append((pid, signal)))
+
+    assert module.CodexHostClient._owner_live(owner) is True
+    assert kill_calls == [(4321, 0)]
+
+
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+def test_installed_reviewed_codex_versions_select_their_manifest(
+        tmp_path, monkeypatch, version):
+    module = _modules()
+    selected = module.REVIEWED_SCHEMA_MANIFESTS[version]
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=f"codex-cli {version}\n"))
+
+    assert module._reviewed_schema_manifest(
+        ["codex"], env={}, cwd=tmp_path) == selected
+    assert json.loads(selected.read_text(encoding="utf-8"))["codex_version"] == version
+
+
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+def test_each_reviewed_codex_version_can_publish_a_matching_host(
+        tmp_path, monkeypatch, version):
+    module = _modules()
+    home = _home(tmp_path)
+    schema_bytes = (json.dumps({"reviewed": version}, sort_keys=True) + "\n").encode()
+    manifest = tmp_path / f"manifest-{version}.json"
+    value = json.loads(
+        module.REVIEWED_SCHEMA_MANIFESTS[version].read_text(encoding="utf-8"))
+    value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
+    manifests[version] = manifest
+    monkeypatch.setattr(module, "REVIEWED_SCHEMA_MANIFESTS", manifests)
+    log = tmp_path / "app-server.jsonl"
+    client = module.CodexHostClient.ensure(
+        home,
+        app_server_command=[str(_fake_app_server(tmp_path, version))],
+        schema_command=[str(_fake_schema_command(
+            tmp_path, version, schema_bytes))],
+        env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+        ready_timeout=5, idle_timeout=30)
+    try:
+        metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
+        assert metadata["codex_version"] == version
+        assert metadata["schema_digest"] == value["schema_sha256"]
+    finally:
+        _shutdown(client)
+
+
+def test_unreviewed_installed_codex_version_is_refused(tmp_path, monkeypatch):
+    module = _modules()
+    monkeypatch.setattr(
+        module.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="codex-cli 9.9.9\n"))
+
+    with pytest.raises(module.HostUnavailable, match="no reviewed schema"):
+        module._reviewed_schema_manifest(["codex"], env={}, cwd=tmp_path)
 
 
 def test_idle_host_shuts_down_without_killing_or_signaling_provider_pid(tmp_path):
@@ -854,7 +1099,8 @@ def test_reviewed_public_initialize_shape_publishes_ready(tmp_path):
     try:
         assert client.call(_operation("public-init"), timeout=1).result[
             "schema_digest"] == json.loads(
-                module.SCHEMA_MANIFEST.read_text())["schema_sha256"]
+                module.REVIEWED_SCHEMA_MANIFESTS["0.155.1"].read_text())[
+                    "schema_sha256"]
         metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
         assert metadata["pid"] == client.host_pid
         assert metadata["process_identity"] == client.host_process_identity
@@ -893,10 +1139,13 @@ def test_installed_schema_digest_mismatch_never_publishes_ready(
     module = _modules()
     home = _home(tmp_path)
     manifest = tmp_path / "manifest.json"
-    value = json.loads(module.SCHEMA_MANIFEST.read_text())
+    value = json.loads(
+        module.REVIEWED_SCHEMA_MANIFESTS["0.155.1"].read_text())
     value["schema_sha256"] = "0" * 64
     manifest.write_text(json.dumps(value), encoding="utf-8")
-    monkeypatch.setattr(module, "SCHEMA_MANIFEST", manifest)
+    manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
+    manifests["0.155.1"] = manifest
+    monkeypatch.setattr(module, "REVIEWED_SCHEMA_MANIFESTS", manifests)
     log = tmp_path / "app-server.jsonl"
 
     with pytest.raises(module.HostUnavailable):
