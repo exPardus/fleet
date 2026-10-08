@@ -15263,7 +15263,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20694, :22884`).
+    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20694, :22880`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8747, :9331, :13494, :21489. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -21645,17 +21645,13 @@ def _scoped_abort_locked(
 
 
 def _finish_successor_scoped_abort(target_sid, inc, *, run, which):
-    # Revalidate under the lock at stop time: a late boot + complete may
-    # have transferred the claim since the decision lock was released.
     with fleet_lock():
         current = read_incarnation()
         if (_is_transferred_successor(current, inc)
                 or (isinstance(current, dict)
-                    and current.get("session_id") == target_sid)
-                or handoff_entry_matching(
-                    current, successor_inc=inc) is None):
-            print(f"automatic abort skipped: successor {inc} is no "
-                  "longer a pending non-holder; nothing stopped")
+                    and current.get("session_id") == target_sid)):
+            print(f"automatic abort skipped: successor {inc} now holds the "
+                  "supervisor claim; nothing stopped")
             return
     stopped = _stop_native_session(
         target_sid, run=run, which=which, timeout=60)
