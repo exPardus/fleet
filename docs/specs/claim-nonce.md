@@ -1201,11 +1201,11 @@ $ grep -n "^RESERVED_NAMES\|if name in RESERVED_NAMES" bin/fleet.py
 796:    if name in RESERVED_NAMES:
 ```
 
-### 4.14b The §5.7 manual lever is now documented for a human
+### 4.14b Historical receipt for the former manual-lever runbook
 
-`skills/fleet/supervisor.md` no longer mentions `supervisor/INCARNATION` only as the definition of
-"body" — it states the lever, scopes it to a human at a shell, and attaches the escalation rule, which
-is exactly what §5.7's row asked for:
+At the pinned commit, `skills/fleet/supervisor.md` stated the destructive manual lever and scoped it
+to a human at a shell. The current Interface runbook instead prefers the non-destructive idle-holder
+wake documented in §5.7; this block remains only as commit-pinned history:
 
 ```
 # at 0e8d7ca
@@ -1511,24 +1511,27 @@ context compaction eating the last printed value. Its options:
 |---|---|---|
 | Wait out the heartbeat, then `sup-boot` ⇒ `seize` | up to `SUPERVISOR_CLAIM_STALE_SECONDS` = 3600 s (@6821); writes a `SEIZED` entry, which is the correct audit record for "a body lost continuity" | no — but it is today's shipped behavior, unchanged |
 | Escalate to the operator | immediate | n/a |
-| The operator's manual lever (remove `supervisor/INCARNATION`) | immediate | no — today's only release lever, undocumented in `--help`. It **was** undocumented everywhere else too (`[UNBUILT — owned by this slice]`: `skills/fleet/supervisor.md` mentioned the file once, at `:6`, as the definition of "body"). **[BUILT]** — `supervisor.md:197` now states it, human-scoped, with the escalation rule attached; receipt §4.14b. The `--help` half stands: still `[UNBUILT]`, deliberately (§5.7's binding constraint is that agent-facing output must not name this lever). |
+| Registered Interface waits for the holder row to become idle, then runs `fleet send supervisor` | immediate once idle | the wake's fresh nonce resumes the same incarnation; its fixed bootstrap aborts every pending successor before campaign work |
+| The operator's manual lever (remove `supervisor/INCARNATION`) | immediate | no — destructive fallback, deliberately absent from agent-facing output. Prefer the Interface wake above when the holder is idle. |
 
-**This spec adds no fourth path.** That is a deliberate reversal of v1, which added three, each keyed
-on a value a read-only view prints, and whose refusal message *instructed the refused caller to run
-that view*.
+**The Interface wake is a later, non-destructive fourth path.** It does not give the refused body a
+unilateral lever: a separate registered Interface waits for durable `idle` state and sends the holder.
+Fleet mints the wake credential internally, and the fresh body must clear pending succession before
+resuming work. A roster-busy holder is not recoverable through this path because the send only queues
+mail; `sup-guard` names its long-running child executable basenames and ages for operator diagnosis.
 
 **Binding constraint on the refusal message, and on the freeze page.** Agent-facing output must
 name the ambiguity and the escalation, and must **not** name a lever that resolves it unilaterally. It
 says *"a second body of your lineage may be acting; stop and escalate to the operator"* — not *"run
-`sup-status` and then …"*. The human-facing runbook (`skills/fleet/supervisor.md`) is where the manual
-lever gets documented — **by this slice, per §8; there is no far side to this boundary until that edit
-lands, and shipping the constraint without the runbook entry would leave the lever documented
-nowhere.** A human reading a runbook and an agent reading stderr are different audiences with
+`sup-status` and then …"*. The human-facing Interface runbook (`skills/fleet/SKILL.md`) documents the
+idle-holder wake; it does not publish a unilateral recovery command to the refused body. A human
+reading a runbook and an agent reading stderr are different audiences with
 different capabilities; this is the one place where the absence of a privilege boundary is worked
 around by an **audience** boundary, and it is a convention, not a mechanism.
 
-**Accepted cost, stated plainly:** a supervisor that loses its nonce catastrophically is locked out of
-`sup-*` for up to an hour. §5.4(b) removes the common causes; compaction remains. Shortening
+**Accepted cost, stated plainly:** without a registered Interface, or while its holder remains busy, a
+supervisor that loses its nonce catastrophically is locked out of `sup-*` for up to an hour. §5.4(b)
+removes the common causes; compaction remains. Shortening
 `SUPERVISOR_CLAIM_STALE_SECONDS` is **not** the mitigation — it is the seizure threshold, and lowering
 it makes an unattended body easier to seize from. §12 O3 puts this in front of the operator.
 
