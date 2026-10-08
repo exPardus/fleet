@@ -354,7 +354,11 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
     import fleet_codex
 
     root = tmp_path_factory.mktemp("hermetic-codex")
-    script = root / "codex"
+    # POSIX can execute the extensionless shebang directly.  Windows does not
+    # treat that file as a CLI, so keep the implementation in a Python script
+    # and put a .cmd shim on PATH for CreateProcess' PATHEXT lookup.
+    windows = os.name == "nt"
+    script = root / ("codex.py" if windows else "codex")
     script.write_text(
         f"#!{sys.executable}\n"
         "import pathlib, sys\n"
@@ -368,7 +372,12 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
         "else:\n"
         "    raise SystemExit(2)\n",
         encoding="utf-8")
-    script.chmod(0o700)
+    if windows:
+        (root / "codex.cmd").write_text(
+            f'@echo off\r\n"{sys.executable}" "%~dp0{script.name}" %*\r\n',
+            encoding="utf-8")
+    else:
+        script.chmod(0o700)
     reviewed = json.loads(
         fleet_codex.REVIEWED_SCHEMA_MANIFESTS[
             HERMETIC_CODEX_VERSION].read_text("utf-8"))
