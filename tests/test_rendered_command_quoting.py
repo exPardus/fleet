@@ -725,9 +725,9 @@ class TestTheTemplateSurfaceQuotesToo:
     fixes for two different behaviours of the same consumer, and they do not
     conflict -- quoting is the stronger of the two. Measured in git-bash:
 
-        $ bash -c 'echo "C:\\Users\\Techn\\x"; echo C:\\Users\\Techn\\x'
-        C:\\Users\\Techn\\x
-        C:UsersTechnx
+        $ bash -c 'echo "C:\\Users\\user\\x"; echo C:\\Users\\user\\x'
+        C:\\Users\\user\\x
+        C:Usersuserx
 
     i.e. a double-quoted segment keeps its backslashes; an unquoted one loses
     them. Quoting therefore also neutralises the backslash hazard for the paths

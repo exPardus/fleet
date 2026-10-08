@@ -273,6 +273,12 @@ class TestTheSuccessorsRedirectTargetHasADirectory:
         fleet.write_incarnation({"incarnation_id": "inc-20260724T000000Z-0old",
                                  "session_id": "sid-old", "claimed_at": beat,
                                  "heartbeat_at": beat, "claimed_via": "fresh"})
+        data = fleet.load_registry()
+        data["workers"]["sup|inc-20260724T000000Z-0old|boot"] = fleet.new_worker_record(
+            "sid-old", str(fleet.FLEET_HOME), "campaign", "bypass",
+            model="claude-sonnet-5-5", setting_sources=None,
+            dispatch_kind="bg", category=None)
+        fleet.save_registry(data)
         rc = fleet.cmd_sup_handoff_begin(
             SimpleNamespace(sid="sid-old", model=None, permission_mode=None, nonce=None),
             which=lambda _n: "C:/fake/claude.cmd",
