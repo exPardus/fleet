@@ -1,7 +1,8 @@
 # Spec: `fleet mailman` — the interface wakes only for mail it must act on
 
-**Status:** draft, spec-first (no implementation). Build follows on a wave branch with an
-independent review; this document is the contract the build and its tests are checked against.
+**Status:** implemented (`bin/fleet_mailman.py`, wired in `bin/fleet.py`; tests `tests/test_mailman.py`).
+Supervisor rulings on the draft's open questions are folded in and recorded in §11. Where this
+document and the code differ, the code is the authority.
 
 **Inherits:** `docs/SPEC.md` (command surface §relay-ack/watch rows), `docs/specs/multi-fleet.md` §5
 (verb-effect tiers), `docs/specs/terminal-surface.md` (views doctrine D4/D7), root `CLAUDE.md`
@@ -61,9 +62,8 @@ $ grep -n "^def _atomic_append_bytes\|^def _write_json_atomic\|^def _replace_wit
 - **`cmd_mail_verify`** (`bin/fleet.py:1602`) is a different thing: it verifies *interface → supervisor*
   mail by receipt. Its doctrine applies here in one respect only: **mailbox text is not authority**.
   Mailman reads mail to route it and to print a summary; it never executes or obeys mail content.
-- **Python 3.10 has no `tomllib`**, and `bin/fleet.py` is stdlib-only. There is precedent for a
-  fixed-schema hand parser (`bin/fleet_index.py`, `_parse_index_config`, which "rejects fields outside
-  the schema instead of accepting unused TOML").
+- **Python 3.10 has no `tomllib`**, and `bin/fleet.py` is stdlib-only, so the home config is JSON
+  (`mailman.json`, stdlib `json`) rather than TOML.
 
 ```
 # at 936af0a7
@@ -98,7 +98,7 @@ body. Header names are case-insensitive; values are stripped. Mailman uses three
 **Malformed** (all WAKE, never FILE — the safe direction is the interface looking, not a mail
 vanishing into the digest):
 
-1. no header block (first line is not `key: value`), or no blank line terminating it;
+1. no header block (first line is not `key: value`); the block ends at the first blank line or at end of file;
 2. `kind` missing or empty;
 3. `needs-answer` present with a value other than `yes`/`no`;
 4. not valid UTF-8, or empty file, or larger than `MAIL_MAX_BYTES` (1 MiB, the same bound as
@@ -111,17 +111,22 @@ For `kind`, the first occurrence is used and a differing second one is malformed
 
 **In-flight files.** Mailman ignores names starting with `.` and names ending in `.tmp`. Senders
 (and the bridge hook, §7) must write `.<name>.tmp` in the inbox and `rename` into place; a half-written
-file is otherwise indistinguishable from a malformed one and would wake. (`_watch_mail_names` does not
-filter these; a follow-up may align it. See open question Q5.)
+file is otherwise indistinguishable from a malformed one and would wake. (`_watch_mail_names` and `relay-ack` do not
+filter these; aligning them is future work.)
 
 ## 4. Verbs
 
 ```
+fleet mailman init   --fleet-home H [--force]
 fleet mailman run    --fleet-home H [--timeout S] [--interval S] [--dry-run] [--include-reported]
 fleet mailman digest --fleet-home H [--since WHEN]
 ```
 
-`--fleet-home` is required and explicit on both (no env/legacy fallback), as for `relay-ack`.
+`--fleet-home` is required and explicit on every verb (no env/legacy fallback), as for `relay-ack`;
+without it the verb refuses.
+
+`init` writes the seed `mailman.json` (§5) into the home atomically and refuses to overwrite an
+existing file without `--force`.
 Both follow the existing parser conventions (`_watch_timeout_arg`/`_watch_interval_arg`: finite,
 non-negative timeout; interval > 0).
 
@@ -129,8 +134,9 @@ non-negative timeout; interval > 0).
 
 One pass, in order:
 
-1. **Load rules** (§5). A config error is fatal before any mutation: print the error to stderr, exit 1
-   (the CLI's `FleetCliError` exit), touch nothing.
+1. **Load rules** (§5). A missing or invalid `mailman.json` is **not** an error exit: the pass runs in
+   *fail-safe mode*, says why on stderr (`FAIL-SAFE, waking on every mail: <reason>`), WAKEs on every
+   mail and files nothing. The bridge hook is not run in fail-safe mode.
 2. **Bridge hook** (§7), if configured. Failure is recorded, never fatal to the pass.
 3. **Sort** every inbox name (sorted order): classify (§6.1) → WAKE or FILE.
 4. **File** every FILE mail (§6.2–6.3).
@@ -161,43 +167,40 @@ D4 sense (it reads a file that exists or reports that it does not).
 
 ## 5. Wake rules live in the home
 
-Rules are read from `<home>/mailman.toml` on every pass (edit while running; no restart). Defaults
-apply to any key the file omits, and the whole file may be absent:
+Rules are read from `<home>/mailman.json` on every pass (edit while running; no restart). The file
+is created by `fleet mailman init`, which writes the seed below. **No rule exists in code at run
+time**: the seed constant is only what `init` writes. A missing or unparseable file puts `run` in
+fail-safe mode (§4.1 step 1): it wakes on everything and says why.
 
-```toml
-[wake]
-kinds        = ["question", "claim", "design-question"]
-needs_answer = true
-patterns     = ["merge-ready", "retract", "do-not-merge", "blocker",
-                "founder action", "CRITICAL", "\\bP0\\b"]
-ignore_case  = true
-
-[bridge]
-command      = []        # argv list; empty = no bridge
-timeout_s    = 60
-max_failures = 5
-
-[digest]
-summary_max  = 160
+```json
+{
+  "wake": {
+    "kinds": ["question", "claim", "design-question"],
+    "needs_answer": true,
+    "ignore_case": true,
+    "patterns": ["merge-ready", "retract", "do-not-merge", "blocker",
+                 "founder action", "CRITICAL", "\\bP0\\b"]
+  },
+  "bridge": {"command": [], "timeout_s": 60, "max_failures": 5},
+  "digest": {"summary_max": 160}
+}
 ```
 
-- **Parser.** A fixed-schema hand parser (the `fleet_index` precedent), not `tomllib`: tables
-  `wake`, `bridge`, `digest` only; value types string / bool / int / single-line array of strings;
-  unknown table, unknown key or wrong type is a config error naming `file:line`.
-- **`patterns`** are Python `re` expressions matched with `re.search` over the **whole file text**
-  (headers and body, so a `subject:` header can wake). An uncompilable pattern is a config error.
-  Matching is bounded by `MAIL_MAX_BYTES`.
+- **Format.** JSON (stdlib `json`; Python 3.10 has no `tomllib`). Unknown tables or keys and wrong
+  types are config errors, which means fail-safe mode.
+- **`patterns`** are Python `re` expressions matched per line with `re.search` over the **body only**
+  (everything after the header block). Header fields are ruled separately (`kind`, `needs-answer`),
+  so a `subject:` header cannot wake. An entry is a string or
+  `{"pattern": "...", "unless": ["regex", ...]}`: a line wakes only if the pattern matches it and no
+  `unless` regex matches the same line (the per-pattern negative, e.g. `blocker` unless
+  `blocker: none`). An uncompilable regex is a config error. Matching is bounded by `MAIL_MAX_BYTES`.
 - **`kinds`** compare case-insensitively after strip.
-- **Defaults** are a single `DEFAULT_MAILMAN_RULES` data constant in code, equal to the block above.
-  They are the *fallback for a home with no file*, not the rules: nothing in code decides policy
-  once the home states it. `fleet mailman run --dry-run` over an empty home therefore shows the
-  defaults at work. (See Q1 for the alternative of requiring the file.)
 - A GOALS-section rule source is **not** supported: parsing prose for policy is how rules go
-  invisible. `mailman.toml` is the only rule source.
+  invisible. `mailman.json` is the only rule source.
 - **WAKE if** `needs_answer` and header `needs-answer` is `yes`; **or** `kind` ∈ `kinds`; **or** any
-  pattern matches; **or** malformed (§3). Reasons are all recorded, first listed in the stderr line.
-  Everything else is FILE. The bias is deliberate: a false wake costs one turn, a missed wake costs a
-  decision. (A LANDED report that mentions "blocker: none" will wake; tune with `--dry-run`.)
+  pattern (net of its negatives) matches the body; **or** malformed (§3). Every reason is reported
+  (`WAKE <name> reason=...` on stderr). Everything else is FILE. The bias is deliberate: a false wake
+  costs one turn, a missed wake costs a decision. `run --dry-run` shows verdicts for tuning.
 
 ## 6. Sorting and filing
 
@@ -222,10 +225,11 @@ For a FILED mail `N` (name) with `sha12` = first 12 hex of sha256:
 `[A-Za-z0-9._@-]`, anything else becomes `_`. Both are *data for reading*; nothing downstream may
 treat them as instructions.
 
-**Single code path.** The relay-log + cursor + move sequence is extracted from `cmd_relay_ack` into
-one helper that both verbs call (e.g. `_relay_file(home, source, line, mirror_logs, *, existing)`),
-so the two cannot drift. `relay-ack`'s observable behaviour is unchanged
-(`tests/test_interface_watch.py::test_relay_ack_refusal_is_byte_identical`).
+**Shared primitives, not a shared function.** Mailman uses the same log file, watch cursor,
+`_atomic_append_bytes`, `_write_json_atomic` and `_replace_with_retry` as `relay-ack` (injected into
+`bin/fleet_mailman.py` through `fleet._mailman_prims`), but does not call `cmd_relay_ack`: that verb
+refuses an existing `done/<name>` and is not idempotent, and changing it is out of scope.
+`relay-ack` is untouched; the interface still uses it to acknowledge wake mails.
 
 ### 6.3 Crash safety and idempotence
 
@@ -295,27 +299,27 @@ bridge cannot look like "no mail". Success resets the counter.
 - Mailman runs **only when invoked** by the interface (typically under `run_in_background`, as
   `fleet watch` is). It registers nothing, installs no hook, injects nothing into any session,
   starts no daemon. It is pull-only.
-- It is **not a view**: it moves files, so it is `VERB_EFFECT_DESTRUCTIVE` for `mailman run` (token
-  `mailman run`, requires an explicit `--fleet-home`, matching `relay-ack`) and
-  `VERB_EFFECT_ORDINARY` for `mailman digest`. The build updates the tuples **and** the transcribing
-  table in `docs/specs/multi-fleet.md` §5 (they are pinned against each other).
+- It is **not a view**: it moves files. `mailman` is deliberately in no verb-effect tuple, so
+  `verb_effect_tier("mailman")` returns the fail-safe default, `destructive` (multi-fleet §5: an
+  unclassified verb is destructive), and every subcommand requires an explicit `--fleet-home`.
+  `digest` is read-only in behaviour but shares the tier; adding tuple tokens would also have to
+  change the ratified-table pin file, which this feature does not need.
 - Views stay views: statusline and `/fleet:*` never call mailman and never read `digest.md` or
   `mailman-state.json` as a precondition; `fleet.status_snapshot()` is unchanged. `digest` honours
   D4 (no write, no lock, no quarantine) and exits 0 on absent files.
 - It never reads `state/fleet.json`, never takes `fleet.lock`, never writes the registry.
 
-## 9. Files touched (build scope)
+## 9. Files touched
 
 | file | change |
 |---|---|
-| `bin/fleet.py` | `mailman` subparser (`run`, `digest`); `cmd_mailman_run`, `cmd_mailman_digest`; `classify`, rules loader, bridge runner; shared `_relay_file` helper factored from `cmd_relay_ack`; tier tuples |
-| `docs/SPEC.md` | two rows beside `watch`/`relay-ack` in the command table |
-| `docs/specs/multi-fleet.md` | §5 tier table: add `mailman run` (destructive), `mailman digest` (ordinary) |
-| `skills/fleet/SKILL.md` | interface section: when to use `mailman run` instead of `watch` for mail; verb list |
-| `tests/test_mailman.py` | §10 |
+| `bin/fleet_mailman.py` | new leaf module: config, `classify`, filing, state, bridge, `cmd_run`/`cmd_digest`/`cmd_init` |
+| `bin/fleet.py` | `mailman` subparser (`init`, `run`, `digest`), `cmd_mailman`, `_mailman_prims`, dispatch |
+| `tests/test_mailman.py`, `tests/fleet_sources.py` | tests; the new module joins the implementation source census |
+| `docs/SPEC.md`, `skills/fleet/SKILL.md` | command rows |
 
-Local operator data written at run time lives under the home's ignored paths (`state/interface/…`,
-`mailbox/…`, `mailman.toml`); none of it is tracked.
+Local operator data written at run time lives under the home's ignored paths (`mailman.json`,
+`state/interface/…`, `mailbox/…`); none of it is tracked.
 
 ## 10. Test plan
 
@@ -337,7 +341,7 @@ no network, no real hook binary beyond a tiny Python script in `tmp_path`.
 
 | # | test | asserts |
 |---|---|---|
-| T7 | `test_rules_come_from_the_home` | A `mailman.toml` that adds a kind/pattern or removes a default changes verdicts; an absent file gives the defaults; a bad key/type/regex exits 1 with `file:line` and mutates nothing. Source-scan: no wake word (`merge-ready` …) appears in `bin/fleet.py` outside `DEFAULT_MAILMAN_RULES`. |
+| T7 | `test_rules_come_from_the_home`, `test_bad_or_missing_config_wakes_on_everything`, `test_body_only_patterns_and_negatives` | A `mailman.json` changes verdicts; a missing/invalid file wakes on every mail, files nothing and says why; patterns are body-only with per-pattern negatives. Source-scan: no wake word outside the seed constant. |
 | T8 | `test_reported_wake_not_reprinted` | Second `run` skips a reported wake mail; `--include-reported` lists it; a changed sha re-wakes; lost state file re-prints. Print-before-persist ordering (a crash after print re-prints). |
 | T9 | `test_done_collision_never_overwrites` | Pre-existing different `done/N`: incoming goes to `done/<stem>.<sha12><suffix>`, both survive. |
 | T10 | `test_changed_mail_not_filed` | File rewritten between classify and move: left in inbox, not moved. |
@@ -346,8 +350,8 @@ no network, no real hook binary beyond a tiny Python script in `tmp_path`.
 | T13 | `test_bridge_hook` | Hook argv runs with `cwd=home` and `FLEET_HOME`; mail it delivers is sorted in the same pass; non-zero/timeout does not abort the pass; `max_failures` consecutive failures exit 4; success resets. |
 | T14 | `test_digest_view` | `--since` as duration and ISO; counts; dedupe by marker; absent file exits 0; torn tail ignored; the home tree is byte-identical before/after (no write, no mkdir, no lock). |
 | T15 | `test_dry_run_mutates_nothing` | Tree hash identical before/after; no bridge spawned. |
-| T16 | `test_relay_ack_unchanged` | The existing relay-ack tests still pass against the extracted helper. |
-| T17 | `test_tiers_and_doctrine` | `mailman run` ∈ destructive tuple, `mailman digest` ∈ ordinary; multi-fleet §5 table lists both; mailman takes no `fleet.lock` and never opens `state/fleet.json`; extend `tests/test_views_doctrine.py`'s verb coverage if it enumerates verbs. |
+| T16 | `test_init_seeds_config_and_refuses_overwrite` | `init` writes the seed, refuses overwrite, `--force` overwrites; `test_requires_explicit_fleet_home`. |
+| T17 | `test_mailman_takes_no_registry_lock` | No `fleet_lock`/`fleet.json` in the module; `verb_effect_tier("mailman")` is `destructive` by default. |
 | T18 | `test_py310` | Collected and passing under 3.10 and 3.12 (no `tomllib`, no 3.11+ syntax). |
 
 **Receipt convention.** Receipts in this document and in the build's doc updates are `# at <sha>`
@@ -360,19 +364,16 @@ to the build commit, as `autoclean.md` does.
 and the 3.12 equivalent over `tests/test_mailman.py`, `tests/test_interface_watch.py`, `tests/test_docs_currency.py`, `tests/test_receipts.py`,
 `tests/test_views_doctrine.py`.
 
-## 11. Open design questions
+## 11. Rulings on the draft's open questions (supervisor)
 
-1. **Defaults in code vs required file.** "Rules never in code" vs "defaults": this spec keeps a
-   `DEFAULT_MAILMAN_RULES` fallback so a fresh home works. Alternative: no file ⇒ `fleet mailman init`
-   writes a seed and `run` refuses without it. Which?
-2. **`watch` still wakes on every mail.** An interface using both will be woken by `fleet watch`
-   before mailman files a mail. Recommend a later `watch --no-mail` (or `--mail-via-mailman`); out of
-   scope here.
-3. **Exit 4 for a dead bridge** is added beyond the requested 0/3 contract. Keep, or surface only on
-   stderr?
-4. **Whole-text pattern match** (headers included) vs body-only. Chosen: whole text.
-5. **In-flight convention** (`.tmp` ignored) is new for the inbox; `_watch_mail_names` and `relay-ack`
-   do not honour it. Align them in the build or leave?
-6. **Pattern false wakes** ("blocker: none"). Accept the wake bias, or add a per-pattern negative
-   (`ignore_patterns`)?
-7. **Digest default window** is 24 h (digest cannot keep a read cursor without writing). Acceptable?
+1. No wake rules in code: `fleet mailman init` seeds the home config; a missing or unparseable config
+   makes `run` wake on every mail and say why (§4.1, §5).
+2. `watch --no-mail` is out of scope. **Future work:** an interface using both `watch` and `mailman`
+   is still woken by `watch` for any mail it sees first.
+3. Exit 4 on a persistently failing bridge hook is accepted and documented (§4.1, §7).
+4. Patterns match the body only; header fields are parsed and ruled separately; malformed headers
+   wake (§3, §5).
+5. `.tmp` files and dotfiles in the inbox are ignored (§3). Aligning `watch`/`relay-ack` is future work.
+6. Per-pattern negatives (`unless`), configured in the home (§5).
+7. `digest` defaults to the last 24 h (§4.2).
+8. Config format is JSON (`mailman.json`), not TOML.

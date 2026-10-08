@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -15270,7 +15270,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
-    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20718, :22713`).
+    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20718, :22733`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8754, :9338, :13501, :21456. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -22322,6 +22322,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
+    p_mailman = sub.add_parser(
+        "mailman", help="sort the home inbox; wake only for mail needing the interface")
+    mailman_sub = p_mailman.add_subparsers(dest="mailman_command", required=True)
+    mailman_sub.add_parser("init", help="seed mailman.json in the home").add_argument(
+        "--force", action="store_true", help="overwrite an existing mailman.json")
+    p_mm_run = mailman_sub.add_parser(
+        "run", help="block until a mail needs the interface (exit 0) or timeout (3)")
+    p_mm_run.add_argument("--timeout", type=_watch_timeout_arg, default=None)
+    p_mm_run.add_argument("--interval", type=_watch_interval_arg,
+                          default=fleet_mailman.DEFAULT_INTERVAL)
+    p_mm_run.add_argument("--dry-run", action="store_true",
+                          help="print verdicts; mutate nothing")
+    p_mm_run.add_argument("--include-reported", action="store_true",
+                          help="also print wake mails already reported")
+    mailman_sub.add_parser("digest", help="rollup of filed mail").add_argument(
+        "--since", default=fleet_mailman.DIGEST_DEFAULT_SINCE, metavar="WHEN",
+        help="<n>m|h|d or ISO UTC timestamp (default 24h)")
+
     p_relay = sub.add_parser(
         "relay-ack", help="append an interface relay and acknowledge one mail file")
     p_relay.add_argument("--mail", required=True, metavar="FILE")
@@ -22632,6 +22650,8 @@ def main(argv=None) -> int:
             return cmd_interface_register(args)
         if args.command == "relay-ack":
             return cmd_relay_ack(args)
+        if args.command == "mailman":
+            return cmd_mailman(args)
         if args.command == "wave-close":
             return cmd_wave_close(args)
         if args.command == "sup-heartbeat":
@@ -23044,6 +23064,30 @@ def _format_process_age(seconds):
     if seconds >= 60:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def _mailman_prims():
+    return fleet_mailman.Prims(
+        append=lambda path, data: _atomic_append_bytes(path, data),
+        write_json=lambda path, obj: _write_json_atomic(path, obj),
+        replace=lambda a, b: _replace_with_retry(a, b),
+        read_cursor=lambda home: _watch_read_cursor(home),
+        write_cursor=lambda home, cursor: _watch_write_cursor(home, cursor),
+        now=now_iso)
+
+
+def cmd_mailman(args) -> int:
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("mailman requires an explicit --fleet-home")
+    home = Path(FLEET_HOME)
+    sub = args.mailman_command
+    if sub == "init":
+        return fleet_mailman.cmd_init(home, _mailman_prims(), force=args.force)
+    if sub == "digest":
+        return fleet_mailman.cmd_digest(home, since=args.since)
+    return fleet_mailman.cmd_run(
+        home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
+        dry_run=args.dry_run, include_reported=args.include_reported)
 
 
 if __name__ == "__main__":
