@@ -333,6 +333,55 @@ def _no_inherited_claude_session(monkeypatch):
     monkeypatch.delenv("FLEET_WORKER", raising=False)
 
 
+# The fake app servers in the codex tests report this version.
+HERMETIC_CODEX_VERSION = "0.155.1"
+HERMETIC_CODEX_SCHEMA = b'{"hermetic":"codex-schema"}\n'
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_codex(tmp_path_factory, monkeypatch):
+    """No test may depend on the host's installed Codex version.
+
+    Puts a fake `codex` first on PATH (it reports a fixed reviewed version and
+    emits a private schema) and swaps that version's manifest for one carrying
+    the private schema's digest, so `CodexHostClient.ensure` without an explicit `schema_command`
+    never reaches the real CLI. Tests that exercise real reviewed versions pass
+    their own fake command or patch `subprocess.run`.
+    """
+    import hashlib
+    import json
+
+    import fleet_codex
+
+    root = tmp_path_factory.mktemp("hermetic-codex")
+    script = root / "codex"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        f"    print('codex-cli {HERMETIC_CODEX_VERSION}')\n"
+        "elif sys.argv[1:3] == ['app-server', 'generate-json-schema']:\n"
+        "    out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+        "    out.mkdir(parents=True, exist_ok=True)\n"
+        "    (out / 'codex_app_server_protocol.v2.schemas.json')"
+        f".write_bytes({HERMETIC_CODEX_SCHEMA!r})\n"
+        "else:\n"
+        "    raise SystemExit(2)\n",
+        encoding="utf-8")
+    script.chmod(0o700)
+    reviewed = json.loads(
+        fleet_codex.REVIEWED_SCHEMA_MANIFESTS[
+            HERMETIC_CODEX_VERSION].read_text("utf-8"))
+    reviewed.update(
+        schema_sha256=hashlib.sha256(HERMETIC_CODEX_SCHEMA).hexdigest())
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps(reviewed), encoding="utf-8")
+    monkeypatch.setitem(
+        fleet_codex.REVIEWED_SCHEMA_MANIFESTS, HERMETIC_CODEX_VERSION, manifest)
+    monkeypatch.setenv(
+        "PATH", f"{root}{os.pathsep}{os.environ.get('PATH', '')}")
+
+
 def pytest_collection_modifyitems(config, items):
     """Tag every collected test with its tier (SPEC §12) and skip the live
     tier unless FLEET_LIVE=1 is set in the environment."""

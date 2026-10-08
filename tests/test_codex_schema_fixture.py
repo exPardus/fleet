@@ -221,7 +221,7 @@ def test_generate_contract_rejects_oversized_public_schema(tmp_path):
         _generator()(str(codex), tmp_path / "fixture")
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_checked_fixture_pins_reviewed_public_contract(version):
     fixture = FIXTURES / version
     manifest = json.loads((fixture / "manifest.json").read_text())
@@ -263,7 +263,7 @@ def test_0160_no_inference_contract_changes_only_the_version():
     assert new == old
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_checked_fixture_contains_no_private_codex_path(version):
     for path in (FIXTURES / version).glob("*.json"):
         text = path.read_text(encoding="utf-8")
@@ -271,3 +271,29 @@ def test_checked_fixture_contains_no_private_codex_path(version):
         assert "\\.codex\\" not in text
         assert "rollout" not in text.lower()
         assert "sqlite" not in text.lower()
+
+
+def test_0161_reviewed_contract_is_identical_to_0160():
+    old = (FIXTURES / "0.160.0" / "v2-contract.json").read_bytes()
+    new = (FIXTURES / "0.161.0" / "v2-contract.json").read_bytes()
+    assert new == old
+
+
+def test_0161_no_inference_contract_changes_only_the_version():
+    old = json.loads(
+        (FIXTURES / "0.160.0" / "no-inference-acceptance.json").read_text())
+    new = json.loads(
+        (FIXTURES / "0.161.0" / "no-inference-acceptance.json").read_text())
+    assert old.pop("codex_version") == "0.160.0"
+    assert new.pop("codex_version") == "0.161.0"
+    assert new == old
+
+
+def test_codex_error_codes_read_variants_under_anyof_and_oneof(tmp_path):
+    from tools.codex_schema_fixture import _codex_errors
+
+    entry = {"required": ["activeTurnNotSteerable"]}
+    for key in ("oneOf", "anyOf"):
+        definitions = {"CodexErrorInfo": {
+            key: [{"enum": ["other"]}, entry]}}
+        assert _codex_errors(definitions) == ["activeTurnNotSteerable", "other"]
