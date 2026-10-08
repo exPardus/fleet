@@ -352,7 +352,11 @@ only uniquely known fields actually sent by its immutable intent, never inferred
 defaults. An unsuccessful source or thread lookup, or incomplete or mismatched
 identity, history, or effective settings settles terminally failed and is never
 adopted. A committed adoption or terminal settlement failure clears the
-predecessor fence so later native mutations may proceed.
+predecessor fence so later native mutations may proceed. On the first later
+mutation after host replacement, prior-generation `thread/start` and
+`thread/resume` predecessors take this public-read settlement path before the
+fence is evaluated; they are never replayed or left permanently unresolved
+merely because their host generation changed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

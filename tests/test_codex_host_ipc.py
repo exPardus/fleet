@@ -26,6 +26,7 @@ def _modules():
 FAKE_APP_SERVER = r'''#!{python}
 import json
 import os
+import signal
 import sys
 
 log = os.environ["FAKE_APP_SERVER_LOG"]
@@ -88,6 +89,26 @@ for line in sys.stdin:
     elif message.get("method") == "thread/start":
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
+    elif message.get("method") == "thread/resume":
+        if os.environ.get("FAKE_CRASH_HOST_ON_THREAD_RESUME") == "1":
+            os.kill(os.getppid(), signal.SIGKILL)
+            raise SystemExit(42)
+        send({{"id": message["id"], "result": {{
+            "thread": {{"id": message.get("params", {{}}).get("threadId"),
+                       "cwd": "/project"}},
+            "cwd": "/project", "model": "gpt-5.6-luna",
+            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            "sandbox": {{"type": "workspaceWrite"}},
+        }}}})
+    elif message.get("method") == "thread/read":
+        send({{"id": message["id"], "result": {{"thread": {{
+            "id": message.get("params", {{}}).get("threadId"),
+            "cwd": "/project", "status": {{"type": "idle"}},
+            "turns": [
+                {{"id": "turn-0", "status": "completed", "items": []}},
+                {{"id": "turn-1", "status": "completed", "items": []}},
+            ],
+        }}}}}})
     elif message.get("method") in ("turn/start", "turn/steer", "turn/interrupt"):
         if (message.get("method") == "turn/start"
                 and os.environ.get("FAKE_DROP_TURN_RESPONSE") == "1"):

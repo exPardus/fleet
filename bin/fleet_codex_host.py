@@ -270,6 +270,47 @@ class Host:
         return self.journal.adopt_thread_read(
             operation_id, observed).get("result")
 
+    def _settle_prior_generation_thread_predecessors(
+            self, operation_id: str, deadline: float) -> None:
+        """Terminally settle old thread intents before a fresh mutation.
+
+        Replacement-host startup conservatively changes accepted operations to
+        uncertain without an app-server observer.  The first later mutation is
+        therefore the bounded public-observation opportunity: thread operations
+        have immutable recovery identity and may be read, never replayed.  A
+        proved projection commits; absent or conflicting proof fails terminally
+        so the old generation cannot remain a permanent predecessor fence.
+        """
+        for predecessor in self.journal.records():
+            predecessor_id = predecessor.get("operation_id")
+            if (predecessor_id == operation_id
+                    or predecessor.get("generation") == self.generation
+                    or predecessor.get("public_method") not in {
+                        "thread/start", "thread/resume"}):
+                continue
+            state = predecessor.get("state")
+            if state == "observed":
+                self.journal.commit(predecessor_id)
+                continue
+            if state not in {"accepted", "uncertain"}:
+                continue
+            if state == "accepted":
+                self.journal.uncertain(
+                    predecessor_id,
+                    "prior host generation ended after provider acceptance; "
+                    "public thread settlement required")
+            try:
+                self._settle_uncertain_thread_result(
+                    predecessor_id, deadline)
+            except Exception:
+                # Identity, read, history, and effective-setting failures are
+                # terminalized by the settlement helper.  Storage failures are
+                # not proof and must retain the fence for a later safe retry.
+                if self.journal.load(predecessor_id).get("state") != "failed":
+                    raise
+            else:
+                self.journal.commit(predecessor_id)
+
     def _recover_spawn_queue_overflow(
             self, operation_id: str, deadline: float) -> Any:
         """Adopt a queue-obscured spawn mutation without replaying it."""
@@ -597,6 +638,8 @@ class Host:
                         elif state == "failed":
                             raise ValueError("operation is terminally failed")
                         elif state == "prepared":
+                            self._settle_prior_generation_thread_predecessors(
+                                operation_id, deadline)
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
                             if predecessor is not None:
@@ -610,6 +653,9 @@ class Host:
                             recovered = False
                             failure: Exception | None = None
                             try:
+                                rpc_timeout = _bounded_rpc_timeout(
+                                    payload, float(request["operation_timeout"]),
+                                    deadline)
                                 result = self.client.request(
                                     payload["method"], payload.get("params", {}),
                                     timeout=rpc_timeout)

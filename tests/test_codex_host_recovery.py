@@ -38,7 +38,8 @@ def test_codex_integration_spec_pins_general_operation_journal_contract():
             "immutable request intent", "intent actually sent",
             "failed operation-source lookup", "public thread lookup",
             "terminally as `failed`",
-            "terminal as `committed`", "predecessor fence"):
+            "terminal as `committed`", "predecessor fence",
+            "first later native mutation", "prior-generation"):
         assert phrase in section
 
 
@@ -770,3 +771,43 @@ def test_replacement_host_conservatively_reconciles_accepted_intent_before_ready
             == client.generation
     finally:
         _shutdown(client)
+
+
+def test_replacement_host_settles_accepted_resume_then_allows_next_mutation(
+        tmp_path, monkeypatch):
+    module, crashed, log = _ensure(
+        tmp_path,
+        env_overrides={"FAKE_CRASH_HOST_ON_THREAD_RESUME": "1"})
+    operation = _mutation("accepted-before-host-crash", "thread/resume")
+
+    with pytest.raises(module.HostUnavailable, match="response was lost"):
+        crashed.call(operation, timeout=2)
+    assert crashed.wait_for_exit(2)
+    accepted = json.loads(_operation_file(
+        crashed, operation["operation_id"]).read_text())
+    assert accepted["state"] == "accepted"
+
+    monkeypatch.setattr(module, "HOST_HEARTBEAT_STALE_SECONDS", 0.0)
+    _module_value, replacement, _replacement_log = _ensure(
+        tmp_path, home=crashed.home)
+    try:
+        reconciled = json.loads(_operation_file(
+            replacement, operation["operation_id"]).read_text())
+        assert reconciled["state"] == "uncertain"
+
+        reply = replacement.call(
+            _mutation("mutation-after-restart", "turn/start"), timeout=2)
+
+        assert reply.result == {
+            "turn": {"id": "turn-1", "status": "inProgress"}}
+        settled = json.loads(_operation_file(
+            replacement, operation["operation_id"]).read_text())
+        assert settled["state"] == "failed"
+        assert settled["settled_from_public_read"] is True
+        assert "effective settings are unknown" in settled["reason"]
+        assert [row["method"] for row in (
+            json.loads(line) for line in log.read_text().splitlines())
+                if row.get("event") == "request"] == [
+                    "thread/resume", "thread/read", "turn/start"]
+    finally:
+        _shutdown(replacement)

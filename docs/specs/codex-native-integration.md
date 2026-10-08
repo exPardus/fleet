@@ -185,8 +185,11 @@ digest. One operation ID has one digest/result. Responses echo those values;
 the client rejects another home, generation, operation, or digest.
 
 An accepted or uncertain operation from an older host generation is rejected
-with an explicit "reconcile before retry" uncertainty; generation rollover
-never turns a lost provider response into a replay.
+when addressed as the same operation: generation rollover never turns a lost
+provider response into a replay. Before the first later mutation, however, the
+replacement host settles any prior-generation `thread/start` or
+`thread/resume` predecessor through the public-read procedure in §7.3. It does
+not require the old operation to be replayed by a caller.
 
 ## 5. Components and state
 
@@ -346,6 +349,18 @@ and the caller then
 makes it terminal as `committed`. Both terminal outcomes clear the predecessor
 fence, while only the committed projection may be adopted into Fleet state.
 Later native mutations may proceed only after one of those terminal outcomes.
+
+Replacement-host startup may first convert a prior-generation `accepted`
+record to `uncertain` without a public observer. On the first later native
+mutation, before testing its predecessor fence, the host settles every such
+prior-generation thread record. `thread/resume` reads the immutable intent's
+thread ID directly; `thread/start` resolves its immutable operation source to
+one exact thread ID and then reads it. Matching evidence becomes `committed`;
+missing, conflicting, or incomplete proof becomes terminally `failed`. An
+already `observed` prior-generation record is committed directly. No path
+replays the old mutation. If the terminal journal write itself cannot be
+persisted, the new mutation refuses and retains the fence for a later safe
+attempt.
 
 ## 8. Worker lifecycle and no-duplicate recovery
 
