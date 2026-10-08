@@ -15270,7 +15270,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
     :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
-    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20723, :22853`).
+    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20723, :22872`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8754, :9338, :13501, :21588. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -23054,11 +23054,6 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
             status = recompute_worker_native(n, rec, entries).get("status")
         elif _is_codex_record(rec):
             if _codex_record_route(rec) == "mcx":
-                # Probe mcx completion.
-
-
-
-
                 expected_mcx_id = rec.get("mcx_id")
                 expected_status = rec.get("status")
                 expected_last_dispatch_at = rec.get("last_dispatch_at")

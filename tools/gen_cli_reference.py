@@ -31,7 +31,8 @@ Every verb and option below is printed by the parser itself. For the workflow
 behind the verbs, read [getting-started.md](getting-started.md); for the
 behavioural contract, read [SPEC.md](SPEC.md).
 
-Verbs marked hidden in the parser are not listed here.
+Verbs marked hidden in the parser are not listed here or in top-level
+`fleet --help` output.
 """
 
 

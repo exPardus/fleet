@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import child_env
+
 
 REPO = Path(__file__).resolve().parents[1]
 GENERATOR = REPO / "tools" / "gen_cli_reference.py"
@@ -152,10 +154,10 @@ def test_no_hidden_nested_command_is_documented():
     assert not leaked, f"hidden commands appear in the reference: {leaked}"
 
 
-def test_always_refusing_attach_is_hidden_from_actual_help():
+def test_always_refusing_attach_is_hidden_from_actual_help(tmp_path):
     result = subprocess.run(
         [sys.executable, str(REPO / "bin" / "fleet.py"), "--help"],
-        cwd=REPO, capture_output=True, text=True)
+        cwd=REPO, env=child_env(tmp_path), capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     choice_list = re.search(
         r"usage: fleet \[-h\]\s+\{([^}]+)\}", result.stdout)

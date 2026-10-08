@@ -62,7 +62,7 @@ mailbox/
 supervisor/
 docs/lanes/
 knowledge/projects/
-local operator lessons
+knowledge/lessons.md
 ```
 
 The Fleet source checkout already carries these rules. In another repository,
