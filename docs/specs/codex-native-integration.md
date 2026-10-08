@@ -403,6 +403,12 @@ pending operation, evidence mismatch, and host ambiguity stays unchanged.
 Candidate rows are snapshotted under `fleet.lock`, host IPC runs unlocked, and
 the repair commits by complete-row compare-and-swap so a concurrent kill,
 resume reservation, or other mutation wins. Bare `doctor` remains report-only.
+For a frozen `turn/start` or `turn/steer`, the repair settles the matching
+Codex host operation journal from that same public turn proof before clearing
+Fleet's pending reservation; an unresolved host predecessor therefore cannot
+block a later mutation. Mailbox claims are captured with the frozen-row
+snapshot and only those exact claims are restored or finalized after the
+compare-and-swap, so a newer concurrent send's claim is left untouched.
 Busy `send` uses one
 `turn/steer(expectedTurnId=...)`; idle `send` starts one new turn on the same
 thread. Each mutation is reserved durably before IPC, and an uncertain response
