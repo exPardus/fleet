@@ -382,7 +382,17 @@ the validated live read finds that same exact newest turn and also reports it
 turn evidence stays non-idle. An unresolved mutation prevents an older
 completion from vouching for unknown provider work. Host loss, a failed live
 identity, or conflicting turn maps to `dead-suspected`, never to a proved
-death. A lost read response from an already joined, live same-generation host
+death, and only while the provider is silent. Codex writes no Stop-hook
+outcome record, so its absence is never evidence. Fleet checks the
+exact thread's rollout file (the public `thread.path` recorded on the last
+good observation as `codex_rollout_path`, else
+`$CODEX_HOME/sessions/<date>/rollout-*-<thread>.jsonl` within one day of the
+UUIDv7 creation date) and the exact-turn public-evidence `observed_at`. A write
+within `CODEX_ACTIVITY_FRESH_SECONDS` (600) keeps the row `working`, or its
+committed `idle`. These are file reads only; no host is started or probed.
+An active provider whose wait metadata is unreadable stays `working` with an
+`uncertain` adapter. A Codex `dead-suspected` row is flagged
+`investigate: no provider activity`. A lost read response from an already joined, live same-generation host
 is not evidence that its thread died; reconciliation preserves the committed
 verdict and retries on a later observation. File-only views remain file-only.
 `fleet doctor --repair` backfills rows that were already committed
@@ -405,12 +415,43 @@ keeps that reservation and retained mail instead of retrying.
 | active + `waitingOnUserInput` | `waiting` with input metadata |
 | idle + persisted terminal current turn | terminal mapping, usually `idle` |
 | exact newest turn is `completed` in both durable evidence and validated live read | `idle`, including after live-view eviction |
+| any unobservable or `notLoaded`/`systemError` shape with a rollout or evidence write in the last 600 s | `working` (committed `idle` kept) |
 | `notLoaded` with missing or disagreeing completion evidence | `dead-suspected`; explicit recovery is required, never inferred death |
 | `systemError` with missing or disagreeing completion evidence | `dead-suspected`/PAGE |
 | host absent, replaced generation, dead host PID, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
 | read response lost from a live same-generation host | preserve the committed verdict; retry later |
 | limit error + authoritative future reset | `limited` |
 | limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
+
+**Early turn end, 2026-10-08:** the evidence store records the public
+`agentMessage.phase` of the last agent message as `result_phase`
+(`commentary`, `final_answer`, or null when the provider omits it). A
+`completed` turn whose last message is `commentary` ended on a progress
+message. After committing that `idle` verdict, `status` and `wait` (outside
+`fleet.lock`) start one same-thread turn with a fixed continuation prompt
+through the ordinary idle-send path, appending `codex_auto_continued`. The
+budget is `CODEX_AUTO_CONTINUE_LIMIT` (2) per operator dispatch: the counter
+`codex_auto_continues` increments on each automatic turn and resets on any
+operator send. A `final_answer` or unknown phase, an exhausted budget, a
+pending operation, or any send refusal leaves the lane idle and notifies as
+usual.
+
+**Recovery verbs, 2026-10-08:** every native worker refusal names a runnable
+verb. An uncertain or `dead-suspected` row says `fleet status <name>`, which
+re-observes it. A pending reservation says `fleet doctor --repair`. That repair
+releases a frozen `turn/start` or `turn/steer` only on provider proof read
+through a two-row descending `thread/turns/list`. If the thread is idle and its
+newest turn is still the bound terminal turn, no successor exists: the
+reservation is released and claimed mail returns to the mailbox. A steer that
+did land may be delivered twice, but mail is never lost. If a `turn/start`
+left exactly one new turn directly after the bound turn, that turn is
+adopted. Every other shape stays reserved. The repair uses the same
+snapshot, unlocked IPC, and complete-row compare-and-swap as the completion
+backfill.
+
+Displayed native ids (`peek`) use the last 12 hex digits of each UUIDv7. The
+leading digits are the creation timestamp and collide across lanes started in
+the same minute.
 
 The worker `result` view treats exact-turn public evidence that has item/usage
 updates but no terminal `turn_status` as a running turn, not malformed durable

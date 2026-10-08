@@ -310,11 +310,29 @@ turn as `completed`.
 An in-progress, failed, interrupted, missing, or conflicting live turn remains
 non-idle; an unresolved mutation never lets older completion evidence vouch
 for unknown provider work. A missing host, replaced generation, dead host PID,
-or conflicting public identity is positive `dead-suspected` evidence; a lost
-response from a joined, live same-generation host preserves the last committed
-verdict for a later observation instead of guessing that the turn died.
-`doctor --repair` applies that same two-witness rule to `dead-suspected` rows
-committed before the rule shipped. It snapshots only unarchived native worker
+or conflicting public identity yields `dead-suspected` only when the provider
+is also silent: a native Codex lane writes no Stop-hook outcome record, so a
+missing record is never evidence. A rollout file for the exact thread (the
+public `thread.path`, else the provider's date-filed `rollout-*-<thread>.jsonl`)
+or exact-turn public evidence written within the last 10 minutes keeps the row
+`working` (or its committed `idle`). A lost response from a joined, live
+same-generation host preserves the last committed verdict for a later
+observation instead of guessing that the turn died. An active provider with an
+unreadable wait record stays `working` with an `uncertain` adapter. The status
+flag for a Codex `dead-suspected` row reads `investigate: no provider activity`.
+A completed turn whose last agent message carries the explicit public
+`commentary` phase ended early on a progress message: `status` and `wait`
+start one same-thread continuation turn, at most twice per operator dispatch
+(`codex_auto_continued` event); a `final_answer` or unknown phase is an
+ordinary completion. Native worker refusals name their recovery verb:
+`fleet status <name>` re-observes an uncertain or `dead-suspected` row, and
+`fleet doctor --repair` reconciles a frozen send reservation.
+`doctor --repair` releases a frozen `turn/start` or `turn/steer` reservation
+only when the exact thread proves it: an idle thread whose newest turn is still
+the bound terminal turn releases it and returns the claimed mail to the
+mailbox; one new turn directly after the bound turn adopts a `turn/start`.
+Every other shape stays reserved. It also applies that same two-witness rule
+to `dead-suspected` rows committed before the rule shipped. It snapshots only unarchived native worker
 rows under `fleet.lock`, probes unlocked, and changes only rows whose complete
 registry value still equals the snapshot; a concurrent terminal or resume
 write wins without being overwritten. Bare `doctor` performs no such probe or

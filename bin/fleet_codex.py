@@ -748,6 +748,7 @@ _USAGE_FIELDS = {
     "totalTokens": "total_tokens",
 }
 _TERMINAL_TURN_STATES = frozenset({"completed", "failed", "interrupted"})
+_AGENT_MESSAGE_PHASES = frozenset({"commentary", "final_answer"})
 
 
 def _public_uuid7(value: object, label: str) -> str:
@@ -811,7 +812,7 @@ class CodexPublicEvidenceStore:
         return result
 
     @staticmethod
-    def _agent_result(item: Any) -> tuple[str, str, bool] | None:
+    def _agent_result(item: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict) or item.get("type") != "agentMessage":
             return None
         item_id = item.get("id")
@@ -819,10 +820,15 @@ class CodexPublicEvidenceStore:
         if (not isinstance(item_id, str) or not item_id or len(item_id) > 160
                 or not isinstance(text, str)):
             raise ValueError("public agent result is malformed")
+        phase = item.get("phase")
+        if phase not in _AGENT_MESSAGE_PHASES:
+            phase = None
         encoded = text.encode("utf-8")
-        if len(encoded) > 32 * 1024:
-            return item_id, encoded[:32 * 1024].decode("utf-8", "ignore"), True
-        return item_id, text, False
+        truncated = len(encoded) > 32 * 1024
+        if truncated:
+            text = encoded[:32 * 1024].decode("utf-8", "ignore")
+        return {"result_item_id": item_id, "result_text": text,
+                "result_truncated": truncated, "result_phase": phase}
 
     def record(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
@@ -851,11 +857,7 @@ class CodexPublicEvidenceStore:
         elif method == "item/completed":
             result = self._agent_result(params.get("item"))
             if result is not None:
-                item_id, text, truncated = result
-                current.update({
-                    "result_item_id": item_id, "result_text": text,
-                    "result_truncated": truncated,
-                })
+                current.update(result)
         else:
             assert turn is not None
             status = turn.get("status")
@@ -875,11 +877,7 @@ class CodexPublicEvidenceStore:
             for item in items:
                 result = self._agent_result(item)
                 if result is not None:
-                    item_id, text, truncated = result
-                    current.update({
-                        "result_item_id": item_id, "result_text": text,
-                        "result_truncated": truncated,
-                    })
+                    current.update(result)
         current["observed_at"] = time.time()
         _atomic_json(self.path(thread_id, turn_id), current)
         return current
