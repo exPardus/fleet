@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11908) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12910) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16369) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:11915) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:12917) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16376) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
       * `_acting_worker_identity` (:3740) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
       * `_read_registry_readonly` (:4435) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13160) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16243) -- describe the incident-specific absence.
+      * `_doctor_check_registry` (:13167) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16250) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
       * `_print_snapshot_table` (:7108) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18023) -- render the release explanation.
+      * `_tombstone_releasing_body` (:18030) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3722,7 +3722,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16369`), because legacy upgrades also require a complete registry.
+    (`:16376`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -8175,7 +8175,14 @@ fresh session; never a successor, never a fork.
    rm "{bundle}"
    Carry the NONCE value in your working context ONLY -- never into the journal, never into any
    file.
-4. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
+4. Before any campaign action, run:
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
+   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE:
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort --successor-inc <inc> [--successor-sid <sid>] --nonce <CURRENT-NONCE>
+   If a sid-less attempt is still inside its join window, wait until it becomes resolvable, then retry. Run each nonce-minting
+   verb directly: never pipe or filter its output, and record every newly printed NONCE before the
+   next abort. A lost-nonce wake must not leave a successor able to take over afterward.
+5. Continue the campaign from the journal tail, GOALS and the manager message above (if any), per
    skills/fleet/supervisor.md. Refresh the heartbeat through the normal protocol
    (`sup-checkpoint`) before any other action; do not seize a changed claim or spawn another
    supervisor.
@@ -10251,7 +10258,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10166` / `cmd_respawn:9457`, before
+    # resolution that runs from `cmd_kill:10173` / `cmd_respawn:9464`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10282,9 +10289,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10166` / `cmd_respawn:9457`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10173` / `cmd_respawn:9464`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9478-9487` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9485-9494` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15262,10 +15269,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3544, :3579, :3609, :3648, :3685,
-    :3747, :3827, :4832, :10269, :10431, :10695, :10924, :10960, :11202, :11203,
-    :11292, :11302, :11313, :11411, :11934, :15213, :19121, :19122, :19226, :19287, :20699, :22829`).
+    :3747, :3827, :4832, :10276, :10438, :10702, :10931, :10967, :11209, :11210,
+    :11299, :11309, :11320, :11418, :11941, :15220, :19128, :19129, :19233, :19294, :20723, :22853`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8747, :9331, :13494, :21564. This makes union identity
+    OWN prior sid alone: :8754, :9338, :13501, :21588. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15983,8 +15990,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8747, :9331, :13494,
-    # :21564) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8754, :9338, :13501,
+    # :21588) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15992,7 +15999,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15187`).
+        # names this gate as its reason (`:15194`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16362,7 +16369,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11905`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:11912`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19289,7 +19296,7 @@ def _sup_guard_body_name(sids):
     return None
 
 
-def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
+def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
     """Collect the read-only inputs for one two-live-body decision."""
     snapshot_fn = snapshot_fn or status_snapshot
     roster_fn = roster_fn or _fetch_agents_roster
@@ -19374,6 +19381,8 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
                       and _sup_guard_row_in_home(row, registry=registry)
                       and (row.get("name") == SUPERVISOR_BODY_NAME
                            or _is_supervisor_shaped(row.get("name")))]
+    busy_children = _sup_guard_busy_children(
+        body_rows, sup.get("heartbeat_age_seconds"), process_tree_fn)
     return {
         "snapshot": snapshot,
         "registry_ok": bool(snapshot.get("ok", True))
@@ -19387,6 +19396,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None):
         "roster_reason": None if roster_ok else str(roster_or_reason),
         "live_rows": live_rows,
         "live_body_rows": live_body_rows,
+        "busy_children": busy_children,
         "handshake_exists": handshake_exists,
         "handshake": handshake,
         "pending": pending,
@@ -19418,7 +19428,7 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
          "parked_wake_condition", "parked_age_seconds", "parked_active",
-         "parked_expired", "parked_finished_lanes")
+         "parked_expired", "parked_finished_lanes", "busy_children")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -19515,7 +19525,14 @@ def _sup_guard_decide(observation):
             detail["quiet"] = True
             return "OK", "fresh heartbeat with live body", detail
         if "busy" in statuses:
-            return "PAGE", "roster says busy", detail
+            reason = "roster says busy"
+            children = obs.get("busy_children") or []
+            if children:
+                rendered = ", ".join(
+                    f"pid {child['pid']} age {_format_process_age(child['age_seconds'])} "
+                    f"executable {child['executable']}" for child in children)
+                reason += f"; long-running child: {rendered}"
+            return "PAGE", reason, detail
         if statuses == {"idle"}:
             return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         return "PAGE", "live supervisor status unknown", detail
@@ -19667,7 +19684,8 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
     return rc
 
 
-def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
+def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
+                  process_tree_fn=None) -> int:
     """Observe twice before action; only WAKE acts, and never spawns.
 
     JSON includes explicit sent/quiet flags so the keeper does not derive
@@ -19679,13 +19697,17 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
     if isinstance(claim, dict) and claim.get("provider") == "codex":
         return _cmd_codex_sup_guard(args, lane_done=lane_done)
-    observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+    observation = _sup_guard_observe(
+        snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+        process_tree_fn=process_tree_fn)
     if do:
         # Only the WAKE path retries deferred fork retirement. OK and PAGE
         # must stay action-free. Re-observe after any retirement before send.
         if _sup_guard_decide(observation)[0] == "WAKE":
             _reap_current_supervisor_forks(roster_fn=roster_fn)
-        observation = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        observation = _sup_guard_observe(
+            snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+            process_tree_fn=process_tree_fn)
     verdict, reason, detail = _sup_guard_decide(observation)
     sent, rc = False, 0
     if do and verdict == "WAKE":
@@ -19713,7 +19735,9 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None) -> int:
         # Send can discover and persist a limit while recomputing its target.
         # Publish that park/horizon immediately; never turn it into timer retries
         # of a generic send failure. This is observation only, not a second send.
-        after = _sup_guard_observe(snapshot_fn=snapshot_fn, roster_fn=roster_fn)
+        after = _sup_guard_observe(
+            snapshot_fn=snapshot_fn, roster_fn=roster_fn,
+            process_tree_fn=process_tree_fn)
         next_verdict, next_reason, next_detail = _sup_guard_decide(after)
         if next_reason.startswith("supervisor limited"):
             verdict, reason, detail, rc = next_verdict, next_reason, next_detail, 0
@@ -23118,6 +23142,48 @@ def cmd_address(args, run=subprocess.run, which=shutil.which) -> int:
               f"{entry.get('waitingFor') or 'a prompt'}; a message queues "
               f"until that clears", file=sys.stderr)
     return 0
+
+
+def _sup_guard_busy_children(body_rows, heartbeat_age, process_tree_fn=None,
+                             min_age=300.0):
+    if (not isinstance(heartbeat_age, (int, float))
+            or heartbeat_age <= SUPERVISOR_CLAIM_STALE_SECONDS
+            or not any(row.get("status") == "busy" for row in body_rows)):
+        return []
+    read_tree = process_tree_fn or PLATFORM.process_tree
+    children = {}
+    for body in body_rows:
+        if body.get("status") != "busy":
+            continue
+        try:
+            descendants = read_tree(int(body.get("pid")))
+        except Exception:
+            continue
+        for child in descendants if isinstance(descendants, list) else ():
+            try:
+                pid = int(child["pid"])
+                age = float(child["age_seconds"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if age < min_age:
+                continue
+            executable = str(child.get("executable") or "").strip()
+            executable = executable.replace("\\", "/").rsplit("/", 1)[-1][:128]
+            if executable:
+                children[pid] = {"pid": pid, "age_seconds": age,
+                                 "executable": executable}
+    return sorted(children.values(), key=lambda row: (-row["age_seconds"], row["pid"]))[:3]
+
+
+def _format_process_age(seconds):
+    seconds = max(0, int(seconds))
+    if seconds >= 86400:
+        return f"{seconds // 86400}d{seconds % 86400 // 3600}h"
+    if seconds >= 3600:
+        return f"{seconds // 3600}h{seconds % 3600 // 60}m"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
 
 
 if __name__ == "__main__":
