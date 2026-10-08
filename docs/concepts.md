@@ -33,7 +33,7 @@ Fleet is that missing layer.
 
 Everything fleet knows lives on disk as plain files: a registry, mailboxes, journals, outcome records, git-tracked knowledge. There is no server holding truth in memory. The statusline, the `/fleet:*` slash commands, the manager's Claude session — none of them *own* anything. They all read the same files and derive the same picture. Add a surface (a web UI, a Telegram bridge) or drop one, and the core never notices.
 
-Every surface is also **pull-only**: fleet injects nothing into any session. The plugin manifest deliberately declares no hooks, because a globally-enabled plugin's `SessionStart` hook fires in *every* session on the machine — which is exactly how an earlier startup briefing leaked this fleet's operator gates and worker table into unrelated projects. It was removed on 2026-07-22 and is not coming back. Fleet state reaches a session when that session asks for it, never before.
+Every surface is also **pull-only**: fleet injects nothing into any session. The plugin manifest deliberately declares no hooks, because a globally-enabled plugin's `SessionStart` hook fires in *every* session on the machine — which is exactly how an earlier startup briefing leaked this fleet's operator gates and worker table into unrelated projects. It was removed and is not coming back. Fleet state reaches a session when that session asks for it, never before.
 
 Three rules fall out of that bet, and they're load-bearing:
 
@@ -59,7 +59,7 @@ flowchart TB
 
 - A **worker** is not a process fleet babysits — it's a durable Claude Code session on disk, addressed by session id. It survives crashes, reboots, and the manager's death.
 - A **turn** is one short-lived unit of a worker's work. Workers do short turns, not marathon sessions. Between turns they sit idle, cheap, resumable.
-- The **manager** is whoever holds the fleet CLI — usually a Claude Code session that has become the fleet manager. `/fleet:overview` is the reliable way in: it is a slash command, so it cannot fail to match. (The phrase *"become the fleet manager"* is **not** one of the triggers `skills/fleet/SKILL.md` declares; activation is semantic, so it may match anyway, but nothing here guarantees it — see [Getting started](getting-started.md#become-the-manager).)
+- The **manager** is whoever holds the fleet CLI — usually a Claude Code session that has become the fleet manager. `/fleet:overview` is the reliable way in: it is a slash command, so it cannot fail to match. (The phrase *"become the fleet manager"* is **not** one of the triggers `skills/fleet/SKILL.md` declares; activation is semantic, so it may match anyway, but nothing here guarantees it — see [Getting started](getting-started.md#your-first-job).)
 - The **registry** (`state/fleet.json`) is the one file that decides truth. Only `bin/fleet.py` ever writes it, under a lock. Everything else reads.
 
 ## How it's layered
@@ -182,7 +182,7 @@ receipts, and postmortems remain local to the home that produced them.
 
 ## Where to go next
 
-- **[Getting started](getting-started.md)** — install, become the manager, run your first campaign.
+- **[Getting started](getting-started.md)** — install, run your first job, resume a session.
 - **[SPEC.md](SPEC.md)** — the architecture of record: registry schema, the numbered load-bearing invariants, every command's exact contract.
 - **[ROADMAP.md](ROADMAP.md)** — what's shipped, what's next, and the soak-gate discipline behind each phase.
 - **[Docs index](README.md)** — every doc in the repo, tagged by audience.
