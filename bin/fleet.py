@@ -6756,7 +6756,10 @@ def _codex_preaccept_evidence(path: Path) -> tuple[dict, str]:
 
     if not path.is_absolute():
         raise FleetCliError("worker preaccept evidence path must be absolute")
-    info = _require_regular(path)
+    try:
+        info = _require_regular(path)
+    except (OSError, ValueError) as exc:
+        raise FleetCliError("supervisor interrupt callback file is unavailable") from exc
     if info.st_size > 64 * 1024:
         raise FleetCliError("worker preaccept evidence exceeds 64 KiB")
     raw = path.read_bytes()
@@ -9091,6 +9094,327 @@ def cmd_codex_respond(args) -> int:
         raise FleetCliError(
             f"{name}: Codex approval response returned invalid state {state!r}")
     print(f"{name}: Codex request {args.request_id} response consumed once ({state})")
+    return 0
+
+
+SUP_INTERRUPT_OLD_HOST_SHA256 = (
+    "ef4516e021043984f7aee4d408d6c9292393def4696353bf3a01d71b3aa2036b")
+
+
+def _sup_interrupt_request_id(raw, kind):
+    """Preserve JSON integer versus string IDs for one bound callback."""
+    if not isinstance(raw, str) or not raw or len(raw) > 160:
+        raise FleetCliError("supervisor interrupt request ID is invalid")
+    if kind == "int":
+        if not raw.isascii() or not raw.isdecimal() or str(int(raw)) != raw:
+            raise FleetCliError("supervisor interrupt integer ID is not canonical")
+        return int(raw)
+    if kind == "string":
+        return raw
+    raise FleetCliError("supervisor interrupt request ID type is required")
+
+
+def _sup_interrupt_record(args, binding, typed_id, *, state, original=None):
+    """Read one owner-only exact callback; never infer resolution from turn state."""
+    from fleet_codex import _approval_key, _require_regular
+    key = _approval_key(binding.host_generation, typed_id)
+    if key != args.expect_request_key:
+        raise FleetCliError("supervisor interrupt callback key disagrees")
+    path = state_dir() / "codex" / "approvals" / f"{key}.json"
+    info = _require_regular(path)
+    if info.st_size > 48 * 1024:
+        raise FleetCliError("supervisor interrupt callback is oversized")
+    raw = path.read_bytes()
+    try:
+        record = json.loads(raw)
+    except (UnicodeError, ValueError) as exc:
+        raise FleetCliError("supervisor interrupt callback is unreadable") from exc
+    params = record.get("params") if isinstance(record, dict) else None
+    if (not isinstance(record, dict) or not isinstance(params, dict)
+            or record.get("schema") != 1
+            or record.get("home") != str(FLEET_HOME.resolve())
+            or record.get("generation") != binding.host_generation
+            or record.get("key") != key
+            or type(record.get("request_id")) is not type(typed_id)
+            or record.get("request_id") != typed_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("item_id") != args.expect_item_id
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or (state is not None and record.get("state") != state)):
+        raise FleetCliError("supervisor interrupt callback identity or state changed")
+    if original is None:
+        if hashlib.sha256(raw).hexdigest() != args.expect_request_sha256:
+            raise FleetCliError("supervisor interrupt callback bytes changed")
+    elif (any(record.get(field) != original.get(field) for field in (
+            "schema", "home", "generation", "key", "request_id", "method",
+            "thread_id", "turn_id", "item_id", "params", "offered_decisions"))
+          or "response" in record):
+        raise FleetCliError("supervisor interrupt callback was answered or retargeted")
+    return record
+
+
+def _sup_interrupt_fresh_processes(args, generation):
+    """Reopen old-host metadata after reads and bind both live OS identities."""
+    from fleet_codex import (CodexHostClient, _process_identity,
+                             _process_identities_match)
+    fresh = CodexHostClient.connect_existing(FLEET_HOME)
+    if (fresh.generation != generation
+            or fresh.host_pid != args.expect_host_pid
+            or fresh.host_process_identity != args.expect_host_process_identity
+            or fresh.app_server_pid != args.expect_app_server_pid
+            or fresh.app_server_process_identity
+            != args.expect_app_server_process_identity
+            or fresh.app_server_started_at != args.expect_app_server_started_at):
+        raise FleetCliError("supervisor interrupt original host or child changed")
+    for pid, expected in (
+            (args.expect_host_pid, args.expect_host_process_identity),
+            (args.expect_app_server_pid, args.expect_app_server_process_identity)):
+        observed = _process_identity(pid)
+        if (not isinstance(observed, str)
+                or _process_identities_match(expected, observed) is not True):
+            raise FleetCliError("supervisor interrupt OS process identity changed")
+    return fresh
+
+
+def _sup_interrupt_durable_inventory(binding, original):
+    """Reject a second unresolved callback for this turn; preserve others."""
+    from fleet_codex import read_pending_requests
+    durable = read_pending_requests(
+        FLEET_HOME, binding.authority.value, binding.current_turn_id,
+        current_generation=binding.host_generation)
+    if len(durable) != 1 or {**original, "stale": False} != durable[0]:
+        raise FleetCliError("supervisor interrupt durable callback is ambiguous")
+
+
+def _sup_interrupt_pending(args, binding, typed_id, client, original):
+    """Require one matching old-host unresolved request on the current turn."""
+    waits = client.pending_approvals(
+        binding.authority.value, binding.current_turn_id)
+    if (not isinstance(waits, list) or len(waits) != 1
+            or waits[0] != original):
+        raise FleetCliError("supervisor interrupt public callback is ambiguous")
+    _sup_interrupt_durable_inventory(binding, original)
+
+
+def _sup_interrupt_no_prior_operation(generation, operation_id):
+    """Match the old host's exact journal predecessor gate before dispatch."""
+    from fleet_codex import OperationJournal
+    if not (state_dir() / "codex" / "operations").is_dir():
+        raise FleetCliError("supervisor interrupt host journal is absent")
+    journal = OperationJournal(FLEET_HOME, generation)
+    if journal.unresolved_predecessor(operation_id) is not None:
+        raise FleetCliError(
+            "supervisor interrupt host journal has an unresolved predecessor")
+
+
+def cmd_codex_sup_interrupt_current(args) -> int:
+    """Interrupt one held supervisor turn, never answer its pending callback."""
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("supervisor interrupt requires explicit --fleet-home")
+    typed_id = _sup_interrupt_request_id(args.request_id, args.request_id_type)
+    if (args.expect_old_host_sha256 != SUP_INTERRUPT_OLD_HOST_SHA256
+            or type(args.expect_host_pid) is not int or args.expect_host_pid <= 0
+            or type(args.expect_app_server_pid) is not int
+            or args.expect_app_server_pid <= 0
+            or type(args.expect_app_server_started_at) is not float
+            or args.expect_app_server_started_at <= 0
+            or any(not isinstance(value, str) or not value for value in (
+                args.expect_inc, args.expect_thread, args.expect_turn,
+                args.expect_host_generation, args.expect_host_process_identity,
+                args.expect_app_server_process_identity, args.expect_item_id))
+            or any(not isinstance(value, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", value) for value in (
+                args.expect_request_key, args.expect_request_sha256))):
+        raise FleetCliError("supervisor interrupt exact source or target pins are incomplete")
+    if hashlib.sha256((Path(__file__).with_name("fleet_codex_host.py"))
+                      .read_bytes()).hexdigest() != SUP_INTERRUPT_OLD_HOST_SHA256:
+        raise FleetCliError("supervisor interrupt bundled old host source differs")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("supervisor interrupt requires genuine current Codex Interface")
+    status, claim = read_incarnation_status()
+    registry = read_registry_no_repair()
+    if status != "ok":
+        raise FleetCliError("supervisor interrupt claim is absent or corrupt")
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    old_row = dict(binding.record)
+    if (binding.incarnation_id != args.expect_inc
+            or binding.authority.value != args.expect_thread
+            or binding.current_turn_id != args.expect_turn
+            or binding.host_generation != args.expect_host_generation
+            or claim.get("pending_operation") is not None
+            or old_row.get("pending_operation") is not None
+            or old_row.get("status") != "working"
+            or old_row.get("adapter_state") != "active"):
+        raise FleetCliError("supervisor interrupt held claim or row disagrees")
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("supervisor interrupt host generation changed")
+    observed = _codex_supervisor_observe(binding, client=client, require_full=True)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"
+            or observed["active_flags"] != ["waitingOnApproval"]):
+        raise FleetCliError("supervisor interrupt current turn is not waiting on one approval")
+    original = _sup_interrupt_record(args, binding, typed_id, state="pending")
+    _sup_interrupt_pending(args, binding, typed_id, client, original)
+    operation_id = f"supervisor-current-interrupt-{uuid.uuid4().hex}"
+    _sup_interrupt_no_prior_operation(binding.host_generation, operation_id)
+    if args.preflight:
+        print("supervisor interrupt exact current turn and pending callback "
+              "verified; no reservation or provider mutation")
+        return 0
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        current = (_codex_supervisor_binding(
+            current_claim, current_registry, expected_name=binding.name,
+            allowed_states={"held"}) if current_status == "ok" else None)
+        if (current_claim != claim or current is None
+                or current.record != old_row
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("supervisor interrupt claim, row or Interface changed")
+        _sup_interrupt_record(args, binding, typed_id, state="pending")
+        _sup_interrupt_durable_inventory(binding, original)
+        _sup_interrupt_no_prior_operation(binding.host_generation, operation_id)
+        fresh = _sup_interrupt_fresh_processes(args, binding.host_generation)
+        old_claim = dict(current_claim)
+        reservation = {
+            "operation_id": operation_id, "kind": "supervisor/current-turn-interrupt",
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "host_generation": binding.host_generation,
+            "request_id": typed_id, "request_key": args.expect_request_key,
+            "request_sha256": args.expect_request_sha256,
+            "previous_claim_operation_id": old_claim.get("last_operation_id"),
+            "previous_row_operation_id": old_row.get("last_operation_id"),
+        }
+        current_claim["pending_operation"] = reservation
+        current_claim["last_operation_id"] = operation_id
+        row = current_registry["workers"][binding.name]
+        row["adapter_state"] = "mutating"
+        row["last_operation_id"] = operation_id
+        reserved_claim, reserved_row = dict(current_claim), dict(row)
+        try:
+            write_incarnation(current_claim)
+            save_registry(current_registry)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor interrupt reservation incomplete; no request sent") from exc
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/interrupt", "params": {
+            "threadId": binding.authority.value,
+            "turnId": binding.current_turn_id}},
+        "recovery": {
+            "kind": "supervisor/current-turn-interrupt",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "request_key": args.expect_request_key,
+            "canonical_cwd": str(FLEET_HOME.resolve())},
+    }
+    try:
+        with fleet_lock():
+            now_claim = read_incarnation()
+            now_registry = read_registry_no_repair()
+            if (now_claim != reserved_claim
+                    or now_registry.get("workers", {}).get(binding.name)
+                    != reserved_row
+                    or _registered_interface_mail_source() != source
+                    or not _mail_source_is_current(source)):
+                raise FleetCliError("supervisor interrupt reservation changed before send")
+            _sup_interrupt_record(args, binding, typed_id, state="pending")
+            _sup_interrupt_durable_inventory(binding, original)
+            _sup_interrupt_no_prior_operation(binding.host_generation, operation_id)
+            fresh = _sup_interrupt_fresh_processes(args, binding.host_generation)
+        mutation = _call_codex_supervisor_claimed(
+            fresh, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"held"})
+        if (mutation.operation_id != operation_id
+                or mutation.generation != binding.host_generation
+                or not isinstance(mutation.result, dict)):
+            raise FleetCliError("supervisor interrupt accepted result is contradictory")
+        # On a1ee, successful mutation and approval/list do not drain provider
+        # notifications. Each public thread read does; repeat only those reads,
+        # never the interrupt, while waiting briefly for resolved evidence.
+        for attempt in range(3):
+            terminal = _codex_supervisor_observe(
+                binding, client=fresh, require_full=True)
+            record = _sup_interrupt_record(
+                args, binding, typed_id, state=None, original=original)
+            waits = fresh.pending_approvals(
+                binding.authority.value, binding.current_turn_id)
+            if (terminal["provider_status"] == "idle"
+                    and terminal["turn_id"] == binding.current_turn_id
+                    and terminal["turn_status"] in {
+                        "completed", "failed", "interrupted"}
+                    and not terminal["active_flags"]
+                    and record["state"] == "resolved"
+                    and waits == []):
+                break
+            if (record["state"] not in {"pending", "resolved"}
+                    or not isinstance(waits, list)
+                    or any(not isinstance(wait, dict) for wait in waits)):
+                raise FleetCliError("supervisor interrupt callback outcome is contradictory")
+            if attempt == 2:
+                raise FleetCliError(
+                    "supervisor interrupt lacks terminal and resolved proof")
+            time.sleep(0.25)
+        _sup_interrupt_fresh_processes(args, binding.host_generation)
+        fresh.commit(operation_id)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "supervisor interrupt outcome uncertain; reservation retained; "
+            "inspect journal, turn and callback; never replay") from exc
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        row = current_registry.get("workers", {}).get(binding.name)
+        if (current_status != "ok" or current_claim != reserved_claim
+                or row != reserved_row
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError(
+                "supervisor interrupt accepted but claim/row settlement changed; "
+                "reservation retained")
+        _sup_interrupt_record(args, binding, typed_id,
+                              state="resolved", original=original)
+        _sup_interrupt_fresh_processes(args, binding.host_generation)
+        settled_claim = dict(old_claim)
+        settled_claim.update({"provider_status": "idle",
+                              "last_operation_id": operation_id,
+                              "heartbeat_at": now_iso()})
+        settled_row = dict(old_row)
+        settled_row.update({"status": "idle", "adapter_state": "idle",
+                            "provider_status": "idle",
+                            "provider_turn_status": terminal["turn_status"],
+                            "last_operation_id": operation_id,
+                            "last_activity": now_iso()})
+        current_registry["workers"][binding.name] = settled_row
+        try:
+            save_registry(current_registry)
+            write_incarnation(settled_claim)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor interrupt settlement incomplete; inspect claim/row; "
+                "never replay") from exc
+        _append_event_quiet(
+            "interrupted", binding.name,
+            codex_thread_id=binding.authority.value,
+            codex_turn_id=binding.current_turn_id,
+            turn_status=terminal["turn_status"])
+    print(f"{binding.name}: current native Codex turn terminal and callback "
+          "resolved; supervisor remains held and idle")
     return 0
 
 
@@ -23148,6 +23472,25 @@ def build_parser() -> argparse.ArgumentParser:
         "decision", help="literal offered choice, JSON object, or @file")
     p_codex_respond.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
+    p_sup_interrupt = sub.add_parser(
+        "codex-sup-interrupt-current",
+        help="interrupt one exact held native Codex supervisor turn without "
+             "answering its callback")
+    p_sup_interrupt.add_argument("request_id")
+    p_sup_interrupt.add_argument("--preflight", action="store_true",
+                                 help="verify current turn without reservation or interrupt")
+    p_sup_interrupt.add_argument("--request-id-type", required=True,
+                                 choices=("int", "string"))
+    for field in ("inc", "thread", "turn", "host-generation", "item-id",
+                  "request-key", "request-sha256", "old-host-sha256",
+                  "host-process-identity", "app-server-process-identity"):
+        p_sup_interrupt.add_argument(f"--expect-{field}", required=True)
+    p_sup_interrupt.add_argument("--expect-host-pid", required=True, type=int)
+    p_sup_interrupt.add_argument("--expect-app-server-pid", required=True,
+                                 type=int)
+    p_sup_interrupt.add_argument("--expect-app-server-started-at",
+                                 required=True, type=float)
+
     p_preaccept = sub.add_parser(
         "codex-settle-preaccept",
         help="settle one reviewed native worker thread/start authentication rejection")
@@ -23649,6 +23992,8 @@ def main(argv=None) -> int:
             parser.error(f"unknown mail command {args.mail_command!r}")
         if args.command == "codex-respond":
             return cmd_codex_respond(args)
+        if args.command == "codex-sup-interrupt-current":
+            return cmd_codex_sup_interrupt_current(args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":

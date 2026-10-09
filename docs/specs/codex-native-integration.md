@@ -68,6 +68,26 @@ ID, real turn ID where applicable, and canonical cwd match the Fleet preclaim.
 
 ## 3. Current adapter and public protocol
 
+### Held supervisor current-turn interrupt
+
+`fleet --fleet-home <exact-home> codex-sup-interrupt-current <typed-request-id>
+--request-id-type int|string` is a dedicated, one-turn rescue route. It requires a
+current process-bound Codex Interface, a held native supervisor claim, an exact
+unique current row, a single exact pending command approval, and fresh original
+host and app-server child identities. The remaining `--expect-*` arguments pin
+the reviewed incarnation, thread, turn, callback key and bytes, and host
+processes. It does not answer an approval or interrupt ordinary workers.
+
+The command reserves the complete claim and target row, issues one authenticated
+journaled `turn/interrupt`, and then reads the public thread to drain old-host
+notifications. It settles only after the same turn is terminal and idle, the
+exact callback is durably resolved without a response, and no unresolved
+callback remains. Any missing or contradictory proof retains the reservation;
+the interrupt must never be replayed. After settlement, a separate verified
+`fleet send supervisor` can deliver existing queued mail with one distinct wake
+direction. That send is a separate decision and must not be repeated after an
+uncertain result.
+
 ### Exact worker preaccept authentication rejection
 
 `fleet --fleet-home <exact-home> codex-settle-preaccept <worker> <operation-id>
