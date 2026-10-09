@@ -901,6 +901,11 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     from fleet_codex import _process_identity
     identity = _process_identity(os.getpid()) or "unknown"
     token = f"{os.getpid()}|{identity}|{uuid.uuid4().hex}"
+
+    def retry_or_timeout() -> None:
+        if time.monotonic() >= deadline:
+            raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+
     while fd is None:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -913,18 +918,24 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
                 if not _fleet_lock_same_file(fd, path):
                     os.close(fd)
                     fd = None
+                    retry_or_timeout()
                     continue
         except FileExistsError:
             try:
-                age = time.time() - path.stat().st_mtime
+                info = path.lstat()
             except FileNotFoundError:
+                retry_or_timeout()
                 continue  # someone else already broke/released it; retry immediately
+            if not stat.S_ISREG(info.st_mode):
+                raise FleetCliError(f"unsafe non-regular lock path: {path}")
+            age = time.time() - info.st_mtime
             if age > LOCK_STALE_SECONDS and fcntl is not None:
                 try:
                     stale_fd = os.open(str(path), os.O_RDONLY
                                        | getattr(os, "O_NOFOLLOW", 0)
                                        | getattr(os, "O_NONBLOCK", 0))
                 except FileNotFoundError:
+                    retry_or_timeout()
                     continue
                 try:
                     try:
@@ -932,11 +943,20 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
                     except BlockingIOError:
                         pass
                     else:
-                        if (_fleet_lock_same_file(stale_fd, path)
-                                and time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS
-                                and not _fleet_lock_live_owner(path)):
-                            path.unlink()
-                            continue
+                        if _fleet_lock_same_file(stale_fd, path):
+                            try:
+                                current = path.lstat()
+                            except FileNotFoundError:
+                                current = None
+                            if (current is not None
+                                    and time.time() - current.st_mtime > LOCK_STALE_SECONDS
+                                    and not _fleet_lock_live_owner(path)):
+                                try:
+                                    path.unlink()
+                                except FileNotFoundError:
+                                    pass
+                                retry_or_timeout()
+                                continue
                 finally:
                     os.close(stale_fd)
             elif age > LOCK_STALE_SECONDS and not _fleet_lock_live_owner(path):
@@ -944,19 +964,22 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
                     path.unlink()
                 except FileNotFoundError:
                     pass
+                retry_or_timeout()
                 continue
-            if time.monotonic() >= deadline:
-                raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+            retry_or_timeout()
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
-        except PermissionError:
+        except PermissionError as denied:
             # Windows delete-pending lock names can raise PermissionError instead of EEXIST.
             # A present name is contention: poll under the deadline without stale-breaking,
             # because unlink can also be denied. An absent name means directory access failed;
             # re-raise that error instead of reporting a misleading lock timeout.
-            if not path.exists():
-                raise
-            if time.monotonic() >= deadline:
-                raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                raise denied
+            if not stat.S_ISREG(info.st_mode):
+                raise FleetCliError(f"unsafe non-regular lock path: {path}")
+            retry_or_timeout()
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
         os.write(fd, token.encode("utf-8"))

@@ -106,6 +106,9 @@ writes; stale-break contenders lock and recheck that inode before unlinking.
 This prevents a slow or suspended settlement writer from being replaced by
 another current Fleet CLI writer during the journal-first transition. A
 pre-install CLI writer that lacks this protocol is an act-time STOP condition.
+The lock path itself must be a regular file if present; a dangling symlink or
+other non-regular entry refuses without unlinking it, and a concurrent unlink
+retry remains bounded by the monotonic lock deadline.
 
 ### 3.1 Current mcx adapter
 
