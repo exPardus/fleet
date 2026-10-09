@@ -2422,7 +2422,9 @@ def test_preserved_history_prepare_accepts_genuine_resolved_callback_variants(
 @pytest.mark.parametrize("change", [
     "missing-thread", "bad-thread", "missing-method", "missing-params",
     "missing-created", "missing-resolved", "bad-resolved",
-    "missing-offered",
+    "missing-offered", "params-null", "params-list", "params-empty",
+    "params-thread-mismatch", "params-turn-mismatch",
+    "params-item-mismatch",
 ])
 def test_preserved_history_prepare_refuses_malformed_resolved_callback(
         supervisor_home, monkeypatch, change):
@@ -2440,6 +2442,18 @@ def test_preserved_history_prepare_refuses_malformed_resolved_callback(
         record["thread_id"] = "not-a-thread-id"
     elif change == "bad-resolved":
         record["resolved_at"] = True
+    elif change == "params-null":
+        record["params"] = None
+    elif change == "params-list":
+        record["params"] = []
+    elif change == "params-empty":
+        record["params"] = {}
+    elif change == "params-thread-mismatch":
+        record["params"]["threadId"] = THREAD_ID
+    elif change == "params-turn-mismatch":
+        record["params"]["turnId"] = TURN_ID
+    elif change == "params-item-mismatch":
+        record["params"]["itemId"] = "another-item"
     else:
         record.pop({
             "missing-thread": "thread_id", "missing-method": "method",

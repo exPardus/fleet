@@ -20622,6 +20622,12 @@ def _restored_resolved_callback(record):
         _public_uuid7(record["thread_id"], "resolved callback thread id")
     except ValueError as exc:
         raise FleetCliError("resolved native callback thread id is malformed") from exc
+    params = record["params"]
+    if (not isinstance(params, dict)
+            or params.get("threadId") != record["thread_id"]
+            or params.get("turnId") != record["turn_id"]
+            or params.get("itemId") != record["item_id"]):
+        raise FleetCliError("resolved native callback request identity differs")
     for field in ("created_at", "resolved_at"):
         value = record[field]
         if (isinstance(value, bool) or not isinstance(value, (int, float))
