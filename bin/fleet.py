@@ -2609,14 +2609,20 @@ def _codex_active_reobserve_journal(binding: CodexWorkerBinding) -> None:
         result_turn = binding.turn_id
     if result_turn != binding.turn_id:
         raise FleetCliError(f"{binding.name}: last operation returned another turn")
-    for entry in journal.records():
-        detail = entry.get("recovery")
-        if (isinstance(detail, dict)
-                and (detail.get("fleet_name") == binding.name
-                     or detail.get("thread_id") == binding.thread_id)
-                and entry.get("state") not in {"committed", "failed"}):
-            raise FleetCliError(
-                f"{binding.name}: unresolved native Codex worker operation")
+    # The host gates new mutations on every unresolved predecessor. A journal
+    # entry without recovery attribution cannot be proved unrelated to this row.
+    if journal.unresolved_predecessor(operation_id) is not None:
+        raise FleetCliError(
+            f"{binding.name}: unresolved native Codex predecessor operation")
+
+
+def _codex_active_reobserve_unknown_callback() -> None:
+    """Mirror the host's global unknown-request gate before clearing a row."""
+    from fleet_codex import read_pending_requests
+    if any(request.get("state") == "unknown"
+           for request in read_pending_requests(FLEET_HOME, None)):
+        raise FleetCliError(
+            "native Codex unknown blocking callback freezes active re-observation")
 
 
 def cmd_codex_reobserve_active(args) -> int:
@@ -2642,6 +2648,7 @@ def cmd_codex_reobserve_active(args) -> int:
             or record.get("adapter_state") != "uncertain"):
         raise FleetCliError(f"{name}: row is not an unsettled active observation")
     _codex_active_reobserve_journal(binding)
+    _codex_active_reobserve_unknown_callback()
     client = _codex_existing_client(FLEET_HOME)
     if client.generation != binding.host_generation:
         raise FleetCliError(f"{name}: native Codex host generation changed")
@@ -2662,6 +2669,7 @@ def cmd_codex_reobserve_active(args) -> int:
             raise FleetCliError(f"{name}: native Codex row changed during re-observation")
         if _codex_wait_summaries(record) != waits:
             raise FleetCliError(f"{name}: callback scope changed during re-observation")
+        _codex_active_reobserve_unknown_callback()
         _codex_active_reobserve_journal(binding)
         updated = dict(record)
         updated["status"] = "working"

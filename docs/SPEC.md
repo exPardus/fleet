@@ -408,9 +408,11 @@ that cache alone cannot distinguish a failed read from an accepted mutation.
 generation and last-operation pins lets the current registered Interface settle
 one such row without sending mail or a provider mutation. It checks the exact home,
 host generation, unchanged row, committed last worker operation, absence of
-unresolved same-worker operations, newest active bound turn and current callback
-scope, then repeats source, journal and row checks before its single registry
-update. A waiting approval remains waiting and uses its exact response path.
+any unresolved journal predecessor, newest active bound turn, current callback
+scope, and the host's global unknown-callback gate. It repeats these metadata
+checks before its single registry update. A waiting approval remains waiting
+and uses its exact response path. An unattributed accepted mutation or unknown
+callback cannot be cleared by this command.
 
 The wave-close row's per-home configuration also owns landing gates: a missing
 `supervisor/wave-close.json` preserves the fleet home's `docs-currency` and

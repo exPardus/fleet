@@ -1595,6 +1595,159 @@ def test_reobserve_active_never_clears_unresolved_other_intent(
     assert client.operations == []
 
 
+def test_reobserve_active_refuses_accepted_intent_without_attribution(
+        native_home, monkeypatch):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    journal = _committed_active_operation(home, lane)
+    journal.prepare({
+        "operation_id": "unattributed-accepted", "method": "rpc",
+        "payload": {"method": "turn/steer", "params": {
+            "threadId": THREAD_ID, "expectedTurnId": TURN_ID,
+            "input": [{"type": "text", "text": "possibly sent"}],
+        }},
+        "recovery": {},
+    })
+    journal.accept("unattributed-accepted")
+    mail = home / "mailbox" / "preserve.md"
+    mail.write_bytes(b"unclaimed mail stays intact\n")
+    source = {"kind": "codex", "claim_id": "fixture-current"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source", lambda: source)
+    monkeypatch.setattr(fleet, "_mail_source_is_current", lambda value: value == source)
+    client = ActiveMetadataClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="unresolved.*predecessor"):
+        fleet.cmd_codex_reobserve_active(_reobserve_args())
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+    assert journal.load("unattributed-accepted")["state"] == "accepted"
+    assert list((home / "mailbox").iterdir()) == [mail]
+    assert mail.read_bytes() == b"unclaimed mail stays intact\n"
+    assert client.operations == []
+
+
+@pytest.mark.parametrize("callback_thread", [None, NEXT_THREAD_ID])
+def test_reobserve_active_refuses_global_unknown_callback(
+        native_home, monkeypatch, callback_thread):
+    from fleet_codex import CodexApprovalStore
+
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _committed_active_operation(home, lane)
+    callbacks = CodexApprovalStore(home, original["codex_host_generation"])
+    params = {"itemId": "item-1"}
+    if callback_thread is not None:
+        params["threadId"] = callback_thread
+    unknown = callbacks.record_request({
+        "id": "unknown-1", "method": "item/commandExecution/requestApproval",
+        "params": params,
+    })
+    assert unknown["state"] == "unknown"
+    callback_before = callbacks.path("unknown-1").read_bytes()
+    mail = home / "mailbox" / "preserve.md"
+    mail.write_bytes(b"unclaimed mail stays intact\n")
+    source = {"kind": "codex", "claim_id": "fixture-current"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source", lambda: source)
+    monkeypatch.setattr(fleet, "_mail_source_is_current", lambda value: value == source)
+    client = ActiveMetadataClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="unknown blocking callback"):
+        fleet.cmd_codex_reobserve_active(_reobserve_args())
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+    assert callbacks.path("unknown-1").read_bytes() == callback_before
+    assert list((home / "mailbox").iterdir()) == [mail]
+    assert mail.read_bytes() == b"unclaimed mail stays intact\n"
+    assert client.operations == []
+
+
+@pytest.mark.parametrize("new_blocker", ["accepted-intent", "unknown-callback"])
+def test_reobserve_active_rechecks_global_blockers_after_public_read(
+        native_home, monkeypatch, new_blocker):
+    from fleet_codex import CodexApprovalStore
+
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    journal = _committed_active_operation(home, lane)
+    callbacks = CodexApprovalStore(home, original["codex_host_generation"])
+    mail = home / "mailbox" / "preserve.md"
+    mail.write_bytes(b"unclaimed mail stays intact\n")
+    source = {"kind": "codex", "claim_id": "fixture-current"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source", lambda: source)
+    monkeypatch.setattr(fleet, "_mail_source_is_current", lambda value: value == source)
+    client = ActiveMetadataClient(lane)
+    original_call = client.call
+    inserted = False
+
+    def add_blocker_after_read(operation, timeout):
+        nonlocal inserted
+        reply = original_call(operation, timeout)
+        if operation.get("payload", {}).get("method") == "thread/read" and not inserted:
+            inserted = True
+            if new_blocker == "accepted-intent":
+                journal.prepare({
+                    "operation_id": "racing-accepted", "method": "rpc",
+                    "payload": {"method": "turn/steer", "params": {
+                        "threadId": THREAD_ID, "expectedTurnId": TURN_ID,
+                        "input": [{"type": "text", "text": "possibly sent"}],
+                    }},
+                    "recovery": {},
+                })
+                journal.accept("racing-accepted")
+            else:
+                callbacks.record_request({
+                    "id": "racing-unknown",
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {"itemId": "item-1"},
+                })
+        return reply
+
+    client.call = add_blocker_after_read
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="unresolved.*predecessor|unknown blocking"):
+        fleet.cmd_codex_reobserve_active(_reobserve_args())
+    assert inserted
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+    assert list((home / "mailbox").iterdir()) == [mail]
+    assert mail.read_bytes() == b"unclaimed mail stays intact\n"
+    assert not any(op["payload"]["method"].startswith("turn/")
+                   for op in client.operations)
+
+
+def test_reobserve_active_keeps_unrelated_known_approval_and_steers(
+        native_home, monkeypatch):
+    from fleet_codex import CodexApprovalStore
+
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _committed_active_operation(home, lane)
+    callbacks = CodexApprovalStore(home, original["codex_host_generation"])
+    pending = callbacks.record_request({
+        "id": "other-thread-pending",
+        "method": "item/commandExecution/requestApproval",
+        "params": {"threadId": NEXT_THREAD_ID, "turnId": TURN_ID,
+                   "itemId": "item-1", "startedAtMs": 1,
+                   "command": "git status"},
+    })
+    assert pending["state"] == "pending"
+    callback_before = callbacks.path("other-thread-pending").read_bytes()
+    source = {"kind": "codex", "claim_id": "fixture-current"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source", lambda: source)
+    monkeypatch.setattr(fleet, "_mail_source_is_current", lambda value: value == source)
+    client = ActiveMetadataClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_codex_reobserve_active(_reobserve_args()) == 0
+    assert fleet._cmd_send_codex("cx-native", "one same-turn instruction") == 0
+    assert [op["payload"]["method"] for op in client.operations].count("turn/steer") == 1
+    assert callbacks.path("other-thread-pending").read_bytes() == callback_before
+
+
 def test_reobserved_pending_approval_remains_waiting_and_cannot_steer(
         native_home, monkeypatch):
     home, lane = native_home
