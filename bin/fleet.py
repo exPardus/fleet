@@ -2362,17 +2362,114 @@ def _codex_error_code(turn: dict) -> str | None:
     return None
 
 
+def _codex_paged_thread_read(client, thread_id: str, generation: str,
+                             prefix: str, *, hydrate_turn: str | None = None):
+    """Read thread metadata and the newest two turns without a rollout frame.
+
+    Item pages are assembled locally only for the exact bound turn.  A page
+    whose single item exceeds IPC remains an explicit, closed failure.
+    """
+    def call(method, params):
+        observed = client.call({
+            "operation_id": f"{prefix}-{uuid.uuid4()}", "method": "rpc",
+            "payload": {"method": method, "params": params},
+        }, timeout=10)
+        if observed.generation != generation:
+            raise FleetCliError("native Codex host generation changed during public read")
+        if not isinstance(observed.result, dict):
+            raise FleetCliError(f"native Codex {method} response is malformed")
+        return observed
+
+    observed = call("thread/read", {"threadId": thread_id,
+                                    "includeTurns": False})
+    thread = observed.result.get("thread")
+    if not isinstance(thread, dict) or thread.get("id") != thread_id:
+        raise FleetCliError("native Codex thread/read returned the wrong thread")
+    page = call("thread/turns/list", {
+        "threadId": thread_id, "limit": 2, "sortDirection": "desc",
+        "itemsView": "notLoaded",
+    }).result
+    data = page.get("data")
+    if (not isinstance(data, list) or len(data) > 2
+            or any(not isinstance(turn, dict) for turn in data)):
+        raise FleetCliError("native Codex turn page is malformed")
+    cursor = page.get("nextCursor")
+    if cursor is not None and (not isinstance(cursor, str) or not cursor):
+        raise FleetCliError("native Codex turn cursor is malformed")
+    if not data and cursor is not None:
+        raise FleetCliError("native Codex empty turn page has a continuation")
+    if data and (hydrate_turn == "*" or hydrate_turn == data[0].get("id")):
+        turn = dict(data[0])
+        hydrate_turn = _provider_codex_id(turn.get("id"), "paged turn")
+        items = []
+        cursor = None
+        seen = set()
+        item_limit = 16
+        for _page in range(4096):
+            params = {"threadId": thread_id, "turnId": hydrate_turn,
+                      "limit": item_limit, "sortDirection": "asc"}
+            if cursor is not None:
+                params["cursor"] = cursor
+            try:
+                item_page = call("thread/items/list", params).result
+            except FleetCliError as exc:
+                from fleet_codex import HostRejected
+                if (not isinstance(exc, HostRejected)
+                        or "host response exceeds MAX_IPC_BYTES" not in str(exc)
+                        or item_limit == 1):
+                    raise
+                item_limit = max(1, item_limit // 2)
+                continue
+            entries = item_page.get("data")
+            if (not isinstance(entries, list) or len(entries) > item_limit
+                    or any(not isinstance(entry, dict)
+                           or entry.get("turnId") != hydrate_turn
+                           or not isinstance(entry.get("item"), dict)
+                           for entry in entries)):
+                raise FleetCliError("native Codex item page is malformed")
+            items.extend(entry["item"] for entry in entries)
+            cursor = item_page.get("nextCursor")
+            if cursor is None:
+                break
+            if (not isinstance(cursor, str) or not cursor
+                    or cursor in seen or not entries):
+                raise FleetCliError("native Codex item cursor is malformed")
+            seen.add(cursor)
+        else:
+            raise FleetCliError("native Codex item history exceeds paging bound")
+        turn["items"] = items
+        turn["itemsView"] = "full"
+        data[0] = turn
+    final_page = call("thread/turns/list", {
+        "threadId": thread_id, "limit": 2, "sortDirection": "desc",
+        "itemsView": "notLoaded",
+    }).result
+    final_data = final_page.get("data")
+    final_cursor = final_page.get("nextCursor")
+    if (not isinstance(final_data, list)
+            or (final_cursor is not None
+                and (not isinstance(final_cursor, str) or not final_cursor))
+            or [(turn.get("id"), turn.get("status"), turn.get("error"))
+                for turn in final_data if isinstance(turn, dict)]
+            != [(turn.get("id"), turn.get("status"), turn.get("error"))
+                for turn in data]
+            or len(final_data) != len(data)
+            or (final_cursor is not None)
+            != (page.get("nextCursor") is not None)):
+        raise FleetCliError("native Codex turn changed during paged read")
+    result = dict(observed.result)
+    result["thread"] = dict(thread, turns=list(reversed(data)))
+    return SimpleNamespace(generation=observed.generation, result=result,
+                           has_older_turns=page.get("nextCursor") is not None)
+
+
 def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
                           *, require_full=False) -> dict:
     """Read one exact worker thread/turn through the existing home host."""
     client = client or _codex_existing_client(FLEET_HOME)
-    operation = {
-        "operation_id": f"worker-read-{uuid.uuid4()}", "method": "rpc",
-        "payload": {"method": "thread/read", "params": {
-            "threadId": binding.thread_id, "includeTurns": True,
-        }},
-    }
-    observation = client.call(operation, timeout=10)
+    observation = _codex_paged_thread_read(
+        client, binding.thread_id, binding.host_generation, "worker-read",
+        hydrate_turn=binding.turn_id)
     if observation.generation != binding.host_generation:
         raise FleetCliError(
             f"{binding.name}: native Codex host generation changed; "
@@ -2480,7 +2577,7 @@ def _resume_codex_worker_on_current_host(
     operation = {
         "operation_id": operation_id, "method": "rpc",
         "payload": {"method": "thread/resume", "params": {
-            "threadId": binding.thread_id,
+            "threadId": binding.thread_id, "excludeTurns": True,
         }},
         "recovery": {
             "kind": "worker/thread-resume", "fleet_name": binding.name,
@@ -2732,13 +2829,9 @@ def _codex_supervisor_binding(claim=None, registry=None, *, expected_name=None,
 def _codex_supervisor_observe(binding, client=None, *, require_full=False):
     """Read and validate the bound public thread without resuming or owning it."""
     client = client or _codex_existing_client(FLEET_HOME)
-    operation = {
-        "operation_id": f"supervisor-read-{uuid.uuid4()}", "method": "rpc",
-        "payload": {"method": "thread/read", "params": {
-            "threadId": binding.authority.value, "includeTurns": True,
-        }},
-    }
-    observation = client.call(operation, timeout=10)
+    observation = _codex_paged_thread_read(
+        client, binding.authority.value, binding.host_generation,
+        "supervisor-read", hydrate_turn=binding.current_turn_id)
     if observation.generation != binding.host_generation:
         raise FleetCliError(
             "native Codex supervisor host generation changed; recovery is ambiguous")
@@ -2768,6 +2861,9 @@ def _codex_supervisor_observe(binding, client=None, *, require_full=False):
     matches = [(index, turn) for index, turn in enumerate(turns)
                if isinstance(turn, dict)
                and turn.get("id") == binding.current_turn_id]
+    if turns and turns[-1].get("id") != binding.current_turn_id:
+        raise FleetCliError(
+            "native Codex supervisor has a newer turn than the bound claim")
     if len(matches) != 1:
         raise FleetCliError(
             "native Codex supervisor current turn is absent or ambiguous")
@@ -9926,13 +10022,8 @@ def _prove_codex_bound_thread_empty(name: str, rec: dict, client) -> None:
         raise FleetCliError(
             f"{name}: bound native Codex worker cwd is unavailable; "
             "refusing kill") from exc
-    observation = client.call({
-        "operation_id": f"worker-kill-bound-read-{uuid.uuid4()}",
-        "method": "rpc",
-        "payload": {"method": "thread/read", "params": {
-            "threadId": thread_id, "includeTurns": True,
-        }},
-    }, timeout=10)
+    observation = _codex_paged_thread_read(
+        client, thread_id, generation, "worker-kill-bound-read")
     if observation.generation != generation:
         raise FleetCliError(
             f"{name}: bound native Codex host generation changed; "
@@ -18211,12 +18302,9 @@ def _codex_activating_binding(claim=None, registry=None):
 
 def _codex_activation_observe(client, binding):
     """Return one complete first turn, or refuse ambiguous adoption."""
-    observation = client.call({
-        "operation_id": f"supervisor-activation-read-{uuid.uuid4()}",
-        "method": "rpc", "payload": {"method": "thread/read", "params": {
-            "threadId": binding.authority.value, "includeTurns": True,
-        }},
-    }, timeout=10)
+    observation = _codex_paged_thread_read(
+        client, binding.authority.value, client.generation,
+        "supervisor-activation-read", hydrate_turn="*")
     if observation.generation != client.generation:
         raise FleetCliError("native Codex activation host generation changed")
     result = observation.result
@@ -18232,7 +18320,8 @@ def _codex_activation_observe(client, binding):
             or not isinstance(status, dict)
             or status.get("type") not in {"active", "idle"}
             or status.get("activeFlags", []) != []
-            or not isinstance(turns, list) or len(turns) != 1):
+            or not isinstance(turns, list) or len(turns) != 1
+            or observation.has_older_turns):
         raise FleetCliError(
             "native Codex activating successor is not one exact thread/turn")
     turn = turns[0]
@@ -18296,6 +18385,7 @@ def _reconcile_codex_activating() -> int:
                 "operation_id": resume_operation_id, "method": "rpc",
                 "payload": {"method": "thread/resume", "params": {
                     "threadId": binding.authority.value,
+                    "excludeTurns": True,
                 }},
                 "recovery": {
                     "kind": "supervisor/activating-thread-resume",
@@ -18717,6 +18807,7 @@ def cmd_sup_reconcile(args) -> int:
             "operation_id": operation_id, "method": "rpc",
             "payload": {"method": "thread/resume", "params": {
                 "threadId": binding.authority.value,
+                "excludeTurns": True,
             }},
             "recovery": {
                 "kind": "supervisor/thread-resume",
@@ -20832,13 +20923,9 @@ def _freeze_codex_handoff_activation(
 def _codex_handoff_thread_read(
         client, thread_id, generation, *, expected_turn_id=None):
     """Prove an empty successor, or its exact single first turn, publicly."""
-    observation = client.call({
-        "operation_id": f"supervisor-handoff-read-{uuid.uuid4()}",
-        "method": "rpc",
-        "payload": {"method": "thread/read", "params": {
-            "threadId": thread_id, "includeTurns": True,
-        }},
-    }, timeout=10)
+    observation = _codex_paged_thread_read(
+        client, thread_id, generation, "supervisor-handoff-read",
+        hydrate_turn=expected_turn_id)
     if observation.generation != generation:
         raise FleetCliError("native Codex successor host generation changed")
     result = observation.result
@@ -20862,7 +20949,8 @@ def _codex_handoff_thread_read(
             raise FleetCliError(
                 "native Codex successor thread is not provably empty")
         return observation
-    if status.get("type") != "active" or len(turns) != 1:
+    if (status.get("type") != "active" or len(turns) != 1
+            or observation.has_older_turns):
         raise FleetCliError(
             "native Codex successor does not have exactly one active turn")
     turn = turns[0]

@@ -166,6 +166,39 @@ class Host:
         self._drain_notifications()
         return result
 
+    def _recovery_turns(self, thread_id: str, deadline: float) -> list[dict]:
+        """Count complete history through small metadata pages after restart."""
+        turns: list[dict] = []
+        cursor = None
+        seen_cursors: set[str] = set()
+        seen_ids: set[str] = set()
+        for _page in range(4096):
+            params: dict[str, Any] = {
+                "threadId": thread_id, "limit": 32,
+                "sortDirection": "desc", "itemsView": "notLoaded",
+            }
+            if cursor is not None:
+                params["cursor"] = cursor
+            result = self._recovery_request("thread/turns/list", params, deadline)
+            data = result.get("data") if isinstance(result, dict) else None
+            if (not isinstance(data, list) or len(data) > 32
+                    or any(not isinstance(turn, dict) for turn in data)):
+                raise ValueError("thread/turns/list recovery evidence is malformed")
+            for turn in data:
+                turn_id = _public_uuid7(turn.get("id"), "recovery turn id")
+                if turn_id in seen_ids:
+                    raise ValueError("thread/turns/list repeated a turn")
+                seen_ids.add(turn_id)
+                turns.append(turn)
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return turns
+            if (not isinstance(cursor, str) or not cursor
+                    or cursor in seen_cursors or not data):
+                raise ValueError("thread/turns/list recovery cursor is malformed")
+            seen_cursors.add(cursor)
+        raise ValueError("thread/turns/list recovery exceeded 4096 pages")
+
     def _find_recovery_thread(self, recovery: Mapping[str, Any],
                               deadline: float) -> dict[str, Any]:
         marker = recovery.get("thread_source")
@@ -215,7 +248,7 @@ class Host:
             "operation_id": operation_id,
             "method": "rpc",
             "payload": {"method": "thread/resume", "params": {
-                "threadId": thread_id,
+                "threadId": thread_id, "excludeTurns": True,
             }},
             "recovery": {
                 "kind": "queue-overflow-thread-resume",
@@ -231,7 +264,8 @@ class Host:
         self.journal.accept(operation_id)
         try:
             result = self._recovery_request(
-                "thread/resume", {"threadId": thread_id}, deadline)
+                "thread/resume", {"threadId": thread_id,
+                                  "excludeTurns": True}, deadline)
         except BaseException as exc:
             self.journal.uncertain(
                 operation_id,
@@ -270,18 +304,17 @@ class Host:
                     or isinstance(watermark, bool) or watermark < 0):
                 raise ValueError("turn recovery metadata is incomplete")
             observed = self._recovery_request(
-                "thread/read", {"threadId": thread_id, "includeTurns": True},
+                "thread/read", {"threadId": thread_id, "includeTurns": False},
                 deadline)
             thread = observed.get("thread") if isinstance(observed, dict) else None
-            turns = thread.get("turns") if isinstance(thread, dict) else None
             if (not isinstance(thread, dict) or thread.get("id") != thread_id
-                    or thread.get("cwd") != cwd or not isinstance(turns, list)
-                    or any(not isinstance(turn, dict) for turn in turns)):
+                    or thread.get("cwd") != cwd):
                 raise ValueError("thread/read recovery evidence is malformed")
+            turns = self._recovery_turns(thread_id, deadline)
             if len(turns) != watermark + 1:
                 raise ValueError(
                     "turn/start public recovery did not find exactly one new turn")
-            turn = turns[-1]
+            turn = turns[0]
             _public_uuid7(turn.get("id"), "recovered turn id")
             result = {
                 "turn": turn, "threadId": thread_id, "canonicalCwd": cwd,
@@ -695,6 +728,11 @@ class Host:
         try:
             encoded = json.dumps(response, separators=(",", ":"),
                                  sort_keys=True).encode("utf-8")
+            if len(encoded) > MAX_IPC_BYTES:
+                encoded = json.dumps(_response(
+                    request, ok=False,
+                    error="host response exceeds MAX_IPC_BYTES; page the request"),
+                    separators=(",", ":"), sort_keys=True).encode("utf-8")
             _send_frame(connection, encoded, deadline)
         except (OSError, EOFError, TimeoutError, ValueError):
             pass

@@ -2047,7 +2047,13 @@ class CodexHostClient:
         if any(response.get(key) != value for key, value in expected.items()):
             raise HostUnavailable("Codex host response correlation mismatch")
         if response.get("ok") is not True:
-            raise HostRejected(str(response.get("error") or "Codex host rejected operation"))
+            error = str(response.get("error") or "Codex host rejected operation")
+            if (error == "host response exceeds MAX_IPC_BYTES; page the request"
+                    and public_method is not None):
+                # The provider mutation may already be committed in the host
+                # journal. Do not misclassify a large reply as rejection.
+                raise HostUnavailable(error + "; mutation outcome is uncertain")
+            raise HostRejected(error)
         return CodexObservation(operation_id, self.generation, digest,
                                 response.get("result"))
 
