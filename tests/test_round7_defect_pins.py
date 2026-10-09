@@ -434,6 +434,8 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         "sup-decision --clear",
                         # [w43/s5] E1, then E2/E3
                         "sup-spawn", "sup-checkpoint", "sup-release",
+                        # [w176] releases a claim and tombstones its old holder
+                        "sup-retire-legacy",
                         # [w47/homes] E2/homes split, operator 2026-08-08
                         "homes --add", "homes --retire",
                         # [w59/inithome] E2/init split, operator 2026-08-10

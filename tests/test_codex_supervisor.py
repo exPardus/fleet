@@ -452,6 +452,71 @@ def test_explicit_native_sup_spawn_binds_genuine_holder_and_boot_turn(
     assert client.commits == [item["operation_id"] for item in client.operations]
 
 
+@pytest.mark.parametrize("terminal_state", ["done", "stopped"])
+def test_retired_legacy_claim_allows_normal_native_sup_spawn_with_active_lane(
+        supervisor_home, monkeypatch, terminal_state):
+    old_sid = "11111111-2222-4333-8444-555555555555"
+    inc = "inc-20260101T000000Z-abcd"
+    name = f"sup|{inc}|boot"
+    claim = {"incarnation_id": inc, "session_id": old_sid,
+             "lineage_id": "lin-20260101T000000Z-abcd", "claimed_via": "fresh",
+             "claimed_at": "2026-01-01T00:00:00Z",
+             "heartbeat_at": "2026-01-01T00:00:00Z"}
+    fleet.write_incarnation(claim)
+    old = fleet.new_worker_record(old_sid, supervisor_home, "old supervisor",
+                                  "bypass", dispatch_kind="bg")
+    active = fleet.new_worker_record(
+        None, supervisor_home, "live lane", "accept",
+        model="codex:gpt-5.6-luna", substrate="codex",
+        dispatch_kind="codex-app-server")
+    active.update({"status": "working", "codex_thread_id": SUCCESSOR_THREAD_ID})
+    fleet.save_registry({"workers": {name: old, "live-lane": active}})
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "interface-test"})
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda: (True, [{"sessionId": old_sid,
+                                         "name": name, "state": terminal_state}]))
+    client = FakeSupervisorClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    assert fleet.cmd_sup_retire_legacy(SimpleNamespace(
+        expect_inc=inc, expect_sid=old_sid, _fleet_home_explicit=True),
+        roster_fn=lambda: (True, [{"sessionId": old_sid,
+                                   "name": name, "state": terminal_state}])) == 0
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda: (True, [{"sessionId": old_sid,
+                                         "name": name, "state": "working",
+                                         "pid": 42}]))
+    with pytest.raises(fleet.FleetCliError, match="liveness"):
+        fleet.cmd_sup_spawn(_args())
+    assert client.operations == []
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda: (True, [{"sessionId": old_sid,
+                                         "name": name, "state": "stopped",
+                                         "pid": False}]))
+    with pytest.raises(fleet.FleetCliError, match="liveness"):
+        fleet.cmd_sup_spawn(_args())
+    assert client.operations == []
+    for state in ("done", "stopped"):
+        for status in ("idle", "working"):
+            monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                                lambda state=state, status=status: (True, [{
+                                    "sessionId": old_sid, "name": name,
+                                    "state": state, "status": status}]))
+            with pytest.raises(fleet.FleetCliError, match="liveness"):
+                fleet.cmd_sup_spawn(_args())
+            assert client.operations == []
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda: (True, [{"sessionId": old_sid,
+                                         "name": name, "state": terminal_state}]))
+    assert fleet.cmd_sup_spawn(_args()) == 0
+    assert fleet.read_incarnation()["holder"] == {
+        "provider": "codex", "thread_id": THREAD_ID}
+    rows = fleet.read_registry_no_repair()["workers"]
+    assert rows[name]["status"] == "dead"
+    assert rows["live-lane"] == active
+    assert len(client.operations) == 2
+
+
 def test_changed_claim_after_thread_creation_never_starts_boot_turn(
         supervisor_home, monkeypatch):
     def handoff():
