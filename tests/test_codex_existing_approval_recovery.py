@@ -389,6 +389,20 @@ def test_unrelated_pending_callback_blocks_shared_host_shutdown(apps_home):
     assert store._load_path(store.path(7))["state"] == "pending"
 
 
+def test_invalid_same_host_worker_route_blocks_shutdown_preparation(apps_home):
+    _home, store, _old, _current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    store.resolve({"params": {"threadId": OTHER, "requestId": 7}})
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        data["workers"]["other-worker"].update({
+            "codex_host_generation": OLD, "mcx_id": "mixed-route"})
+        fleet.save_registry(data)
+    with pytest.raises(fleet.FleetCliError, match="invalid route"):
+        fleet._prepare_codex_cancelled_approval_resume(
+            args(cwd, expect_cancel_op=operation_id))
+
+
 def test_same_host_worker_change_after_preflight_blocks_cold_resume(apps_home):
     _home, _store, old, _current, cwd, _mail = apps_home
     with fleet.fleet_lock():

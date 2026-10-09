@@ -20324,9 +20324,10 @@ def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
     for name, row in sorted(workers.items()):
         if name == supervisor_name or not isinstance(row, dict):
             continue
-        if (_codex_record_route(row) != "native"
-                or row.get("codex_host_generation") != generation):
+        if row.get("codex_host_generation") != generation:
             continue
+        if _codex_record_route(row) != "native":
+            raise FleetCliError("same-host Apps worker row has an invalid route")
         if row.get("pending_operation") is not None:
             raise FleetCliError("another Apps worker has a pending operation")
         binding = _codex_worker_binding(name, row)
