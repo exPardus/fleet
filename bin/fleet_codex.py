@@ -185,8 +185,163 @@ def _linux_process_environment(pid: int) -> dict[str, str] | None:
         return None
 
 
+class _DarwinBsdInfo(ctypes.Structure):
+    # sys/proc_info.h: struct proc_bsdinfo (including its alignment).
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "flags", "status", "xstatus", "pid", "ppid", "uid", "gid",
+        "ruid", "rgid", "svuid", "svgid", "reserved")]
+    _fields_ += [("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32)]
+    _fields_ += [(name, ctypes.c_uint32) for name in (
+        "nfiles", "pgid", "pjobc", "e_tdev", "e_tpgid")]
+    _fields_ += [("nice", ctypes.c_int32), ("start_sec", ctypes.c_uint64),
+                 ("start_usec", ctypes.c_uint64)]
+
+
+class _DarwinVinfoStat(ctypes.Structure):
+    _fields_ = [
+        ("dev", ctypes.c_uint32), ("mode", ctypes.c_uint16),
+        ("nlink", ctypes.c_uint16), ("ino", ctypes.c_uint64),
+        ("uid", ctypes.c_uint32), ("gid", ctypes.c_uint32),
+        *((name, ctypes.c_int64) for name in (
+            "atime", "atimensec", "mtime", "mtimensec", "ctime",
+            "ctimensec", "birthtime", "birthtimensec", "size", "blocks")),
+        ("blksize", ctypes.c_int32), ("flags", ctypes.c_uint32),
+        ("gen", ctypes.c_uint32), ("rdev", ctypes.c_uint32),
+        ("spare", ctypes.c_int64 * 2),
+    ]
+
+
+class _DarwinVnodeInfoPath(ctypes.Structure):
+    _fields_ = [("stat", _DarwinVinfoStat), ("type", ctypes.c_int32),
+                ("pad", ctypes.c_int32), ("fsid", ctypes.c_int32 * 2),
+                ("path", ctypes.c_char * 1024)]
+
+
+class _DarwinVnodePathInfo(ctypes.Structure):
+    _fields_ = [("cwd", _DarwinVnodeInfoPath),
+                ("root", _DarwinVnodeInfoPath)]
+
+
+def _darwin_proc_pidinfo(pid: int, flavor: int, buffer: Any,
+                         *, proc_pidinfo: Any | None = None) -> bool:
+    if proc_pidinfo is None:
+        try:
+            proc_pidinfo = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True).proc_pidinfo
+        except (OSError, AttributeError):
+            return False
+        proc_pidinfo.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                                 ctypes.c_void_p, ctypes.c_int]
+        proc_pidinfo.restype = ctypes.c_int
+    try:
+        return proc_pidinfo(pid, flavor, 0, ctypes.byref(buffer),
+                            ctypes.sizeof(buffer)) == ctypes.sizeof(buffer)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _darwin_process_record(pid: int) -> dict[str, Any] | None:
+    """Read a complete Darwin process record, rejecting identity changes."""
+    if (not getattr(_platform(), "is_darwin", False)
+            or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+        return None
+    before = _darwin_process_identity(pid)
+    if before is None or not before.startswith("darwin:"):
+        return None  # ps precision is insufficient for caller authentication.
+    bsd = _DarwinBsdInfo()
+    paths = _DarwinVnodePathInfo()
+    if (not _darwin_proc_pidinfo(pid, 3, bsd)
+            or not _darwin_proc_pidinfo(pid, 9, paths)):
+        return None
+    if bsd.pid != pid or bsd.ppid <= 0:
+        return None
+    try:
+        comm = bsd.comm.split(b"\0", 1)[0].decode("utf-8")
+        cwd = os.fsdecode(paths.cwd.path.split(b"\0", 1)[0])
+        if not cwd or not os.path.isabs(cwd):
+            return None
+        cwd = str(Path(cwd).resolve(strict=True))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not comm or _darwin_process_identity(pid) != before:
+        return None
+    return {"pid": pid, "ppid": int(bsd.ppid), "start_identity": before,
+            "uid": int(bsd.uid), "comm": comm, "cwd": cwd}
+
+
+def _darwin_process_environment(pid: int, *, sysctl: Any | None = None,
+                                owner_uid: int | None = None) -> dict[str, str] | None:
+    """Read KERN_PROCARGS2 only for a current same-uid process."""
+    if (not getattr(_platform(), "is_darwin", False)
+            or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
+        return None
+    owner_uid = os.getuid() if owner_uid is None else owner_uid
+    bsd = _DarwinBsdInfo()
+    if not _darwin_proc_pidinfo(pid, 3, bsd) or bsd.pid != pid or bsd.uid != owner_uid:
+        return None
+    if sysctl is None:
+        try:
+            sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+        except (OSError, AttributeError):
+            return None
+        sysctl.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_uint,
+                           ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+                           ctypes.c_void_p, ctypes.c_size_t]
+        sysctl.restype = ctypes.c_int
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+    size = ctypes.c_size_t()
+    try:
+        if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            return None
+        if not 4 <= size.value <= 4 * 1024 * 1024:
+            return None
+        buffer = ctypes.create_string_buffer(size.value)
+        if sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+            return None
+        raw = buffer.raw[:size.value]
+        argc = struct.unpack_from("=i", raw)[0]
+        if not 0 <= argc <= 100_000:
+            return None
+        cursor = 4
+        executable_end = raw.find(b"\0", cursor)
+        if executable_end < 0:
+            return None
+        cursor = executable_end + 1
+        while cursor < len(raw) and raw[cursor] == 0:
+            cursor += 1
+        for _ in range(argc):
+            end = raw.find(b"\0", cursor)
+            if end < 0:
+                return None
+            cursor = end + 1
+        while cursor < len(raw) and raw[cursor] == 0:
+            cursor += 1
+        result: dict[str, str] = {}
+        while cursor < len(raw):
+            end = raw.find(b"\0", cursor)
+            if end < 0:
+                return None
+            if end == cursor:
+                break
+            key, separator, value = raw[cursor:end].partition(b"=")
+            if not separator or not key:
+                return None
+            result[key.decode("utf-8")] = value.decode("utf-8")
+            cursor = end + 1
+        return result
+    except (OSError, UnicodeError, ValueError, struct.error):
+        return None
+
+
+def _process_evidence_readers():
+    if _platform().is_linux:
+        return _linux_process_record, _linux_process_environment
+    if getattr(_platform(), "is_darwin", False):
+        return _darwin_process_record, _darwin_process_environment
+    raise HostRejected("Codex caller process authentication is unsupported on this platform")
+
+
 def codex_process_source(pid: int, thread_id: str | None = None) -> dict[str, Any]:
-    """Bind a caller thread to its actual Linux Codex ancestor.
+    """Bind a caller thread to its actual Codex ancestor.
 
     The thread value is read from the socket peer's process environment (or
     checked against it by registration), while the durable process identity
@@ -194,13 +349,12 @@ def codex_process_source(pid: int, thread_id: str | None = None) -> dict[str, An
     readable thread membership and a UUID-shaped environment value alone are
     replayable.
     """
-    if not _platform().is_linux:
-        raise HostRejected("Codex caller process authentication is unsupported on this platform")
-    peer_before = _linux_process_record(pid)
+    process_record, process_environment = _process_evidence_readers()
+    peer_before = process_record(pid)
     if peer_before is None:
         raise HostRejected("Codex caller process identity is unavailable")
-    environment = _linux_process_environment(pid)
-    peer_after = _linux_process_record(pid)
+    environment = process_environment(pid)
+    peer_after = process_record(pid)
     if (peer_after is None
             or peer_after["start_identity"] != peer_before["start_identity"]):
         raise HostRejected("Codex caller process identity changed during authentication")
@@ -214,11 +368,11 @@ def codex_process_source(pid: int, thread_id: str | None = None) -> dict[str, An
         if current in seen:
             break
         seen.add(current)
-        record = peer_after if current == pid else _linux_process_record(current)
+        record = peer_after if current == pid else process_record(current)
         if record is None:
             break
         if record["comm"] == "codex":
-            confirmed = _linux_process_record(current)
+            confirmed = process_record(current)
             if (confirmed is None
                     or confirmed["start_identity"] != record["start_identity"]):
                 raise HostRejected(

@@ -608,13 +608,17 @@ registration refuses without writing state.
 
 The reviewed protocol exposes thread ID, session ID, and source as readable
 membership metadata, but no credential authenticating the process invoking
-Fleet. On Linux, Fleet therefore combines an exact public `thread/read` with
-kernel-owned Unix-socket peer credentials and `/proc` ancestry. Registration
-binds the exact `CODEX_THREAD_ID`, nearest Codex ancestor PID and start identity,
+Fleet. On Linux and Darwin, Fleet therefore combines an exact public
+`thread/read` with kernel-owned Unix-socket peer credentials and process
+ancestry. Linux reads `/proc`; Darwin reads `KERN_PROC_PID` start identity,
+`PROC_PIDTBSDINFO` for parent/uid/command, `PROC_PIDVNODEPATHINFO` for cwd,
+and same-uid `KERN_PROCARGS2` for environment. Darwin sockets provide
+`LOCAL_PEERPID` and `LOCAL_PEERCRED`. Registration binds the exact
+`CODEX_THREAD_ID`, nearest Codex ancestor PID and start identity,
 and explicit home in an owner-only rotating claim. The host rechecks the peer's
 thread and ancestry for every app-server mutation. A different UUID, unrelated
 same-user process, reused PID, nearer forked Codex process, or stale predecessor
-fails closed. Other platforms remain unsupported until they have equivalent
+fails closed. Windows remains unsupported until it has equivalent
 peer-process and PID-reuse acceptance proof.
 
 Interface provider registration is exclusive. A successful native Codex
