@@ -342,15 +342,17 @@ HERMETIC_CODEX_SCHEMA = b'{"hermetic":"codex-schema"}\n'
 def _hermetic_codex(tmp_path_factory, monkeypatch):
     """No test may depend on the host's installed Codex version.
 
-    Puts a fake `codex` first on PATH (it reports a fixed reviewed version and
-    emits a private schema) and swaps that version's manifest for one carrying
-    the private schema's digest, so `CodexHostClient.ensure` without an explicit `schema_command`
-    never reaches the real CLI. Tests that exercise real reviewed versions pass
-    their own fake command or patch `subprocess.run`.
+    Supplies ``CodexHostClient.ensure`` with an explicit fake-Codex argv (it
+    reports a fixed reviewed version, emits a private schema, and implements a
+    minimal app server) and swaps that version's manifest for one carrying the
+    private schema's digest.  The explicit argv is serialized into the real
+    child host for both schema verification and the default app-server launch,
+    so neither process resolves a host-installed Codex.  Tests that exercise
+    real reviewed versions pass their own fake command or patch
+    ``subprocess.run``.
     """
     import hashlib
     import json
-    import subprocess
 
     import fleet_codex
     from codex_test_support import hermetic_codex_argv
@@ -363,7 +365,11 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
     script = root / ("codex.py" if windows else "codex")
     script.write_text(
         f"#!{sys.executable}\n"
-        "import pathlib, sys\n"
+        "import json, os, pathlib, sys\n"
+        "log = os.environ.get('HERMETIC_CODEX_LOG')\n"
+        "if log:\n"
+        "    with open(log, 'a', encoding='utf-8') as stream:\n"
+        "        stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "if sys.argv[1:] == ['--version']:\n"
         f"    print('codex-cli {HERMETIC_CODEX_VERSION}')\n"
         "elif sys.argv[1:3] == ['app-server', 'generate-json-schema']:\n"
@@ -371,6 +377,15 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
         "    out.mkdir(parents=True, exist_ok=True)\n"
         "    (out / 'codex_app_server_protocol.v2.schemas.json')"
         f".write_bytes({HERMETIC_CODEX_SCHEMA!r})\n"
+        "elif sys.argv[1:] == ['app-server', '--listen', 'stdio://']:\n"
+        "    first = json.loads(sys.stdin.readline())\n"
+        "    result = {'serverInfo': {'name': 'hermetic-codex', "
+        f"'version': '{HERMETIC_CODEX_VERSION}'}}}}\n"
+        "    print(json.dumps({'id': first['id'], 'result': result}), flush=True)\n"
+        "    if json.loads(sys.stdin.readline()) != {'method': 'initialized'}:\n"
+        "        raise SystemExit(31)\n"
+        "    for line in sys.stdin:\n"
+        "        pass\n"
         "else:\n"
         "    raise SystemExit(2)\n",
         encoding="utf-8")
@@ -379,29 +394,6 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
             f'@echo off\r\n"{sys.executable}" "%~dp0{script.name}" %*\r\n',
             encoding="utf-8")
 
-        # The production and test callers intentionally use the same bare
-        # ``["codex", ...]`` argv with ``shell=False``.  A .cmd file cannot be
-        # selected by CreateProcess for that shape, so adapt only this
-        # fixture's command to an explicit cmd.exe invocation.  The real
-        # subprocess calls still use shell=False; no host Codex can win a PATH
-        # race behind the shim.
-        real_run = subprocess.run
-        real_popen = subprocess.Popen
-
-        def run(command, *args, **kwargs):
-            adapted = (hermetic_codex_argv(command, root)
-                       if not isinstance(command, (str, bytes, os.PathLike))
-                       else command)
-            return real_run(adapted, *args, **kwargs)
-
-        def popen(command, *args, **kwargs):
-            adapted = (hermetic_codex_argv(command, root)
-                       if not isinstance(command, (str, bytes, os.PathLike))
-                       else command)
-            return real_popen(adapted, *args, **kwargs)
-
-        monkeypatch.setattr(subprocess, "run", run)
-        monkeypatch.setattr(subprocess, "Popen", popen)
     else:
         script.chmod(0o700)
     reviewed = json.loads(
@@ -413,6 +405,20 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
     manifest.write_text(json.dumps(reviewed), encoding="utf-8")
     monkeypatch.setitem(
         fleet_codex.REVIEWED_SCHEMA_MANIFESTS, HERMETIC_CODEX_VERSION, manifest)
+    fixture_command = hermetic_codex_argv(["codex"], root)
+    original_ensure = fleet_codex.CodexHostClient.ensure.__func__
+
+    def ensure(cls, home, **kwargs):
+        if kwargs.get("schema_command") is None:
+            kwargs["schema_command"] = fixture_command
+        if kwargs.get("app_server_command") is None:
+            kwargs["app_server_command"] = [
+                *fixture_command, "app-server", "--listen", "stdio://"]
+        return original_ensure(cls, home, **kwargs)
+
+    monkeypatch.setattr(
+        fleet_codex.CodexHostClient, "ensure", classmethod(ensure))
+    monkeypatch.setenv("HERMETIC_CODEX_LOG", str(root / "invocations.jsonl"))
     monkeypatch.setenv(
         "PATH", f"{root}{os.pathsep}{os.environ.get('PATH', '')}")
     return root

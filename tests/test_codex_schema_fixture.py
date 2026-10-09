@@ -1,6 +1,6 @@
 import hashlib
 import json
-import subprocess
+import os
 import sys
 from pathlib import Path
 
@@ -11,22 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "codex_app_server"
 
 
-def test_hermetic_codex_bare_shell_false_invocation(_hermetic_codex):
-    """The fixture must win the exact production ``shell=False`` launch."""
-    result = subprocess.run(
-        ["codex", "--version"], shell=False, capture_output=True,
-        text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "codex-cli 0.155.1"
-
-
-def test_hermetic_codex_keeps_posix_bare_argv(tmp_path):
+def test_hermetic_codex_keeps_posix_direct_argv(tmp_path):
     """Windows' cmd adaptation must never leak into the POSIX contract."""
     from codex_test_support import hermetic_codex_argv
 
     command = hermetic_codex_argv(
         ["codex", "--version"], tmp_path, platform="posix")
-    assert command == ["codex", "--version"]
+    assert command == [str(tmp_path / "codex"), "--version"]
 
 
 def test_hermetic_codex_models_windows_createprocess_contract(tmp_path):
@@ -38,6 +29,56 @@ def test_hermetic_codex_models_windows_createprocess_contract(tmp_path):
     assert command == [
         "cmd.exe", "/d", "/c", str(tmp_path / "codex.cmd"), "--version",
     ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native host transport is POSIX-only")
+def test_hermetic_codex_argv_round_trips_through_real_host(
+        tmp_path, monkeypatch, _hermetic_codex):
+    """Both child-host call sites receive the fixture's explicit argv."""
+    import fleet_codex
+
+    later = tmp_path / "later-real-codex"
+    later.mkdir()
+    later_log = tmp_path / "later-real-codex.log"
+    later_codex = later / "codex"
+    later_codex.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, sys\n"
+        "pathlib.Path(os.environ['LATER_CODEX_LOG']).write_text("
+        "repr(sys.argv[1:]), encoding='utf-8')\n"
+        "raise SystemExit(91)\n",
+        encoding="utf-8")
+    later_codex.chmod(0o700)
+    monkeypatch.setenv("LATER_CODEX_LOG", str(later_log))
+    monkeypatch.setenv(
+        "PATH", f"{later}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    home = tmp_path / "home"
+    (home / "state").mkdir(parents=True)
+    client = fleet_codex.CodexHostClient.ensure(
+        home.resolve(), ready_timeout=10, idle_timeout=30)
+    try:
+        assert client.call(
+            {"operation_id": "fixture-round-trip", "method": "ping",
+             "payload": {}}, timeout=2).result["home"] == str(home.resolve())
+    finally:
+        try:
+            client.call(
+                {"operation_id": "fixture-shutdown", "method": "host/shutdown",
+                 "payload": {}}, timeout=2)
+        finally:
+            assert client.wait_for_exit(5)
+
+    invocations = [
+        json.loads(line) for line in
+        (_hermetic_codex / "invocations.jsonl").read_text(
+            encoding="utf-8").splitlines()]
+    assert invocations[0] == ["--version"]
+    assert invocations[1][:2] == ["app-server", "generate-json-schema"]
+    assert invocations[1][2] == "--out"
+    assert Path(invocations[1][3]).name.startswith("fleet-codex-schema-")
+    assert invocations[2] == ["app-server", "--listen", "stdio://"]
+    assert not later_log.exists()
 
 
 def _generator():
