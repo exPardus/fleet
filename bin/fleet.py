@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11909) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12911) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16370) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:12105) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:13239) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16701) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3738) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:3812) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4433) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13161) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16244) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4547) -- expose that distinction to views.
+      * `_doctor_check_registry` (:13489) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16575) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7106) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18024) -- render the release explanation.
+      * `_print_snapshot_table` (:7223) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:18355) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2346,6 +2346,69 @@ def _codex_worker_has_completed_evidence(binding: CodexWorkerBinding) -> bool:
             and evidence.get("turn_status") == "completed")
 
 
+CODEX_ACTIVITY_FRESH_SECONDS = 600
+
+
+def _codex_short_id(value) -> str:
+    digits = value.replace("-", "") if isinstance(value, str) else ""
+    return digits[-12:] or "?"
+
+
+def _codex_rollout_paths(record: dict, thread_id: str) -> list:
+    suffix = f"-{thread_id}.jsonl"
+    recorded = record.get("codex_rollout_path")
+    if isinstance(recorded, str) and recorded.endswith(suffix):
+        return [Path(recorded)]
+    try:
+        created = datetime.fromtimestamp((uuid.UUID(thread_id).int >> 80) / 1000)
+    except (ValueError, OverflowError, OSError):
+        return []
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    paths = []
+    for offset in (-1, 0, 1):
+        day = created + timedelta(days=offset)
+        folder = root / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+        try:
+            paths.extend(folder.glob(f"rollout-*{suffix}"))
+        except OSError:
+            continue
+    return paths
+
+
+def _codex_activity_age(binding: CodexWorkerBinding, now=None) -> float | None:
+    stamps = []
+    for path in _codex_rollout_paths(binding.record, binding.thread_id):
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    try:
+        evidence = _codex_public_evidence_file(binding)
+    except FleetCliError:
+        evidence = None
+    observed_at = (evidence or {}).get("observed_at")
+    if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool):
+        stamps.append(float(observed_at))
+    if not stamps:
+        return None
+    return max(0.0, (time.time() if now is None else now) - max(stamps))
+
+
+def _codex_provider_recently_active(binding: CodexWorkerBinding) -> bool:
+    age = _codex_activity_age(binding)
+    return age is not None and age <= CODEX_ACTIVITY_FRESH_SECONDS
+
+
+def _codex_turn_ended_early(binding: CodexWorkerBinding) -> bool:
+    try:
+        evidence = _codex_public_evidence_file(binding)
+    except FleetCliError:
+        return False
+    return (isinstance(evidence, dict)
+            and evidence.get("turn_status") == "completed"
+            and evidence.get("result_phase") == "commentary")
+
+
 def _codex_error_code(turn: dict) -> str | None:
     error = turn.get("error")
     if error is None:
@@ -2362,22 +2425,22 @@ def _codex_error_code(turn: dict) -> str | None:
     return None
 
 
-def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
-                          *, require_full=False) -> dict:
-    """Read one exact worker thread/turn through the existing home host."""
+def _codex_worker_observe(binding: CodexWorkerBinding, client=None) -> dict:
+    """Read one exact worker thread/turn through bounded public pages."""
     client = client or _codex_existing_client(FLEET_HOME)
-    operation = {
+    thread_operation = {
         "operation_id": f"worker-read-{uuid.uuid4()}", "method": "rpc",
         "payload": {"method": "thread/read", "params": {
-            "threadId": binding.thread_id, "includeTurns": True,
+            "threadId": binding.thread_id, "includeTurns": False,
         }},
     }
-    observation = client.call(operation, timeout=10)
-    if observation.generation != binding.host_generation:
+    thread_observation = client.call(thread_operation, timeout=10)
+    if thread_observation.generation != binding.host_generation:
         raise FleetCliError(
             f"{binding.name}: native Codex host generation changed; "
-            "worker recovery is ambiguous")
-    result = observation.result
+            f"worker recovery is ambiguous -- `fleet send {binding.name} "
+            "<message>` resumes it on the current host")
+    result = thread_observation.result
     thread = result.get("thread") if isinstance(result, dict) else None
     if not isinstance(thread, dict):
         raise FleetCliError(f"{binding.name}: thread/read returned no public thread")
@@ -2397,15 +2460,35 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
             or any(flag not in {"waitingOnApproval", "waitingOnUserInput"}
                    for flag in flags)):
         raise FleetCliError(f"{binding.name}: public active flags are unknown")
-    turns = thread.get("turns")
-    if not isinstance(turns, list):
-        raise FleetCliError(f"{binding.name}: public turn history is incomplete")
-    matches = [(index, turn) for index, turn in enumerate(turns)
-               if isinstance(turn, dict) and turn.get("id") == binding.turn_id]
-    if len(matches) != 1 or matches[0][0] != len(turns) - 1:
+    if thread.get("turns") != []:
+        raise FleetCliError(
+            f"{binding.name}: metadata-only thread/read returned turn history")
+
+    turn_operation = {
+        "operation_id": f"worker-turn-read-{uuid.uuid4()}", "method": "rpc",
+        "payload": {"method": "thread/turns/list", "params": {
+            "threadId": binding.thread_id, "limit": 1,
+            "sortDirection": "desc", "itemsView": "notLoaded",
+        }},
+    }
+    turn_observation = client.call(turn_operation, timeout=10)
+    if turn_observation.generation != binding.host_generation:
+        raise FleetCliError(
+            f"{binding.name}: native Codex host generation changed; "
+            f"worker recovery is ambiguous -- `fleet send {binding.name} "
+            "<message>` resumes it on the current host")
+    turn_result = turn_observation.result
+    turns = turn_result.get("data") if isinstance(turn_result, dict) else None
+    if not isinstance(turns, list) or len(turns) != 1:
         raise FleetCliError(
             f"{binding.name}: bound turn is absent, ambiguous, or not newest")
-    turn = matches[0][1]
+    turn = turns[0]
+    if not isinstance(turn, dict):
+        raise FleetCliError(f"{binding.name}: public turn is malformed")
+    if (_provider_codex_id(turn.get("id"), "observed worker turn")
+            != binding.turn_id):
+        raise FleetCliError(
+            f"{binding.name}: bound turn is absent, ambiguous, or not newest")
     turn_status = turn.get("status")
     if turn_status not in {"inProgress", "completed", "failed", "interrupted"}:
         raise FleetCliError(f"{binding.name}: public turn status is unknown")
@@ -2414,30 +2497,19 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
     if provider_status == "idle" and turn_status == "inProgress":
         raise FleetCliError(f"{binding.name}: idle thread conflicts with its turn")
     items_view = turn.get("itemsView")
-    if items_view not in {"notLoaded", "summary", "full"}:
-        raise FleetCliError(f"{binding.name}: public item view is unknown")
-    if require_full and items_view != "full":
-        raise FleetCliError(f"{binding.name}: public item history is incomplete")
+    if items_view != "notLoaded":
+        raise FleetCliError(f"{binding.name}: bounded public item view is unknown")
     items = turn.get("items", [])
-    if not isinstance(items, list):
-        raise FleetCliError(f"{binding.name}: public turn items are malformed")
-    result_text = result_item_id = None
-    for item in items:
-        if not isinstance(item, dict):
-            raise FleetCliError(f"{binding.name}: public turn item is malformed")
-        item_id = item.get("id")
-        if not isinstance(item_id, str) or not item_id or len(item_id) > 160:
-            raise FleetCliError(f"{binding.name}: public item has no genuine ID")
-        if item.get("type") == "agentMessage":
-            if not isinstance(item.get("text"), str):
-                raise FleetCliError(f"{binding.name}: public result text is malformed")
-            result_item_id, result_text = item_id, item["text"]
+    if items != []:
+        raise FleetCliError(f"{binding.name}: bounded public turn returned items")
     return {
         "binding": binding, "client": client,
         "provider_status": provider_status, "active_flags": list(flags),
         "turn_status": turn_status, "items_view": items_view,
-        "result_item_id": result_item_id, "result_text": result_text,
+        "result_item_id": None, "result_text": None,
         "error_code": _codex_error_code(turn),
+        "rollout_path": (thread.get("path")
+                         if isinstance(thread.get("path"), str) else None),
     }
 
 
@@ -2459,14 +2531,16 @@ def _codex_worker_status(observed):
 
 
 def _resume_codex_worker_on_current_host(
-        binding, client, *, require_full=False):
+        binding: CodexWorkerBinding, client
+) -> tuple[dict, dict]:
     """Validate and resume one exact thread before adopting a new host."""
     if client.generation == binding.host_generation:
         return dict(binding.record), _codex_worker_observe(
-            binding, client=client, require_full=require_full)
+            binding, client=client)
     if binding.record.get("pending_operation") is not None:
         raise FleetCliError(
-            f"{binding.name}: native Codex operation is pending; reconcile it "
+            f"{binding.name}: native Codex operation is pending; run `fleet "
+            "doctor --repair` to reconcile it "
             "before host restart recovery")
     requested_model = _codex_model_slug(binding.record.get("model"))
     if requested_model is None:
@@ -2506,8 +2580,7 @@ def _resume_codex_worker_on_current_host(
             name=binding.name, thread_id=binding.thread_id,
             turn_id=binding.turn_id, host_generation=client.generation,
             cwd=binding.cwd, record=binding.record)
-        observed = _codex_worker_observe(
-            rebound, client=client, require_full=require_full)
+        observed = _codex_worker_observe(rebound, client=client)
         status, adapter_state = _codex_worker_status(observed)
         if observed["provider_status"] not in {"active", "idle"}:
             raise FleetCliError(
@@ -2561,17 +2634,18 @@ def _guard_codex_worker_operation(name: str, record: dict, action: str, *,
     pending = record.get("pending_operation")
     if pending is not None:
         raise FleetCliError(
-            f"{name}: native Codex operation is pending; reconcile it before "
-            f"{action}")
+            f"{name}: native Codex operation is pending; run `fleet doctor "
+            f"--repair` to reconcile it from the provider before {action}")
     adapter_state = record.get("adapter_state")
     if adapter_state == "uncertain":
         raise FleetCliError(
-            f"{name}: native Codex operation state is uncertain; reconcile it "
-            f"before {action}")
+            f"{name}: native Codex operation state is uncertain; run "
+            f"`fleet status {name}` to re-observe it before {action}")
     status = record.get("status")
     if status == "dead-suspected":
         raise FleetCliError(
-            f"{name}: dead-suspected -- inspect and reconcile before {action}")
+            f"{name}: dead-suspected -- run `fleet status {name}` to "
+            f"re-observe it before {action}")
     if status not in allowed_statuses:
         label = status if isinstance(status, str) and status else "unknown"
         raise FleetCliError(
@@ -3720,7 +3794,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16370`), because legacy upgrades also require a complete registry.
+    (`:16701`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4131,27 +4205,65 @@ def recompute_worker_codex(name: str, record: dict,
 
     route = _codex_record_route(record)
     if route == "native":
+        from fleet_codex import HostUnavailable
+
         if record.get("status") in _NATIVE_STICKY:
             return updated
         completed_evidence = False
         try:
             binding = _codex_worker_binding(name, record)
             completed_evidence = _codex_worker_has_completed_evidence(binding)
-            observed = _codex_worker_observe(binding)
         except (FleetCliError, OSError, ValueError):
             updated["status"] = "dead-suspected"
             updated["adapter_state"] = "uncertain"
             return updated
+
+        def unobservable():
+            if _codex_provider_recently_active(binding):
+                if record.get("status") not in {"working", "idle"}:
+                    updated["status"] = "working"
+                return updated
+            updated["status"] = "dead-suspected"
+            updated["adapter_state"] = "uncertain"
+            updated.pop("provider_status", None)
+            return updated
+
+        try:
+            client = _codex_existing_client(FLEET_HOME)
+        except (FleetCliError, OSError, ValueError):
+            return unobservable()
+        owner_live = getattr(client, "_owner_live", None)
+        try:
+            host_gone = (client.generation != binding.host_generation
+                         or (callable(owner_live) and not owner_live()))
+        except (OSError, ValueError):
+            host_gone = False
+        if host_gone:
+            return unobservable()
+        try:
+            observed = _codex_worker_observe(binding, client=client)
+        except HostUnavailable:
+            return updated
+        except (FleetCliError, OSError, ValueError):
+            return unobservable()
         status, adapter_state = _codex_worker_status(observed)
         if status == "dead-suspected" and completed_evidence and observed["turn_status"] == "completed":
             status, adapter_state = "idle", "idle"
         waits = _codex_wait_summaries(record)
         current_waits = [wait for wait in waits if not wait.get("stale")]
-        if any(wait.get("state") in {"unknown", "unreadable"}
-               for wait in current_waits):
+        if observed["provider_status"] == "active" and current_waits:
+            status = "working"
+            adapter_state = ("uncertain" if any(
+                wait.get("state") in {"unknown", "unreadable"}
+                for wait in current_waits) else "waiting")
+        elif any(wait.get("state") in {"unknown", "unreadable"}
+                 for wait in current_waits):
             status, adapter_state = "dead-suspected", "uncertain"
-        elif observed["provider_status"] == "active" and current_waits:
-            status, adapter_state = "working", "waiting"
+        if (status == "dead-suspected"
+                and _codex_provider_recently_active(binding)):
+            status = "working"
+        if observed.get("rollout_path"):
+            updated["codex_rollout_path"] = observed["rollout_path"]
         updated["status"] = status
         updated["adapter_state"] = adapter_state
         updated["provider_status"] = observed["provider_status"]
@@ -4252,7 +4364,9 @@ def _worker_flags(record: dict) -> list:
     # M-B T5: dead-suspected is a native-only, non-sticky verdict -- surface
     # it as an operator prompt to look, never an auto-respawn trigger.
     if status == "dead-suspected":
-        flags.append("investigate: no outcome record")
+        flags.append("investigate: no provider activity"
+                     if _is_codex_record(record)
+                     else "investigate: no outcome record")
     # M-B T5: recompute_worker_native sets this transient field (never part
     # of new_worker_record's base schema) when the roster reports the native
     # session paused on a permission prompt.
@@ -7064,6 +7178,9 @@ def cmd_status(args) -> int:
         if (not _is_codex_record(rec) or rec.get("status") != "idle"
                 or rec.get("archived_at")):
             continue
+        if _codex_auto_continue(n, rec):
+            display[n] = read_registry_no_repair()["workers"].get(n, rec)
+            continue
         sid = rec.get("session_id") or rec.get("codex_thread_id")
         try:
             notify_lane_done(
@@ -7300,7 +7417,8 @@ def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
         except FleetCliError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        print(f"-- {name} ({binding.thread_id[:8]}/{binding.turn_id[:8]}) --")
+        print(f"-- {name} ({_codex_short_id(binding.thread_id)}/"
+              f"{_codex_short_id(binding.turn_id)}) --")
         if evidence is None:
             print("(no completed durable public item yet)")
             return 0
@@ -7596,6 +7714,10 @@ def _cmd_result_codex(name: str, rec: dict,
             print(f"{name}: no durable public result for the current native "
                   "Codex turn", file=sys.stderr)
             return 1
+        if evidence.get("turn_status") is None:
+            print(f"{name}: native Codex turn still running; durable result "
+                  "evidence is not terminal yet", file=sys.stderr)
+            return 1
         _validate_codex_worker_result_evidence(binding, evidence)
         if evidence["turn_status"] != "completed":
             print(f"{name}: last native Codex turn ended by "
@@ -7745,31 +7867,15 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
     return finished, pending
 
 
-def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
-    """Wait for any/all requested workers and print final statuses.
-    --any succeeds when at least one finishes even if others remain pending;
-    otherwise unfinished workers at the deadline produce a timeout exit."""
-    with fleet_lock():
-        data = load_registry()
-        for n in args.names:
-            if n not in data["workers"]:
-                raise FleetCliError(f"unknown worker: {n!r}")
-
-    mode = "any" if args.any else "all"
-    finished, pending = wait_for_workers(
-        args.names, mode=mode, timeout=args.timeout, sleep=sleep, clock=clock,
-    )
-
-    # The persist pass fetches its own roster; display its committed verdict when
-    # available, since it may differ from the earlier poll. Otherwise retain the
-    # poll verdict and identify any epoch freeze explicitly.
+def _persist_wait_finished(finished: dict) -> tuple[dict, set, bool]:
     persisted_status: dict = {}
     epoch_frozen = False
+    auto_continued = set()
     if finished:
         # Refresh finished native verdicts outside the lock before persisting fields
         # and transition events. Archived evidence has moved, so exclude tombstones
         # from recomputation and preserve their committed state.
-        snap_workers = load_registry()["workers"]
+        snap_workers = read_registry_no_repair()["workers"]
         live_finished = [n for n in finished
                          if n in snap_workers
                          and not snap_workers[n].get("archived_at")]
@@ -7833,6 +7939,10 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
             if changed:
                 save_registry(data)
         for n, sid, mcx_id, expected_status, expected_last_dispatch_at in completed_codex:
+            if _codex_auto_continue(n, read_registry_no_repair()["workers"].get(n)):
+                persisted_status[n] = "working"
+                auto_continued.add(n)
+                continue
             try:
                 notify_lane_done(n, "idle", expected_sid=sid,
                                  expected_mcx_id=mcx_id,
@@ -7840,6 +7950,54 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                                  expected_last_dispatch_at=expected_last_dispatch_at)
             except Exception:
                 pass
+    return persisted_status, auto_continued, epoch_frozen
+
+
+def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
+    """Wait for any/all requested workers and print final statuses.
+    --any succeeds when at least one finishes even if others remain pending;
+    otherwise unfinished workers at the original deadline time out."""
+    with fleet_lock():
+        data = load_registry()
+        for n in args.names:
+            if n not in data["workers"]:
+                raise FleetCliError(f"unknown worker: {n!r}")
+
+    mode = "any" if args.any else "all"
+    deadline = None if args.timeout is None else clock() + args.timeout
+    finished: dict = {}
+    pending = set(args.names)
+    persisted_status: dict = {}
+    epoch_frozen = False
+    wait_names = list(args.names)
+
+    while wait_names:
+        remaining = None if deadline is None else max(0.0, deadline - clock())
+        cycle_finished, cycle_pending = wait_for_workers(
+            wait_names, mode=mode, timeout=remaining, sleep=sleep, clock=clock,
+        )
+        cycle_persisted, auto_continued, cycle_epoch_frozen = \
+            _persist_wait_finished(cycle_finished)
+        persisted_status.update(cycle_persisted)
+        epoch_frozen = epoch_frozen or cycle_epoch_frozen
+
+        if mode == "any":
+            finished.update(cycle_finished)
+            pending = set(cycle_pending)
+            break
+
+        settled = set(cycle_finished) - auto_continued
+        for name in settled:
+            finished[name] = cycle_finished[name]
+        pending.difference_update(settled)
+        pending.update(cycle_pending)
+        pending.update(auto_continued)
+
+        if (auto_continued
+                and (deadline is None or clock() < deadline)):
+            wait_names = sorted(auto_continued)
+            continue
+        break
 
     # Use the current sid result outcome, or the explicit no-result placeholder.
     summary_workers = load_registry()["workers"]
@@ -8485,7 +8643,39 @@ def _cmd_send_codex_supervisor(name: str, message: str) -> int:
     return 0
 
 
-def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
+CODEX_AUTO_CONTINUE_LIMIT = 2
+CODEX_AUTO_CONTINUE_MESSAGE = (
+    "Your last turn ended on a progress update, not a final result. Continue "
+    "the task from where you stopped, and end the turn with your final result "
+    "summary.")
+
+
+def _codex_auto_continue(name: str, rec) -> bool:
+    if (not isinstance(rec, dict) or _codex_record_route(rec) != "native"
+            or _is_supervisor_shaped(name) or rec.get("status") != "idle"
+            or rec.get("archived_at") is not None
+            or rec.get("pending_operation") is not None):
+        return False
+    count = rec.get("codex_auto_continues")
+    count = count if isinstance(count, int) else 0
+    if count >= CODEX_AUTO_CONTINUE_LIMIT:
+        return False
+    try:
+        if not _codex_turn_ended_early(_codex_worker_binding(name, rec)):
+            return False
+        with redirect_stdout(io.StringIO()):
+            _cmd_send_codex_native(name, CODEX_AUTO_CONTINUE_MESSAGE, rec,
+                                   auto_continue=True)
+    except (FleetCliError, OSError, ValueError):
+        return False
+    print(f"{name}: turn ended on a progress message -- auto-continued "
+          f"({count + 1}/{CODEX_AUTO_CONTINUE_LIMIT})", file=sys.stderr)
+    return True
+
+
+def _cmd_send_codex_native(name: str, message: str, rec: dict, *,
+                           allow_limited: bool = False,
+                           auto_continue: bool = False) -> int:
     """Steer an active turn or start one successor turn on the same thread."""
     binding = _codex_worker_binding(name, rec)
     allowed_statuses = {"working", "idle"}
@@ -8502,16 +8692,14 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
             allowed_adapter_states=allowed_adapter_states)
     client = _codex_existing_client(FLEET_HOME)
     if client.generation != binding.host_generation:
-        rec, observed = _resume_codex_worker_on_current_host(
-            binding, client, require_full=True)
+        rec, observed = _resume_codex_worker_on_current_host(binding, client)
         binding = _codex_worker_binding(name, rec)
     else:
         if restart_candidate:
             _guard_codex_worker_operation(
                 name, rec, "send", allowed_statuses=allowed_statuses,
                 allowed_adapter_states=allowed_adapter_states)
-        observed = _codex_worker_observe(
-            binding, client=client, require_full=True)
+        observed = _codex_worker_observe(binding, client=client)
     _guard_codex_worker_operation(
         name, rec, "send", allowed_statuses=allowed_statuses,
         allowed_adapter_states=allowed_adapter_states)
@@ -8609,11 +8797,21 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
                 record["turns"] = record.get("turns", 0) + 1
             if allow_limited:
                 record.pop("ordinary_usage_allowed", None)
+            continues = record.get("codex_auto_continues")
+            record["codex_auto_continues"] = (
+                (continues if isinstance(continues, int) else 0) + 1
+                if auto_continue else 0)
             save_registry(data)
             _append_event_quiet(
                 "steered" if method == "turn/steer" else "turn_started",
                 name, codex_thread_id=binding.thread_id,
                 codex_turn_id=turn_id, substrate="codex")
+            if auto_continue:
+                _append_event_quiet(
+                    "codex_auto_continued", name,
+                    codex_thread_id=binding.thread_id,
+                    previous_turn_id=binding.turn_id, codex_turn_id=turn_id,
+                    count=record["codex_auto_continues"])
             committed = True
     if not committed:
         raise FleetCliError(
@@ -9004,7 +9202,7 @@ def _cmd_interrupt_codex(name: str, rec: dict,
             name, rec, "interrupt", allowed_statuses=allowed_statuses,
             allowed_adapter_states=allowed_adapter_states)
         binding = _codex_worker_binding(name, rec)
-        observed = _codex_worker_observe(binding, require_full=True)
+        observed = _codex_worker_observe(binding)
         if observed["provider_status"] == "idle":
             print(f"{name}: no turn running -- nothing to interrupt")
             return 0
@@ -9031,8 +9229,7 @@ def _cmd_interrupt_codex(name: str, rec: dict,
         client = observed["client"]
         try:
             client.call(operation, timeout=30)
-            terminal = _codex_worker_observe(
-                binding, client=client, require_full=True)
+            terminal = _codex_worker_observe(binding, client=client)
             if (terminal["provider_status"] != "idle"
                     or terminal["turn_status"] not in {
                         "completed", "failed", "interrupted"}):
@@ -9580,12 +9777,10 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     binding = _codex_worker_binding(name, before)
     client = _codex_native_client(FLEET_HOME)
     if client.generation != binding.host_generation:
-        before, observed = _resume_codex_worker_on_current_host(
-            binding, client, require_full=True)
+        before, observed = _resume_codex_worker_on_current_host(binding, client)
         binding = _codex_worker_binding(name, before)
     else:
-        observed = _codex_worker_observe(
-            binding, client=client, require_full=True)
+        observed = _codex_worker_observe(binding, client=client)
     if observed["provider_status"] == "active":
         if not getattr(args, "force", False):
             raise FleetCliError(
@@ -9594,7 +9789,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         _cmd_interrupt_codex(name, before)
         before = dict(read_registry_no_repair()["workers"][name])
         binding = _codex_worker_binding(name, before)
-        observed = _codex_worker_observe(binding, require_full=True)
+        observed = _codex_worker_observe(binding)
     if (observed["provider_status"] != "idle"
             or observed["turn_status"] not in {
                 "completed", "failed", "interrupted"}):
@@ -9998,7 +10193,8 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
             kind = pending.get("kind") if isinstance(pending, dict) else None
             raise FleetCliError(
                 f"{name}: native Codex operation {kind or 'unknown'} is "
-                "pending; refusing kill")
+                "pending; refusing kill -- run `fleet doctor --repair` to "
+                "reconcile it first")
         if current != rec:
             raise FleetCliError(
                 f"{name}: native Codex worker changed concurrently; "
@@ -10049,8 +10245,7 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
             }
             try:
                 client.call(operation, timeout=30)
-                terminal = _codex_worker_observe(
-                    binding, client=client, require_full=True)
+                terminal = _codex_worker_observe(binding, client=client)
                 if (terminal["provider_status"] != "idle"
                         or terminal["turn_status"] not in {
                             "completed", "failed", "interrupted"}):
@@ -10079,7 +10274,8 @@ def _cmd_kill_codex_native(name: str, rec: dict, connect=None) -> int:
                         if isinstance(pending, dict) else None)
                 raise FleetCliError(
                     f"{name}: native Codex operation {kind or 'unknown'} "
-                    "became pending; refusing kill")
+                    "became pending; refusing kill -- run `fleet doctor "
+                    "--repair` to reconcile it first")
             if r != rec:
                 raise FleetCliError(
                     f"{name}: native Codex worker changed concurrently; "
@@ -10255,7 +10451,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10170` / `cmd_respawn:9461`, before
+    # resolution that runs from `cmd_kill:10366` / `cmd_respawn:9658`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10286,9 +10482,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10170` / `cmd_respawn:9461`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10366` / `cmd_respawn:9658`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9482-9491` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9679-9686` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12576,7 +12772,135 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
     return reconciled
 
 
-def _doctor_check_dead_suspected(workers: dict, reconciled=()):
+def _codex_worker_turn_page(binding: CodexWorkerBinding, client,
+                            limit: int) -> list:
+    observation = client.call({
+        "operation_id": f"worker-turn-page-{uuid.uuid4()}", "method": "rpc",
+        "payload": {"method": "thread/turns/list", "params": {
+            "threadId": binding.thread_id, "limit": limit,
+            "sortDirection": "desc", "itemsView": "notLoaded",
+        }},
+    }, timeout=10)
+    if observation.generation != binding.host_generation:
+        raise FleetCliError(f"{binding.name}: native Codex host generation changed")
+    result = observation.result
+    turns = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(turns, list) or not all(isinstance(t, dict) for t in turns):
+        raise FleetCliError(f"{binding.name}: public turn page is malformed")
+    for turn in turns:
+        _provider_codex_id(turn.get("id"), "paged worker turn")
+    return turns
+
+
+_CODEX_RECONCILABLE_SENDS = frozenset({"turn/start", "turn/steer"})
+
+
+def _reconcile_frozen_codex_worker_operations() -> list[str]:
+    with fleet_lock():
+        data = load_registry()
+        candidates = {
+            name: (dict(record), tuple(sorted(
+                mailbox_dir().glob(
+                    f"{record.get('codex_thread_id')}.md.claimed.*"),
+                key=lambda path: path.name)))
+            for name, record in data.get("workers", {}).items()
+            if (isinstance(record, dict)
+                and record.get("archived_at") is None
+                and record.get("adapter_state") == "uncertain"
+                and isinstance(record.get("pending_operation"), dict)
+                and record["pending_operation"].get("kind")
+                in _CODEX_RECONCILABLE_SENDS
+                and _codex_record_route(record) == "native"
+                and not _is_supervisor_shaped(name))
+        }
+
+    prepared = {}
+    for name, (before, claims) in candidates.items():
+        kind = before["pending_operation"]["kind"]
+        operation_id = before["pending_operation"].get("operation_id")
+        try:
+            binding = _codex_worker_binding(name, before)
+            client = _codex_existing_client(FLEET_HOME)
+            if client.generation != binding.host_generation:
+                continue
+            turns = _codex_worker_turn_page(binding, client, 2)
+            if not turns:
+                continue
+            if turns[0].get("id") == binding.turn_id:
+                observed = _codex_worker_observe(binding, client=client)
+                if (observed["provider_status"] != "idle"
+                        or observed["turn_status"] not in {
+                            "completed", "failed", "interrupted"}):
+                    continue
+                status, adapter_state = _codex_worker_status(observed)
+                updated = dict(before)
+                updated.pop("pending_operation", None)
+                updated.pop("uncertain_reason", None)
+                updated.update({"status": status, "adapter_state": adapter_state,
+                                "provider_status": "idle",
+                                "last_activity": now_iso()})
+                settle_turn_id = binding.turn_id
+                settle_turn_status = observed["turn_status"]
+                outcome = "released"
+            elif (kind == "turn/start" and len(turns) == 2
+                  and turns[1].get("id") == binding.turn_id
+                  and turns[0].get("status") in {
+                      "inProgress", "completed", "failed", "interrupted"}):
+                updated = dict(before)
+                updated.pop("pending_operation", None)
+                updated.pop("uncertain_reason", None)
+                updated.update({
+                    "codex_turn_id": turns[0]["id"], "adapter_state": "active",
+                    "status": "working", "turns": before.get("turns", 0) + 1,
+                    "last_activity": now_iso(), "last_dispatch_at": now_iso(),
+                })
+                settle_turn_id = turns[0]["id"]
+                settle_turn_status = turns[0]["status"]
+                outcome = "adopted"
+            else:
+                continue
+
+            client.adopt_worker_turn(
+                operation_id,
+                fleet_name=name,
+                thread_id=binding.thread_id,
+                previous_turn_id=binding.turn_id,
+                canonical_cwd=binding.cwd,
+                turn_id=settle_turn_id,
+                turn_status=settle_turn_status,
+            )
+            prepared[name] = (before, updated, outcome, binding, claims)
+        except (FleetCliError, OSError, ValueError):
+            continue
+
+    reconciled = []
+    if not prepared:
+        return reconciled
+    with fleet_lock():
+        data = load_registry()
+        workers = data.get("workers", {})
+        for name, (before, updated, outcome, _binding, _claims) in prepared.items():
+            if workers.get(name) != before:
+                continue
+            for claim in _claims:
+                if outcome == "adopted":
+                    finalize_mailbox_claim(claim)
+                else:
+                    restore_mailbox_claim(claim)
+            workers[name] = updated
+            reconciled.append(name)
+        if reconciled:
+            save_registry(data)
+    for name in reconciled:
+        _before, updated, outcome, binding, _claims = prepared[name]
+        _append_event_quiet(
+            "codex_operation_reconciled", name, outcome=outcome,
+            codex_thread_id=binding.thread_id,
+            codex_turn_id=updated.get("codex_turn_id"))
+    return reconciled
+
+
+def _doctor_check_dead_suspected(workers: dict, reconciled=(), released=()):
     """Note dead-suspected rows in the supplied snapshot without recomputing.
     The verdict is advisory and recomputable, never a sticky respawn trigger.
     """
@@ -12584,6 +12908,10 @@ def _doctor_check_dead_suspected(workers: dict, reconciled=()):
         f"reconciled {len(reconciled)} exact native Codex completion(s): "
         f"{', '.join(sorted(reconciled))}; "
         if reconciled else "")
+    if released:
+        repaired += (
+            f"reconciled {len(released)} frozen native Codex operation(s): "
+            f"{', '.join(sorted(released))}; ")
     names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
     if names:
         return ("dead-suspected", True,
@@ -13211,10 +13539,12 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     registry_quarantined = None
     registry_rename_attempted = False
     reconciled_codex = []
+    released_codex = []
     try:
         if repair:
             with fleet_lock():
                 data = load_registry()          # the ONE quarantine site left
+            released_codex = _reconcile_frozen_codex_worker_operations()
             reconciled_codex = _reconcile_dead_suspected_codex_completions()
             # Refresh the diagnostic snapshot after the conditional repair.
             with fleet_lock():
@@ -13252,7 +13582,8 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(
-            _doctor_check_dead_suspected, workers, reconciled_codex),
+            _doctor_check_dead_suspected, workers, reconciled_codex,
+            released_codex),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_permission_denials, workers),
@@ -15191,7 +15522,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1091`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4421`) applies here too. An unreadable registry
+    rule for the view path (`:4535`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -15262,11 +15593,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
-    :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    sites that already key on the union (`:3616, :3651, :3681, :3720, :3757,
+    :3819, :3899, :4944, :10469, :10631, :10895, :11122, :11158, :11400, :11401,
+    :11490, :11500, :11511, :11609, :12131, :15545, :19453, :19454, :19558, :19619, :21048, :23369`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
+    OWN prior sid alone: :8949, :9532, :13826, :21970. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15984,8 +16315,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8751, :9335, :13495,
-    # :21639) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8949, :9532, :13826,
+    # :21970) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15993,7 +16324,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15188`).
+        # names this gate as its reason (`:15519`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16363,7 +16694,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11906`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:12102`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.

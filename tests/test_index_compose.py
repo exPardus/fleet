@@ -1173,9 +1173,9 @@ class TestTheDigestSizeCap:
         M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of
         it (~55,482); neither reaches 250,000, so the truncation never fires
         in M4 at all. Four tests in THIS class caught it; M4 saw nothing.
-      * truncate at the WARN threshold (`digest[:50_000]`) -- M4 goes RED,
+      * truncate at the WARN threshold (`digest[:75_000]`) -- M4 goes RED,
         because its two-copies assertion (`len(both) > 2 * len(digest) - 200`)
-        does cross 50,000.
+        does cross 75,000 (two copies of the 50,534-char digest of 2026-10-08).
 
     So M4 reds only for a cap that trims below ~55,500 chars, and the more
     plausible wrong implementation -- trim at the ceiling -- slips past it
@@ -1327,7 +1327,8 @@ class TestTheDigestSizeCap:
         and a warning genuinely means "more than the biggest file here".
 
         Re-derived against `bin/fleet.py`, the file the M4 cost pin uses and
-        the one that grows every wave. Measured 2026-07-30: 27,741 chars.
+        the one that grows every wave. Measured 2026-07-30: 27,741 chars;
+        re-measured 2026-10-08: 50,534 chars, so WARN moved 50,000 -> 75,000.
         `tests/test_native.py` is actually this repo's largest digest at
         40,993 chars -- also under the threshold -- but it is not staged here,
         because this test's job is to guarantee the M4 pin's `warnings == []`
@@ -1341,7 +1342,7 @@ class TestTheDigestSizeCap:
         assert warnings == [], (
             f"bin/fleet.py's own digest is {len(digest)} chars and now trips "
             f"the {fleet.INDEX_DIGEST_WARN_CHARS}-char warn threshold. The "
-            f"threshold was measured against a 27,741-char digest; re-measure "
+            f"threshold was measured against a 50,534-char digest; re-measure "
             f"it and move it, and move the M4 pin's docstring with it")
         assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS
 

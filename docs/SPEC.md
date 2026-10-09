@@ -276,7 +276,7 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 | `peek <name> [-n]` | `_cmd_peek_native` @2607: last n substantive transcript records (assistant text/tool_use, user vs `isMeta`), tolerant parsing, works mid-turn (daemon writes the transcript live). No stream-json log exists to read. |
 | `result <name>` | `_cmd_result_native` @2662: latest outcome record for the CURRENT sid; `kind=="result"` prints `result_text` on stdout (script-pure) + token/model line on stderr; a tombstone kind or missing/null record exits 1 with a distinct reason. |
 | `address <name>` | `cmd_address`: read-only join of the registry sid to one live `claude agents --json --all` row; prints the exact native `name` for a `SendMessage` `to`. Refuses a sid with no process and refuses when several live sessions (pid present, live status) share the name (non-zero exit; `--json` carries `error` and each duplicate's pid and sid); warns on a live retired sid. See `docs/specs/peer-messaging.md`. |
-| `wait <name...> [--any\|--all] [--timeout]` | `wait_for_workers` @2711: poll-recompute until `NATIVE_TERMINAL_STATUSES` (@1305: idle, dead, dead-suspected, limited, over_ceiling, interrupted). One roster fetch per poll shared across names; epoch-frozen polls trust nothing; archived records resolve immediately from frozen status. |
+| `wait <name...> [--any\|--all] [--timeout]` | `wait_for_workers` @2711: poll-recompute until `NATIVE_TERMINAL_STATUSES` (@1305: idle, dead, dead-suspected, limited, over_ceiling, interrupted). One roster fetch per poll shared across names; epoch-frozen polls trust nothing; archived records resolve immediately from frozen status. A native Codex completion that triggers an automatic continuation enters another poll cycle for `--all`, against the original command deadline, until that successor finishes; `--any` retains early-success semantics and does not re-poll the continued winner. |
 | `attach <name>` / `release <name>` | `cmd_attach` @3579 **refuses and redirects**: a native session has no fleet-owned terminal — use the agents menu (Ctrl+T) or `claude attach <sid>` (M-B scope fence; native attach integration is a later milestone). `release` @3595 still flips a stale `attached` record → idle. |
 | `interrupt <name>` | `_cmd_interrupt_native` @3462: guard — only `status=="working"` is interruptible (T8 C1: nothing else is ever overwritten). Non-working branches (@3520-3546): `dead`/`interrupted`/`idle` → friendly "nothing to interrupt" no-op, rc 0; `limited` (would orphan the resume path), `dead-suspected` (inspect first), dispatch-in-flight, and any other status → refuse, rc 1. `claude stop <sid>` (never raw kill), write fleet's own `interrupted` tombstone (G10: stop fires no Stop hook), mark sticky `interrupted`. Respawn is a separate, explicit decision — an interrupted task is definitionally started; auto-respawn would re-run side effects. |
 | `respawn <name> [--task]` | `_cmd_respawn_native` @3620: **fresh dispatch, no `--resume`** — the context reset is the point; journal + old-sid mailbox carried via `compose_prompt(journal_path=...)`. **The task text comes from the brief store (§7), not from the registry snapshot** (wave 35 — it used to come from `task[:200]`, which is what ate two lanes' briefs); `--task` replaces the recorded brief, a bare respawn reuses it, and an unrecoverable remnant is refused rather than dispatched. Old-sid liveness gated on the **roster**, not the stored label; roster-fetch failure refuses (never assume dead on ambiguity). **One disagreement between the two liveness verdicts is resolved by evidence, not by `--force`** (queue item 31): a stream death (`API Error: stream closed before completion` and the measured family around it) leaves the session process resident with no outcome record, so the roster still reports a live body while the status probe concludes `dead-suspected`. When the probe's verdict IS `dead-suspected` **and** the transcript tail's newest qualifying record is an API stream death (`transcript_stream_death_scan`), respawn accepts the row without `--force` — announcing the acceptance on stderr — and **still stops and tombstones the old session**, because the flag was never the safety property; the stop is. A genuinely running turn keeps the refusal: a roster `busy`/`waiting` entry (the probe then says `working`), a `limited` tail (429 is its own verdict with its own verb), no transcript evidence at all, or a tail whose newest record is chatter after an older death. `--force` on a live old session: stop → **always re-verify via roster** (reported success gets one 2 s grace re-fetch; reported failure aborts on first still-live check) → still-live aborts the respawn (never two live sessions under one name). Stopped tombstone written regardless of the stop's exit code. Carries forward cwd/mode/model/category/setting_sources/token_ceiling/spawned_by/cost fields; `retired_sids` += old sid. **An interrupted supervisor holder is the exception:** it cannot receive the release steer, so respawn wakes a fresh unforked turn under the same claim/incarnation and proves continuity with the wake nonce; an interrupted-holder `--task` override is refused because the same-incarnation wake payload cannot replace the campaign brief. No log rotation — there is no log. |
@@ -300,22 +300,48 @@ Rows with
 verb by that durable discriminator; they never fall through to mcx. Ordinary
 `status`/`wait` validate the exact provider-minted thread and newest bound turn
 through the existing exact-home host and reconcile that observation with the
-bounded exact-turn public-evidence file. Durable `completed` evidence for the
-current bound turn yields `idle` after `notLoaded` or `systemError` only when
-the validated live read also reports that exact newest turn as `completed`.
+bounded exact-turn public-evidence file. The live read is bounded at the
+provider: metadata-only `thread/read(includeTurns=false)`, followed by
+`thread/turns/list(limit=1, sortDirection=desc, itemsView=notLoaded)`. It never
+hydrates a rollout-sized turn into the host's 1 MiB IPC response. Durable
+`completed` evidence for the current bound turn yields `idle` after `notLoaded`
+or `systemError` only when the bounded live read also reports that exact newest
+turn as `completed`.
 An in-progress, failed, interrupted, missing, or conflicting live turn remains
 non-idle; an unresolved mutation never lets older completion evidence vouch
-for unknown provider work, and a failed live read remains uncertain.
-`doctor --repair` applies that same two-witness rule to `dead-suspected` rows
-committed before the rule shipped. It snapshots only unarchived native worker
+for unknown provider work. A missing host, replaced generation, dead host PID,
+or conflicting public identity yields `dead-suspected` only when the provider
+is also silent: a native Codex lane writes no Stop-hook outcome record, so a
+missing record is never evidence. A rollout file for the exact thread (the
+public `thread.path`, else the provider's date-filed `rollout-*-<thread>.jsonl`)
+or exact-turn public evidence written within the last 10 minutes keeps the row
+`working` (or its committed `idle`). A lost response from a joined, live
+same-generation host preserves the last committed verdict for a later
+observation instead of guessing that the turn died. An active provider with an
+unreadable wait record stays `working` with an `uncertain` adapter. The status
+flag for a Codex `dead-suspected` row reads `investigate: no provider activity`.
+A completed turn whose last agent message carries the explicit public
+`commentary` phase ended early on a progress message: `status` and `wait`
+start one same-thread continuation turn, at most twice per operator dispatch
+(`codex_auto_continued` event); a `final_answer` or unknown phase is an
+ordinary completion. Native worker refusals name their recovery verb:
+`fleet status <name>` re-observes an uncertain or `dead-suspected` row, and
+`fleet doctor --repair` reconciles a frozen send reservation.
+`doctor --repair` releases a frozen `turn/start` or `turn/steer` reservation
+only when the exact thread proves it: an idle thread whose newest turn is still
+the bound terminal turn releases it and returns the claimed mail to the
+mailbox; one new turn directly after the bound turn adopts a `turn/start`.
+Every other shape stays reserved. It also applies that same two-witness rule
+to `dead-suspected` rows committed before the rule shipped. It snapshots only unarchived native worker
 rows under `fleet.lock`, probes unlocked, and changes only rows whose complete
 registry value still equals the snapshot; a concurrent terminal or resume
 write wins without being overwritten. Bare `doctor` performs no such probe or
 write.
 Stale/file-only views remain probe-free. `peek` and `result` read only the
-bounded exact-turn public-evidence file; `result` requires complete durable
-item text and token usage and takes no lock, performs no RPC, and writes
-nothing. Busy `send` uses
+bounded exact-turn public-evidence file; `result` reports a partial evidence
+record with no terminal `turn_status` as still running, and requires complete
+durable item text and token usage for success. It takes no lock, performs no
+RPC, and writes nothing. Busy `send` uses
 `turn/steer` with `expectedTurnId`; idle send and `resume-limited` start one
 turn on the same thread. When a replacement host has a new generation, `send`
 and `respawn` first reserve one `thread/resume` for the exact recorded provider

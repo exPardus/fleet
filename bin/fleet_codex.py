@@ -748,6 +748,7 @@ _USAGE_FIELDS = {
     "totalTokens": "total_tokens",
 }
 _TERMINAL_TURN_STATES = frozenset({"completed", "failed", "interrupted"})
+_AGENT_MESSAGE_PHASES = frozenset({"commentary", "final_answer"})
 
 
 def _public_uuid7(value: object, label: str) -> str:
@@ -811,7 +812,7 @@ class CodexPublicEvidenceStore:
         return result
 
     @staticmethod
-    def _agent_result(item: Any) -> tuple[str, str, bool] | None:
+    def _agent_result(item: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict) or item.get("type") != "agentMessage":
             return None
         item_id = item.get("id")
@@ -819,10 +820,15 @@ class CodexPublicEvidenceStore:
         if (not isinstance(item_id, str) or not item_id or len(item_id) > 160
                 or not isinstance(text, str)):
             raise ValueError("public agent result is malformed")
+        phase = item.get("phase")
+        if phase not in _AGENT_MESSAGE_PHASES:
+            phase = None
         encoded = text.encode("utf-8")
-        if len(encoded) > 32 * 1024:
-            return item_id, encoded[:32 * 1024].decode("utf-8", "ignore"), True
-        return item_id, text, False
+        truncated = len(encoded) > 32 * 1024
+        if truncated:
+            text = encoded[:32 * 1024].decode("utf-8", "ignore")
+        return {"result_item_id": item_id, "result_text": text,
+                "result_truncated": truncated, "result_phase": phase}
 
     def record(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
@@ -851,11 +857,7 @@ class CodexPublicEvidenceStore:
         elif method == "item/completed":
             result = self._agent_result(params.get("item"))
             if result is not None:
-                item_id, text, truncated = result
-                current.update({
-                    "result_item_id": item_id, "result_text": text,
-                    "result_truncated": truncated,
-                })
+                current.update(result)
         else:
             assert turn is not None
             status = turn.get("status")
@@ -875,11 +877,7 @@ class CodexPublicEvidenceStore:
             for item in items:
                 result = self._agent_result(item)
                 if result is not None:
-                    item_id, text, truncated = result
-                    current.update({
-                        "result_item_id": item_id, "result_text": text,
-                        "result_truncated": truncated,
-                    })
+                    current.update(result)
         current["observed_at"] = time.time()
         _atomic_json(self.path(thread_id, turn_id), current)
         return current
@@ -1490,6 +1488,74 @@ class OperationJournal:
                 operation_id, {"observed"}, "committed", result=evidence)
         return record
 
+    def adopt_worker_turn(
+            self, operation_id: str, *, fleet_name: str, thread_id: str,
+            previous_turn_id: str, canonical_cwd: str, turn_id: str,
+            turn_status: str) -> dict[str, Any]:
+        """Settle an uncertain worker send from exact public turn evidence.
+
+        Worker ``turn/start`` and ``turn/steer`` reservations are fenced in
+        Fleet's registry, but their host journal must be settled as well before
+        the reservation can be cleared.  This is deliberately an adoption
+        helper, not a replay path: it accepts only the recovery identity that
+        was recorded with the original operation and the one turn shape the
+        repair code already proved publicly (a same-id steer, one successor
+        turn/start, or a terminal same-id turn proving that turn/start created
+        no successor).
+        """
+        record = self.load(operation_id)
+        recovery = record.get("recovery")
+        public_method = record.get("public_method")
+        expected = {
+            "kind": f"worker/{public_method}",
+            "fleet_name": fleet_name,
+            "thread_id": thread_id,
+            "previous_turn_id": previous_turn_id,
+            "canonical_cwd": canonical_cwd,
+        }
+        if (record.get("method") != "rpc"
+                or public_method not in {"turn/start", "turn/steer"}
+                or not isinstance(recovery, dict)
+                or any(recovery.get(key) != value
+                       for key, value in expected.items())
+                or not isinstance(turn_status, str)
+                or turn_status not in {
+                    "inProgress", "completed", "failed", "interrupted"}):
+            raise HostRejected(
+                f"operation {operation_id} is not the exact worker turn intent")
+        if (public_method == "turn/start" and turn_id == previous_turn_id
+                and turn_status not in {"completed", "failed", "interrupted"}):
+            raise HostRejected(
+                f"operation {operation_id} has no terminal predecessor proof")
+        if public_method == "turn/steer" and turn_id != previous_turn_id:
+            raise HostRejected(
+                f"operation {operation_id} steer changed turn identity")
+        state = record.get("state")
+        if state == "committed":
+            return record
+        if state not in {"accepted", "uncertain", "observed"}:
+            raise HostRejected(
+                f"operation {operation_id} cannot be adopted from {state}")
+        evidence = {
+            "fleetName": fleet_name,
+            "threadId": thread_id,
+            "previousTurnId": previous_turn_id,
+            "turnId": turn_id,
+            "canonicalCwd": canonical_cwd,
+            "turnStatus": turn_status,
+            "adoptedFromPublicRead": True,
+            "settlement": (
+                "releasedWithoutSuccessor"
+                if public_method == "turn/start" and turn_id == previous_turn_id
+                else "adoptedProviderTurn"),
+        }
+        if state in {"accepted", "uncertain"}:
+            self._transition(
+                operation_id, {"accepted", "uncertain"}, "observed",
+                result=evidence)
+        return self._transition(
+            operation_id, {"observed"}, "committed", result=evidence)
+
     def adopt_spawn_queue_overflow(
             self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
         """Adopt one spawn mutation from exact post-overflow public evidence.
@@ -1940,6 +2006,10 @@ class CodexHostClient:
 
     def commit_handoff_turn_start(self, operation_id: str, **evidence: Any) -> None:
         OperationJournal(self.home, self.generation).commit_handoff_turn_start(
+            operation_id, **evidence)
+
+    def adopt_worker_turn(self, operation_id: str, **evidence: Any) -> None:
+        OperationJournal(self.home, self.generation).adopt_worker_turn(
             operation_id, **evidence)
 
     def wait_for_exit(self, timeout: float) -> bool:
