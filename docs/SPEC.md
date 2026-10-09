@@ -374,6 +374,39 @@ claim/row/mail/source/host/journal check. Rejection or ambiguity stays uncertain
 No turn or original resume is replayed, and recorded policy is never changed
 implicitly.
 
+After an explicit recorded-policy restoration has settled, an idle native
+supervisor may be cold-reattached on its **same current thread** through
+`sup-reconcile --prepare-restored-continuation` followed, within five minutes
+and after the exact host and app-server child have exited, by
+`--reattach-restored-continuation`. Both calls require the exact incarnation,
+thread, completed turn, original observed resume, committed restoration, and
+old host generation. The prepare proof pins the current claim, row, journals,
+target mail, all other native rows and operations, callback records, source,
+and old host identity. The reattach creates one new host generation and sends
+one distinct policy-bound `thread/resume` with `excludeTurns`; it creates no
+turn and never retries an ambiguous accepted response. Ordinary continuation
+refuses an accepted unresolved historical operation.
+
+For an exact current-host continuation that must preserve unresolved retired
+history, both calls may additionally select one owner-only, SHA-256-pinned
+evidence manifest with `--preserve-retired-history-evidence` and
+`--expect-history-sha256`. This opt-in path permits exactly one accepted
+retired unbound `thread/start` and one accepted retired narrower-policy
+`thread/resume` whose archived bytes, returned identities, policies, and
+nonexecutable historical rows agree with the manifest and complete Fleet
+inventory. They remain observed and unresolved. Every implicated old host and
+app-server child must be presently absent, all historical bound turns must
+be publicly terminal and not loaded, the current manager's complete loaded
+list must contain only the held target, and the fresh manager's loaded list
+must be empty before the distinct resume. Callback and historical mail
+inventories stay pinned across the cold boundary. Missing original process
+start identity is recorded as missing; present PID absence does not attest
+historical exit or prove zero historical turns. Only the current held thread
+is resumed. Unknown ownership, a newly live old process, accepted historical
+drift, or a lost reply leaves the current claim frozen. Native supervisor
+husks without the current claim cannot be respawned through the ordinary
+supervisor lifecycle route.
+
 For a stale legacy Claude supervisor claim whose nonce cannot be recovered,
 `sup-retire-legacy --expect-inc ... --expect-sid ...` is a separate explicit
 registered-Codex-Interface transition. It requires the exact home and old
