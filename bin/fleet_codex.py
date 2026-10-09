@@ -33,6 +33,13 @@ HOST_LOCK_STALE_SECONDS = 30.0
 HOST_HEARTBEAT_STALE_SECONDS = 3.0
 IPC_AUTH_CHALLENGE_BYTES = 32
 MAX_OPERATION_TIMEOUT_SECONDS = 120.0
+
+
+def _fleet_state_digest(value: Mapping[str, Any]) -> str:
+    """Compare complete JSON claim/row snapshots without copying them to IPC."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                         ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 SCHEMA_FIXTURES = (
     Path(__file__).resolve().parents[1]
     / "tests" / "fixtures" / "codex_app_server"
@@ -2175,9 +2182,19 @@ class CodexHostClient:
             raise HostUnavailable("Codex host returned malformed approval state")
         return result
 
+    def supervisor_approval_reservation_supported(self) -> bool:
+        """A running host must itself advertise the approval boundary fence."""
+        operation = {
+            "operation_id": f"approval-reservation-capability-{uuid.uuid4()}",
+            "method": "approval/supervisor-reservation-v1", "payload": {},
+        }
+        return self.call(operation, timeout=5).result == {"version": 1}
+
     def respond_approval(self, request_id: str, thread_id: str,
                          turn_id: str, decision: Any,
-                         timeout: float = 10.0) -> dict[str, Any]:
+                         timeout: float = 10.0,
+                         supervisor_reservation: Mapping[str, Any] | None = None
+                         ) -> dict[str, Any]:
         """Consume one current durable request; the host rejects every replay."""
         operation = {
             "operation_id": f"approval-response-{uuid.uuid4()}",
@@ -2187,6 +2204,8 @@ class CodexHostClient:
                 "turn_id": turn_id, "decision": decision,
             },
         }
+        if supervisor_reservation is not None:
+            operation["payload"]["supervisor_reservation"] = dict(supervisor_reservation)
         result = self.call(operation, timeout=timeout).result
         if not isinstance(result, dict):
             raise HostUnavailable("Codex host returned malformed approval response state")
