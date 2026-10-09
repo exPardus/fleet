@@ -405,10 +405,13 @@ the repair commits by complete-row compare-and-swap so a concurrent kill,
 resume reservation, or other mutation wins. Bare `doctor` remains report-only.
 For a frozen `turn/start` or `turn/steer`, the repair settles the matching
 Codex host operation journal from that same public turn proof before clearing
-Fleet's pending reservation; an unresolved host predecessor therefore cannot
-block a later mutation. Mailbox claims are captured with the frozen-row
-snapshot and only those exact claims are restored or finalized after the
-compare-and-swap, so a newer concurrent send's claim is left untouched.
+Fleet's pending reservation. A terminal same-id observation settles a
+`turn/start` as released-without-successor rather than replaying it, so an
+unresolved host predecessor cannot block a later mutation. Mailbox claims are
+captured with the frozen-row snapshot and only those exact claims are restored
+or finalized inside the registry compare-and-swap, before its reservation is
+cleared. A newer sender therefore wins only after the old disposition is
+complete, and cannot claim between restoration's read and replace.
 Busy `send` uses one
 `turn/steer(expectedTurnId=...)`; idle `send` starts one new turn on the same
 thread. Each mutation is reserved durably before IPC, and an uncertain response
@@ -440,7 +443,9 @@ budget is `CODEX_AUTO_CONTINUE_LIMIT` (2) per operator dispatch: the counter
 `codex_auto_continues` increments on each automatic turn and resets on any
 operator send. A `final_answer` or unknown phase, an exhausted budget, a
 pending operation, or any send refusal leaves the lane idle and notifies as
-usual.
+usual. `wait --all` re-enters its poll for every automatic successor while
+retaining the command's original deadline; `wait --any` returns on the first
+completed turn even when Fleet has continued that lane.
 
 **Recovery verbs, 2026-10-08:** every native worker refusal names a runnable
 verb. An uncertain or `dead-suspected` row says `fleet status <name>`, which

@@ -2103,9 +2103,10 @@ def test_peek_prints_unambiguous_short_ids(native_home, capsys):
 
 
 class _PagedClient(WorkerVerbClient):
-    def __init__(self, lane, page, **kwargs):
+    def __init__(self, lane, page, *, journal=None, **kwargs):
         super().__init__(lane, **kwargs)
         self.page = page
+        self.journal = journal
 
     def call(self, operation, timeout):
         params = operation.get("payload", {}).get("params", {})
@@ -2117,6 +2118,31 @@ class _PagedClient(WorkerVerbClient):
                 generation=self.generation, payload_digest="a" * 64,
                 result={"data": self.page, "nextCursor": None})
         return super().call(operation, timeout)
+
+    def adopt_worker_turn(self, operation_id, **evidence):
+        if self.journal is not None:
+            return self.journal.adopt_worker_turn(operation_id, **evidence)
+        self.commits.append(operation_id)
+
+
+def _prepare_frozen_send_journal(home, lane, kind="turn/start"):
+    from fleet_codex import OperationJournal
+    journal = OperationJournal(home.resolve(), "host-generation-1")
+    operation = {
+        "operation_id": "worker-send-1", "method": "rpc",
+        "payload": {"method": kind, "params": {
+            "threadId": THREAD_ID, "input": [{"type": "text", "text": "mail"}],
+        }},
+        "recovery": {
+            "kind": f"worker/{kind}", "fleet_name": "cx-native",
+            "thread_id": THREAD_ID, "previous_turn_id": TURN_ID,
+            "canonical_cwd": str(lane),
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(operation["operation_id"])
+    journal.uncertain(operation["operation_id"], "response lost")
+    return journal
 
 
 def _frozen_send(lane, kind="turn/start"):
@@ -2130,11 +2156,12 @@ def test_doctor_repair_releases_unaccepted_frozen_send_and_restores_mail(
         native_home, monkeypatch):
     home, lane = native_home
     _frozen_send(lane)
+    journal = _prepare_frozen_send_journal(home, lane)
     claim = home / "mailbox" / f"{THREAD_ID}.md.claimed.4242"
     claim.write_text("operator steer", encoding="utf-8")
     client = _PagedClient(
         lane, [{"id": TURN_ID, "status": "completed"}],
-        provider_status="idle", turn_status="completed")
+        provider_status="idle", turn_status="completed", journal=journal)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
 
     assert fleet._reconcile_frozen_codex_worker_operations() == ["cx-native"]
@@ -2146,6 +2173,10 @@ def test_doctor_repair_releases_unaccepted_frozen_send_and_restores_mail(
     assert not claim.exists()
     assert (home / "mailbox" / f"{THREAD_ID}.md").read_text().strip() \
         == "operator steer"
+    operation = journal.load("worker-send-1")
+    assert operation["state"] == "committed"
+    assert operation["result"]["settlement"] == "releasedWithoutSuccessor"
+    assert journal.unresolved_predecessor("later-operation") is None
 
 
 def test_doctor_repair_adopts_exactly_one_successor_turn(
@@ -2185,3 +2216,105 @@ def test_doctor_repair_leaves_unprovable_frozen_sends_reserved(
 
     assert fleet._reconcile_frozen_codex_worker_operations() == []
     assert fleet.load_registry()["workers"]["cx-native"] == before
+
+
+def test_frozen_mail_restore_precedes_a_newer_claim(
+        native_home, monkeypatch):
+    home, lane = native_home
+    _frozen_send(lane)
+    claim = home / "mailbox" / f"{THREAD_ID}.md.claimed.4242"
+    claim.write_text("older undelivered", encoding="utf-8")
+    client = _PagedClient(
+        lane, [{"id": TURN_ID, "status": "completed"}],
+        provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    restore_entered = threading.Event()
+    contender_attempted = threading.Event()
+    captured = {}
+    original_restore = fleet.restore_mailbox_claim
+
+    def delayed_restore(path):
+        restore_entered.set()
+        assert contender_attempted.wait(2)
+        original_restore(path)
+
+    def newer_claim():
+        assert restore_entered.wait(2)
+        contender_attempted.set()
+        with fleet.fleet_lock():
+            row = fleet.load_registry()["workers"]["cx-native"]
+            assert "pending_operation" not in row
+            fleet.append_mailbox(THREAD_ID, "newer message")
+            captured["mail"], captured["claim"] = fleet.claim_mailbox(THREAD_ID)
+
+    monkeypatch.setattr(fleet, "restore_mailbox_claim", delayed_restore)
+    contender = threading.Thread(target=newer_claim)
+    contender.start()
+    assert fleet._reconcile_frozen_codex_worker_operations() == ["cx-native"]
+    contender.join(timeout=2)
+
+    assert not contender.is_alive()
+    assert captured["mail"].count("older undelivered") == 1
+    assert captured["mail"].count("newer message") == 1
+    assert not (home / "mailbox" / f"{THREAD_ID}.md").exists()
+    fleet.finalize_mailbox_claim(captured["claim"])
+
+
+class _WaitClock:
+    def __init__(self):
+        self.value = 100.0
+
+    def __call__(self):
+        return self.value
+
+
+def test_wait_all_repolls_auto_continuation_with_original_timeout_budget(
+        native_home, monkeypatch, capsys):
+    _home, lane = native_home
+    _install_record(lane, status="working", adapter_state="active")
+    clock = _WaitClock()
+    waits = []
+    persists = iter([
+        ({"cx-native": "working"}, {"cx-native"}, False),
+        ({"cx-native": "idle"}, set(), False),
+    ])
+
+    def fake_wait(names, *, mode, timeout, sleep, clock):
+        waits.append((list(names), mode, timeout))
+        if len(waits) == 1:
+            clock.value += 4.0
+        return ({"cx-native": "idle"}, set())
+
+    monkeypatch.setattr(fleet, "wait_for_workers", fake_wait)
+    monkeypatch.setattr(
+        fleet, "_persist_wait_finished", lambda _finished: next(persists))
+
+    assert fleet.cmd_wait(SimpleNamespace(
+        names=["cx-native"], any=False, timeout=10), clock=clock) == 0
+
+    assert waits == [
+        (["cx-native"], "all", 10.0),
+        (["cx-native"], "all", 6.0),
+    ]
+    assert "cx-native: idle" in capsys.readouterr().out
+
+
+def test_wait_any_does_not_repoll_an_auto_continued_winner(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane, status="working", adapter_state="active")
+    calls = []
+
+    def fake_wait(names, **_kwargs):
+        calls.append(list(names))
+        return ({"cx-native": "idle"}, set())
+
+    monkeypatch.setattr(fleet, "wait_for_workers", fake_wait)
+    monkeypatch.setattr(
+        fleet, "_persist_wait_finished",
+        lambda _finished: ({"cx-native": "working"}, {"cx-native"}, False))
+
+    assert fleet.cmd_wait(SimpleNamespace(
+        names=["cx-native"], any=True, timeout=10)) == 0
+    assert calls == [["cx-native"]]

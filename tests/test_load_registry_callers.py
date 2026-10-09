@@ -272,7 +272,7 @@ ALLOWED = {
     # showed as clean. It now reads via `read_registry_no_repair`; the mutating
     # verbs that call it still quarantine at their own lock-held load.
     # --- CLI verbs that persist what they observe ---
-    "cmd_wait", "wait_for_workers",
+    "cmd_wait", "wait_for_workers", "_persist_wait_finished",
     # `cmd_status` keeps ONE call, and it is the merge read inside
     # `with fleet_lock():` immediately before `save_registry` -- a genuine
     # mutating-under-lock site, which is the admission rule as written.

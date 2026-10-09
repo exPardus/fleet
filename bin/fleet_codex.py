@@ -1499,8 +1499,9 @@ class OperationJournal:
         the reservation can be cleared.  This is deliberately an adoption
         helper, not a replay path: it accepts only the recovery identity that
         was recorded with the original operation and the one turn shape the
-        repair code already proved publicly (a same-id steer or one successor
-        turn/start).
+        repair code already proved publicly (a same-id steer, one successor
+        turn/start, or a terminal same-id turn proving that turn/start created
+        no successor).
         """
         record = self.load(operation_id)
         recovery = record.get("recovery")
@@ -1522,9 +1523,10 @@ class OperationJournal:
                     "inProgress", "completed", "failed", "interrupted"}):
             raise HostRejected(
                 f"operation {operation_id} is not the exact worker turn intent")
-        if public_method == "turn/start" and turn_id == previous_turn_id:
+        if (public_method == "turn/start" and turn_id == previous_turn_id
+                and turn_status not in {"completed", "failed", "interrupted"}):
             raise HostRejected(
-                f"operation {operation_id} has no successor turn to adopt")
+                f"operation {operation_id} has no terminal predecessor proof")
         if public_method == "turn/steer" and turn_id != previous_turn_id:
             raise HostRejected(
                 f"operation {operation_id} steer changed turn identity")
@@ -1542,6 +1544,10 @@ class OperationJournal:
             "canonicalCwd": canonical_cwd,
             "turnStatus": turn_status,
             "adoptedFromPublicRead": True,
+            "settlement": (
+                "releasedWithoutSuccessor"
+                if public_method == "turn/start" and turn_id == previous_turn_id
+                else "adoptedProviderTurn"),
         }
         if state in {"accepted", "uncertain"}:
             self._transition(
