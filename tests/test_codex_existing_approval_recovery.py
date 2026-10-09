@@ -1,13 +1,18 @@
 """Existing 0.155.1 callback recovery with a pre-reservation Apps host fake."""
 
 import copy
+import json
+from pathlib import Path
+import time
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
 import fleet
 import fleet_codex_host
-from fleet_codex import CodexApprovalStore, OperationJournal
+from fleet_codex import (CodexApprovalStore, CodexHostClient,
+                         OperationJournal, _create_key)
 
 
 THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
@@ -21,6 +26,8 @@ METHOD = "item/commandExecution/requestApproval"
 COMMAND = "gh pr view 17 -R example/tap --json number,url"
 FRESH_TURN = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
 FRESH_COMMAND = "gh pr view 18 -R example/tap --json number,url"
+PINNED_SCHEMA = (
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3")
 
 
 class LegacyAppsHost:
@@ -29,6 +36,8 @@ class LegacyAppsHost:
     def __init__(self, home, generation, store, *, cold=False):
         self.home = home
         self.generation = generation
+        self.codex_version = "0.155.1"
+        self.schema_digest = PINNED_SCHEMA
         self.store = store
         self.host_pid = 55037 if not cold else 55100
         self.host_process_identity = "old-host-start" if not cold else "new-host-start"
@@ -179,8 +188,16 @@ def apps_home(tmp_path, monkeypatch):
     worker = fleet.new_worker_record(
         None, home, "other product", "accept", model="codex:gpt-6-sol",
         dispatch_kind="codex-app-server", substrate="codex")
-    worker.update({"codex_thread_id": OTHER, "status": "idle"})
-    fleet.save_registry({"workers": {NAME: row, "other-worker": worker}})
+    worker.update({"codex_thread_id": OTHER, "codex_turn_id": TURN,
+                   "codex_host_generation": OLD,
+                   "adapter_state": "active", "provider_status": "idle",
+                   "status": "idle"})
+    legacy = fleet.new_worker_record(
+        None, home, "legacy product", "accept", model="claude:sonnet",
+        dispatch_kind="bg", substrate="claude")
+    legacy["status"] = "idle"
+    fleet.save_registry({"workers": {
+        NAME: row, "other-worker": worker, "legacy-worker": legacy}})
     fleet.write_incarnation({
         "incarnation_id": INC, "state": "held", "provider": "codex",
         "holder": {"provider": "codex", "thread_id": THREAD},
@@ -257,11 +274,18 @@ def test_old_host_cancel_then_exact_cold_resume(apps_home):
     mail_before = mail.read_bytes()
     operation_id = cancel(apps_home)
     assert [op["payload"]["method"] for op in old.mutations] == ["turn/interrupt"]
+    cancelled = fleet.read_incarnation()["pending_operation"]
+    original = OperationJournal(home, OLD).load(operation_id)
+    assert cancelled["old_host"]["codex_version"] == "0.155.1"
+    assert cancelled["old_host"]["schema_digest"] == PINNED_SCHEMA
+    assert original["recovery"]["old_host"] == cancelled["old_host"]
     terminal = store._load_path(store.path(6))
     assert terminal["state"] == "resolved" and "response" not in terminal
     assert store._load_path(store.path(7))["state"] == "pending"
     assert fleet.read_incarnation()["state"] == "uncertain"
     assert prepare(apps_home, operation_id) == 0
+    assert fleet.read_incarnation()["pending_operation"][
+        "approval_resume_preflight"]["host"] == cancelled["old_host"]
     old.host_live = old.app_live = False
     old.stale = True
     assert fleet._resume_codex_cancelled_approval(
@@ -271,6 +295,8 @@ def test_old_host_cancel_then_exact_cold_resume(apps_home):
     assert claim["incarnation_id"] == INC and claim["current_turn_id"] == TURN
     assert claim["host_generation"] == NEW
     assert [op["payload"]["method"] for op in current[0].mutations] == ["thread/resume"]
+    assert current[0].mutations[0]["recovery"]["previous_host"] == \
+        cancelled["old_host"]
     assert current[0].mutations[0]["payload"]["params"] == {
         "threadId": THREAD, "excludeTurns": True, "cwd": str(home),
         "model": "gpt-6-sol", "approvalPolicy": "on-request",
@@ -356,12 +382,150 @@ def test_unrelated_product_row_can_progress_before_cold_resume(apps_home):
     assert prepare(apps_home, operation_id) == 0
     with fleet.fleet_lock():
         data = fleet.load_registry()
-        data["workers"]["other-worker"]["status"] = "dead"
+        data["workers"]["legacy-worker"]["status"] = "dead"
         fleet.save_registry(data)
     old.host_live = old.app_live = False
     old.stale = True
     assert fleet._resume_codex_cancelled_approval(pinned) == 0
-    assert fleet.read_registry_no_repair()["workers"]["other-worker"]["status"] == "dead"
+    assert fleet.read_registry_no_repair()["workers"]["legacy-worker"]["status"] == "dead"
+
+
+@pytest.mark.parametrize("version", ["0.160.0", "0.161.0"])
+def test_real_client_newer_reviewed_version_refuses_cancel_before_reservation(
+        apps_home, version):
+    home, store, old, current, cwd, _mail = apps_home
+    manifest = json.loads((Path(__file__).resolve().parent / "fixtures"
+        / "codex_app_server" / version / "manifest.json").read_text())
+    state_dir = home / "state" / "codex"
+    metadata = {
+        "schema": 1, "home": str(home),
+        "generation": str(uuid.uuid4()), "codex_version": version,
+        "schema_digest": manifest["schema_sha256"],
+        "ipc_protocol_version": 1,
+        "codex_protocol_version": manifest["protocol_version"],
+        "endpoint": str(state_dir / "ipc.sock"), "transport": "AF_UNIX",
+        "ready": True, "heartbeat": time.time(),
+        "pid": old.host_pid, "process_identity": old.host_process_identity,
+        "started_at": 1.0, "app_server_pid": old.app_server_pid,
+        "app_server_process_identity": old.app_server_process_identity,
+        "app_server_started_at": 1.0,
+    }
+    _create_key(state_dir / "host.key")
+    metadata_path = state_dir / "host.json"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    metadata_path.chmod(0o600)
+    real = CodexHostClient.connect_existing(home)
+    assert real.codex_version == version
+    assert real.schema_digest == manifest["schema_sha256"]
+    current[0] = real
+    with pytest.raises(fleet.FleetCliError, match="running Codex 0.155.1"):
+        fleet._cancel_codex_supervisor_approval(args(cwd))
+    assert fleet.read_incarnation().get("pending_operation") is None
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert old.mutations == []
+
+
+@pytest.mark.parametrize("generation,status", [
+    (None, "active"), (None, "idle"),
+    ("other-host-generation", "active"),
+    ("other-host-generation", "idle"),
+])
+def test_ambiguous_native_inventory_blocks_preparation(
+        apps_home, generation, status):
+    _home, _store, _old, _current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        row = data["workers"]["other-worker"]
+        row["status"] = "working" if status == "active" else "idle"
+        row["adapter_state"] = status
+        row["provider_status"] = status
+        if generation is None:
+            row.pop("codex_host_generation")
+        else:
+            row["codex_host_generation"] = generation
+        fleet.save_registry(data)
+    with pytest.raises(fleet.FleetCliError, match="generation is missing or ambiguous"):
+        prepare(apps_home, operation_id)
+    assert fleet.read_incarnation()["pending_operation"].get(
+        "approval_resume_preflight") is None
+
+
+def _add_ambiguous_native_row():
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        row = copy.deepcopy(data["workers"]["other-worker"])
+        row.pop("codex_host_generation")
+        data["workers"]["new-ambiguous-native"] = row
+        fleet.save_registry(data)
+
+
+@pytest.mark.parametrize("stage", ["before-creation", "at-creation",
+                                    "before-dispatch", "at-settlement"])
+def test_new_native_row_after_preflight_never_allows_unproved_resume(
+        apps_home, monkeypatch, stage):
+    _home, _store, old, current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    assert prepare(apps_home, operation_id) == 0
+    old.host_live = old.app_live = False
+    old.stale = True
+    if stage == "before-creation":
+        _add_ambiguous_native_row()
+    elif stage == "at-creation":
+        create = fleet._codex_native_client
+
+        def drift_at_creation(home):
+            client = create(home)
+            _add_ambiguous_native_row()
+            return client
+
+        monkeypatch.setattr(fleet, "_codex_native_client", drift_at_creation)
+    elif stage == "before-dispatch":
+        call = fleet._call_codex_supervisor_claimed
+
+        def drift_before_dispatch(*args, **kwargs):
+            _add_ambiguous_native_row()
+            return call(*args, **kwargs)
+
+        monkeypatch.setattr(fleet, "_call_codex_supervisor_claimed",
+                            drift_before_dispatch)
+    else:
+        create = fleet._codex_native_client
+
+        def drift_at_settlement(home):
+            client = create(home)
+            client.on_mutation = lambda method: _add_ambiguous_native_row() \
+                if method == "thread/resume" else None
+            return client
+
+        monkeypatch.setattr(fleet, "_codex_native_client", drift_at_settlement)
+    with pytest.raises(fleet.FleetCliError):
+        fleet._resume_codex_cancelled_approval(
+            args(cwd, expect_cancel_op=operation_id))
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    resume_calls = [op for op in current[0].mutations
+                    if op["payload"]["method"] == "thread/resume"]
+    assert len(resume_calls) == (1 if stage == "at-settlement" else 0)
+
+
+def test_running_old_host_schema_drift_after_reservation_blocks_interrupt(
+        apps_home):
+    _home, store, old, _current, cwd, _mail = apps_home
+    calls = 0
+
+    def drift():
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            old.schema_digest = "0" * 64
+
+    old.on_pending = drift
+    with pytest.raises(fleet.FleetCliError, match="before provider dispatch"):
+        fleet._cancel_codex_supervisor_approval(args(cwd))
+    assert old.mutations == []
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert fleet.read_incarnation()["pending_operation"]["kind"] == \
+        "approval-turn-cancel"
 
 
 def test_active_same_host_worker_blocks_shutdown_preparation(apps_home):

@@ -679,7 +679,12 @@ the registered Codex Interface may instead use `sup-reconcile
 turn, old host generation, request ID, item ID, method, raw command and cwd.
 Fleet requires the recorded `accept` policy, one durable pending callback on
 the bound active turn, `waitingOnApproval`, no other unresolved host journal,
-and the exact live old host and child. A full claim/row reservation blocks
+and the exact live old host and child. This cancellation is permitted only
+when that **running** host reports Codex `0.155.1` and schema SHA-256
+`f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3`.
+Fleet pins both values in the old host identity, cancellation journal, and
+prepared proof; a different reviewed Codex version refuses before reservation.
+A full claim/row reservation blocks
 ordinary competing supervisor mutations. The old host's existing journaled
 `turn/interrupt` carries the exact thread and turn IDs. Codex 0.155.1 aborts
 pending per-thread callbacks on `TurnAborted`; Fleet requires the specific
@@ -692,10 +697,12 @@ queued mail.
 `--prepare-cancelled-approval-resume` records a five-minute proof of that
 terminal callback, committed interrupt, source, old host and child identities,
 complete supervisor claim and row, target inbox/claimed-mail contents, and
-every other row sharing the old host generation. Other same-host worker turns
+the complete exact-home native worker inventory. A native row with a missing
+or divergent host generation, invalid binding, or invalid route cannot be
+treated as unrelated and blocks preparation. Every proved same-host worker turn
 must be publicly idle or unloaded with terminal turns and no active flags;
 the host must have no unresolved callbacks or journal operations. Any
-same-host worker-row drift after preparation refuses cold resume.
+native inventory drift after preparation refuses shutdown or cold resume.
 After the exact old host and app-server child exit with a stale heartbeat,
 `--resume-cancelled-approval` requires the same explicit pins and proof before
 host creation and provider dispatch. The new generation must prove the

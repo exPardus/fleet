@@ -19539,11 +19539,29 @@ def _codex_restore_one_predecessor(journal, original_id) -> None:
 def _codex_restore_host_identity(client) -> dict:
     return {
         "generation": client.generation,
+        "codex_version": getattr(client, "codex_version", None),
+        "schema_digest": getattr(client, "schema_digest", None),
         "host_pid": client.host_pid,
         "host_process_identity": client.host_process_identity,
         "app_server_pid": client.app_server_pid,
         "app_server_process_identity": client.app_server_process_identity,
     }
+
+
+_CODEX_CANCEL_VERSION = "0.155.1"
+_CODEX_CANCEL_SCHEMA = (
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3")
+
+
+def _codex_cancel_pinned_old_host(client) -> dict:
+    """Bind the cancellation proof to the validated, running old host."""
+    identity = _codex_restore_host_identity(client)
+    if (identity["codex_version"] != _CODEX_CANCEL_VERSION
+            or identity["schema_digest"] != _CODEX_CANCEL_SCHEMA):
+        raise FleetCliError(
+            "approval cancellation requires running Codex 0.155.1 and its "
+            "exact reviewed schema")
+    return identity
 
 
 def _codex_restore_claim_without_proof(claim: dict) -> dict:
@@ -20043,6 +20061,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
     binding = _codex_supervisor_binding(claim, data, allowed_states={"held"})
     _codex_cancel_original_policy(binding)
     client = _codex_existing_client(FLEET_HOME)
+    old_host = _codex_cancel_pinned_old_host(client)
     _codex_cancel_expectations(args, binding, client.generation)
     if client.generation != binding.host_generation:
         raise FleetCliError("pending callback belongs to another host generation")
@@ -20066,6 +20085,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
         "request_id": record["request_id"],
         "request_digest": _digest("pending-approval", record),
         "canonical_cwd": str(FLEET_HOME.resolve()),
+        "old_host": old_host,
     }
     operation = {
         "operation_id": operation_id, "method": "rpc",
@@ -20082,7 +20102,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
                 or _registered_interface_mail_source() != source
                 or _codex_restore_host_identity(
                     _codex_existing_client(FLEET_HOME))
-                != _codex_restore_host_identity(client)
+                != old_host
                 or _codex_cancel_approval_record(
                     client, binding, args, host_check=False) != record):
             raise FleetCliError(
@@ -20096,7 +20116,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
             "previous_record_operation_id": binding.record.get("last_operation_id"),
             "request_id": record["request_id"],
             "request_digest": recovery["request_digest"],
-            "old_host": _codex_restore_host_identity(client),
+            "old_host": old_host,
         }
         live["last_operation_id"] = operation_id
         registry["workers"][binding.name]["last_operation_id"] = operation_id
@@ -20119,7 +20139,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
             if (_registered_interface_mail_source() != source
                     or _codex_restore_host_identity(
                         _codex_existing_client(FLEET_HOME))
-                    != _codex_restore_host_identity(client)
+                    != old_host
                     or _codex_cancel_approval_record(
                         client, binding, args, host_check=False) != record):
                 raise FleetCliError("approval cancellation changed before provider dispatch")
@@ -20160,7 +20180,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
             if (_registered_interface_mail_source() != source
                     or _codex_restore_host_identity(
                         _codex_existing_client(FLEET_HOME))
-                    != _codex_restore_host_identity(client)
+                    != old_host
                     or _codex_cancel_approval_record(
                         client, binding, args, terminal=True,
                         host_check=False) != terminal_record
@@ -20232,6 +20252,7 @@ def _codex_cancelled_context(args, *, require_live):
     _codex_cancel_expectations(
         args, binding, binding.host_generation, operation_id)
     old_client = _codex_existing_client(FLEET_HOME)
+    _codex_cancel_pinned_old_host(old_client)
     if (old_client.generation != binding.host_generation
             or _codex_restore_host_identity(old_client) != pending.get("old_host")):
         raise FleetCliError("cancelled approval old-host identity changed")
@@ -20263,6 +20284,7 @@ def _codex_cancelled_context(args, *, require_live):
         "request_id": record["request_id"],
         "request_digest": pending.get("request_digest"),
         "canonical_cwd": str(FLEET_HOME.resolve()),
+        "old_host": pending.get("old_host"),
     }
     payload = {"method": "turn/interrupt", "params": {
         "threadId": binding.authority.value,
@@ -20314,7 +20336,7 @@ def _codex_cancel_preflight_state(proof, claim, row, thread_id,
 
 
 def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
-    """Pin every other native row sharing the old Apps host generation."""
+    """Validate and pin the complete exact-home native Apps inventory."""
     from fleet_codex import _digest
 
     workers = registry.get("workers") if isinstance(registry, dict) else None
@@ -20322,19 +20344,29 @@ def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
         raise FleetCliError("Apps host worker inventory is unavailable")
     result = []
     for name, row in sorted(workers.items()):
-        if name == supervisor_name or not isinstance(row, dict):
+        if name == supervisor_name:
             continue
+        if not isinstance(row, dict):
+            raise FleetCliError("Apps worker inventory contains a malformed row")
+        route = _codex_record_route(row)
+        has_native_fields = any(row.get(key) is not None for key in (
+            "codex_thread_id", "codex_turn_id", "codex_host_generation"))
+        if route is None and not has_native_fields:
+            continue
+        if route == "mcx" and not has_native_fields:
+            continue
+        if route != "native":
+            raise FleetCliError("Apps native worker row has an invalid route")
         if row.get("codex_host_generation") != generation:
-            continue
-        if _codex_record_route(row) != "native":
-            raise FleetCliError("same-host Apps worker row has an invalid route")
+            raise FleetCliError(
+                "Apps native worker host generation is missing or ambiguous")
         if row.get("pending_operation") is not None:
             raise FleetCliError("another Apps worker has a pending operation")
         binding = _codex_worker_binding(name, row)
         result.append({
             "name": name, "thread_id": binding.thread_id,
             "turn_id": binding.turn_id,
-            "row_digest": _digest("same-host-worker-row", row),
+            "row_digest": _digest("exact-home-native-worker-row", row),
         })
     return result
 
@@ -20512,6 +20544,7 @@ def _resume_codex_cancelled_approval(args) -> int:
             "kind": "approval-cancelled/resume",
             "cancel_operation_id": pending["operation_id"],
             "old_generation": binding.host_generation,
+            "old_host": proof["host"],
             "new_generation": client.generation,
             "previous_turn_id": binding.current_turn_id,
             "prepared_mail": proof["mail"],
@@ -20538,6 +20571,7 @@ def _resume_codex_cancelled_approval(args) -> int:
             "thread_id": binding.authority.value,
             "turn_id": binding.current_turn_id,
             "previous_host_generation": binding.host_generation,
+            "previous_host": proof["host"],
             "cancel_operation_id": pending["operation_id"],
             "canonical_cwd": str(FLEET_HOME.resolve()),
         },

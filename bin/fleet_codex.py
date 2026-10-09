@@ -1839,6 +1839,7 @@ class CodexHostClient:
         self.metadata_path = self.state_dir / "host.json"
         self.key_path = self.state_dir / "host.key"
         self.generation = str(metadata["generation"])
+        self.codex_version = metadata.get("codex_version")
         self.schema_digest = metadata.get("schema_digest")
         self.protocol_version = metadata["codex_protocol_version"]
         self._endpoint = metadata["endpoint"]
