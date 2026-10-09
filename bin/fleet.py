@@ -6876,30 +6876,22 @@ def _codex_preaccept_expected_intent(name: str, row: dict,
 
 def _codex_preaccept_original_row(name: str, row: dict, evidence: dict,
                                   settlement: dict) -> bool:
-    """Accept only the frozen original or our exact partial/final row."""
+    """Require the frozen nonexecutable row; settlement never writes it."""
     if not isinstance(row, dict):
         return False
-    original = dict(row)
-    if row.get("preaccept_settlement") == settlement:
-        if (row.get("status") != "dead"
-                or row.get("adapter_state") != "preaccept-failed"):
-            return False
-        original.pop("preaccept_settlement")
-        original["status"] = "dead-suspected"
-        original["adapter_state"] = "uncertain"
-    elif "preaccept_settlement" in row:
+    if "preaccept_settlement" in row:
         return False
-    if (_codex_preaccept_digest(original, "row") != evidence["row_digest"]
+    if (_codex_preaccept_digest(row, "row") != evidence["row_digest"]
             or _is_supervisor_shaped(name)
-            or _codex_record_route(original) != "native"
-            or original.get("dispatch_kind") != "codex-app-server"
-            or original.get("adapter_state") != "uncertain"
-            or original.get("status") != "dead-suspected"
-            or original.get("last_operation_id") != evidence["operation_id"]
-            or original.get("pending_operation") is not None
-            or original.get("session_id") is not None
-            or original.get("mcx_id") is not None
-            or any(original.get(key) is not None for key in (
+            or _codex_record_route(row) != "native"
+            or row.get("dispatch_kind") != "codex-app-server"
+            or row.get("adapter_state") != "uncertain"
+            or row.get("status") != "dead-suspected"
+            or row.get("last_operation_id") != evidence["operation_id"]
+            or row.get("pending_operation") is not None
+            or row.get("session_id") is not None
+            or row.get("mcx_id") is not None
+            or any(row.get(key) is not None for key in (
                 "codex_thread_id", "codex_turn_id", "codex_host_generation",
                 "permission_effective", "provider_status"))):
         return False
@@ -7148,9 +7140,7 @@ def cmd_codex_settle_preaccept(args) -> int:
                            for key, value in settlement_core.items())
                     or not isinstance(settlement.get("interface_claim_id"), str)):
                 raise FleetCliError("worker preaccept prior disposition is ambiguous")
-        if (not _codex_preaccept_original_row(args.name, row, evidence, settlement)
-                or (record.get("state") == "prepared"
-                    and row.get("preaccept_settlement") is not None)):
+        if not _codex_preaccept_original_row(args.name, row, evidence, settlement):
             raise FleetCliError("worker preaccept row changed or is actionable")
         digest, recovery = _codex_preaccept_expected_intent(
             args.name, row, evidence["operation_id"])
@@ -7214,11 +7204,17 @@ def cmd_codex_settle_preaccept(args) -> int:
                     raise FleetCliError("worker preaccept callback inventory is ambiguous")
         if not _codex_preaccept_target_mail_absent(args.name):
             raise FleetCliError("worker preaccept target mail appeared before transition")
+        if (read_registry_no_repair().get("workers", {}).get(args.name) != row
+                or not _codex_preaccept_original_row(
+                    args.name, row, evidence, settlement)):
+            raise FleetCliError("worker preaccept row changed before settlement")
         if record["state"] == "prepared":
-            # This exact disposition is the only permitted transition.  It is
-            # recoverable if the later registry write fails or the reply is lost.
+            # This exact journal disposition is the only permitted write. A
+            # lost reply is recoverable with the same evidence and row.
             latest = journal.load(evidence["operation_id"])
-            if latest != record:
+            if (latest != record or hashlib.sha256(
+                    journal.path(evidence["operation_id"]).read_bytes()
+                    ).hexdigest() != evidence["journal_sha256"]):
                 raise FleetCliError("worker preaccept journal changed before settlement")
             failed = dict(record)
             failed.update({
@@ -7246,19 +7242,14 @@ def cmd_codex_settle_preaccept(args) -> int:
                 or not heartbeat_fresh(final_host)
                 or not host_processes_match(final_host)):
             raise FleetCliError("worker preaccept host changed after journal")
-        if row.get("preaccept_settlement") != settlement:
-            row = dict(row)
-            row.update({"status": "dead", "adapter_state": "preaccept-failed",
-                        "preaccept_settlement": settlement})
-            data["workers"][args.name] = row
-            save_registry(data)
         if (read_registry_no_repair().get("workers", {}).get(args.name) != row
                 or journal.load(evidence["operation_id"]) != record):
             raise FleetCliError("worker preaccept settlement changed during commit")
         if not _codex_preaccept_target_mail_absent(args.name):
             raise FleetCliError("worker preaccept target mail appeared after settlement")
-    print(f"{args.name}: original preaccept authentication rejection settled; "
-          "worker remains terminal and no provider mutation was sent")
+    print(f"{args.name}: original preaccept authentication rejection settled "
+          "in journal; original worker row remains nonexecutable; "
+          "no provider mutation was sent")
     return 0
 
 

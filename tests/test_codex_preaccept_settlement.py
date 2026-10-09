@@ -159,37 +159,43 @@ def _assert_preserved(case):
 
 def test_exact_preaccept_settlement_is_terminal_and_idempotent(preaccept_home):
     case = preaccept_home
+    registry_before = (case.home / "state" / "fleet.json").read_bytes()
     assert fleet.cmd_codex_settle_preaccept(case.args) == 0
     row = fleet.read_registry_no_repair()["workers"][case.name]
     record = case.journal.load(case.args.operation_id)
-    assert row["status"] == "dead"
-    assert row["adapter_state"] == "preaccept-failed"
+    assert row == case.row
+    assert (case.home / "state" / "fleet.json").read_bytes() == registry_before
+    assert row["status"] == "dead-suspected"
+    assert row["adapter_state"] == "uncertain"
     assert row["last_operation_id"] == case.args.operation_id
     assert row["codex_thread_id"] is None and row["codex_turn_id"] is None
     assert record["state"] == "failed"
-    assert record["preaccept_settlement"] == row["preaccept_settlement"]
+    assert record["preaccept_settlement"]["kind"] == "worker/thread-start-auth-rejection"
     assert not case.journal.has_unresolved()
+    assert case.journal.unresolved_predecessor("new-unrelated-operation") is None
+    with pytest.raises(ValueError, match="already exists"):
+        fleet.validate_name(case.name, fleet.read_registry_no_repair()["workers"])
+    with pytest.raises(fleet.FleetCliError):
+        fleet._codex_worker_binding(case.name, row)
     before = case.journal.path(case.args.operation_id).read_bytes()
     assert fleet.cmd_codex_settle_preaccept(case.args) == 0
     assert case.journal.path(case.args.operation_id).read_bytes() == before
     _assert_preserved(case)
 
 
-def test_partial_journal_write_recovers_under_new_interface_claim(
+def test_journal_only_lost_reply_recovers_under_new_interface_claim(
         preaccept_home, monkeypatch):
     case = preaccept_home
-    original_save = fleet.save_registry
-    def fail_once(_data):
-        raise OSError("registry write failed after journal transition")
-    monkeypatch.setattr(fleet, "save_registry", fail_once)
-    with pytest.raises(OSError, match="registry write failed"):
-        fleet.cmd_codex_settle_preaccept(case.args)
+    registry_before = (case.home / "state" / "fleet.json").read_bytes()
+    monkeypatch.setattr(fleet, "save_registry", lambda *_a: pytest.fail(
+        "journal-only settlement rewrote registry"))
+    assert fleet.cmd_codex_settle_preaccept(case.args) == 0
     assert case.journal.load(case.args.operation_id)["state"] == "failed"
     assert fleet.read_registry_no_repair()["workers"][case.name] == case.row
-    monkeypatch.setattr(fleet, "save_registry", original_save)
+    assert (case.home / "state" / "fleet.json").read_bytes() == registry_before
     case.source["claim_id"] = "claim-2"
     assert fleet.cmd_codex_settle_preaccept(case.args) == 0
-    assert fleet.read_registry_no_repair()["workers"][case.name]["status"] == "dead"
+    assert fleet.read_registry_no_repair()["workers"][case.name] == case.row
     _assert_preserved(case)
 
 
@@ -233,10 +239,10 @@ def test_fresh_unrelated_registry_progress_is_retained(preaccept_home, monkeypat
     case.sibling = dict(data["workers"]["sibling"])
     assert fleet.cmd_codex_settle_preaccept(case.args) == 0
     _assert_preserved(case)
-    monkeypatch.setattr(fleet, "_codex_worker_binding",
-                        lambda *_a, **_kw: pytest.fail("terminal row was probed"))
-    terminal = fleet.read_registry_no_repair()["workers"][case.name]
-    assert fleet.recompute_worker_codex(case.name, terminal) == terminal
+    original = fleet.read_registry_no_repair()["workers"][case.name]
+    observed = fleet.recompute_worker_codex(case.name, original)
+    assert observed["status"] == "dead-suspected"
+    assert observed["adapter_state"] == "uncertain"
 
 
 def test_cli_exposes_exact_supported_method():
@@ -369,7 +375,65 @@ def test_journal_drift_after_inventory_refuses_before_transition(
 
 
 @pytest.mark.parametrize("window", ["before-journal", "after-journal"])
-def test_delayed_live_lock_owner_cannot_be_stale_broken_through_both_writes(
+def test_concurrent_target_row_drift_refuses_without_registry_overwrite(
+        preaccept_home, monkeypatch, window):
+    case = preaccept_home
+
+    def change_target():
+        data = fleet.read_registry_no_repair()
+        data["workers"][case.name]["task"] = "changed by old writer"
+        fleet.save_registry(data)
+
+    if window == "before-journal":
+        original = fleet_codex.OperationJournal.records
+
+        def drift(self):
+            records = original(self)
+            if self.home == case.home:
+                change_target()
+            return records
+
+        monkeypatch.setattr(fleet_codex.OperationJournal, "records", drift)
+    else:
+        original = fleet._codex_preaccept_write_failed
+
+        def write_then_drift(path, value):
+            original(path, value)
+            change_target()
+
+        monkeypatch.setattr(fleet, "_codex_preaccept_write_failed",
+                            write_then_drift)
+    with pytest.raises(fleet.FleetCliError, match="row changed|changed during commit"):
+        fleet.cmd_codex_settle_preaccept(case.args)
+    assert fleet.read_registry_no_repair()["workers"][case.name]["task"] == (
+        "changed by old writer")
+    assert case.journal.load(case.args.operation_id)["state"] == (
+        "prepared" if window == "before-journal" else "failed")
+    _assert_preserved(case)
+
+
+def test_concurrent_unrelated_row_progress_is_allowed_without_registry_write(
+        preaccept_home, monkeypatch):
+    case = preaccept_home
+    original = fleet_codex.OperationJournal.records
+
+    def progress(self):
+        records = original(self)
+        if self.home == case.home:
+            data = fleet.read_registry_no_repair()
+            data["workers"]["sibling"]["status"] = "idle"
+            fleet.save_registry(data)
+            case.sibling = dict(data["workers"]["sibling"])
+        return records
+
+    monkeypatch.setattr(fleet_codex.OperationJournal, "records", progress)
+    assert fleet.cmd_codex_settle_preaccept(case.args) == 0
+    assert fleet.read_registry_no_repair()["workers"][case.name] == case.row
+    _assert_preserved(case)
+
+
+@pytest.mark.parametrize("window", ["before-journal", "after-journal"])
+def test_delayed_live_lock_owner_cannot_be_stale_broken_through_journal_write(
         preaccept_home, monkeypatch, window):
     case = preaccept_home
     monkeypatch.setattr(fleet, "LOCK_STALE_SECONDS", 0.03)
@@ -416,7 +480,7 @@ def test_delayed_live_lock_owner_cannot_be_stale_broken_through_both_writes(
         thread.join(3)
     assert not thread.is_alive()
     assert not errors
-    assert fleet.read_registry_no_repair()["workers"][case.name]["status"] == "dead"
+    assert fleet.read_registry_no_repair()["workers"][case.name] == case.row
     _assert_preserved(case)
 
 

@@ -88,24 +88,28 @@ metadata from the frozen row, then refuses any changed row, accepted or
 uncertain journal, provider ID, other unresolved operation, unresolved
 callback, host/source drift, or evidence mismatch. It makes no host or provider
 call. Its sole durable transition records the exact authentication rejection
-as a failed-before-acceptance journal disposition, then marks the original row
-`dead` / `preaccept-failed`, retaining its operation link and all launch inputs.
-The journal write precedes the row write; a lost reply or row-write failure is
-recoverable by the same exact invocation and evidence hash. No new worker,
+as a failed-before-acceptance disposition in the original operation journal.
+The registry is never written: the frozen original row remains
+`dead-suspected` / `uncertain`, with its operation link and launch inputs but
+without provider thread, turn, or generation IDs. A lost reply is recoverable
+by the same exact invocation and evidence hash. No new worker,
 thread, turn, task, brief, mail, or callback is created or consumed. A future
 ordinary dispatch requires a separate decision and a new name or reviewed
 cleanup; this command does not replay the failed spawn.
 The bounded operation inventory requires an explicit, current or archived
 registry owner for every unrelated terminal journal; malformed or ownerless
 entries refuse. Any target inbox or claimed target mail refuses before the
-journal transition and is checked again before the row write. The registry,
+journal transition and is checked again afterward. The target row is checked
+again before and after the journal write; unrelated registry progress may
+continue without a whole-registry rewrite. The registry,
 operation, callback, and mailbox scans have explicit size or entry bounds.
 The registry lock retains a live process owner past its age threshold. On
-POSIX, it also holds a kernel lock on the exact lock-file inode through both
-writes; stale-break contenders lock and recheck that inode before unlinking.
-This prevents a slow or suspended settlement writer from being replaced by
-another current Fleet CLI writer during the journal-first transition. A
-pre-install CLI writer that lacks this protocol is an act-time STOP condition.
+POSIX, it also holds a kernel lock on the exact lock-file inode through the
+journal transition; stale-break contenders lock and recheck that inode before
+unlinking. This prevents a slow or suspended settlement writer from being
+replaced by another current Fleet CLI writer. A concurrent old CLI targeting
+the same worker or journal remains an act-time STOP condition; unrelated old
+CLI registry writes cannot be overwritten by this journal-only command.
 The lock path itself must be a regular file if present; a dangling symlink or
 other non-regular entry refuses without unlinking it, and a concurrent unlink
 retry remains bounded by the monotonic lock deadline.
