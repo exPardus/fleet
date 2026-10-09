@@ -341,6 +341,20 @@ the host replaces its failed stdio child and adopts the original spawn journal
 entry only from an operation-tagged empty thread with matching effective
 settings, or exactly one public turn beyond the bound history watermark;
 otherwise the row stays uncertain with a queue-bound/concurrency remedy.
+For native Codex supervisor sends rejected before provider acceptance,
+`sup-reconcile` requires the current authenticated Interface, exact failed
+operation journal (or the old Darwin host's precise pre-acceptance
+authentication refusal), unchanged latest public turn, matching home and
+holder, and a claim/row compare-and-swap. It restores claimed mail before
+clearing uncertainty; accepted or ambiguous effects remain frozen. A failed
+initial supervisor thread preclaim with no thread may be retired to a released
+claim and dead row by the same authenticated, exact-intent check. Neither path
+replays a provider mutation.
+After a native Codex mutation enters the durable `accepted` journal state,
+any host error—including a provider reply too large for the 64 KiB journal
+record—surfaces as uncertain. The client checks that exact operation state
+before classifying a correlated error; a handoff never rolls back an accepted
+successor turn because result persistence failed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

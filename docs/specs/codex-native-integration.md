@@ -608,10 +608,35 @@ codex:<model>`.
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and
 never creates a second supervisor body.
+An authenticated `sup-reconcile` may also settle an uncertain supervisor send
+whose original operation journal proves rejection before provider acceptance.
+The current registered Codex Interface must match the exact home and process
+source. The pending operation, holder, host generation, journal recovery
+identity, and newest public thread/turn must agree, and the claim and registry
+row must still match under `fleet.lock`. The old Darwin host's precise
+authentication-refusal response may promote its still-prepared journal entry to
+failed only after those checks; a newer host records that rejection as failed
+before responding. The one claimed mail file is restored to an empty inbox by
+an exclusive link before the held claim is unblocked. Concurrent new inbox mail
+leaves both files and the uncertain claim intact for ordered recovery. A failed
+initial `thread/start` preclaim with no
+bound thread may instead be retired to a released claim and dead row, retaining
+its incarnation, journal, and brief. Accepted, uncertain, missing, conflicting,
+or unreadable evidence stays frozen. Neither path repeats `thread/start`,
+`turn/start`, or `turn/steer`; after a host generation change a separate
+`sup-reconcile` reattaches the exact thread without creating a turn.
 Queue-overflow recovery counts the entire persisted turn history through
 `thread/turns/list` pages of at most 32 with items omitted, after validating a
 metadata-only `thread/read`; it requires exactly one turn beyond the durable
 watermark before adopting an uncertain `turn/start`.
+The host journal's 64 KiB metadata bound can be reached by a successful
+provider reply before the 1 MiB IPC response bound. If recording that reply
+fails after the durable `accepted` transition, the host retains or marks the
+operation uncertain. The client checks the exact journal state for every
+correlated mutation error: `accepted`, `uncertain`, `observed`, and `committed`
+raise an uncertain outcome, never a definitive rejection. A handoff therefore
+keeps its activating claim and predecessor disarmed until exact public proof;
+it cannot roll back a live successor because an oversized journal write failed.
 
 ## 11. Explicit home and interface registration
 

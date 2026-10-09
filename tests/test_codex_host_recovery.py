@@ -94,7 +94,7 @@ def test_provider_acceptance_with_lost_response_is_uncertain_and_never_replayed(
         tmp_path, env_overrides={"FAKE_DROP_TURN_RESPONSE": "1"})
     operation = _mutation("lost-provider-response", "turn/start")
     try:
-        with pytest.raises(module.HostRejected, match="outcome is uncertain"):
+        with pytest.raises(module.HostUnavailable, match="outcome is uncertain"):
             client.call(operation, timeout=2)
         record = json.loads(_operation_file(client, operation["operation_id"])
                             .read_text())
