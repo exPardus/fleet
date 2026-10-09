@@ -514,6 +514,7 @@ class Host:
         should_stop = False
         accepted_at = time.monotonic()
         deadline = accepted_at + 1.0
+        mutating_operation_id = None
         try:
             challenge = os.urandom(32)
             _send_frame(connection, challenge, deadline)
@@ -571,9 +572,22 @@ class Host:
                                     deadline))
                         self._drain_notifications()
                     else:
-                        self._authorize_public_mutation(
-                            connection, public_method, payload)
                         operation_id = request["operation_id"]
+                        mutating_operation_id = operation_id
+                        try:
+                            self._authorize_public_mutation(
+                                connection, public_method, payload)
+                        except HostRejected as exc:
+                            # Authentication precedes the accepted journal state
+                            # and the provider write. Record this distinction so
+                            # a rejected Interface call can be settled without
+                            # treating a lost provider response as a rejection.
+                            prepared = self.journal.load(operation_id)
+                            if prepared.get("state") == "prepared":
+                                self.journal.fail(
+                                    operation_id,
+                                    f"authentication rejected before provider acceptance: {exc}")
+                            raise
                         record = self.journal.load(operation_id)
                         if record.get("generation") != self.generation:
                             if record.get("state") in {"accepted", "uncertain"}:
@@ -596,7 +610,10 @@ class Host:
                         elif state == "prepared":
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
-                            if predecessor is not None:
+                            if (predecessor is not None
+                                    and not self.journal.permits_observed_resume_policy_restore(
+                                        operation_id, payload,
+                                        request.get("recovery", {}))):
                                 self.journal.fail(
                                     operation_id,
                                     "blocked by unresolved predecessor operation")
@@ -724,6 +741,18 @@ class Host:
         except (UnicodeError, json.JSONDecodeError, ValueError, OSError,
                 EOFError, TimeoutError,
                 FleetCliError) as exc:
+            if mutating_operation_id is not None:
+                try:
+                    current = self.journal.load(mutating_operation_id)
+                    if current.get("state") == "accepted":
+                        self.journal.uncertain(
+                            mutating_operation_id,
+                            "post-acceptance host failure: "
+                            f"{type(exc).__name__}")
+                except (OSError, ValueError, FleetCliError):
+                    # The client also reads the journal state. A failed repair
+                    # must never turn an accepted write into a rejection.
+                    pass
             response = _response(request, ok=False, error=str(exc)[:300])
         try:
             encoded = json.dumps(response, separators=(",", ":"),

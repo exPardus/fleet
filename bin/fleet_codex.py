@@ -39,7 +39,7 @@ SCHEMA_FIXTURES = (
 )
 REVIEWED_SCHEMA_MANIFESTS = {
     version: SCHEMA_FIXTURES / version / "manifest.json"
-    for version in ("0.155.1", "0.160.0")
+    for version in ("0.155.1", "0.160.0", "0.161.0")
 }
 
 
@@ -1752,6 +1752,77 @@ class OperationJournal:
                 return record
         return None
 
+    def permits_observed_resume_policy_restore(
+            self, operation_id: str, payload: Mapping[str, Any],
+            recovery: Mapping[str, Any]) -> bool:
+        """Allow only an explicit new resume behind its one observed predecessor.
+
+        The original observation stays observed and is never replayed. The
+        caller has already authenticated the mutation; Fleet separately pins
+        the held claim, original policy, and public idle turn before dispatch.
+        """
+        if (not isinstance(payload, dict)
+                or payload.get("method") != "thread/resume"
+                or not isinstance(payload.get("params"), dict)
+                or not isinstance(recovery, dict)
+                or recovery.get("kind") != "supervisor/resume-policy-restore"):
+            return False
+        params = payload["params"]
+        original_id = recovery.get("original_resume_operation_id")
+        observed_generation = recovery.get("observed_resume_generation")
+        if (not isinstance(original_id, str)
+                or not original_id.startswith("supervisor-reconcile-")
+                or not isinstance(observed_generation, str)
+                or observed_generation == self.generation
+                or recovery.get("canonical_cwd") != str(self.home)
+                or not isinstance(recovery.get("turn_id"), str)
+                or params != {
+                    "threadId": recovery.get("thread_id"),
+                    "excludeTurns": True, "cwd": str(self.home),
+                    "model": params.get("model"),
+                    "approvalPolicy": "never", "approvalsReviewer": "user",
+                    "sandbox": "danger-full-access",
+                }
+                or not isinstance(params.get("model"), str)
+                or not params["model"]):
+            return False
+        outstanding = [record for record in self.records()
+                       if record.get("operation_id") != operation_id
+                       and record.get("state") in {
+                           "prepared", "accepted", "observed", "uncertain"}]
+        if len(outstanding) != 1 or outstanding[0].get("operation_id") != original_id:
+            return False
+        original = outstanding[0]
+        expected_recovery = {
+            "kind": "supervisor/thread-resume",
+            "fleet_name": recovery.get("fleet_name"),
+            "incarnation_id": recovery.get("incarnation_id"),
+            "thread_id": recovery.get("thread_id"),
+            "previous_host_generation": recovery.get("previous_host_generation"),
+            "canonical_cwd": str(self.home),
+        }
+        expected_digest = _digest("rpc", {"method": "thread/resume", "params": {
+            "threadId": recovery.get("thread_id"), "excludeTurns": True}})
+        result = original.get("result")
+        thread = result.get("thread") if isinstance(result, dict) else None
+        sandbox = result.get("sandbox") if isinstance(result, dict) else None
+        return (original.get("state") == "observed"
+                and original.get("home") == str(self.home)
+                and original.get("generation") == observed_generation
+                and original.get("method") == "rpc"
+                and original.get("public_method") == "thread/resume"
+                and original.get("payload_digest") == expected_digest
+                and original.get("recovery") == expected_recovery
+                and isinstance(thread, dict)
+                and thread.get("id") == recovery.get("thread_id")
+                and thread.get("cwd") == str(self.home)
+                and result.get("cwd") == str(self.home)
+                and result.get("model") == params["model"]
+                and result.get("approvalPolicy") == "never"
+                and result.get("approvalsReviewer") == "user"
+                and isinstance(sandbox, dict)
+                and sandbox.get("type") == "workspaceWrite")
+
 
 class CodexHostClient:
     def __init__(self, home: Path, metadata: Mapping[str, Any], encoded_key: str,
@@ -1968,6 +2039,22 @@ class CodexHostClient:
             return True
         return True
 
+    def _app_server_live(self) -> bool:
+        """Conservatively identify the child from the exact host metadata."""
+        current = _process_identity(self.app_server_pid)
+        if current is not None:
+            matches = _process_identities_match(
+                self.app_server_process_identity, current)
+            if matches is not None:
+                return matches
+        try:
+            os.kill(self.app_server_pid, 0)
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError):
+            return True
+        return True
+
     def _ping(self, timeout: float) -> bool:
         try:
             observation = self.call({"operation_id": f"ping-{uuid.uuid4()}",
@@ -2048,11 +2135,21 @@ class CodexHostClient:
             raise HostUnavailable("Codex host response correlation mismatch")
         if response.get("ok") is not True:
             error = str(response.get("error") or "Codex host rejected operation")
-            if (error == "host response exceeds MAX_IPC_BYTES; page the request"
-                    and public_method is not None):
-                # The provider mutation may already be committed in the host
-                # journal. Do not misclassify a large reply as rejection.
-                raise HostUnavailable(error + "; mutation outcome is uncertain")
+            if public_method is not None:
+                if error == "host response exceeds MAX_IPC_BYTES; page the request":
+                    raise HostUnavailable(error + "; mutation outcome is uncertain")
+                try:
+                    state = OperationJournal(self.home, self.generation).load(
+                        operation_id).get("state")
+                except (OSError, ValueError, FleetCliError) as exc:
+                    raise HostUnavailable(
+                        error + "; mutation journal is unreadable") from exc
+                if state not in {"prepared", "failed"}:
+                    # The provider write begins only after accepted is durable.
+                    # Even a generic host error after that boundary is not a
+                    # rejection and must not trigger a handoff rollback.
+                    raise HostUnavailable(
+                        error + "; mutation outcome is uncertain")
             raise HostRejected(error)
         return CodexObservation(operation_id, self.generation, digest,
                                 response.get("result"))

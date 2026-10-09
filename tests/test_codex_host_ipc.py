@@ -90,6 +90,21 @@ for line in sys.stdin:
     elif message.get("method") == "thread/start":
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
+    elif message.get("method") == "thread/resume":
+        params = message.get("params", {{}})
+        send({{"id": message["id"], "result": {{
+            "thread": {{"id": params.get("threadId"),
+                         "cwd": params.get("cwd")}},
+            "cwd": params.get("cwd"), "model": params.get("model"),
+            "approvalPolicy": params.get("approvalPolicy"),
+            "approvalsReviewer": params.get("approvalsReviewer"),
+            "sandbox": {{"type": "dangerFullAccess"}},
+        }}}})
+    elif (message.get("method") == "turn/start"
+          and os.environ.get("FAKE_OVERSIZE_TURN_RESULT") == "1"):
+        send({{"id": message["id"], "result": {{
+            "turn": {{"id": "turn-1", "status": "inProgress"}},
+            "padding": "x" * (70 * 1024)}}}})
     elif message.get("method") in ("turn/start", "turn/steer", "turn/interrupt"):
         if (message.get("method") == "turn/start"
                 and os.environ.get("FAKE_DROP_TURN_RESPONSE") == "1"):
@@ -514,6 +529,39 @@ def test_external_interface_thread_is_observe_only(tmp_path, monkeypatch):
             Peer(), "turn/steer", {"params": {"threadId": "external"}})
 
 
+def test_host_records_authentication_rejection_before_provider_acceptance(tmp_path):
+    module, client, log = _ensure(tmp_path)
+    try:
+        claim_path = client.home / "state" / "interface-codex.json"
+        claim_path.write_text(json.dumps({
+            "schema": 1, "home": str(client.home),
+            "thread_id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1",
+            "claim_id": "c1705ad1-8530-4e90-a8fc-869a7450d77b",
+            "ancestor_pid": 999999, "ancestor_start_identity": "stale",
+            "uid": os.getuid(),
+        }), encoding="utf-8")
+        claim_path.chmod(0o600)
+        operation = {
+            "operation_id": "rejected-before-acceptance", "method": "rpc",
+            "payload": {"method": "turn/steer", "params": {
+                "threadId": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7",
+                "expectedTurnId": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8",
+                "input": [],
+            }},
+            "recovery": {"kind": "supervisor/turn/steer"},
+        }
+        with pytest.raises(module.HostRejected):
+            client.call(operation, timeout=5)
+        record = module.OperationJournal(
+            client.home, client.generation).load(operation["operation_id"])
+        assert record["state"] == "failed"
+        assert "authentication rejected before provider acceptance" in record["reason"]
+        requests = [json.loads(line) for line in log.read_text().splitlines()]
+        assert not any(row.get("method") == "turn/steer" for row in requests)
+    finally:
+        _shutdown(client)
+
+
 def test_current_supervisor_source_requires_exact_home_cwd(tmp_path, monkeypatch):
     import fleet_codex_host as host_module
 
@@ -742,7 +790,9 @@ def test_host_state_is_owner_only_and_pid_does_not_decide_identity(tmp_path):
     try:
         metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
         assert metadata["home"] == str(client.home)
-        assert metadata["schema_digest"] == "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3"
+        assert metadata["schema_digest"] == json.loads(
+            _modules().REVIEWED_SCHEMA_MANIFESTS["0.155.1"].read_text(
+                encoding="utf-8"))["schema_sha256"]
         if os.name != "nt":
             assert stat.S_IMODE(client.state_dir.stat().st_mode) == 0o700
             assert stat.S_IMODE(client.key_path.stat().st_mode) == 0o600
@@ -794,7 +844,7 @@ def test_live_old_host_remains_reachable_after_installed_version_change(
     home = _home(tmp_path)
     schemas = {
         version: (json.dumps({"reviewed": version}, sort_keys=True) + "\n").encode()
-        for version in ("0.155.1", "0.160.0")
+        for version in ("0.155.1", "0.160.0", "0.161.0")
     }
     manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
     for version, schema_bytes in schemas.items():
@@ -1007,7 +1057,7 @@ def test_darwin_identity_source_change_does_not_replace_live_host(monkeypatch):
     assert kill_calls == [(4321, 0)]
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_installed_reviewed_codex_versions_select_their_manifest(
         tmp_path, monkeypatch, version):
     module = _modules()
@@ -1022,7 +1072,7 @@ def test_installed_reviewed_codex_versions_select_their_manifest(
     assert json.loads(selected.read_text(encoding="utf-8"))["codex_version"] == version
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_each_reviewed_codex_version_can_publish_a_matching_host(
         tmp_path, monkeypatch, version):
     module = _modules()

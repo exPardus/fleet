@@ -2,8 +2,8 @@
 
 **Status:** Option A approved and native is the default for new Codex workers
 and Codex supervisor bodies. The explicit mcx compatibility selector remains.
-**Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1 and
-0.160.0 v2 JSON Schemas generated from isolated installs with
+**Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1,
+0.160.0 and 0.161.0 v2 JSON Schemas generated from isolated installs with
 `codex app-server generate-json-schema`.
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -136,7 +136,7 @@ That compatibility adapter cannot provide the target lifecycle:
 ### 3.2 Reviewed Codex v2 schemas
 
 For a new host, the adapter selects an explicit reviewed manifest from exact
-`codex --version` output. Versions 0.155.1 and 0.160.0 are reviewed; any other
+`codex --version` output. Versions 0.155.1, 0.160.0 and 0.161.0 are reviewed; any other
 version refuses before host startup, and an installed schema whose digest
 differs from its selected manifest never publishes ready. An already-live host
 is instead authenticated against the reviewed version and digest recorded in
@@ -196,6 +196,14 @@ Review of 0.160.0 against 0.155.1 found no change to any Fleet-used method,
 required parameter, thread/turn/permission type, server notification, effective
 thread-start field, or no-inference RPC sequence. Its only extracted contract
 delta is the additive error codes `flexUnavailable` and `tooManyDenials`.
+
+Review of 0.161.0 against 0.160.0: the extracted contract is byte-identical
+(same `contract_sha256`): no change to any Fleet-used method, required
+parameter, thread/turn/permission type, server notification, error code, or
+no-inference RPC sequence. Only the raw schema digest differs. The generator
+had to learn that 0.161 emits `CodexErrorInfo` variants under `anyOf` rather
+than `oneOf`; without that, `activeTurnNotSteerable` and the object-form
+connection error codes silently dropped out of the extraction.
 
 ## 4. Alternatives
 
@@ -646,10 +654,111 @@ codex:<model>`.
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and
 never creates a second supervisor body.
+The effective policy in a successful public `thread/resume` response is checked
+against the supervisor row's requested Fleet mode before generation adoption.
+For example, `workspaceWrite` under a recorded `bypass`/`dangerFullAccess`
+holder is a mismatch even if the thread and newest turn still match. Fleet
+keeps the original generation and uncertain claim, preserves the accepted or
+observed new-generation journal and all mail, and never repeats that resume
+or starts a turn. The normal resume builder supplies only the existing thread
+ID and `excludeTurns=true`.
+For an original `bypass` holder with an exact observed `workspaceWrite` resume,
+the current registered Codex Interface first runs
+`sup-reconcile --prepare-recorded-policy-restore` with explicit `--fleet-home`
+and exact expected incarnation, thread, turn, original resume operation, and
+observed host generation. This records a five-minute claim-bound proof of the
+original journal, current managed requirements, and bounded public
+idle/completed/no-new-turn evidence. It durably pins the exact prepared
+supervisor claim and row plus the thread inbox and claimed-mail identities and
+digests. Any later supervisor or target-mail change refuses before host
+creation, before provider dispatch, and before settlement; unrelated product
+worker rows may change. A loaded thread may be idle, and pinned
+0.155.1 ignores resume policy overrides for a loaded thread; `thread/unsubscribe`
+does not unload it. The exact observed Platform host and app-server child must
+exit and its heartbeat become stale. Then `--restore-recorded-policy` with the
+same pins creates only a fresh Platform host, validates the preflight and cold
+boundary, and reserves a new auditable resume intent. The pinned public
+`thread/resume` request supplies `threadId`,
+`excludeTurns=true`, canonical `cwd`, recorded `model`, `approvalPolicy=never`,
+`approvalsReviewer=user`, and `sandbox=danger-full-access`. A narrow host
+journal gate permits this linked request behind only the matching observed
+original intent from the prior generation. The original journal stays observed.
+Fleet adopts the fresh generation only after an exact effective bypass response,
+repeat public header, and locked claim/row/mail/source/host/journal comparison. An
+accepted but unverified new response remains uncertain; read-only reconcile can
+settle only its exact observed new operation. No turn is replayed or newly
+started.
+
+### 10.4 Retiring an absent legacy Claude claim
+
+From the **current registered native Codex Interface process**, use
+`fleet --fleet-home <exact-home> sup-retire-legacy --expect-inc <legacy-incarnation> --expect-sid <old-Claude-session-id>`
+only after `sup-guard` reports `DISPATCH` and the old body and predecessors have
+been stopped or otherwise proved absent. This command does not take a nonce,
+accept a replacement SID, dispatch a thread, or start a turn. It requires an
+explicit home, the process-bound exclusive Codex Interface registration, and
+the exact legacy Claude claim and unique supervisor registry row. It refuses a
+Codex, released, pending, corrupt, changed, or fresh claim; any present
+`handoff_pending` field (including empty or malformed values) or handshake;
+missing or ambiguous identity; and a failed, empty, malformed,
+or suspicious `claude agents --json --all` roster. Two fresh roster observations
+must show every home-scoped supervisor body and predecessor in documented
+terminal state `done` or `stopped` with neither `pid` nor `status` fields,
+as observed for reaped `done` and supported `claude stop` in
+`docs/specs/native-substrate.md` §G3/G10. Even `pid: false` or a status field
+on an otherwise terminal row is malformed proof.
+A registry `dead-suspected` label alone is never proof. The claim, complete
+supervisor row identity set, and Interface registration are compared again under
+`fleet.lock`; a newer journal checkpoint or concurrent change refuses. An idle
+resumable holder is refused because the legacy guard would offer `WAKE`.
+
+Success stores the original claim, holder row, roster evidence, and Interface
+source under `state/supervisor-retirements/<incarnation>.json` with a prepared
+phase; rewrites the
+claim to `released` without legacy nonce or holder fields; and tombstones only
+the old holder row. Only after the registry and event writes succeed does it
+mark the evidence complete. The released claim names the old SID in `released_by_sid`
+so the existing boot liveness gate still protects against a returning body.
+The operator's queue, all mail (including claimed mail), worker rows, briefs,
+and journals remain in place. Normal `sup-spawn --model codex:<model>` can then
+create a new supervisor incarnation; it rechecks the public Claude roster and
+old supervisor absence before creating a thread. It also requires matching
+complete retirement evidence and the exact old-holder tombstone, rechecked
+under `fleet.lock`. Run `sup-guard` again immediately before that dispatch.
+An interrupted write may leave prepared evidence, a released claim, or an
+incomplete tombstone. Native spawn refuses that state; the operator preserves
+the evidence and resolves it through reviewed recovery, without an automatic
+retry or overwrite.
+
+An authenticated `sup-reconcile` may also settle an uncertain supervisor send
+whose original operation journal proves rejection before provider acceptance.
+The current registered Codex Interface must match the exact home and process
+source. The pending operation, holder, host generation, journal recovery
+identity, and newest public thread/turn must agree, and the claim and registry
+row must still match under `fleet.lock`. The old Darwin host's precise
+authentication-refusal response may promote its still-prepared journal entry to
+failed only after those checks; a newer host records that rejection as failed
+before responding. The one claimed mail file is restored to an empty inbox by
+an exclusive link before the held claim is unblocked. Concurrent new inbox mail
+leaves both files and the uncertain claim intact for ordered recovery. A failed
+initial `thread/start` preclaim with no
+bound thread may instead be retired to a released claim and dead row, retaining
+its incarnation, journal, and brief. Accepted, uncertain, missing, conflicting,
+or unreadable evidence stays frozen. Neither path repeats `thread/start`,
+`turn/start`, or `turn/steer`; after a host generation change a separate
+`sup-reconcile` reattaches the exact thread without creating a turn.
 Queue-overflow recovery counts the entire persisted turn history through
 `thread/turns/list` pages of at most 32 with items omitted, after validating a
 metadata-only `thread/read`; it requires exactly one turn beyond the durable
 watermark before adopting an uncertain `turn/start`.
+The host journal's 64 KiB metadata bound can be reached by a successful
+provider reply before the 1 MiB IPC response bound. If recording that reply
+fails after the durable `accepted` transition, the host retains or marks the
+operation uncertain. The client checks the exact journal state for every
+correlated mutation error: `accepted`, `uncertain`, `observed`, and `committed`
+raise an uncertain outcome, never a definitive rejection. A handoff therefore
+keeps its activating claim and predecessor disarmed until exact public proof;
+it cannot roll back a live successor because an oversized journal write failed.
 
 ## 11. Explicit home and interface registration
 
@@ -756,7 +865,7 @@ Grade actions and side effects, not wording.
 
 | ID | Layer | Test | Required result |
 | --- | --- | --- | --- |
-| P1 | Schema | Generate 0.155.1 and 0.160.0 v2 schemas; validate each fixture digest | Either reviewed exact version/digest accepted; unknown version or drift disables native only |
+| P1 | Schema | Generate 0.155.1, 0.160.0 and 0.161.0 v2 schemas; validate each fixture digest | Either reviewed exact version/digest accepted; unknown version or drift disables native only |
 | P2 | Protocol | Initialize; start/read/list/resume disposable thread at exact cwd | Real ID/cwd agree |
 | P3 | Protocol | Start, active, steer with expected turn, page history, complete | One real turn lineage; final result persisted |
 | P4 | Protocol | Interrupt active disposable turn | Supported request with real IDs; same turn observed terminal |

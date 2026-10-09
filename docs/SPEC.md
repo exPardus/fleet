@@ -341,6 +341,55 @@ the host replaces its failed stdio child and adopts the original spawn journal
 entry only from an operation-tagged empty thread with matching effective
 settings, or exactly one public turn beyond the bound history watermark;
 otherwise the row stays uncertain with a queue-bound/concurrency remedy.
+For native Codex supervisor sends rejected before provider acceptance,
+`sup-reconcile` requires the current authenticated Interface, exact failed
+operation journal (or the old Darwin host's precise pre-acceptance
+authentication refusal), unchanged latest public turn, matching home and
+holder, and a claim/row compare-and-swap. It restores claimed mail before
+clearing uncertainty; accepted or ambiguous effects remain frozen. A failed
+initial supervisor thread preclaim with no thread may be retired to a released
+claim and dead row by the same authenticated, exact-intent check. Neither path
+replays a provider mutation.
+An accepted `thread/resume` can return an effective sandbox different from
+the recorded supervisor mode after a host restart. Fleet treats that response
+as authoritative: a `bypass` holder recorded with `dangerFullAccess` cannot
+adopt a `workspaceWrite` resume. The claim and old host generation stay
+uncertain and the observed operation remains in its new-generation journal.
+The current registered Codex Interface may first use
+`sup-reconcile --prepare-recorded-policy-restore` with an explicit home and exact
+incarnation/thread/turn/original operation/observed host generation pins. This
+records a fresh bounded proof that the bound turn is uniquely newest, completed,
+and idle; it also checks the original observed journal and managed requirements,
+then durably pins the exact supervisor claim, row, and target inbox/claimed-mail
+contents and identities. Any later change to those targets refuses before host
+creation and provider dispatch; unrelated product rows may progress.
+Idle alone does not mean the thread is unloaded. The exact observed host and
+its app-server child must then exit, with a stale heartbeat, before
+`--restore-recorded-policy` can create a fresh host generation. The latter
+requires the same pins and a five-minute preflight, and sends one distinct
+policy-bound cold `thread/resume` for the original recorded `bypass` tuple.
+The original observed journal remains unchanged. Fleet adopts only an exact
+matching effective response after another public header and locked
+claim/row/mail/source/host/journal check. Rejection or ambiguity stays uncertain.
+No turn or original resume is replayed, and recorded policy is never changed
+implicitly.
+
+For a stale legacy Claude supervisor claim whose nonce cannot be recovered,
+`sup-retire-legacy --expect-inc ... --expect-sid ...` is a separate explicit
+registered-Codex-Interface transition. It requires the exact home and old
+identity, two fresh healthy public Claude rosters proving no live supervisor or
+predecessor, and a locked unchanged claim/row/Interface check. It preserves all
+mail, queues, journals, and unrelated workers, records the original claim in
+ignored retirement evidence, writes a released claim and old-holder tombstone,
+marks evidence complete only after those writes, and creates no Codex thread
+or turn. Native spawn requires that complete evidence and exact tombstone
+before dispatch. See
+`docs/specs/codex-native-integration.md` §10.4 for CLI semantics and refusals.
+After a native Codex mutation enters the durable `accepted` journal state,
+any host error—including a provider reply too large for the 64 KiB journal
+record—surfaces as uncertain. The client checks that exact operation state
+before classifying a correlated error; a handoff never rolls back an accepted
+successor turn because result persistence failed.
 Public rate-limit reads provide the recorded reset horizon. No path signals a
 Codex PID or manufactures USD usage.
 

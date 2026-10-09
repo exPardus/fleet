@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,76 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "codex_app_server"
+
+
+def test_hermetic_codex_keeps_posix_direct_argv(tmp_path):
+    """Windows' cmd adaptation must never leak into the POSIX contract."""
+    from codex_test_support import hermetic_codex_argv
+
+    command = hermetic_codex_argv(
+        ["codex", "--version"], tmp_path, platform="posix")
+    assert command == [str(tmp_path / "codex"), "--version"]
+
+
+def test_hermetic_codex_models_windows_createprocess_contract(tmp_path):
+    """A Windows batch shim is launched only through an explicit cmd argv."""
+    from codex_test_support import hermetic_codex_argv
+
+    command = hermetic_codex_argv(
+        ["codex", "--version"], tmp_path, platform="nt", comspec="cmd.exe")
+    assert command == [
+        "cmd.exe", "/d", "/c", str(tmp_path / "codex.cmd"), "--version",
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native host transport is POSIX-only")
+def test_hermetic_codex_argv_round_trips_through_real_host(
+        tmp_path, monkeypatch, _hermetic_codex):
+    """Both child-host call sites receive the fixture's explicit argv."""
+    import fleet_codex
+
+    later = tmp_path / "later-real-codex"
+    later.mkdir()
+    later_log = tmp_path / "later-real-codex.log"
+    later_codex = later / "codex"
+    later_codex.write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, sys\n"
+        "pathlib.Path(os.environ['LATER_CODEX_LOG']).write_text("
+        "repr(sys.argv[1:]), encoding='utf-8')\n"
+        "raise SystemExit(91)\n",
+        encoding="utf-8")
+    later_codex.chmod(0o700)
+    monkeypatch.setenv("LATER_CODEX_LOG", str(later_log))
+    monkeypatch.setenv(
+        "PATH", f"{later}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    home = tmp_path / "home"
+    (home / "state").mkdir(parents=True)
+    client = fleet_codex.CodexHostClient.ensure(
+        home.resolve(), ready_timeout=10, idle_timeout=30)
+    try:
+        assert client.call(
+            {"operation_id": "fixture-round-trip", "method": "ping",
+             "payload": {}}, timeout=2).result["home"] == str(home.resolve())
+    finally:
+        try:
+            client.call(
+                {"operation_id": "fixture-shutdown", "method": "host/shutdown",
+                 "payload": {}}, timeout=2)
+        finally:
+            assert client.wait_for_exit(5)
+
+    invocations = [
+        json.loads(line) for line in
+        (_hermetic_codex / "invocations.jsonl").read_text(
+            encoding="utf-8").splitlines()]
+    assert invocations[0] == ["--version"]
+    assert invocations[1][:2] == ["app-server", "generate-json-schema"]
+    assert invocations[1][2] == "--out"
+    assert Path(invocations[1][3]).name.startswith("fleet-codex-schema-")
+    assert invocations[2] == ["app-server", "--listen", "stdio://"]
+    assert not later_log.exists()
 
 
 def _generator():
@@ -221,7 +292,7 @@ def test_generate_contract_rejects_oversized_public_schema(tmp_path):
         _generator()(str(codex), tmp_path / "fixture")
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_checked_fixture_pins_reviewed_public_contract(version):
     fixture = FIXTURES / version
     manifest = json.loads((fixture / "manifest.json").read_text())
@@ -263,7 +334,7 @@ def test_0160_no_inference_contract_changes_only_the_version():
     assert new == old
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_checked_fixture_contains_no_private_codex_path(version):
     for path in (FIXTURES / version).glob("*.json"):
         text = path.read_text(encoding="utf-8")
@@ -271,3 +342,29 @@ def test_checked_fixture_contains_no_private_codex_path(version):
         assert "\\.codex\\" not in text
         assert "rollout" not in text.lower()
         assert "sqlite" not in text.lower()
+
+
+def test_0161_reviewed_contract_is_identical_to_0160():
+    old = (FIXTURES / "0.160.0" / "v2-contract.json").read_bytes()
+    new = (FIXTURES / "0.161.0" / "v2-contract.json").read_bytes()
+    assert new == old
+
+
+def test_0161_no_inference_contract_changes_only_the_version():
+    old = json.loads(
+        (FIXTURES / "0.160.0" / "no-inference-acceptance.json").read_text())
+    new = json.loads(
+        (FIXTURES / "0.161.0" / "no-inference-acceptance.json").read_text())
+    assert old.pop("codex_version") == "0.160.0"
+    assert new.pop("codex_version") == "0.161.0"
+    assert new == old
+
+
+def test_codex_error_codes_read_variants_under_anyof_and_oneof(tmp_path):
+    from tools.codex_schema_fixture import _codex_errors
+
+    entry = {"required": ["activeTurnNotSteerable"]}
+    for key in ("oneOf", "anyOf"):
+        definitions = {"CodexErrorInfo": {
+            key: [{"enum": ["other"]}, entry]}}
+        assert _codex_errors(definitions) == ["activeTurnNotSteerable", "other"]

@@ -136,7 +136,8 @@ def _codex_errors(definitions: dict[str, Any]) -> list[str]:
     if not isinstance(value, dict):
         raise ValueError("missing public definition CodexErrorInfo")
     result = set(_enum(definitions, "CodexErrorInfo"))
-    for entry in value.get("oneOf", []):
+    # Codex 0.161 emits the variants under anyOf; earlier versions use oneOf.
+    for entry in [*value.get("oneOf", []), *value.get("anyOf", [])]:
         if not isinstance(entry, dict):
             continue
         required = entry.get("required", [])

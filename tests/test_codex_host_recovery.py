@@ -88,13 +88,83 @@ def test_same_operation_replays_observed_result_without_second_mutation(tmp_path
         assert client.wait_for_exit(2)
 
 
+def test_host_allows_only_linked_explicit_restore_after_observed_resume(
+        tmp_path, monkeypatch):
+    module, old_client, log = _ensure(tmp_path)
+    assert old_client._owner_live()
+    assert old_client._app_server_live()
+    home = old_client.home
+    journal = module.OperationJournal(home, old_client.generation)
+    original = {
+        "operation_id": "supervisor-reconcile-original", "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": "thread-1", "excludeTurns": True}},
+        "recovery": {
+            "kind": "supervisor/thread-resume", "fleet_name": "sup|inc-1|boot",
+            "incarnation_id": "inc-1", "thread_id": "thread-1",
+            "previous_host_generation": "old-generation",
+            "canonical_cwd": str(home),
+        },
+    }
+    journal.prepare(original)
+    journal.accept(original["operation_id"])
+    journal.observe(original["operation_id"], {
+        "thread": {"id": "thread-1", "cwd": str(home)},
+        "cwd": str(home), "model": "gpt-5.6-luna",
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": {"type": "workspaceWrite", "writableRoots": []},
+    })
+    _shutdown(old_client)
+    assert old_client.wait_for_exit(2)
+    assert not old_client._owner_live()
+    assert not old_client._app_server_live()
+    monkeypatch.setattr(module, "HOST_HEARTBEAT_STALE_SECONDS", 0.0)
+    _module_value, client, _new_log = _ensure(tmp_path, home=home)
+    assert client.generation != old_client.generation
+    restored = {
+        "operation_id": "supervisor-restore-policy-next", "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": "thread-1", "excludeTurns": True,
+            "cwd": str(home), "model": "gpt-5.6-luna",
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": "danger-full-access",
+        }},
+        "recovery": {
+            "kind": "supervisor/resume-policy-restore",
+            "fleet_name": "sup|inc-1|boot", "incarnation_id": "inc-1",
+            "thread_id": "thread-1", "turn_id": "turn-1",
+            "previous_host_generation": "old-generation",
+            "observed_resume_generation": old_client.generation,
+            "original_resume_operation_id": original["operation_id"],
+            "canonical_cwd": str(home),
+        },
+    }
+    try:
+        wrong = json.loads(json.dumps(restored))
+        wrong["operation_id"] = "supervisor-restore-policy-wrong"
+        wrong["recovery"]["original_resume_operation_id"] = "other-original"
+        with pytest.raises(module.HostRejected, match="unresolved predecessor"):
+            client.call(wrong, timeout=2)
+        assert journal.load(wrong["operation_id"])["state"] == "failed"
+        assert _app_requests(log, "thread/resume") == []
+
+        response = client.call(restored, timeout=2)
+        assert response.result["sandbox"] == {"type": "dangerFullAccess"}
+        assert journal.load(original["operation_id"])["state"] == "observed"
+        assert journal.load(restored["operation_id"])["state"] == "observed"
+        assert len(_app_requests(log, "thread/resume")) == 1
+    finally:
+        _shutdown(client)
+        assert client.wait_for_exit(2)
+
+
 def test_provider_acceptance_with_lost_response_is_uncertain_and_never_replayed(
         tmp_path, monkeypatch):
     module, client, log = _ensure(
         tmp_path, env_overrides={"FAKE_DROP_TURN_RESPONSE": "1"})
     operation = _mutation("lost-provider-response", "turn/start")
     try:
-        with pytest.raises(module.HostRejected, match="outcome is uncertain"):
+        with pytest.raises(module.HostUnavailable, match="outcome is uncertain"):
             client.call(operation, timeout=2)
         record = json.loads(_operation_file(client, operation["operation_id"])
                             .read_text())

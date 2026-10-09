@@ -1,0 +1,7 @@
+{
+  "codex_version": "0.161.0",
+  "contract_sha256": "396209b8810c3e2b6a1adeab8efd71661848e5d1556617e010f3f59b2fc86985",
+  "protocol_version": 2,
+  "schema_file": "codex_app_server_protocol.v2.schemas.json",
+  "schema_sha256": "62f227e897351f20fe8b8984341512d1cc4ebf42def4487bc65d36fb7c40bba6"
+}
