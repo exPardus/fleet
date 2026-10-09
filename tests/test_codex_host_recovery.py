@@ -47,9 +47,12 @@ def test_same_operation_replays_observed_result_without_second_mutation(tmp_path
     try:
         first = client.call(operation, timeout=2)
         second = client.call(operation, timeout=2)
+        recovered = client.recover_observed(operation)
 
-        assert first.result == second.result == {
+        assert first.result == second.result == recovered.result == {
             "turn": {"id": "turn-1", "status": "inProgress"}}
+        assert recovered.operation_id == operation["operation_id"]
+        assert recovered.generation == client.generation
         assert len(_app_requests(log, "turn/start")) == 1
         record = json.loads(_operation_file(client, "turn-op").read_text())
         assert record["state"] == "observed"
@@ -75,6 +78,8 @@ def test_provider_acceptance_with_lost_response_is_uncertain_and_never_replayed(
                             .read_text())
         assert record["state"] == "uncertain"
         assert "outcome unknown" in record["reason"]
+        with pytest.raises(module.HostRejected, match="not yet proven"):
+            client.recover_observed(operation)
     finally:
         _shutdown(client)
         assert client.wait_for_exit(2)

@@ -405,10 +405,11 @@ class TestTheCensus:
         # handoff -- named here one by one rather than widening the predicate.
         codex_route = {
             "_commit_codex_supervisor_operation", "_cmd_codex_sup_checkpoint",
+            "_cmd_codex_sup_notify",
             "_reconcile_codex_activating", "_dispatch_codex_supervisor_body",
             "_rollback_codex_handoff_activation", "_cmd_codex_sup_handoff_begin",
         }
-        assert len(writes) == 19, f"heartbeat writers moved: {writes}"
+        assert len(writes) == 20, f"heartbeat writers moved: {writes}"
         assert all(s.startswith("cmd_sup_") or s.startswith("_cmd_sup_")
                    or s == "cmd_wave_close"
                    or s == "_refresh_supervisor_heartbeat_for_dispatch"

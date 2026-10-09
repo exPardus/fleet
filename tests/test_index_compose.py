@@ -917,9 +917,9 @@ class TestContextDigest:
           * N distinct files cost the sum of their digests -- there is no
             budget, so the manager's `--context` list IS the budget.
 
-        Measured 2026-07-27 at this fix wave's base commit: `bin/fleet.py`
-        (16,075 source lines) rendered **539 digest lines / 27,835 chars**,
-        and fifty distinct files of that size would render ~1.39 MB into a
+        Re-measured 2026-10-09: `bin/fleet.py` (23,679 source lines) rendered
+        **899 digest lines / 50,756 chars**, and fifty distinct files of that
+        size would render ~2.54 MB into a
         single prompt. No cap was added: §11.1 states the digest and
         `q --outline` differ only when the cap truncates, so capping here
         would silently impose `q`'s limit on a path the spec exempts, and that
@@ -1170,14 +1170,14 @@ class TestTheDigestSizeCap:
     does is wrong.** This was measured both ways rather than assumed:
 
       * truncate at the CEILING (`digest[:250_000]`) -- M4 stays **GREEN**.
-        M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of
-        it (~55,482); neither reaches 250,000, so the truncation never fires
+        M4's fixture is `bin/fleet.py` alone (50,756 chars) plus two copies of
+        it (~101,512); neither reaches 250,000, so the truncation never fires
         in M4 at all. Four tests in THIS class caught it; M4 saw nothing.
-      * truncate at the WARN threshold (`digest[:50_000]`) -- M4 goes RED,
+      * truncate at the WARN threshold (`digest[:55_000]`) -- M4 goes RED,
         because its two-copies assertion (`len(both) > 2 * len(digest) - 200`)
-        does cross 50,000.
+        does cross 55,000.
 
-    So M4 reds only for a cap that trims below ~55,500 chars, and the more
+    So M4 reds only for a cap that trims below ~101,500 chars, and the more
     plausible wrong implementation -- trim at the ceiling -- slips past it
     entirely. Anyone leaning on "M4 will catch it" is relying on a coincidence
     of fixture size. What actually catches truncation is
@@ -1327,11 +1327,9 @@ class TestTheDigestSizeCap:
         and a warning genuinely means "more than the biggest file here".
 
         Re-derived against `bin/fleet.py`, the file the M4 cost pin uses and
-        the one that grows every wave. Measured 2026-07-30: 27,741 chars.
-        `tests/test_native.py` is actually this repo's largest digest at
-        40,993 chars -- also under the threshold -- but it is not staged here,
-        because this test's job is to guarantee the M4 pin's `warnings == []`
-        keeps holding as `bin/fleet.py` grows."""
+        the one that grows every wave. Re-measured 2026-10-09: 50,756 chars,
+        below the 55,000-char threshold. This test guarantees the M4 pin's
+        `warnings == []` keeps holding as `bin/fleet.py` grows."""
         root = tmp_path / "real"
         _write(root / "bin" / "fleet.py",
                Path(fleet.__file__).read_text(encoding="utf-8"))
@@ -1341,7 +1339,7 @@ class TestTheDigestSizeCap:
         assert warnings == [], (
             f"bin/fleet.py's own digest is {len(digest)} chars and now trips "
             f"the {fleet.INDEX_DIGEST_WARN_CHARS}-char warn threshold. The "
-            f"threshold was measured against a 27,741-char digest; re-measure "
+            f"threshold was measured against a 50,756-char digest; re-measure "
             f"it and move it, and move the M4 pin's docstring with it")
         assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS
 

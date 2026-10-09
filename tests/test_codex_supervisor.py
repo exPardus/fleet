@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -174,6 +175,16 @@ class FakeLifecycleClient:
             observed_thread_status = (
                 "idle" if predecessor_after_handoff
                 and self.predecessor_interrupted else self.thread_status)
+            if operation["payload"]["params"].get("includeTurns") is False:
+                return SimpleNamespace(
+                    operation_id=operation["operation_id"],
+                    generation=self.generation, payload_digest="c" * 64,
+                    result={"thread": {
+                        "id": THREAD_ID, "cwd": str(self.home),
+                        "status": {"type": observed_thread_status,
+                                   "activeFlags": self.active_flags},
+                        "turns": [],
+                    }})
             items = []
             if observed_turn_status == "completed" and self.result_text is not None:
                 items = [{"id": ITEM_ID, "type": "agentMessage",
@@ -193,6 +204,16 @@ class FakeLifecycleClient:
                                "activeFlags": self.active_flags},
                     "turns": turns,
                 }})
+        if method == "thread/turns/list":
+            turns = [{"id": self.turn_id, "status": self.turn_status,
+                      "itemsView": "notLoaded", "items": []}]
+            if self.newer_turn is not None:
+                turns.insert(0, {**self.newer_turn,
+                                 "itemsView": "notLoaded", "items": []})
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="7" * 64,
+                result={"data": turns[:2], "nextCursor": None})
         if method == "thread/resume":
             resumed_thread = operation["payload"]["params"]["threadId"]
             return SimpleNamespace(
@@ -300,9 +321,46 @@ class JournalLifecycleClient(FakeLifecycleClient):
         self.journal.commit(operation_id)
         super().commit(operation_id)
 
+    def recover_observed(self, operation):
+        record = self.journal.observed_operation(operation)
+        return SimpleNamespace(
+            operation_id=record["operation_id"],
+            generation=record["generation"],
+            payload_digest=record["payload_digest"], result=record["result"])
+
     def commit_handoff_turn_start(self, operation_id, **evidence):
         self.journal.commit_handoff_turn_start(operation_id, **evidence)
         super().commit_handoff_turn_start(operation_id, **evidence)
+
+
+class ResponseLostJournalClient(JournalLifecycleClient):
+    """Host observed the mutation durably, but its IPC response was lost."""
+
+    def __init__(self, home, *, mutate_after_observe=None, **kwargs):
+        super().__init__(home, **kwargs)
+        self.mutate_after_observe = mutate_after_observe
+
+    def call(self, operation, timeout):
+        observation = super().call(operation, timeout)
+        if operation["payload"]["method"] == "turn/steer":
+            if self.mutate_after_observe is not None:
+                self.mutate_after_observe()
+            from fleet_codex import HostUnavailable
+            raise HostUnavailable("Codex host response was lost")
+        return observation
+
+
+class AcceptedUnobservedJournalClient(JournalLifecycleClient):
+    """The provider boundary was crossed but no exact result was observed."""
+
+    def call(self, operation, timeout):
+        if operation["payload"]["method"] != "turn/steer":
+            return super().call(operation, timeout)
+        from fleet_codex import HostUnavailable
+        self.operations.append(operation)
+        self.journal.prepare(operation)
+        self.journal.accept(operation["operation_id"])
+        raise HostUnavailable("Codex host response was lost")
 
 
 class EvidenceLifecycleClient(FakeLifecycleClient):
@@ -586,13 +644,83 @@ def test_native_send_steers_only_the_claimed_active_turn(
     assert fleet.cmd_send(_send_args()) == 0
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read", "turn/steer"]
+        "thread/read", "thread/turns/list", "turn/steer"]
+    assert client.operations[0]["payload"]["params"]["includeTurns"] is False
+    assert client.operations[1]["payload"]["params"] == {
+        "threadId": THREAD_ID, "limit": 2,
+        "sortDirection": "desc", "itemsView": "notLoaded",
+    }
     params = client.operations[-1]["payload"]["params"]
     assert params["threadId"] == THREAD_ID
     assert params["expectedTurnId"] == TURN_ID
     assert "pending_operation" not in fleet.read_incarnation()
     assert len(client.commits) == 1
     assert not (supervisor_home / "mailbox" / f"{THREAD_ID}.md").exists()
+
+
+def test_native_send_recovers_observed_response_loss_without_replay_or_duplicate_mail(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    client = ResponseLostJournalClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet.cmd_send(_send_args(message="deliver exactly once")) == 0
+
+    methods = [op["payload"]["method"] for op in client.operations]
+    assert methods == ["thread/read", "thread/turns/list", "turn/steer"]
+    assert methods.count("turn/steer") == 1
+    operation = next(client.journal.directory.glob("supervisor-send-*.json"))
+    assert json.loads(operation.read_text())["state"] == "committed"
+    assert not list((supervisor_home / "mailbox").glob(f"{THREAD_ID}.md*"))
+    assert "pending_operation" not in fleet.read_incarnation()
+
+
+@pytest.mark.parametrize("change", ["claim", "generation"])
+def test_response_loss_recovery_cannot_cross_changed_claim_or_generation(
+        supervisor_home, monkeypatch, change):
+    name, _inc = _seed_native_supervisor(supervisor_home)
+
+    def mutate():
+        claim = fleet.read_incarnation()
+        if change == "claim":
+            claim["incarnation_id"] = "inc-replaced"
+        else:
+            claim["host_generation"] = "host-generation-replaced"
+        fleet.write_incarnation(claim)
+
+    client = ResponseLostJournalClient(
+        supervisor_home, mutate_after_observe=mutate)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="claim changed.*Claimed mail was retained"):
+        fleet.cmd_send(_send_args(name=name, message="retain on changed identity"))
+
+    methods = [op["payload"]["method"] for op in client.operations]
+    assert methods.count("turn/steer") == 1
+    assert list((supervisor_home / "mailbox").glob(f"{THREAD_ID}.md.claimed.*"))
+    assert fleet.read_incarnation()[
+        "incarnation_id" if change == "claim" else "host_generation"
+    ].endswith("replaced")
+
+
+def test_accepted_without_exact_result_freezes_mail_with_actionable_recovery(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    client = AcceptedUnobservedJournalClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="sup-reconcile"):
+        fleet.cmd_send(_send_args(message="do not replay me"))
+
+    methods = [op["payload"]["method"] for op in client.operations]
+    assert methods.count("turn/steer") == 1
+    claim = fleet.read_incarnation()
+    assert claim["pending_operation"]["kind"] == "turn/steer"
+    assert list((supervisor_home / "mailbox").glob(f"{THREAD_ID}.md.claimed.*"))
+    with pytest.raises(fleet.FleetCliError, match="no mutation was replayed"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert [op["payload"]["method"] for op in client.operations].count(
+        "turn/steer") == 1
 
 
 def test_stale_native_predecessor_cannot_wake_or_steer(
@@ -626,7 +754,7 @@ def test_ambiguous_native_recovery_queues_mail_without_resume_or_duplicate_turn(
         fleet.cmd_send(_send_args(message="preserve me"))
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+        "thread/read", "thread/turns/list"]
     _assert_unverified_queued_mail(supervisor_home, "preserve me")
     assert "pending_operation" not in fleet.read_incarnation()
     record = next(iter(fleet.load_registry()["workers"].values()))
@@ -635,7 +763,7 @@ def test_ambiguous_native_recovery_queues_mail_without_resume_or_duplicate_turn(
 
 
 @pytest.mark.parametrize("items_view", ["notLoaded", "summary"])
-def test_native_send_refuses_incomplete_items_and_preserves_queued_mail(
+def test_native_send_does_not_hydrate_unbounded_item_history(
         supervisor_home, monkeypatch, items_view):
     _seed_native_supervisor(supervisor_home, stale=True)
     client = FakeLifecycleClient(
@@ -643,15 +771,14 @@ def test_native_send_refuses_incomplete_items_and_preserves_queued_mail(
         items_view=items_view)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
 
-    with pytest.raises(fleet.FleetCliError, match="item history is incomplete"):
-        fleet.cmd_send(_send_args(message="keep incomplete evidence"))
+    assert fleet.cmd_send(_send_args(message="bounded delivery")) == 0
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
-    assert client.commits == []
-    _assert_unverified_queued_mail(
-        supervisor_home, "keep incomplete evidence")
-    assert fleet.read_incarnation()["current_turn_id"] == TURN_ID
+        "thread/read", "thread/turns/list", "turn/start"]
+    assert client.operations[0]["payload"]["params"]["includeTurns"] is False
+    assert client.operations[1]["payload"]["params"]["itemsView"] == "notLoaded"
+    assert len(client.commits) == 1
+    assert fleet.read_incarnation()["current_turn_id"] == WAKE_TURN_ID
     assert "pending_operation" not in fleet.read_incarnation()
 
 
@@ -684,15 +811,99 @@ def test_native_send_refuses_newer_turn_and_preserves_claim_and_mail(
         newer_turn=newer)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
 
-    with pytest.raises(fleet.FleetCliError, match="newer turn"):
+    with pytest.raises(fleet.FleetCliError, match="not newest"):
         fleet.cmd_send(_send_args(message="keep stale turn mail"))
 
     assert [op["payload"]["method"] for op in client.operations] == [
-        "thread/read"]
+        "thread/read", "thread/turns/list"]
     assert client.commits == []
     assert fleet.read_incarnation()["current_turn_id"] == TURN_ID
     assert "pending_operation" not in fleet.read_incarnation()
     _assert_unverified_queued_mail(supervisor_home, "keep stale turn mail")
+
+
+class _NotifyTmux:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+def _notify_args(text="native holder progress"):
+    return SimpleNamespace(
+        text=text, tmux_session="work", window="fleet", dry_run=False,
+        sid=None, nonce=None)
+
+
+def _authenticate_native_holder(monkeypatch, home, thread_id=THREAD_ID):
+    import fleet_codex
+    monkeypatch.setenv("CODEX_THREAD_ID", thread_id)
+    monkeypatch.setattr(
+        fleet_codex, "codex_process_source",
+        lambda _pid, requested=None: {
+            "thread_id": thread_id, "ancestor_pid": 123,
+            "ancestor_start_identity": "start", "ancestor_cwd": str(home),
+            "uid": 1000,
+        } if requested == thread_id else pytest.fail("foreign thread accepted"))
+
+
+def test_native_holder_sup_notify_verifies_turn_refreshes_heartbeat_and_delivers_once(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home, stale=True)
+    _authenticate_native_holder(monkeypatch, supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    tmux = _NotifyTmux()
+
+    assert fleet.cmd_sup_notify(_notify_args(), run=tmux) == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/turns/list"]
+    assert fleet.read_incarnation()["heartbeat_at"] != "2000-01-01T00:00:00Z"
+    literal = [call for call in tmux.calls if "-l" in call]
+    assert len(literal) == 1
+
+
+def test_native_sup_notify_rejects_foreign_provider_identity_before_delivery(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+    _authenticate_native_holder(
+        monkeypatch, supervisor_home, thread_id=SUCCESSOR_THREAD_ID)
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    tmux = _NotifyTmux()
+
+    with pytest.raises(fleet.FleetCliError, match="not the current"):
+        fleet.cmd_sup_notify(_notify_args(), run=tmux)
+
+    assert client.operations == [] and tmux.calls == []
+
+
+def test_native_sup_notify_rejects_claim_change_after_provider_observation(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home, stale=True)
+    _authenticate_native_holder(monkeypatch, supervisor_home)
+    client = FakeLifecycleClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    original = fleet._codex_supervisor_send_observe
+
+    def observe_then_change(binding, client=None):
+        result = original(binding, client=client)
+        claim = fleet.read_incarnation()
+        claim["host_generation"] = "host-generation-replaced"
+        fleet.write_incarnation(claim)
+        return result
+
+    monkeypatch.setattr(fleet, "_codex_supervisor_send_observe", observe_then_change)
+    tmux = _NotifyTmux()
+
+    with pytest.raises(fleet.FleetCliError, match="claim changed"):
+        fleet.cmd_sup_notify(_notify_args(), run=tmux)
+
+    assert tmux.calls == []
+    assert fleet.read_incarnation()["heartbeat_at"] == "2000-01-01T00:00:00Z"
 
 
 def test_native_guard_pages_when_bound_turn_is_not_newest(

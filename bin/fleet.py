@@ -1011,20 +1011,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11909) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12911) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16370) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:12154) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:13156) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:16615) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3738) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:3841) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4433) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13161) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16244) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4536) -- expose that distinction to views.
+      * `_doctor_check_registry` (:13406) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:16489) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7106) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18024) -- render the release explanation.
+      * `_print_snapshot_table` (:7209) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:18269) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2827,6 +2827,78 @@ def _codex_supervisor_observe(binding, client=None, *, require_full=False):
     }
 
 
+def _codex_supervisor_send_observe(binding, client=None):
+    client = client or _codex_existing_client(FLEET_HOME)
+    metadata = client.call({
+        "operation_id": f"supervisor-read-{uuid.uuid4()}", "method": "rpc",
+        "payload": {"method": "thread/read", "params": {
+            "threadId": binding.authority.value, "includeTurns": False,
+        }},
+    }, timeout=10)
+    if metadata.generation != binding.host_generation:
+        raise FleetCliError(
+            "native Codex supervisor host generation changed; recovery is ambiguous")
+    result = metadata.result
+    thread = result.get("thread") if isinstance(result, dict) else None
+    if not isinstance(thread, dict):
+        raise FleetCliError("native Codex supervisor thread/read returned no thread")
+    if (_provider_codex_id(thread.get("id"), "supervisor observed thread")
+            != binding.authority.value):
+        raise FleetCliError("native Codex supervisor observed the wrong thread")
+    if thread.get("cwd") != str(FLEET_HOME.resolve()):
+        raise FleetCliError("native Codex supervisor observed the wrong home")
+    status = thread.get("status")
+    if not isinstance(status, dict):
+        raise FleetCliError("native Codex supervisor thread status is malformed")
+    provider_status = status.get("type")
+    if provider_status not in {"active", "idle", "notLoaded", "systemError"}:
+        raise FleetCliError("native Codex supervisor thread status is unknown")
+    flags = status.get("activeFlags", [])
+    if (not isinstance(flags, list)
+            or any(flag not in {"waitingOnApproval", "waitingOnUserInput"}
+                   for flag in flags)):
+        raise FleetCliError("native Codex supervisor active flags are unknown")
+    hydrated = thread.get("turns", [])
+    if hydrated not in (None, []):
+        raise FleetCliError(
+            "native Codex metadata-only read unexpectedly hydrated turn history")
+
+    turns_observation = client.call({
+        "operation_id": f"supervisor-turns-{uuid.uuid4()}", "method": "rpc",
+        "payload": {"method": "thread/turns/list", "params": {
+            "threadId": binding.authority.value, "limit": 2,
+            "sortDirection": "desc", "itemsView": "notLoaded",
+        }},
+    }, timeout=10)
+    if turns_observation.generation != binding.host_generation:
+        raise FleetCliError(
+            "native Codex supervisor turn page changed host generation")
+    page = turns_observation.result
+    turns = page.get("data") if isinstance(page, dict) else None
+    if (not isinstance(turns, list) or not turns or len(turns) > 2
+            or any(not isinstance(turn, dict) for turn in turns)):
+        raise FleetCliError("native Codex supervisor turn page is malformed")
+    ids = [_provider_codex_id(turn.get("id"), "supervisor observed turn")
+           for turn in turns]
+    if len(set(ids)) != len(ids) or ids[0] != binding.current_turn_id:
+        raise FleetCliError(
+            "native Codex supervisor current turn is absent, ambiguous, or not newest")
+    turn = turns[0]
+    turn_status = turn.get("status")
+    if turn_status not in {"inProgress", "completed", "failed", "interrupted"}:
+        raise FleetCliError("native Codex supervisor turn status is unknown")
+    if provider_status == "active" and turn_status != "inProgress":
+        raise FleetCliError("native Codex supervisor active thread conflicts with its turn")
+    if provider_status == "idle" and turn_status == "inProgress":
+        raise FleetCliError("native Codex supervisor idle thread conflicts with its turn")
+    return {
+        "binding": binding, "client": client,
+        "provider_status": provider_status, "active_flags": list(flags),
+        "turn_id": ids[0], "turn_status": turn_status,
+        "newest_turn_ids": ids,
+    }
+
+
 def _codex_supervisor_holder_matches(
         claim, incarnation_id, authority, *, allowed_states=None):
     if not isinstance(claim, dict) or not isinstance(authority, ProviderIdentity):
@@ -2882,7 +2954,8 @@ def _commit_codex_supervisor_journal(client, name, incarnation_id,
 
 
 def _reserve_codex_supervisor_operation(
-        binding, operation_id, kind, *, allowed_states=None):
+        binding, operation_id, kind, *, allowed_states=None,
+        operation_details=None):
     """Serialize one provider mutation against the exact current claim."""
     with fleet_lock():
         claim = read_incarnation()
@@ -2903,13 +2976,18 @@ def _reserve_codex_supervisor_operation(
                 or not isinstance(record, dict)):
             raise FleetCliError(
                 "native Codex supervisor current claim changed before mutation")
-        claim["pending_operation"] = {
+        pending = {
             "operation_id": operation_id, "kind": kind,
             "previous_turn_id": binding.current_turn_id,
             "previous_claim_operation_id": claim.get("last_operation_id"),
             "previous_record_operation_id": record.get("last_operation_id"),
             "previous_adapter_state": record.get("adapter_state"),
         }
+        if operation_details is not None:
+            if not isinstance(operation_details, dict):
+                raise FleetCliError("native Codex operation details are malformed")
+            pending.update(operation_details)
+        claim["pending_operation"] = pending
         claim["last_operation_id"] = operation_id
         record["adapter_state"] = "mutating"
         record["last_operation_id"] = operation_id
@@ -2956,6 +3034,31 @@ def _clear_codex_supervisor_operation(
         write_incarnation(claim)
         save_registry(data)
         return True
+
+
+def _set_codex_supervisor_send_kind(binding, operation_id, method):
+    if method not in {"turn/steer", "turn/start"}:
+        raise FleetCliError("native Codex supervisor send method is invalid")
+    with fleet_lock():
+        claim = read_incarnation()
+        data = load_registry()
+        record = data["workers"].get(binding.name)
+        pending = claim.get("pending_operation") if isinstance(claim, dict) else None
+        current = _codex_supervisor_binding(
+            claim, data, expected_name=binding.name)
+        if (current.incarnation_id != binding.incarnation_id
+                or current.authority != binding.authority
+                or current.current_turn_id != binding.current_turn_id
+                or current.host_generation != binding.host_generation
+                or not isinstance(pending, dict)
+                or pending.get("operation_id") != operation_id
+                or pending.get("kind") != "observe-send"
+                or not isinstance(record, dict)
+                or record.get("last_operation_id") != operation_id):
+            raise FleetCliError(
+                "native Codex supervisor current claim changed before send")
+        pending["kind"] = method
+        write_incarnation(claim)
 
 
 def _commit_codex_supervisor_operation(binding, operation_id, turn_id, *,
@@ -3720,7 +3823,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16370`), because legacy upgrades also require a complete registry.
+    (`:16615`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -8376,17 +8479,183 @@ def cmd_codex_respond(args) -> int:
     return 0
 
 
+def _codex_supervisor_send_operation(binding, operation_id, method, queued,
+                                     mail_claim_name):
+    inputs = [{"type": "text", "text": queued, "text_elements": []}]
+    if method == "turn/steer":
+        params = {
+            "threadId": binding.authority.value,
+            "expectedTurnId": binding.current_turn_id,
+            "input": inputs,
+        }
+    elif method == "turn/start":
+        params = {"threadId": binding.authority.value, "input": inputs}
+    else:
+        raise FleetCliError("native Codex supervisor send method is invalid")
+    return {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": method, "params": params},
+        "recovery": {
+            "kind": f"supervisor/{method}", "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "previous_turn_id": binding.current_turn_id,
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+            "mail_claim": mail_claim_name,
+        },
+    }
+
+
+def _freeze_codex_supervisor_send(binding, operation_id, detail):
+    with fleet_lock():
+        claim = read_incarnation()
+        data = load_registry()
+        record = data["workers"].get(binding.name)
+        pending = claim.get("pending_operation") if isinstance(claim, dict) else None
+        try:
+            current = _codex_supervisor_binding(
+                claim, data, expected_name=binding.name)
+        except FleetCliError:
+            current = None
+        if (current is None
+                or current.incarnation_id != binding.incarnation_id
+                or current.authority != binding.authority
+                or current.current_turn_id != binding.current_turn_id
+                or current.host_generation != binding.host_generation
+                or not isinstance(pending, dict)
+                or pending.get("operation_id") != operation_id
+                or not isinstance(record, dict)
+                or record.get("last_operation_id") != operation_id):
+            return False
+        claim["uncertainty"] = str(detail)[:300]
+        record["adapter_state"] = "uncertain"
+        record["status"] = "dead-suspected"
+        record["uncertain_reason"] = str(detail)[:300]
+        record["last_activity"] = now_iso()
+        write_incarnation(claim)
+        save_registry(data)
+        return True
+
+
+def _commit_codex_supervisor_send_journal(
+        client, binding, operation_id):
+    try:
+        client.commit(operation_id)
+    except BaseException as exc:
+        _freeze_codex_supervisor_send(binding, operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{binding.name}: Codex supervisor send journal commit failed; "
+            f"operation {operation_id} remains recoverable -- {exc}") from exc
+
+
+def _validate_codex_supervisor_send_result(binding, method, result):
+    if not isinstance(result, dict):
+        raise FleetCliError(f"native Codex supervisor {method} returned no result")
+    if method == "turn/start":
+        turn = result.get("turn")
+        if not isinstance(turn, dict):
+            raise FleetCliError("native Codex supervisor wake returned no turn")
+        turn_id = _provider_codex_id(turn.get("id"), "supervisor wake turn")
+        if turn_id == binding.current_turn_id:
+            raise FleetCliError("native Codex supervisor wake reused the completed turn")
+        if turn.get("status") != "inProgress":
+            raise FleetCliError("native Codex supervisor wake turn is not active")
+        return turn_id
+    turn_id = _provider_codex_id(result.get("turnId"), "supervisor steered turn")
+    if turn_id != binding.current_turn_id:
+        raise FleetCliError("native Codex supervisor steer changed the current turn")
+    return turn_id
+
+
+def _settle_codex_supervisor_send(binding, operation_id, operation, client,
+                                  claim_path):
+    recovered = client.recover_observed(operation)
+    if recovered.generation != binding.host_generation:
+        raise FleetCliError(
+            "native Codex supervisor send journal changed host generation")
+    method = operation["payload"]["method"]
+    turn_id = _validate_codex_supervisor_send_result(
+        binding, method, recovered.result)
+    _commit_codex_supervisor_send_journal(
+        client, binding, operation_id)
+    if not _commit_codex_supervisor_operation(
+            binding, operation_id, turn_id,
+            increment_turn=(method == "turn/start")):
+        raise FleetCliError(
+            f"{binding.name}: native Codex supervisor claim changed after "
+            f"{method}; claimed mail was retained for recovery")
+    finalize_mailbox_claim(claim_path)
+    return method
+
+
+def _pending_codex_supervisor_mail_path(binding, pending):
+    name = pending.get("mail_claim") if isinstance(pending, dict) else None
+    expected_prefix = f"{binding.authority.value}.md.claimed."
+    if (not isinstance(name, str) or Path(name).name != name
+            or not name.startswith(expected_prefix)):
+        raise FleetCliError(
+            "native Codex supervisor pending send has no exact mail claim")
+    path = mailbox_dir() / name
+    if not path.is_file():
+        raise FleetCliError(
+            f"native Codex supervisor retained mail is missing: {path}")
+    return path
+
+
+def _reconcile_codex_supervisor_send(binding, pending, client=None):
+    operation_id = pending.get("operation_id")
+    method = pending.get("kind")
+    if method not in {"turn/steer", "turn/start"}:
+        raise FleetCliError("native Codex supervisor pending send kind is invalid")
+    claim_path = _pending_codex_supervisor_mail_path(binding, pending)
+    queued = claim_path.read_text(encoding="utf-8", errors="replace").strip()
+    if not queued:
+        raise FleetCliError("native Codex supervisor retained mail is empty")
+    operation = _codex_supervisor_send_operation(
+        binding, operation_id, method, queued, claim_path.name)
+    client = client or _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError(
+            "native Codex supervisor send belongs to a changed host generation; "
+            "the retained mail and operation remain frozen")
+    try:
+        settled_method = _settle_codex_supervisor_send(
+            binding, operation_id, operation, client, claim_path)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        _freeze_codex_supervisor_send(binding, operation_id, exc)
+        raise FleetCliError(
+            f"{binding.name}: native Codex supervisor {method} operation "
+            f"{operation_id} is not durably observed; no mutation was replayed. "
+            "Retained mail remains frozen; retry `fleet sup-reconcile` after "
+            "the exact host journal settles") from exc
+    action = "woken" if settled_method == "turn/start" else "steered"
+    print(f"{binding.name}: {action} via recovered native Codex operation "
+          f"{operation_id}")
+    return 0
+
+
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
     """Queue once, then steer active or wake idle on the exact claimed thread."""
     binding = _codex_supervisor_binding(expected_name=name)
     operation_id = f"supervisor-send-{uuid.uuid4()}"
-    _reserve_codex_supervisor_operation(binding, operation_id, "observe-send")
+    anticipated_claim = _claimed_path(binding.authority.value)
+    _reserve_codex_supervisor_operation(
+        binding, operation_id, "observe-send",
+        operation_details={"mail_claim": anticipated_claim.name})
     try:
         append_mailbox(binding.authority.value, message)
-        observed = _codex_supervisor_observe(binding, require_full=True)
-    except BaseException:
+        observed = _codex_supervisor_send_observe(binding)
+    except BaseException as exc:
         _clear_codex_supervisor_operation(binding, operation_id)
-        raise
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            f"{name}: native Codex supervisor observation failed ({exc}); queued mail "
+            "was preserved and no provider mutation was attempted") from exc
 
     provider_status = observed["provider_status"]
     flags = observed["active_flags"]
@@ -8405,82 +8674,58 @@ def _cmd_send_codex_supervisor(name: str, message: str) -> int:
         raise FleetCliError(
             f"{name}: native Codex supervisor state is ambiguous; queued mail preserved")
 
+    method = "turn/steer" if provider_status == "active" else "turn/start"
+    try:
+        _set_codex_supervisor_send_kind(binding, operation_id, method)
+    except BaseException:
+        _clear_codex_supervisor_operation(binding, operation_id)
+        raise
+
     queued, claim_path = claim_mailbox(binding.authority.value)
     if not queued or claim_path is None:
         _clear_codex_supervisor_operation(binding, operation_id)
         raise FleetCliError(
             f"{name}: native Codex supervisor could not claim queued mail")
-    input_items = [{"type": "text", "text": queued, "text_elements": []}]
-    if provider_status == "active":
-        method = "turn/steer"
-        params = {
-            "threadId": binding.authority.value,
-            "expectedTurnId": binding.current_turn_id,
-            "input": input_items,
-        }
-        increment_turn = False
-    else:
-        method = "turn/start"
-        params = {"threadId": binding.authority.value, "input": input_items}
-        increment_turn = True
-    operation = {
-        "operation_id": operation_id, "method": "rpc",
-        "payload": {"method": method, "params": params},
-        "recovery": {
-            "kind": f"supervisor/{method}", "fleet_name": binding.name,
-            "incarnation_id": binding.incarnation_id,
-            "thread_id": binding.authority.value,
-            "previous_turn_id": binding.current_turn_id,
-            "canonical_cwd": str(FLEET_HOME.resolve()),
-        },
-    }
+    operation = _codex_supervisor_send_operation(
+        binding, operation_id, method, queued, claim_path.name)
     client = observed["client"]
     try:
         mutation = _call_codex_supervisor_claimed(
             client, binding.incarnation_id, binding.authority,
             operation, timeout=30)
-        result = mutation.result
-        if not isinstance(result, dict):
-            raise FleetCliError(
-                f"native Codex supervisor {method} returned no result")
-        if method == "turn/start":
-            turn = result.get("turn")
-            if not isinstance(turn, dict):
-                raise FleetCliError(
-                    "native Codex supervisor wake returned no turn")
-            turn_id = _provider_codex_id(
-                turn.get("id"), "supervisor wake turn")
-            if turn_id == binding.current_turn_id:
-                raise FleetCliError(
-                    "native Codex supervisor wake reused the completed turn")
-            if turn.get("status") != "inProgress":
-                raise FleetCliError(
-                    "native Codex supervisor wake turn is not active")
-        else:
-            turn_id = _provider_codex_id(
-                result.get("turnId"), "supervisor steered turn")
-            if turn_id != binding.current_turn_id:
-                raise FleetCliError(
-                    "native Codex supervisor steer changed the current turn")
+        turn_id = _validate_codex_supervisor_send_result(
+            binding, method, mutation.result)
     except BaseException as exc:
-        _freeze_codex_supervisor_preclaim(
-            binding.name, binding.incarnation_id, operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-        raise FleetCliError(
-            f"{name}: native Codex supervisor {method} acceptance is uncertain; "
-            "claimed mail was retained for recovery") from exc
+        try:
+            settled_method = _settle_codex_supervisor_send(
+                binding, operation_id, operation, client, claim_path)
+        except BaseException as recovery_exc:
+            if isinstance(recovery_exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            _freeze_codex_supervisor_send(binding, operation_id, recovery_exc)
+            raise FleetCliError(
+                f"{name}: native Codex supervisor {method} operation "
+                f"{operation_id} could not be safely committed "
+                f"({recovery_exc}); no mutation was "
+                "replayed. Claimed mail was retained; run `fleet "
+                "sup-reconcile` to recover this exact operation") from exc
+        action = "woken" if settled_method == "turn/start" else "steered"
+        print(f"{name}: {action} via recovered native Codex operation "
+              f"{operation_id}")
+        return 0
 
+    _commit_codex_supervisor_send_journal(
+        client, binding, operation_id)
     if not _commit_codex_supervisor_operation(
-            binding, operation_id, turn_id, increment_turn=increment_turn):
+            binding, operation_id, turn_id,
+            increment_turn=(method == "turn/start")):
         raise FleetCliError(
             f"{name}: native Codex supervisor claim changed after {method}; "
             "claimed mail was retained for recovery")
-    _commit_codex_supervisor_journal(
-        client, binding.name, binding.incarnation_id,
-        operation_id, operation_id)
     finalize_mailbox_claim(claim_path)
-    action = "woken" if increment_turn else "steered"
+    action = "woken" if method == "turn/start" else "steered"
     print(f"{name}: {action} via native Codex thread {binding.authority.value}")
     return 0
 
@@ -10255,7 +10500,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10170` / `cmd_respawn:9461`, before
+    # resolution that runs from `cmd_kill:10415` / `cmd_respawn:9706`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -10286,9 +10531,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10170` / `cmd_respawn:9461`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:10415` / `cmd_respawn:9706`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9482-9491` spells out that design -- resolve under the lock.
+    # `cmd_respawn:9727-9736` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15191,7 +15436,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1091`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4421`) applies here too. An unreadable registry
+    rule for the view path (`:4524`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -15262,11 +15507,11 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
-    :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    sites that already key on the union (`:3645, :3680, :3710, :3749, :3786,
+    :3848, :3928, :4933, :10518, :10680, :10944, :11171, :11207, :11449, :11450,
+    :11539, :11549, :11560, :11658, :12180, :15459, :19372, :19373, :19477, :19538, :21021, :23342`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
+    OWN prior sid alone: :8996, :9580, :13740, :21943. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -15984,8 +16229,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8751, :9335, :13495,
-    # :21639) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:8996, :9580, :13740,
+    # :21943) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -15993,7 +16238,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1091`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15188`).
+        # names this gate as its reason (`:15433`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -16363,7 +16608,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11906`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:12151`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -18684,6 +18929,11 @@ def cmd_sup_reconcile(args) -> int:
         raise FleetCliError("sup-reconcile requires a native Codex supervisor claim")
     if claim.get("state") == "activating":
         return _reconcile_codex_activating()
+    pending = claim.get("pending_operation")
+    if (isinstance(pending, dict)
+            and pending.get("kind") in {"turn/steer", "turn/start"}):
+        binding = _codex_supervisor_binding(claim, allowed_states={"held"})
+        return _reconcile_codex_supervisor_send(binding, pending)
     predecessor = claim.get("predecessor") if isinstance(claim, dict) else None
     if (claim.get("state") == "held"
             and isinstance(predecessor, dict)
@@ -19777,6 +20027,56 @@ def cmd_sup_context(args) -> int:
     return 0
 
 
+def _verify_codex_supervisor_caller(binding):
+    from fleet_codex import HostRejected, codex_process_source
+    requested = os.environ.get("CODEX_THREAD_ID")
+    if requested != binding.authority.value:
+        raise FleetCliError(
+            "sup-notify: caller is not the current native Codex holder thread")
+    try:
+        source = codex_process_source(os.getpid(), binding.authority.value)
+    except HostRejected as exc:
+        raise FleetCliError(f"sup-notify: {exc}") from exc
+    try:
+        caller_cwd = Path(source.get("ancestor_cwd")).resolve()
+    except (TypeError, OSError):
+        caller_cwd = None
+    if caller_cwd != FLEET_HOME.resolve():
+        raise FleetCliError(
+            "sup-notify: native Codex holder process belongs to another home")
+    return source
+
+
+def _cmd_codex_sup_notify(args):
+    binding = _codex_supervisor_binding()
+    _verify_codex_supervisor_caller(binding)
+    observed = _codex_supervisor_send_observe(binding)
+    if observed["provider_status"] not in {"active", "idle"}:
+        raise FleetCliError("sup-notify: native Codex provider state is ambiguous")
+    if observed["active_flags"]:
+        raise FleetCliError("sup-notify: native Codex holder is waiting on provider input")
+    with fleet_lock():
+        claim = read_incarnation()
+        data = load_registry()
+        try:
+            current = _codex_supervisor_binding(
+                claim, data, expected_name=binding.name)
+        except FleetCliError as exc:
+            raise FleetCliError(
+                "sup-notify: native Codex supervisor claim changed before delivery") from exc
+        if (current.incarnation_id != binding.incarnation_id
+                or current.authority != binding.authority
+                or current.current_turn_id != binding.current_turn_id
+                or current.host_generation != binding.host_generation
+                or claim.get("pending_operation") is not None):
+            raise FleetCliError(
+                "sup-notify: native Codex supervisor claim changed before delivery")
+        claim["heartbeat_at"] = now_iso()
+        claim["provider_status"] = observed["provider_status"]
+        write_incarnation(claim)
+    return claim
+
+
 def cmd_sup_notify(args, run=subprocess.run) -> int:
     """Notify the interface after non-minting claim validation.
 
@@ -19787,12 +20087,16 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         print(f"[dry-run] would type into {target}: "
               f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
         return 0
-    with fleet_lock():
-        claim, _, notices = _require_claim_holder(
-            getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
-            verb="sup-notify", mint=False)
-        claim["heartbeat_at"] = now_iso()
-        write_incarnation(claim)
+    if _claim_uses_native_codex():
+        claim = _cmd_codex_sup_notify(args)
+        notices = []
+    else:
+        with fleet_lock():
+            claim, _, notices = _require_claim_holder(
+                getattr(args, "sid", None), nonce=getattr(args, "nonce", None),
+                verb="sup-notify", mint=False)
+            claim["heartbeat_at"] = now_iso()
+            write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
     if not type_interface_line(run, target, args.text,

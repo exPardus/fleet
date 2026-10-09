@@ -1427,6 +1427,33 @@ class OperationJournal:
     def commit(self, operation_id: str) -> dict[str, Any]:
         return self._transition(operation_id, {"observed"}, "committed")
 
+    def observed_operation(self, operation: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a durably observed mutation without sending it again.
+
+        This is the response-loss boundary: the complete immutable intent must
+        match the journal, and only an already observed/committed result is
+        recoverable.  Prepared, accepted, and uncertain intents remain frozen.
+        """
+        operation_id = self._validate_id(operation.get("operation_id"))
+        method = operation.get("method")
+        payload = operation.get("payload", {})
+        recovery = operation.get("recovery", {})
+        record = self.load(operation_id)
+        if (record.get("generation") != self.generation
+                or record.get("method") != method
+                or record.get("payload_digest") != _digest(method, payload)
+                or record.get("recovery") != _public_evidence(recovery)):
+            raise HostRejected(
+                f"operation {operation_id} does not match its durable intent")
+        if record.get("state") not in {"observed", "committed"}:
+            raise HostRejected(
+                f"operation {operation_id} is {record.get('state')}; exact "
+                "provider acceptance is not yet proven")
+        if "result" not in record:
+            raise HostRejected(
+                f"operation {operation_id} has no durable observed result")
+        return record
+
     def commit_handoff_turn_start(
             self, operation_id: str, *, fleet_name: str,
             incarnation_id: str, thread_id: str, turn_id: str,
@@ -1937,6 +1964,14 @@ class CodexHostClient:
 
     def commit(self, operation_id: str) -> None:
         OperationJournal(self.home, self.generation).commit(operation_id)
+
+    def recover_observed(self, operation: Mapping[str, Any]) -> CodexObservation:
+        """Recover one exact durable result; never contact the provider host."""
+        record = OperationJournal(
+            self.home, self.generation).observed_operation(operation)
+        return CodexObservation(
+            record["operation_id"], record["generation"],
+            record["payload_digest"], record["result"])
 
     def commit_handoff_turn_start(self, operation_id: str, **evidence: Any) -> None:
         OperationJournal(self.home, self.generation).commit_handoff_turn_start(

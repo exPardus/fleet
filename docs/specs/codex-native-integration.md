@@ -424,6 +424,21 @@ creates no send reservation. A known-local mailbox failure before the provider
 call releases its reservation; only a possibly accepted provider call freezes
 the row and keeps the reservation for reconciliation.
 
+Native supervisor send uses a metadata-only `thread/read` plus the two newest
+item-free turns from `thread/turns/list`; it never hydrates an unbounded
+supervisor transcript merely to steer the active turn. The claim, host
+generation, thread, and current turn are checked again at the mutation and
+commit boundaries. If host IPC loses the response after the operation journal
+has durably observed the provider result, Fleet reads that exact operation by
+ID and payload digest and commits it without another `turn/steer` or
+`turn/start`. Any prepared/accepted/uncertain journal state remains reserved;
+the claimed mailbox file is retained and `sup-reconcile` retries only the
+journal reconciliation, never the provider mutation. A changed claim,
+generation, thread, or turn wins the compare-and-swap and likewise retains the
+mail. The claimed mailbox file is deleted only after the exact operation and
+Fleet state both commit, so response recovery cannot duplicate or silently
+discard mail.
+
 ### 8.3 Interrupt and terminal operations
 
 **Implemented 2026-10-04:** worker `interrupt` issues one supported request and
@@ -620,6 +635,14 @@ thread, but remains observational: it never resumes or owns that same thread,
 starts a turn on it, or creates a second writer. A bridge that needs active
 control must use a separately authorized provider thread and the normal
 single-owner lifecycle.
+
+A native Codex holder may call `sup-notify` without a Claude session ID or
+nonce. Fleet authenticates the invoking process's `CODEX_THREAD_ID` and Codex
+ancestor against the exact claimed thread/home, validates the same host
+generation and newest current turn used by native checkpointing, and
+compare-and-swaps the unchanged provider claim before refreshing its heartbeat
+and typing one line. Foreign process identity or claim/generation/turn drift
+refuses before tmux. The legacy Claude nonce path is unchanged.
 
 Wrong cwd, ambiguous homes, unknown thread, Claude SID in the Codex field,
 Codex ID in `session_id`, malformed input, host mismatch, or unverified UUID
