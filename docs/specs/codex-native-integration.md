@@ -717,16 +717,21 @@ For the restored holder before its first successful normal send, use
 `--expect-restore-op`, and `--expect-new-generation`. It pins the complete
 worker inventory, claim, row, linked journals, target mail, registered
 Interface, public idle/completed header, and host and app-server identities
-for five minutes. The inventory distinguishes recorded mcx and archived
-external-session rows from native app-server ownership; model text or an old
-generation alone never proves that a row is external. An old native preclaim
-needs an exact failed-before-acceptance journal. An old bound native thread
-needs terminal operation journals, no unresolved callback, and a fresh public
+for five minutes. The inventory distinguishes explicit mcx and daemon-hosted
+external-session rows from native app-server ownership; model text, an archived
+timestamp, or an old generation alone never proves that a row is external.
+Unknown provenance refuses. An old native preclaim needs an exact
+failed-before-acceptance journal. An old bound native thread needs a committed
+last-operation journal whose method, kind, and result bind its recorded turn,
+no unresolved callback, and a fresh public
 `thread/read` status of `notLoaded` with its recorded terminal newest turn.
 Missing, loaded, active, idle, or ambiguous native evidence refuses. The full
-registry and other-operation/callback evidence are pinned and rechecked before
+registry, current and owner-only retired operation journals, and callback
+evidence are pinned and rechecked before
 host creation, dispatch, and settlement. Immediately before shutdown the old
 host must repeat the public `notLoaded` proof for each historical bound thread.
+Retiring a journal does not settle an accepted or observed intent; a retired
+unresolved record refuses preparation without editing the archive.
 After exact host and child exit with stale heartbeat,
 `--reattach-restored-continuation` with the same pins starts a fresh host
 generation and sends one distinct policy-bound `thread/resume` with

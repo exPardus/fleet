@@ -1843,7 +1843,7 @@ def test_restored_continuation_drift_refuses_before_host_creation(
 
 
 def _seed_platform_historical_inventory(home, client, monkeypatch):
-    """Reproduce the Mac 131 mcx, one legacy, five old-native row shapes."""
+    """Reproduce the Mac 131 mcx, 84 bg, five old-native row shapes."""
     from fleet_codex import OperationJournal
 
     data = fleet.load_registry()
@@ -1856,11 +1856,19 @@ def _seed_platform_historical_inventory(home, client, monkeypatch):
         }
     legacy_name = "sup|inc-20261008T231137Z-b530|successor"
     data["workers"][legacy_name] = {
-        "model": "codex:gpt-6-sol", "dispatch_kind": None,
+        "model": "codex:gpt-6-sol", "dispatch_kind": "bg",
+        "substrate": None,
         "session_id": "legacy-external-session",
         "status": "working", "archived_at": "2026-10-08T23:19:46Z",
         "last_operation_id": None,
     }
+    for index in range(83):
+        data["workers"][f"historical-bg-{index}"] = {
+            "model": "claude-sonnet-5-5", "dispatch_kind": "bg",
+            "substrate": None, "session_id": f"external-session-{index}",
+            "status": "idle", "archived_at": None,
+            "last_operation_id": None,
+        }
     preclaims = []
     for index, incarnation in enumerate((
             "inc-20261009T011922Z-2caf",
@@ -1911,15 +1919,21 @@ def _seed_platform_historical_inventory(home, client, monkeypatch):
         journal = OperationJournal(home, generation)
         journal.prepare({
             "operation_id": operation_id, "method": "rpc",
-            "payload": {"method": "turn/start", "params": {
+            "payload": {"method": ("turn/start" if index == 0 else
+                                   "turn/steer"), "params": {
                 "threadId": thread_id, "input": []}},
-            "recovery": {"kind": "supervisor/turn/start",
+            "recovery": {"kind": ("supervisor/turn/start" if index == 0 else
+                                  "supervisor/turn/steer"),
                          "fleet_name": name, "incarnation_id": incarnation,
                          "thread_id": thread_id,
+                         "previous_turn_id": (TURN_ID if index == 0 else
+                                              turn_id),
                          "canonical_cwd": str(home.resolve())},
         })
         journal.accept(operation_id)
-        journal.observe(operation_id, {"turnId": turn_id})
+        journal.observe(operation_id, (
+            {"turn": {"id": turn_id, "status": "inProgress"}}
+            if index == 0 else {"turnId": turn_id}))
         journal.commit(operation_id)
         bound[thread_id] = {"name": name, "turn": turn_id,
                             "journal": journal, "operation": operation_id,
@@ -1957,6 +1971,7 @@ def test_restored_continuation_accounts_for_reported_historical_inventory(
         _restored_continuation_setup(supervisor_home, monkeypatch)
     _legacy, _preclaims, bound = _seed_platform_historical_inventory(
         supervisor_home, old_client, monkeypatch)
+    assert len(fleet.load_registry()["workers"]) == 221
     assert fleet.cmd_sup_reconcile(args) == 0
     proof = fleet.read_incarnation()["restored_continuation_preflight"]
     assert set(proof["other_native_public"]) == set(bound)
@@ -1979,9 +1994,155 @@ def test_restored_continuation_accounts_for_reported_historical_inventory(
     assert all(item["status"] == "notLoaded" for item in bound.values())
 
 
+@pytest.mark.parametrize("archived", ["failed-preclaim", "committed-bound"])
+def test_restored_continuation_reads_terminal_retired_journal_without_editing_it(
+        supervisor_home, monkeypatch, archived):
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    _legacy, preclaims, bound = _seed_platform_historical_inventory(
+        supervisor_home, old_client, monkeypatch)
+    if archived == "failed-preclaim":
+        _row, journal, operation = preclaims[0]
+    else:
+        item = next(iter(bound.values()))
+        journal, operation = item["journal"], item["operation"]
+    original = journal.path(operation).read_bytes()
+    retired = supervisor_home / "state" / "codex" / "operations.retired"
+    retired.mkdir(mode=0o700)
+    journal.path(operation).rename(retired / (operation + ".json"))
+    assert fleet.cmd_sup_reconcile(args) == 0
+    assert (retired / (operation + ".json")).read_bytes() == original
+    assert not journal.path(operation).exists()
+
+
+def test_restored_continuation_actual_retired_observed_roster_stays_held(
+        supervisor_home, monkeypatch):
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    _legacy, preclaims, bound = _seed_platform_historical_inventory(
+        supervisor_home, old_client, monkeypatch)
+    retired = supervisor_home / "state" / "codex" / "operations.retired"
+    retired.mkdir(mode=0o700)
+    archived = {}
+    for index, (_row, journal, operation) in enumerate(preclaims):
+        if index == 0:
+            record = journal.load(operation)
+            record.update({
+                "state": "observed", "accepted_at": 1.0,
+                "observed_at": 2.0,
+                "result": {"thread": {"id": SUCCESSOR_THREAD_ID},
+                           "approvalsReviewer": "auto_review"},
+            })
+            journal.path(operation).write_text(
+                json.dumps(record), encoding="utf-8")
+        path = retired / (operation + ".json")
+        journal.path(operation).rename(path)
+        archived[operation] = path.read_bytes()
+    item = list(bound.values())[1]
+    journal, operation = item["journal"], item["operation"]
+    record = journal.load(operation)
+    record.update({
+        "state": "observed", "accepted_at": 3.0, "observed_at": 4.0,
+        "generation": "observed-resume-generation",
+        "public_method": "thread/resume",
+        "result": {"sandbox": {"type": "workspaceWrite",
+                               "writableRoots": []}},
+    })
+    record["recovery"]["kind"] = "supervisor/thread-resume"
+    record["recovery"]["previous_host_generation"] = \
+        "old-bound-generation-1"
+    journal.path(operation).write_text(json.dumps(record), encoding="utf-8")
+    path = retired / (operation + ".json")
+    journal.path(operation).rename(path)
+    archived[operation] = path.read_bytes()
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(args)
+    assert fleet.read_incarnation()["state"] == "held"
+    assert "restored_continuation_preflight" not in fleet.read_incarnation()
+    assert {path.stem: path.read_bytes() for path in retired.glob("*.json")} == archived
+
+
+@pytest.mark.parametrize("case", [
+    "unknown-native-row", "wrong-bound-result", "wrong-bound-method",
+    "wrong-bound-kind", "missing-bound-result", "wrong-steer-result",
+    "malformed-callback", "malformed-target-operation",
+])
+def test_restored_continuation_refuses_w232_ambiguous_evidence(
+        supervisor_home, monkeypatch, case):
+    from fleet_codex import CodexApprovalStore, OperationJournal
+
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    legacy, _preclaims, bound = _seed_platform_historical_inventory(
+        supervisor_home, old_client, monkeypatch)
+    if case == "unknown-native-row":
+        data = fleet.load_registry()
+        del data["workers"][legacy]
+        data["workers"]["unknown-native-row"] = {
+            "dispatch_kind": "codex-app-server", "substrate": None,
+            "model": None, "session_id": None, "adapter_state": None,
+            "codex_thread_id": None, "codex_turn_id": None,
+            "codex_host_generation": None,
+            "last_operation_id": "unresolved-row-link",
+            "status": "dead-suspected",
+        }
+        fleet.save_registry(data)
+    elif case in {"wrong-bound-result", "wrong-bound-method",
+                  "wrong-bound-kind", "missing-bound-result",
+                  "wrong-steer-result"}:
+        item = (list(bound.values())[1] if case == "wrong-steer-result"
+                else next(iter(bound.values())))
+        record = item["journal"].load(item["operation"])
+        if case == "wrong-bound-result":
+            record["result"]["turn"]["id"] = TURN_ID
+        elif case == "wrong-bound-method":
+            record["public_method"] = "thread/resume"
+        elif case == "wrong-bound-kind":
+            record["recovery"]["kind"] = "supervisor/thread-start"
+        elif case == "missing-bound-result":
+            record.pop("result")
+        else:
+            record["result"]["turnId"] = TURN_ID
+        item["journal"].path(item["operation"]).write_text(
+            json.dumps(record), encoding="utf-8")
+    elif case == "malformed-callback":
+        store = CodexApprovalStore(supervisor_home, old_client.generation)
+        path = store.path("malformed")
+        path.write_text(json.dumps({
+            "schema": 1, "home": str(supervisor_home.resolve()),
+            "key": path.stem, "generation": old_client.generation,
+            "request_id": "malformed", "state": "malformed",
+            "created_at": 1.0,
+        }), encoding="utf-8")
+        os.chmod(path, 0o600)
+    else:
+        claim = fleet.read_incarnation()
+        data = fleet.load_registry()
+        target = fleet._codex_supervisor_binding(
+            claim, data, allowed_states={"held"}).name
+        journal = OperationJournal(supervisor_home, old_client.generation)
+        operation_id = "target-malformed-state"
+        journal.prepare({
+            "operation_id": operation_id, "method": "rpc",
+            "payload": {"method": "thread/start", "params": {}},
+            "recovery": {"kind": "supervisor/thread-start",
+                         "fleet_name": target,
+                         "canonical_cwd": str(supervisor_home.resolve())},
+        })
+        record = journal.load(operation_id)
+        record["state"] = "malformed"
+        journal.path(operation_id).write_text(
+            json.dumps(record), encoding="utf-8")
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(args)
+    assert fleet.read_incarnation()["state"] == "held"
+    assert "restored_continuation_preflight" not in fleet.read_incarnation()
+
+
 @pytest.mark.parametrize("case", [
     "mcx-native-pin", "mcx-native-protocol", "legacy-no-session",
     "preclaim-accepted", "preclaim-missing-journal", "bound-observed",
+    "archived-observed-preclaim", "archived-observed-resume",
     "bound-missing-journal", "bound-loaded", "bound-newest-changed",
     "bound-current-generation", "unknown-callback", "unattributed-intent",
 ])
@@ -2012,6 +2173,29 @@ def test_restored_continuation_historical_inventory_refuses_ambiguity(
     elif case == "preclaim-missing-journal":
         _row, journal, operation = preclaims[0]
         journal.path(operation).unlink()
+    elif case == "archived-observed-preclaim":
+        _row, journal, operation = preclaims[0]
+        record = journal.load(operation)
+        record.update({"state": "observed", "accepted_at": 1.0,
+                       "observed_at": 2.0,
+                       "result": {"thread": {"id": SUCCESSOR_THREAD_ID}}})
+        journal.path(operation).write_text(json.dumps(record), encoding="utf-8")
+        retired = supervisor_home / "state" / "codex" / "operations.retired"
+        retired.mkdir()
+        journal.path(operation).rename(retired / (operation + ".json"))
+    elif case == "archived-observed-resume":
+        item = list(bound.values())[1]
+        record = item["journal"].load(item["operation"])
+        record.update({"state": "observed", "public_method": "thread/resume",
+                       "result": {"sandbox": {"type": "workspaceWrite",
+                                              "writableRoots": []}}})
+        record["recovery"]["kind"] = "supervisor/thread-resume"
+        item["journal"].path(item["operation"]).write_text(
+            json.dumps(record), encoding="utf-8")
+        retired = supervisor_home / "state" / "codex" / "operations.retired"
+        retired.mkdir()
+        item["journal"].path(item["operation"]).rename(
+            retired / (item["operation"] + ".json"))
     elif case == "bound-observed":
         item = next(iter(bound.values()))
         record = item["journal"].load(item["operation"])
