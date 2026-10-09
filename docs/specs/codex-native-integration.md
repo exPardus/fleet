@@ -100,9 +100,12 @@ registry owner for every unrelated terminal journal; malformed or ownerless
 entries refuse. Any target inbox or claimed target mail refuses before the
 journal transition and is checked again before the row write. The registry,
 operation, callback, and mailbox scans have explicit size or entry bounds.
-The registry lock retains a live process owner past its age threshold, so a
-slow inventory or suspended writer cannot be replaced by another current
-Fleet CLI writer during the journal-first transition.
+The registry lock retains a live process owner past its age threshold. On
+POSIX, it also holds a kernel lock on the exact lock-file inode through both
+writes; stale-break contenders lock and recheck that inode before unlinking.
+This prevents a slow or suspended settlement writer from being replaced by
+another current Fleet CLI writer during the journal-first transition. A
+pre-install CLI writer that lacks this protocol is an act-time STOP condition.
 
 ### 3.1 Current mcx adapter
 

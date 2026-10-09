@@ -443,6 +443,48 @@ def test_aged_modern_dead_owner_token_is_recoverable(preaccept_home):
     assert not path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX kernel flock handoff")
+def test_two_stale_breakers_cannot_unlink_successors_lock(
+        preaccept_home, monkeypatch):
+    path = fleet.lock_path()
+    path.write_text("999999999|dead-start|nonce", encoding="ascii")
+    old = time.time() - 60
+    os.utime(path, (old, old))
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+    original = fleet._fleet_lock_live_owner
+
+    def pause_first(candidate):
+        if threading.current_thread().name == "first-stale-breaker":
+            entered.set()
+            assert release.wait(3), "stale breaker pause expired"
+        return original(candidate)
+
+    monkeypatch.setattr(fleet, "_fleet_lock_live_owner", pause_first)
+
+    def first():
+        try:
+            with fleet.fleet_lock(timeout=2):
+                pass
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=first, name="first-stale-breaker")
+    thread.start()
+    try:
+        assert entered.wait(3), "first stale breaker did not inspect owner"
+        with pytest.raises(fleet.FleetLockTimeout):
+            with fleet.fleet_lock(timeout=0.12):
+                pytest.fail("second stale breaker entered before first released inode")
+    finally:
+        release.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert not errors
+    assert not path.exists()
+
+
 def test_target_mail_arriving_after_journal_write_preserves_partial_recovery(
         preaccept_home, monkeypatch):
     case = preaccept_home

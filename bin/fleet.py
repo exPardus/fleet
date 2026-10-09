@@ -31,6 +31,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
+if os.name != "nt":
+    import fcntl
+else:
+    fcntl = None
+
 import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
@@ -874,6 +879,17 @@ def _fleet_lock_live_owner(path: Path) -> bool:
         return True
 
 
+def _fleet_lock_same_file(fd: int, path: Path) -> bool:
+    """A pathname may have changed while a contender waited for its inode."""
+    try:
+        opened = os.fstat(fd)
+        named = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (stat.S_ISREG(opened.st_mode) and stat.S_ISREG(named.st_mode)
+            and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino))
+
+
 @contextmanager
 def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     """Lock one home's registry; ``home`` avoids changing global selection."""
@@ -888,12 +904,42 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     while fd is None:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            if fcntl is not None:
+                # Keep a kernel lock on this inode through the whole registry
+                # transaction. A stale breaker must acquire the same lock
+                # before it may unlink the name. This closes the race between
+                # two contenders that both inspected an old stale pathname.
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                if not _fleet_lock_same_file(fd, path):
+                    os.close(fd)
+                    fd = None
+                    continue
         except FileExistsError:
             try:
                 age = time.time() - path.stat().st_mtime
             except FileNotFoundError:
                 continue  # someone else already broke/released it; retry immediately
-            if age > LOCK_STALE_SECONDS and not _fleet_lock_live_owner(path):
+            if age > LOCK_STALE_SECONDS and fcntl is not None:
+                try:
+                    stale_fd = os.open(str(path), os.O_RDONLY
+                                       | getattr(os, "O_NOFOLLOW", 0)
+                                       | getattr(os, "O_NONBLOCK", 0))
+                except FileNotFoundError:
+                    continue
+                try:
+                    try:
+                        fcntl.flock(stale_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        if (_fleet_lock_same_file(stale_fd, path)
+                                and time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS
+                                and not _fleet_lock_live_owner(path)):
+                            path.unlink()
+                            continue
+                finally:
+                    os.close(stale_fd)
+            elif age > LOCK_STALE_SECONDS and not _fleet_lock_live_owner(path):
                 try:
                     path.unlink()
                 except FileNotFoundError:
@@ -918,16 +964,18 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
         # O_EXCL proves this file is ours. On token-write failure, close and remove it
         # so other acquirers are not stranded; cleanup must preserve the original error.
         try:
-            os.close(fd)
+            if _fleet_lock_same_file(fd, path):
+                path.unlink()
         except OSError:
             pass
         try:
-            path.unlink()
+            os.close(fd)
         except OSError:
             pass
         raise
     try:
-        os.close(fd)
+        if fcntl is None:
+            os.close(fd)
         yield
     finally:
         # Compare-and-delete: only unlink if the lock file still holds our
@@ -939,9 +987,12 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
             current = None
         if current == token.encode("utf-8"):
             try:
-                path.unlink()
+                if fcntl is None or _fleet_lock_same_file(fd, path):
+                    path.unlink()
             except (FileNotFoundError, OSError):
                 pass
+        if fcntl is not None:
+            os.close(fd)
 
 
 # ---------------------------------------------------------------------------
