@@ -78,6 +78,33 @@ def _bounded_rpc_timeout(payload: Mapping[str, Any], operation_timeout: float,
     return min(float(requested), operation_timeout, _remaining(deadline))
 
 
+def _ipc_peer_credentials(connection: socket.socket) -> tuple[int, int]:
+    """Return kernel-owned PID and effective UID for a local socket peer."""
+    try:
+        if _platform().is_linux and hasattr(socket, "SO_PEERCRED"):
+            raw = connection.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            pid, uid, _gid = struct.unpack("3i", raw)
+        elif getattr(_platform(), "is_darwin", False):
+            # sys/un.h: SOL_LOCAL=0, LOCAL_PEERPID=2, LOCAL_PEERCRED=1.
+            pid_raw = connection.getsockopt(0, 2, struct.calcsize("i"))
+            cred_raw = connection.getsockopt(0, 1, 76)  # struct xucred, 16 groups
+            if len(pid_raw) != 4 or len(cred_raw) != 76:
+                raise HostRejected("could not authenticate Codex IPC peer")
+            pid = struct.unpack("=i", pid_raw)[0]
+            version, uid = struct.unpack_from("=II", cred_raw)
+            if version != 0:  # XUCRED_VERSION
+                raise HostRejected("could not authenticate Codex IPC peer")
+        else:
+            raise HostRejected(
+                "Interface mutation authentication is unsupported on this platform")
+    except (OSError, struct.error, ValueError) as exc:
+        raise HostRejected("could not authenticate Codex IPC peer") from exc
+    if pid <= 0 or uid < 0:
+        raise HostRejected("could not authenticate Codex IPC peer")
+    return pid, uid
+
+
 class Host:
     def __init__(self, *, home: Path, generation: str, endpoint: str,
                  transport: str, app_server_command: list[str],
@@ -734,14 +761,7 @@ class Host:
         claim = read_interface_claim(self.home)
         if claim is None:
             return
-        if not _platform().is_linux or not hasattr(socket, "SO_PEERCRED"):
-            raise HostRejected("Interface mutation authentication is unsupported on this platform")
-        try:
-            raw = connection.getsockopt(
-                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
-            peer_pid, peer_uid, _peer_gid = struct.unpack("3i", raw)
-        except (OSError, struct.error) as exc:
-            raise HostRejected("could not authenticate Codex IPC peer") from exc
+        peer_pid, peer_uid = _ipc_peer_credentials(connection)
         source = codex_process_source(peer_pid)
         if peer_uid != os.getuid() or source.get("uid") != peer_uid:
             raise HostRejected("Codex IPC peer uid does not match the host owner")

@@ -49,6 +49,7 @@ class _WindowsPlatform:
 
     is_windows = True
     is_linux = False
+    is_darwin = False
 
     def memory_available_mb(self) -> int:
         """Windows has no portable MemAvailable implementation in Fleet."""
@@ -143,6 +144,7 @@ class _PosixPlatform:
 
     is_windows = False
     is_linux = sys.platform.startswith("linux")
+    is_darwin = sys.platform == "darwin"
 
     def memory_available_mb(self) -> int:
         """Read Linux MemAvailable; other POSIX platforms are explicit gaps."""

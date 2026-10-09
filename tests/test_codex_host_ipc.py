@@ -394,6 +394,8 @@ def test_interface_claim_authorizes_current_peer_and_refuses_stale_sources(
              "ancestor_pid": 41, "ancestor_start_identity": "100", "uid": 1000}
     monkeypatch.setattr(host_module, "read_interface_claim", lambda _home: claim)
     monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(host_module, "_ipc_peer_credentials",
+                        lambda _connection: (99, 1000))
     source = {"thread_id": "thread-current", "ancestor_pid": 41,
               "ancestor_start_identity": "100", "ancestor_cwd": str(host.home),
               "uid": 1000}
@@ -418,6 +420,44 @@ def test_interface_claim_authorizes_current_peer_and_refuses_stale_sources(
                 Peer(), "turn/start", {"params": {"threadId": "worker-thread"}})
         source.clear()
         source.update(original)
+
+
+def test_darwin_ipc_peer_credentials_use_kernel_pid_and_uid(monkeypatch):
+    import fleet_codex_host as host_module
+    import fleet_platform
+
+    monkeypatch.setattr(fleet_platform, "PLATFORM",
+                        SimpleNamespace(is_linux=False, is_darwin=True))
+    calls = []
+
+    class Peer:
+        def getsockopt(self, level, option, size):
+            calls.append((level, option, size))
+            return (struct.pack("=i", 99) if option == 2
+                    else struct.pack("=II", 0, 501) + bytes(68))
+
+    assert host_module._ipc_peer_credentials(Peer()) == (99, 501)
+    assert calls == [(0, 2, 4), (0, 1, 76)]
+
+    class WrongVersion(Peer):
+        def getsockopt(self, level, option, size):
+            return (struct.pack("=i", 99) if option == 2
+                    else struct.pack("=II", 1, 501) + bytes(68))
+
+    with pytest.raises(host_module.HostRejected, match="could not authenticate"):
+        host_module._ipc_peer_credentials(WrongVersion())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires Darwin socket")
+def test_darwin_ipc_peer_credentials_smoke():
+    import fleet_codex_host as host_module
+
+    left, right = socket.socketpair()
+    try:
+        assert host_module._ipc_peer_credentials(left) == (os.getpid(), os.getuid())
+    finally:
+        left.close()
+        right.close()
 
 
 def test_identity_invalid_unknown_request_freezes_all_provider_mutations(
@@ -462,6 +502,8 @@ def test_external_interface_thread_is_observe_only(tmp_path, monkeypatch):
     monkeypatch.setattr(host_module, "read_interface_claim", lambda _home: claim)
     monkeypatch.setattr(host_module, "codex_process_source", lambda _pid: source)
     monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(host_module, "_ipc_peer_credentials",
+                        lambda _connection: (99, 1000))
 
     class Peer:
         def getsockopt(self, *_args):
@@ -477,20 +519,22 @@ def test_current_supervisor_source_requires_exact_home_cwd(tmp_path, monkeypatch
 
     host = host_module.Host.__new__(host_module.Host)
     host.home = _home(tmp_path)
+    uid = os.getuid()
     (host.home / "supervisor").mkdir()
     (host.home / "supervisor/INCARNATION").write_text(json.dumps({
         "state": "held", "provider": "codex",
         "holder": {"provider": "codex", "thread_id": "supervisor-thread"},
     }))
     interface_claim = {"thread_id": "interface-thread", "ancestor_pid": 41,
-                       "ancestor_start_identity": "100", "uid": 1000}
+                       "ancestor_start_identity": "100", "uid": uid}
     source = {"thread_id": "supervisor-thread", "ancestor_pid": 55,
               "ancestor_start_identity": "200", "ancestor_cwd": str(host.home),
-              "uid": 1000}
+              "uid": uid}
     monkeypatch.setattr(host_module, "read_interface_claim",
                         lambda _home: interface_claim)
     monkeypatch.setattr(host_module, "codex_process_source", lambda _pid: source)
-    monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(host_module, "_ipc_peer_credentials",
+                        lambda _connection: (99, uid))
 
     class Peer:
         def getsockopt(self, *_args):

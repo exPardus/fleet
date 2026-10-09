@@ -592,7 +592,10 @@ predecessor. If acceptance is unknown, the claim stays activating and PAGE;
 Fleet neither restores the predecessor nor starts another successor. After
 promotion, interrupt the predecessor through the supported operation if active
 and retire it only after terminal proof. Existing Claude token/nonce handoff is
-unchanged on Claude routes.
+unchanged on Claude routes. A handoff never switches provider: `sup-handoff-begin --model
+codex:<model>` on a Claude-held claim refuses before dispatch. Move a Claude
+supervisor to Codex by checkpoint, `sup-release`, then `sup-spawn --model
+codex:<model>`.
 
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and
@@ -619,13 +622,17 @@ registration refuses without writing state.
 
 The reviewed protocol exposes thread ID, session ID, and source as readable
 membership metadata, but no credential authenticating the process invoking
-Fleet. On Linux, Fleet therefore combines an exact public `thread/read` with
-kernel-owned Unix-socket peer credentials and `/proc` ancestry. Registration
-binds the exact `CODEX_THREAD_ID`, nearest Codex ancestor PID and start identity,
+Fleet. On Linux and Darwin, Fleet therefore combines an exact public
+`thread/read` with kernel-owned Unix-socket peer credentials and process
+ancestry. Linux reads `/proc`; Darwin reads `KERN_PROC_PID` start identity,
+`PROC_PIDTBSDINFO` for parent/uid/command, `PROC_PIDVNODEPATHINFO` for cwd,
+and same-uid `KERN_PROCARGS2` for environment. Darwin sockets provide
+`LOCAL_PEERPID` and `LOCAL_PEERCRED`. Registration binds the exact
+`CODEX_THREAD_ID`, nearest Codex ancestor PID and start identity,
 and explicit home in an owner-only rotating claim. The host rechecks the peer's
 thread and ancestry for every app-server mutation. A different UUID, unrelated
 same-user process, reused PID, nearer forked Codex process, or stale predecessor
-fails closed. Other platforms remain unsupported until they have equivalent
+fails closed. Windows remains unsupported until it has equivalent
 peer-process and PID-reuse acceptance proof.
 
 Interface provider registration is exclusive. A successful native Codex
