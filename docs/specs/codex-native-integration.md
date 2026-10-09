@@ -622,7 +622,11 @@ the current registered Codex Interface first runs
 and exact expected incarnation, thread, turn, original resume operation, and
 observed host generation. This records a five-minute claim-bound proof of the
 original journal, current managed requirements, and bounded public
-idle/completed/no-new-turn evidence. A loaded thread may be idle, and pinned
+idle/completed/no-new-turn evidence. It durably pins the exact prepared
+supervisor claim and row plus the thread inbox and claimed-mail identities and
+digests. Any later supervisor or target-mail change refuses before host
+creation, before provider dispatch, and before settlement; unrelated product
+worker rows may change. A loaded thread may be idle, and pinned
 0.155.1 ignores resume policy overrides for a loaded thread; `thread/unsubscribe`
 does not unload it. The exact observed Platform host and app-server child must
 exit and its heartbeat become stale. Then `--restore-recorded-policy` with the
@@ -634,7 +638,7 @@ boundary, and reserves a new auditable resume intent. The pinned public
 journal gate permits this linked request behind only the matching observed
 original intent from the prior generation. The original journal stays observed.
 Fleet adopts the fresh generation only after an exact effective bypass response,
-repeat public header, and locked claim/row/source/host/journal comparison. An
+repeat public header, and locked claim/row/mail/source/host/journal comparison. An
 accepted but unverified new response remains uncertain; read-only reconcile can
 settle only its exact observed new operation. No turn is replayed or newly
 started.

@@ -1593,6 +1593,136 @@ def test_policy_restore_requires_exact_cold_boundary(
                    for op in new.operations)
 
 
+@pytest.mark.parametrize("drift", [
+    "new-mail", "claimed-mail", "supervisor-row", "claim-heartbeat",
+    "row-working",
+])
+def test_policy_restore_rejects_post_preflight_supervisor_progress(
+        supervisor_home, monkeypatch, drift):
+    name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old, new, _current = _cold_restore_clients(supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old)
+    if drift == "new-mail":
+        fleet.append_mailbox(THREAD_ID, "arrived after preflight")
+        mail = (supervisor_home / "mailbox" / f"{THREAD_ID}.md")
+        before = mail.read_bytes()
+    elif drift == "claimed-mail":
+        mail = (supervisor_home / "mailbox"
+                / f"{THREAD_ID}.md.claimed.456")
+        mail.write_bytes(b"claimed after preflight\n")
+        before = mail.read_bytes()
+    elif drift in {"supervisor-row", "row-working"}:
+        data = fleet.read_registry_no_repair()
+        data["workers"][name]["last_activity"] = "changed-after-proof"
+        if drift == "row-working":
+            data["workers"][name]["status"] = "working"
+        fleet.save_registry(data)
+        before = fleet.read_registry_no_repair()["workers"][name]
+    else:
+        claim = fleet.read_incarnation()
+        claim["heartbeat_at"] = "changed-after-proof"
+        fleet.write_incarnation(claim)
+        before = fleet.read_incarnation()
+
+    with pytest.raises(fleet.FleetCliError, match="prepared claim"):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert journal.load(old_op)["state"] == "observed"
+    assert new.operations == []
+    if drift in {"new-mail", "claimed-mail"}:
+        assert mail.read_bytes() == before
+    elif drift in {"supervisor-row", "row-working"}:
+        assert fleet.read_registry_no_repair()["workers"][name] == before
+    else:
+        assert fleet.read_incarnation() == before
+
+
+def test_policy_restore_allows_unrelated_product_progress_after_preflight(
+        supervisor_home, monkeypatch):
+    _name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old, new, _current = _cold_restore_clients(supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old)
+    data = fleet.read_registry_no_repair()
+    unrelated = {"status": "working", "last_activity": "product-progress",
+                 "codex_thread_id": SUCCESSOR_THREAD_ID}
+    data["workers"]["unrelated-product-worker"] = dict(unrelated)
+    fleet.save_registry(data)
+
+    assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
+    assert fleet.read_registry_no_repair()["workers"][
+        "unrelated-product-worker"] == unrelated
+    assert journal.load(old_op)["state"] == "observed"
+    assert len([op for op in new.operations
+                if op["payload"]["method"] == "thread/resume"]) == 1
+
+
+def test_policy_restore_rechecks_row_at_provider_dispatch(
+        supervisor_home, monkeypatch):
+    name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old, new, _current = _cold_restore_clients(supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old)
+    original_call = fleet._call_codex_supervisor_claimed
+
+    def drift_before_dispatch(*args, **kwargs):
+        data = fleet.read_registry_no_repair()
+        data["workers"][name]["status"] = "working"
+        fleet.save_registry(data)
+        return original_call(*args, **kwargs)
+
+    monkeypatch.setattr(fleet, "_call_codex_supervisor_claimed",
+                        drift_before_dispatch)
+    with pytest.raises(fleet.FleetCliError, match="uncertain"):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+    assert fleet.read_registry_no_repair()["workers"][name]["status"] == "working"
+    assert journal.load(old_op)["state"] == "observed"
+    assert not any(op["payload"]["method"] == "thread/resume"
+                   for op in new.operations)
+
+
+def test_policy_restore_settlement_preserves_post_acceptance_row_progress(
+        supervisor_home, monkeypatch):
+    name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old, new, _current = _cold_restore_clients(supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old)
+    original_call = new.call
+
+    def accept_then_progress(operation, timeout):
+        observed = original_call(operation, timeout)
+        if (operation["payload"]["method"] == "thread/resume"
+                and "sandbox" in operation["payload"]["params"]):
+            data = fleet.read_registry_no_repair()
+            data["workers"][name]["status"] = "working"
+            data["workers"][name]["last_activity"] = "after-acceptance"
+            fleet.save_registry(data)
+        return observed
+
+    monkeypatch.setattr(new, "call", accept_then_progress)
+    with pytest.raises(fleet.FleetCliError, match="reserved claim"):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+    pending = fleet.read_incarnation()["pending_operation"]
+    assert pending["kind"] == "resume-policy-restore"
+    assert journal.load(old_op)["state"] == "observed"
+    assert journal.load(pending["operation_id"])["state"] == "observed"
+    assert fleet.read_registry_no_repair()["workers"][name]["status"] == "working"
+    with pytest.raises(fleet.FleetCliError, match="reserved claim"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert len([op for op in new.operations
+                if op["payload"]["method"] == "thread/resume"]) == 1
+
+
 def test_cold_restore_refuses_workspace_profile_even_with_full_access_sandbox(
         supervisor_home, monkeypatch):
     _name, incarnation_id, old_op, journal = \

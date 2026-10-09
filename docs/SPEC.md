@@ -359,7 +359,10 @@ The current registered Codex Interface may first use
 `sup-reconcile --prepare-recorded-policy-restore` with an explicit home and exact
 incarnation/thread/turn/original operation/observed host generation pins. This
 records a fresh bounded proof that the bound turn is uniquely newest, completed,
-and idle; it also checks the original observed journal and managed requirements.
+and idle; it also checks the original observed journal and managed requirements,
+then durably pins the exact supervisor claim, row, and target inbox/claimed-mail
+contents and identities. Any later change to those targets refuses before host
+creation and provider dispatch; unrelated product rows may progress.
 Idle alone does not mean the thread is unloaded. The exact observed host and
 its app-server child must then exit, with a stale heartbeat, before
 `--restore-recorded-policy` can create a fresh host generation. The latter
@@ -367,7 +370,7 @@ requires the same pins and a five-minute preflight, and sends one distinct
 policy-bound cold `thread/resume` for the original recorded `bypass` tuple.
 The original observed journal remains unchanged. Fleet adopts only an exact
 matching effective response after another public header and locked
-claim/row/source/host/journal check. Rejection or ambiguity stays uncertain.
+claim/row/mail/source/host/journal check. Rejection or ambiguity stays uncertain.
 No turn or original resume is replayed, and recorded policy is never changed
 implicitly.
 
