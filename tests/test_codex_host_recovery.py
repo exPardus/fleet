@@ -88,8 +88,9 @@ def test_same_operation_replays_observed_result_without_second_mutation(tmp_path
         assert client.wait_for_exit(2)
 
 
+@pytest.mark.parametrize("drop_third_reply", [False, True])
 def test_host_allows_only_linked_explicit_restore_after_observed_resume(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, drop_third_reply):
     module, old_client, log = _ensure(tmp_path)
     assert old_client._owner_live()
     assert old_client._app_server_live()
@@ -119,7 +120,11 @@ def test_host_allows_only_linked_explicit_restore_after_observed_resume(
     assert not old_client._owner_live()
     assert not old_client._app_server_live()
     monkeypatch.setattr(module, "HOST_HEARTBEAT_STALE_SECONDS", 0.0)
-    _module_value, client, _new_log = _ensure(tmp_path, home=home)
+    fake_env = {"FAKE_TURN_ID_START": "2"}
+    if drop_third_reply:
+        fake_env["FAKE_DROP_TURN_NUMBER"] = "4"
+    _module_value, client, _new_log = _ensure(
+        tmp_path, home=home, env_overrides=fake_env)
     assert client.generation != old_client.generation
     restored = {
         "operation_id": "supervisor-restore-policy-next", "method": "rpc",
@@ -201,54 +206,68 @@ def test_host_allows_only_linked_explicit_restore_after_observed_resume(
                 client.call(bad, timeout=2)
         assert _app_requests(log, "turn/start") == []
         next_result = client.call(next_turn, timeout=2)
-        assert next_result.result["turn"]["status"] == "inProgress"
+        assert next_result.result["turn"] == {
+            "id": "turn-2", "status": "inProgress"}
         assert len(_app_requests(log, "turn/start")) == 1
         client.commit(next_turn["operation_id"])
+        second_turn = json.loads(json.dumps(next_turn))
+        second_turn["operation_id"] = "supervisor-send-second"
+        second_turn["recovery"]["previous_turn_id"] = "turn-2"
+        second_turn["payload"]["params"]["input"][0]["text"] = \
+            "second normal mail after completed turn-2"
+        second_result = client.call(second_turn, timeout=2)
+        assert second_result.result["turn"] == {
+            "id": "turn-3", "status": "inProgress"}
+        client.commit(second_turn["operation_id"])
+        assert len(_app_requests(log, "turn/start")) == 2
         assert journal.load(original["operation_id"])["state"] == "observed"
         assert journal.load(restored["operation_id"])["state"] == "committed"
         assert journal.load(next_turn["operation_id"])["state"] == "committed"
-        _shutdown(client)
-        assert client.wait_for_exit(2)
-        monkeypatch.setattr(module, "HOST_HEARTBEAT_STALE_SECONDS", 0.0)
-        _module_value, continued, _log = _ensure(tmp_path, home=home)
-        try:
-            reattach = {
-                "operation_id": "supervisor-continuation-next",
-                "method": "rpc",
-                "payload": {"method": "thread/resume", "params": {
-                    "threadId": "thread-1", "excludeTurns": True,
-                    "cwd": str(home), "model": "gpt-5.6-luna",
-                    "approvalPolicy": "never", "approvalsReviewer": "user",
-                    "sandbox": "danger-full-access"}},
-                "recovery": {
-                    "kind": "supervisor/restored-continuation-reattach",
-                    "fleet_name": "sup|inc-1|boot",
-                    "incarnation_id": "inc-1", "thread_id": "thread-1",
-                    "turn_id": "turn-1",
-                    "previous_host_generation": client.generation,
-                    "canonical_cwd": str(home), "restored_predecessor": link,
-                },
-            }
-            assert continued.call(reattach, timeout=2).result["sandbox"] == {
-                "type": "dangerFullAccess"}
-            continued.commit(reattach["operation_id"])
-            after_reattach = json.loads(json.dumps(next_turn))
-            after_reattach["operation_id"] = "supervisor-send-after-reattach"
-            assert continued.call(after_reattach, timeout=2).result[
-                "turn"]["status"] == "inProgress"
-            assert len(_app_requests(log, "turn/start")) == 2
+        assert journal.load(second_turn["operation_id"])["state"] == "committed"
+        if drop_third_reply:
+            third_turn = json.loads(json.dumps(second_turn))
+            third_turn["operation_id"] = "supervisor-send-third-lost-reply"
+            third_turn["recovery"]["previous_turn_id"] = "turn-3"
+            with pytest.raises(module.HostUnavailable, match="uncertain"):
+                client.call(third_turn, timeout=2)
+            assert journal.load(third_turn["operation_id"])["state"] == "uncertain"
+            with pytest.raises(module.HostUnavailable, match="uncertain"):
+                client.call(third_turn, timeout=2)
+            assert len(_app_requests(log, "turn/start")) == 3
             assert journal.load(original["operation_id"])["state"] == "observed"
-            other = json.loads(json.dumps(after_reattach))
-            other["operation_id"] = "other-accepted-predecessor"
-            journal.prepare(other)
-            journal.accept(other["operation_id"])
-            blocked = json.loads(json.dumps(after_reattach))
-            blocked["operation_id"] = "supervisor-send-with-other-accepted"
-            with pytest.raises(module.HostRejected, match="unresolved predecessor"):
-                continued.call(blocked, timeout=2)
+            return
+        original_bytes = journal.path(original["operation_id"]).read_bytes()
+        for index, change in enumerate(("missing", "committed")):
+            if change == "missing":
+                journal.path(original["operation_id"]).unlink()
+            else:
+                changed = json.loads(original_bytes)
+                changed["state"] = "committed"
+                journal.path(original["operation_id"]).write_text(
+                    json.dumps(changed), encoding="utf-8")
+                journal.path(original["operation_id"]).chmod(0o600)
+            unlinked = json.loads(json.dumps(second_turn))
+            unlinked["operation_id"] = f"supervisor-send-unlinked-{index}"
+            unlinked["recovery"].pop("restored_predecessor")
+            unlinked["recovery"]["previous_turn_id"] = "turn-3"
+            with pytest.raises(module.HostRejected,
+                               match="missing restored predecessor evidence"):
+                client.call(unlinked, timeout=2)
+            assert journal.load(unlinked["operation_id"])["state"] == "failed"
             assert len(_app_requests(log, "turn/start")) == 2
-        finally:
-            _shutdown(continued)
+            journal.path(original["operation_id"]).write_bytes(original_bytes)
+            journal.path(original["operation_id"]).chmod(0o600)
+        assert journal.load(original["operation_id"])["state"] == "observed"
+        other = json.loads(json.dumps(second_turn))
+        other["operation_id"] = "other-accepted-predecessor"
+        journal.prepare(other)
+        journal.accept(other["operation_id"])
+        blocked = json.loads(json.dumps(second_turn))
+        blocked["operation_id"] = "supervisor-send-with-other-accepted"
+        blocked["recovery"]["previous_turn_id"] = "turn-3"
+        with pytest.raises(module.HostRejected, match="unresolved predecessor"):
+            client.call(blocked, timeout=2)
+        assert len(_app_requests(log, "turn/start")) == 2
     finally:
         _shutdown(client)
         assert client.wait_for_exit(2)

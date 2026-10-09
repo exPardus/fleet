@@ -610,19 +610,25 @@ class Host:
                         elif state == "prepared":
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
-                            if (predecessor is not None
+                            restored_history = self.journal.has_restoration_history_for_thread(
+                                payload.get("params", {}).get("threadId"))
+                            if ((predecessor is not None or restored_history)
                                     and not self.journal.permits_observed_resume_policy_restore(
                                         operation_id, payload,
                                         request.get("recovery", {}))
                                     and not self.journal.permits_restored_supervisor_continuation(
                                         operation_id, payload,
                                         request.get("recovery", {}))):
-                                self.journal.fail(
-                                    operation_id,
-                                    "blocked by unresolved predecessor operation")
-                                raise HostRejected(
-                                    "unresolved predecessor operation "
-                                    f"{predecessor.get('operation_id')} blocks mutation")
+                                if predecessor is not None:
+                                    reason = "blocked by unresolved predecessor operation"
+                                    detail = ("unresolved predecessor operation "
+                                              f"{predecessor.get('operation_id')} "
+                                              "blocks mutation")
+                                else:
+                                    reason = "blocked by missing restored predecessor evidence"
+                                    detail = reason
+                                self.journal.fail(operation_id, reason)
+                                raise HostRejected(detail)
                             self.journal.accept(operation_id)
                             recovered = False
                             failure: Exception | None = None

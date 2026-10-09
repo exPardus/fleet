@@ -137,6 +137,7 @@ class FakeLifecycleClient:
         self.predecessor_interrupted = False
         self.interrupt_calls = 0
         self.turn_id = TURN_ID
+        self.wake_turn_ids = []
         self.successor_thread_id = SUCCESSOR_HANDOFF_THREAD_ID
         self.successor_initial_turns = []
         self.successor_after_turns = None
@@ -287,8 +288,9 @@ class FakeLifecycleClient:
                 raise HostRejected("successor turn rejected")
             target = operation["payload"]["params"]["threadId"]
             self.turn_id = (SUCCESSOR_TURN_ID
-                            if target == self.successor_thread_id
-                            else WAKE_TURN_ID)
+                            if target == self.successor_thread_id else
+                            self.wake_turn_ids.pop(0)
+                            if self.wake_turn_ids else WAKE_TURN_ID)
             if target == self.successor_thread_id:
                 self.successor_started = True
             self.thread_status = "active"
@@ -333,16 +335,20 @@ class JournalLifecycleClient(FakeLifecycleClient):
         if state != "prepared":
             raise HostRejected("operation acceptance is uncertain")
         predecessor = self.journal.unresolved_predecessor(operation_id)
-        if (predecessor is not None
+        restored_history = self.journal.has_restoration_history_for_thread(
+            operation["payload"].get("params", {}).get("threadId"))
+        if ((predecessor is not None or restored_history)
                 and not self.journal.permits_observed_resume_policy_restore(
                     operation_id, operation["payload"],
                     operation.get("recovery", {}))
                 and not self.journal.permits_restored_supervisor_continuation(
                     operation_id, operation["payload"],
                     operation.get("recovery", {}))):
-            self.journal.fail(operation_id, "blocked by unresolved predecessor")
-            raise HostRejected(
-                f"unresolved predecessor operation {predecessor['operation_id']}")
+            reason = ("blocked by unresolved predecessor operation"
+                      if predecessor is not None else
+                      "blocked by missing restored predecessor evidence")
+            self.journal.fail(operation_id, reason)
+            raise HostRejected(reason)
         self.journal.accept(operation_id)
         try:
             observation = super().call(operation, timeout)
@@ -1491,23 +1497,60 @@ def test_linked_restoration_wakes_with_one_normal_mail_and_same_holder(
     assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
     before = fleet.read_incarnation()
     assert fleet.load_registry()["workers"][name]["adapter_state"] == "active"
+    client.wake_turn_ids = [WAKE_TURN_ID, NEWER_TURN_ID]
     assert fleet._cmd_send_codex_supervisor(name, "first normal mail") == 0
+    first = fleet.read_incarnation()
+    assert first["current_turn_id"] == WAKE_TURN_ID
+    client.thread_status = "idle"
+    client.turn_status = "completed"
+    assert fleet._cmd_send_codex_supervisor(name, "second normal mail") == 0
     after = fleet.read_incarnation()
     journal = OperationJournal(supervisor_home, client.generation)
     sends = [op for op in client.operations
              if op["payload"]["method"] == "turn/start"]
-    assert len(sends) == 1
-    assert sends[0]["recovery"]["restored_predecessor"] == \
-        journal.restored_policy_link(
-            fleet_name=name, incarnation_id=incarnation_id,
-            thread_id=THREAD_ID)
-    assert journal.load(sends[0]["operation_id"])["state"] == "committed"
+    assert len(sends) == 2
+    link = journal.restored_policy_link(
+        fleet_name=name, incarnation_id=incarnation_id,
+        thread_id=THREAD_ID)
+    assert all(op["recovery"]["restored_predecessor"] == link
+               and journal.load(op["operation_id"])["state"] == "committed"
+               for op in sends)
+    assert [op["recovery"]["previous_turn_id"] for op in sends] == [
+        TURN_ID, WAKE_TURN_ID]
     assert after["incarnation_id"] == before["incarnation_id"]
     assert after["holder"] == before["holder"]
-    assert after["current_turn_id"] == WAKE_TURN_ID
+    assert after["current_turn_id"] == NEWER_TURN_ID
     assert after["state"] == "held"
     assert not list((supervisor_home / "mailbox").glob(
         f"{THREAD_ID}.md.claimed.*"))
+
+
+@pytest.mark.parametrize("case", ["missing", "committed"])
+def test_restored_holder_refuses_missing_or_changed_original_before_mail(
+        supervisor_home, monkeypatch, case):
+    name, incarnation_id, old_op, journal = _seed_observed_workspace_resume(
+        supervisor_home)
+    old_client, client, _current = _cold_restore_clients(
+        supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
+    if case == "missing":
+        journal.path(old_op).unlink()
+    else:
+        changed = journal.load(old_op)
+        changed["state"] = "committed"
+        journal.path(old_op).write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(fleet.FleetCliError, match="restored supervisor"):
+        fleet._cmd_send_codex_supervisor(name, "new mail must not be claimed")
+    with pytest.raises(fleet.FleetCliError, match="restored supervisor"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert fleet.read_incarnation()["state"] == "held"
+    assert fleet.read_incarnation()["current_turn_id"] == TURN_ID
+    assert not (supervisor_home / "mailbox" / f"{THREAD_ID}.md").exists()
+    assert not any(op["payload"]["method"] == "turn/start"
+                   for op in client.operations)
 
 
 def _seed_restored_predecessor_rejected_send(home, monkeypatch):
