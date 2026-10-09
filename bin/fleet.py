@@ -19816,7 +19816,8 @@ def _restored_continuation_inventory(
     excluded only with terminal intent evidence; a bound thread additionally
     needs a fresh public notLoaded observation before the host may be stopped.
     """
-    from fleet_codex import CodexApprovalStore, OperationJournal, _digest
+    from fleet_codex import (CodexApprovalStore, OperationJournal, _digest,
+                             _read_json, _require_directory)
 
     workers = registry.get("workers") if isinstance(registry, dict) else None
     if not isinstance(workers, dict):
@@ -19824,6 +19825,20 @@ def _restored_continuation_inventory(
     home = str(FLEET_HOME.resolve())
     journal = OperationJournal(FLEET_HOME, binding.host_generation)
     records = journal.records()
+    retired_dir = FLEET_HOME / "state" / "codex" / "operations.retired"
+    if retired_dir.exists() or retired_dir.is_symlink():
+        _require_directory(retired_dir)
+        known_ids = {record.get("operation_id") for record in records}
+        for path in sorted(retired_dir.iterdir()):
+            if path.suffix != ".json" or not path.stem:
+                raise FleetCliError("retired native operation inventory is ambiguous")
+            record = _read_json(path)
+            if (record.get("schema") != 1
+                    or record.get("operation_id") != path.stem
+                    or path.stem in known_ids):
+                raise FleetCliError("retired native operation identity is ambiguous")
+            known_ids.add(path.stem)
+            records.append(record)
     link = journal.restored_policy_link(
         fleet_name=binding.name, incarnation_id=binding.incarnation_id,
         thread_id=binding.authority.value,
@@ -19832,10 +19847,8 @@ def _restored_continuation_inventory(
     if any(not isinstance(record, dict) or record.get("home") != home
            for record in records):
         raise FleetCliError("native operation inventory has an unknown home")
-    if any(record.get("state") in {
-            "pending", "responding", "responded", "uncertain", "unknown"}
-           for record in approvals):
-        raise FleetCliError("native callback inventory is unresolved")
+    if any(record.get("state") != "resolved" for record in approvals):
+        raise FleetCliError("native callback inventory is unresolved or malformed")
     inventory_records = []
     for record in records:
         if (pending_operation_id is not None
@@ -19857,22 +19870,16 @@ def _restored_continuation_inventory(
             continue
         recovery = record.get("recovery")
         owner = recovery.get("fleet_name") if isinstance(recovery, dict) else None
-        if owner == binding.name:
-            if record.get("state") in {
-                    "prepared", "accepted", "observed", "uncertain"}:
-                is_original = (isinstance(link, dict)
-                               and record.get("operation_id") ==
-                               link["original_operation_id"]
-                               and record.get("state") == "observed")
-                if not is_original:
-                    raise FleetCliError("another restored supervisor intent is unresolved")
-        else:
-            if record.get("state") not in {"committed", "failed"}:
-                raise FleetCliError("another native operation is unresolved")
-            if (record.get("state") == "failed"
-                    and any(key in record for key in (
-                        "accepted_at", "observed_at", "uncertain_at"))):
-                raise FleetCliError("failed native intent has acceptance evidence")
+        is_original = (owner == binding.name and isinstance(link, dict)
+                       and record.get("operation_id") ==
+                       link["original_operation_id"]
+                       and record.get("state") == "observed")
+        if not is_original and record.get("state") not in {"committed", "failed"}:
+            raise FleetCliError("another native operation is unresolved or malformed")
+        if (record.get("state") == "failed"
+                and any(key in record for key in (
+                    "accepted_at", "observed_at", "uncertain_at"))):
+            raise FleetCliError("failed native intent has acceptance evidence")
         inventory_records.append(record)
 
     bound = {}
@@ -19889,26 +19896,22 @@ def _restored_continuation_inventory(
         )
         has_native_pin = any(row.get(key) is not None for key in native_fields)
         route = _codex_record_route(row)
-        model = row.get("model")
-        codex_model = isinstance(model, str) and model.startswith("codex:")
         if (route == "mcx" and row.get("dispatch_kind") == "mcx"
+                and isinstance(row.get("mcx_id"), str)
+                and row["mcx_id"]
                 and not has_native_pin and row.get("pending_operation") is None
                 and row.get("last_operation_id") is None):
             continue
-        # Before the app-server adapter, an archived supervisor had a real
-        # external session id.  Its missing native pins are meaningful only
-        # together with that explicit non-native dispatch provenance.
-        if (row.get("dispatch_kind") is None
+        # A daemon-hosted external session is not owned by this Codex host.
+        # Its model text and archival state do not establish provenance.
+        if (row.get("dispatch_kind") == "bg"
+                and row.get("substrate") in (None, "claude")
                 and isinstance(row.get("session_id"), str)
                 and row["session_id"]
-                and isinstance(row.get("archived_at"), str)
-                and row["archived_at"]
                 and not has_native_pin
                 and row.get("mcx_id") is None
                 and row.get("pending_operation") is None
                 and row.get("last_operation_id") is None):
-            continue
-        if not codex_model and not has_native_pin and route is None:
             continue
         if (route != "native"
                 or row.get("dispatch_kind") != "codex-app-server"
@@ -19945,12 +19948,31 @@ def _restored_continuation_inventory(
                     or latest[0].get("state") != "failed"):
                 raise FleetCliError("native preclaim lacks pre-acceptance failure proof")
             continue
+        method = latest[0].get("public_method")
+        recovery = latest[0]["recovery"]
+        result = latest[0].get("result")
+        result_turn = (result.get("turn") if isinstance(result, dict)
+                       else None)
         if (not isinstance(thread_id, str) or not thread_id
                 or not isinstance(turn_id, str) or not turn_id
                 or not isinstance(generation, str) or not generation
                 or generation == binding.host_generation
                 or latest[0].get("generation") != generation
-                or latest[0].get("recovery", {}).get("thread_id") != thread_id
+                or recovery.get("thread_id") != thread_id
+                or latest[0].get("state") != "committed"
+                or method not in {"turn/start", "turn/steer"}
+                or recovery.get("kind") != f"supervisor/{method}"
+                or not isinstance(result, dict)
+                or (method == "turn/start" and (
+                    not isinstance(result_turn, dict)
+                    or result_turn.get("id") != turn_id
+                    or result_turn.get("status") != "inProgress"
+                    or not isinstance(recovery.get("previous_turn_id"), str)
+                    or not recovery["previous_turn_id"]
+                    or recovery["previous_turn_id"] == turn_id))
+                or (method == "turn/steer" and (
+                    result.get("turnId") != turn_id
+                    or recovery.get("previous_turn_id") != turn_id))
                 or thread_id == binding.authority.value
                 or thread_id in bound):
             raise FleetCliError("historical native thread ownership is ambiguous")
