@@ -48,7 +48,8 @@ recorded effective model, approval and sandbox policy and sends one
 `thread/resume` with `excludeTurns: true`. It never starts a thread or turn and
 never drains mail. A lost or accepted but unobserved reply leaves the one-shot
 operation pending. `settle-rebind` uses only an exact observed or committed
-operation result, rechecks public history and then conditionally writes the
+operation whose immutable journal generation, payload digest and recovery
+identity match the staged intent. It rechecks public history and conditionally writes the
 row and, for the supervisor, the held claim. A partial claim/row save can be
 settled without another provider call. Historical terminal rows are held
 without resume after public inspection. `finish` requires every affected row

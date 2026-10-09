@@ -762,6 +762,22 @@ def _settle_rebind(fleet, record):
     original = record["current_row"]
     thread_id, turn_id = original["codex_thread_id"], original["codex_turn_id"]
     cwd = str(Path(original["cwd"]).resolve())
+    expected_recovery = {
+        "kind": "failed-client/thread-resume", "recovery_id": record["id"],
+        "fleet_name": name, "thread_id": thread_id, "bound_turn_id": turn_id,
+        "previous_host_generation": record["old_host"]["generation"],
+        "canonical_cwd": cwd,
+    }
+    if (journal.get("home") != str(fleet.FLEET_HOME.resolve())
+            or journal.get("generation") != client.generation
+            or journal.get("operation_id") != operation_id
+            or journal.get("method") != "rpc"
+            or journal.get("public_method") != "thread/resume"
+            or journal.get("payload_digest") != record["current_payload_digest"]
+            or journal.get("recovery") != expected_recovery
+            or record["current_thread"] != thread_id
+            or record["resume_operations"].get(name) != operation_id):
+        raise FleetCliError("observed resume journal differs from staged exact intent")
     model, profile = _row_policy(fleet, original)
     result = journal.get("result")
     thread = result.get("thread") if isinstance(result, dict) else None

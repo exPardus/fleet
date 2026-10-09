@@ -346,11 +346,22 @@ def test_partial_claim_write_keeps_barrier_then_settles_without_resume(staged, m
               "sandbox": {"type": "dangerFullAccess"}}
 
     class Journal:
+        digest = "a" * 64
+
         def __init__(self, *_args):
             pass
 
         def load(self, _operation_id):
-            return {"state": "observed", "result": result}
+            return {"state": "observed", "result": result,
+                    "home": str(fake.FLEET_HOME), "generation": "new-generation",
+                    "operation_id": "resume-1", "method": "rpc",
+                    "public_method": "thread/resume", "payload_digest": self.digest,
+                    "recovery": {"kind": "failed-client/thread-resume",
+                                 "recovery_id": record["id"],
+                                 "fleet_name": "sup|inc|boot",
+                                 "thread_id": "thread-1", "bound_turn_id": "turn-1",
+                                 "previous_host_generation": "old-generation",
+                                 "canonical_cwd": fake.rows["sup|inc|boot"]["cwd"]}}
 
         def commit(self, _operation_id):
             pass
@@ -358,6 +369,11 @@ def test_partial_claim_write_keeps_barrier_then_settles_without_resume(staged, m
     monkeypatch.setattr(recovery, "OperationJournal", Journal)
     monkeypatch.setattr(recovery, "_complete_history", lambda *_: {
         "thread_status": "idle", "bound_turn_status": "interrupted", "turn_count": 1})
+    Journal.digest = "b" * 64
+    with pytest.raises(FleetCliError, match="staged exact intent"):
+        recovery._settle_rebind(fake, record)
+    assert fake.claim["host_generation"] == "old-generation"
+    Journal.digest = "a" * 64
     original_save = fake.save_registry
     def fail_once(_data):
         raise OSError("simulated registry save failure")
