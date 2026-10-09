@@ -572,21 +572,26 @@ class Host:
                                     deadline))
                         self._drain_notifications()
                     else:
+                        params = payload.get("params")
                         operation_id = request["operation_id"]
                         mutating_operation_id = operation_id
                         try:
+                            if not isinstance(params, dict):
+                                raise HostRejected(
+                                    "public mutation params must be an object")
                             self._authorize_public_mutation(
                                 connection, public_method, payload)
                         except HostRejected as exc:
-                            # Authentication precedes the accepted journal state
-                            # and the provider write. Record this distinction so
-                            # a rejected Interface call can be settled without
-                            # treating a lost provider response as a rejection.
+                            # Shape and authentication checks precede acceptance.
+                            # A proved rejection must not leave prepared intent.
                             prepared = self.journal.load(operation_id)
                             if prepared.get("state") == "prepared":
+                                reason = ("malformed public mutation params"
+                                          if not isinstance(params, dict) else
+                                          "authentication rejected")
                                 self.journal.fail(
                                     operation_id,
-                                    f"authentication rejected before provider acceptance: {exc}")
+                                    f"{reason} before provider acceptance: {exc}")
                             raise
                         record = self.journal.load(operation_id)
                         if record.get("generation") != self.generation:
@@ -611,7 +616,7 @@ class Host:
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
                             restored_history = self.journal.has_restoration_history_for_thread(
-                                payload.get("params", {}).get("threadId"))
+                                params.get("threadId"))
                             if ((predecessor is not None or restored_history)
                                     and not self.journal.permits_observed_resume_policy_restore(
                                         operation_id, payload,
