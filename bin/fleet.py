@@ -18294,9 +18294,9 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
                  or _is_supervisor_shaped(entry.get("name")))
         if ((sid in supervisor_sids)
                 or (named and _sup_guard_row_in_home(entry, registry))):
-            # Terminal public rows have no pid key. A present false/zero/null
-            # pid is malformed evidence, not proof that the process is gone.
-            if "pid" in entry or ("status" in entry and entry.get("state") != "done"):
+            # Terminal public rows are state-only. Even a false/zero/null pid
+            # or status field is ambiguous evidence, not proof of absence.
+            if "pid" in entry or "status" in entry:
                 raise FleetCliError("sup-retire-legacy: old supervisor or predecessor is live")
             # A supported `claude stop` leaves a state-only stopped row.
             if entry.get("state") not in ("done", "stopped"):
@@ -20860,9 +20860,8 @@ def _dispatch_codex_supervisor_body(campaign, mode, model, *,
                        (not isinstance(entry.get("sessionId"), str)
                         or not entry.get("sessionId")
                         or "pid" in entry
-                        or entry.get("state") not in ("done", "stopped")
-                        or (entry.get("state") == "stopped"
-                            and "status" in entry))
+                        or "status" in entry
+                        or entry.get("state") not in ("done", "stopped"))
                        for entry in roster)):
             raise FleetCliError(
                 "native Codex sup-spawn: retired legacy supervisor liveness "

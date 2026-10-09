@@ -158,14 +158,35 @@ def test_present_handoff_pending_refuses_without_losing_claim_or_mail(home, pend
     {"sessionId": OLD_SID, "name": NAME, "state": "working"},
     {"sessionId": OLD_SID, "name": NAME, "state": "done", "pid": 42},
     {"sessionId": OLD_SID, "name": NAME, "state": "done", "pid": False},
+    {"sessionId": OLD_SID, "name": NAME, "state": "done", "status": "idle"},
+    {"sessionId": OLD_SID, "name": NAME, "state": "done", "status": "working"},
     {"sessionId": OLD_SID, "name": NAME, "state": "stopped", "pid": False},
     {"sessionId": OLD_SID, "name": NAME, "state": "stopped", "status": "idle"},
+    {"sessionId": OLD_SID, "name": NAME, "state": "stopped", "status": "working"},
     {"sessionId": OLD_SID, "name": NAME, "state": "unknown"},
 ])
 def test_live_or_ambiguous_old_body_refuses(home, old):
+    claim = fleet.read_incarnation()
+    registry = fleet.read_registry_no_repair()
+    mail = {p.name: p.read_bytes() for p in (home / "mailbox").iterdir()}
     with pytest.raises(fleet.FleetCliError):
         fleet.cmd_sup_retire_legacy(args(), roster_fn=lambda: roster(old))
-    assert fleet.read_incarnation().get("state") != "released"
+    assert fleet.read_incarnation() == claim
+    assert fleet.read_registry_no_repair() == registry
+    assert {p.name: p.read_bytes() for p in (home / "mailbox").iterdir()} == mail
+    assert not (home / "state" / "supervisor-retirements").exists()
+
+
+@pytest.mark.parametrize("state", ["done", "stopped"])
+def test_status_bearing_predecessor_refuses(home, state):
+    predecessor = {"sessionId": OTHER_SID, "name": f"sup|{INC}|successor",
+                   "state": state, "status": "working", "cwd": str(home)}
+    claim = fleet.read_incarnation()
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_retire_legacy(
+            args(), roster_fn=lambda: roster(extra=[predecessor]))
+    assert fleet.read_incarnation() == claim
+    assert not (home / "state" / "supervisor-retirements").exists()
 
 
 def test_live_predecessor_refuses_and_unrelated_product_does_not(home):
