@@ -610,7 +610,10 @@ class Host:
                         elif state == "prepared":
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
-                            if predecessor is not None:
+                            if (predecessor is not None
+                                    and not self.journal.permits_observed_resume_policy_restore(
+                                        operation_id, payload,
+                                        request.get("recovery", {}))):
                                 self.journal.fail(
                                     operation_id,
                                     "blocked by unresolved predecessor operation")

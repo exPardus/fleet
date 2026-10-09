@@ -106,11 +106,21 @@ class FakeLifecycleClient:
                  turn_status="inProgress", active_flags=None,
                  result_text="campaign complete", items_view="full",
                  newer_turn=None, generation=None, fail_method=None,
+                 resume_policy=None,
+                 requirements=None,
                  reject_turn_start=False,
                  reject_successor_read_after_start=False,
                  interrupt_leaves_active=False):
         self.home = Path(home).resolve()
         self.generation = generation or type(self).generation
+        self.host_pid = 111
+        self.host_process_identity = "host-identity-111"
+        self.app_server_pid = 222
+        self.app_server_process_identity = "app-identity-222"
+        self.host_live = True
+        self.app_live = True
+        self.metadata_stale = False
+        self._launched_process = None
         self.thread_status = thread_status
         self.turn_status = turn_status
         self.active_flags = list(active_flags or [])
@@ -118,6 +128,8 @@ class FakeLifecycleClient:
         self.items_view = items_view
         self.newer_turn = newer_turn
         self.fail_method = fail_method
+        self.resume_policy = resume_policy
+        self.requirements = requirements
         self.reject_turn_start = reject_turn_start
         self.reject_successor_read_after_start = \
             reject_successor_read_after_start
@@ -134,6 +146,18 @@ class FakeLifecycleClient:
         self.paging_operations = []
         self.commits = []
         self.handoff_commits = []
+
+    def config_requirements(self):
+        return {"requirements": self.requirements}
+
+    def _owner_live(self):
+        return self.host_live
+
+    def _app_server_live(self):
+        return self.app_live
+
+    def _metadata_stale(self):
+        return self.metadata_stale
 
     def call(self, operation, timeout):
         method = operation["payload"]["method"]
@@ -218,14 +242,17 @@ class FakeLifecycleClient:
                 }})
         if method == "thread/resume":
             resumed_thread = operation["payload"]["params"]["threadId"]
+            policy = self.resume_policy or {
+                "approvalPolicy": "never", "approvalsReviewer": "user",
+                "sandbox": {"type": "dangerFullAccess"},
+            }
             return SimpleNamespace(
                 operation_id=operation["operation_id"],
                 generation=self.generation, payload_digest="f" * 64,
                 result={
                     "thread": {"id": resumed_thread, "cwd": str(self.home)},
                     "cwd": str(self.home), "model": "gpt-5.6-luna",
-                    "approvalPolicy": "never", "approvalsReviewer": "user",
-                    "sandbox": {"type": "dangerFullAccess"},
+                    **policy,
                 })
         if method == "thread/start":
             self.successor_created = True
@@ -306,7 +333,10 @@ class JournalLifecycleClient(FakeLifecycleClient):
         if state != "prepared":
             raise HostRejected("operation acceptance is uncertain")
         predecessor = self.journal.unresolved_predecessor(operation_id)
-        if predecessor is not None:
+        if (predecessor is not None
+                and not self.journal.permits_observed_resume_policy_restore(
+                    operation_id, operation["payload"],
+                    operation.get("recovery", {}))):
             self.journal.fail(operation_id, "blocked by unresolved predecessor")
             raise HostRejected(
                 f"unresolved predecessor operation {predecessor['operation_id']}")
@@ -326,6 +356,31 @@ class JournalLifecycleClient(FakeLifecycleClient):
     def commit_handoff_turn_start(self, operation_id, **evidence):
         self.journal.commit_handoff_turn_start(operation_id, **evidence)
         super().commit_handoff_turn_start(operation_id, **evidence)
+
+
+class PolicyRestoreLifecycleClient(JournalLifecycleClient):
+    """Journal-backed public resume that applies explicit wire overrides."""
+
+    def __init__(self, home, *, apply_override=True,
+                 restored_active_profile=None, **kwargs):
+        super().__init__(home, **kwargs)
+        self.apply_override = apply_override
+        self.restored_active_profile = restored_active_profile
+
+    def call(self, operation, timeout):
+        payload = operation.get("payload", {})
+        params = payload.get("params", {})
+        if (payload.get("method") == "thread/resume"
+                and "sandbox" in params and self.apply_override):
+            self.resume_policy = {
+                "approvalPolicy": params["approvalPolicy"],
+                "approvalsReviewer": params["approvalsReviewer"],
+                "sandbox": {"type": "dangerFullAccess"},
+            }
+            if self.restored_active_profile is not None:
+                self.resume_policy["activePermissionProfile"] = \
+                    self.restored_active_profile
+        return super().call(operation, timeout)
 
 
 class EvidenceLifecycleClient(FakeLifecycleClient):
@@ -1158,6 +1213,402 @@ def test_native_host_restart_reconciles_same_ids_without_new_body_or_turn(
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/resume", "thread/read"]
     assert client.operations[0]["payload"]["params"]["excludeTurns"] is True
+
+
+def test_native_restart_observed_narrower_policy_freezes_without_replay(
+        supervisor_home, monkeypatch):
+    name, incarnation_id = _seed_native_supervisor(supervisor_home)
+    before = fleet.read_incarnation()
+    fleet.append_mailbox(THREAD_ID, "preserve policy mismatch mail")
+    client = JournalLifecycleClient(
+        supervisor_home, generation="host-generation-2",
+        thread_status="idle", turn_status="completed",
+        resume_policy={
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": {
+                "type": "workspaceWrite", "writableRoots": [],
+                "networkAccess": False, "excludeSlashTmp": False,
+                "excludeTmpdirEnvVar": False,
+            },
+        })
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="restart reconciliation is uncertain"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+
+    claim = fleet.read_incarnation()
+    operation_id = claim["pending_operation"]["operation_id"]
+    row = fleet.load_registry()["workers"][name]
+    journal = client.journal.load(operation_id)
+    assert claim["incarnation_id"] == incarnation_id
+    assert claim["holder"] == before["holder"]
+    assert claim["current_turn_id"] == before["current_turn_id"]
+    assert claim["host_generation"] == before["host_generation"]
+    assert claim["state"] == "uncertain"
+    assert claim["pending_operation"]["kind"] == "thread/resume"
+    assert "thread/resume effective sandbox mismatch" in claim["uncertainty"]
+    assert row["adapter_state"] == "uncertain"
+    assert row["codex_host_generation"] == before["host_generation"]
+    assert journal["state"] == "observed"
+    assert journal["public_method"] == "thread/resume"
+    assert journal["result"]["sandbox"]["type"] == "workspaceWrite"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume"]
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "preserve policy mismatch mail"
+
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    with pytest.raises(fleet.FleetCliError, match="thread/resume is unresolved"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/resume"]
+
+
+def _seed_observed_workspace_resume(home):
+    from fleet_codex import OperationJournal
+
+    name, incarnation_id = _seed_native_supervisor(home)
+    data = fleet.load_registry()
+    data["workers"][name]["permission_effective"] = {
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": {"type": "dangerFullAccess"},
+    }
+    fleet.save_registry(data)
+    binding = fleet._codex_supervisor_binding()
+    old_operation_id = "supervisor-reconcile-observed-workspace"
+    fleet._reserve_codex_supervisor_operation(
+        binding, old_operation_id, "thread/resume", allowed_states={"held"})
+    fleet._freeze_codex_supervisor_preclaim(
+        name, incarnation_id, old_operation_id,
+        "Codex thread/resume effective sandbox mismatch")
+    journal = OperationJournal(home, "host-generation-2")
+    operation = {
+        "operation_id": old_operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": THREAD_ID, "excludeTurns": True}},
+        "recovery": {
+            "kind": "supervisor/thread-resume", "fleet_name": name,
+            "incarnation_id": incarnation_id, "thread_id": THREAD_ID,
+            "previous_host_generation": binding.host_generation,
+            "canonical_cwd": str(home.resolve()),
+        },
+    }
+    journal.prepare(operation)
+    journal.accept(old_operation_id)
+    journal.observe(old_operation_id, {
+        "thread": {"id": THREAD_ID, "cwd": str(home.resolve())},
+        "cwd": str(home.resolve()), "model": "gpt-5.6-luna",
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": {"type": "workspaceWrite", "writableRoots": [],
+                    "networkAccess": False, "excludeSlashTmp": False,
+                    "excludeTmpdirEnvVar": False},
+        "activePermissionProfile": {"id": ":workspace", "extends": None},
+        "runtimeWorkspaceRoots": [str(home.resolve())],
+    })
+    return name, incarnation_id, old_operation_id, journal
+
+
+def _restore_args(incarnation_id, old_operation_id, **updates):
+    values = {
+        "restore_recorded_policy": True, "_fleet_home_explicit": True,
+        "prepare_recorded_policy_restore": False,
+        "expect_inc": incarnation_id, "expect_thread": THREAD_ID,
+        "expect_turn": TURN_ID, "expect_resume_op": old_operation_id,
+        "expect_new_generation": "host-generation-2",
+    }
+    values.update(updates)
+    return SimpleNamespace(**values)
+
+
+def _prepare_args(incarnation_id, old_operation_id, **updates):
+    return _restore_args(
+        incarnation_id, old_operation_id,
+        restore_recorded_policy=False,
+        prepare_recorded_policy_restore=True, **updates)
+
+
+def _cold_restore_clients(home, monkeypatch, *, apply_override=True,
+                          restore_policy=None, restored_active_profile=None):
+    old = PolicyRestoreLifecycleClient(
+        home, generation="host-generation-2",
+        thread_status="idle", turn_status="completed")
+    new = PolicyRestoreLifecycleClient(
+        home, generation="host-generation-3",
+        thread_status="idle", turn_status="completed",
+        apply_override=apply_override, resume_policy=restore_policy,
+        restored_active_profile=restored_active_profile)
+    new._launched_process = object()
+    current = {"client": old}
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: current["client"])
+
+    def ensure_new(_home):
+        assert not old.host_live and not old.app_live and old.metadata_stale
+        current["client"] = new
+        return new
+
+    monkeypatch.setattr(fleet, "_codex_native_client", ensure_new)
+    return old, new, current
+
+
+def _prove_then_stop_cold_host(incarnation_id, old_op, old):
+    assert fleet.cmd_sup_reconcile(_prepare_args(incarnation_id, old_op)) == 0
+    old.host_live = False
+    old.app_live = False
+    old.metadata_stale = True
+
+
+def test_observed_resume_restores_recorded_policy_with_distinct_intent(
+        supervisor_home, monkeypatch):
+    name, incarnation_id, old_op, journal = _seed_observed_workspace_resume(
+        supervisor_home)
+    fleet.append_mailbox(THREAD_ID, "preserve exact mail")
+    unrelated = {"status": "working", "adapter_state": "active",
+                 "codex_thread_id": SUCCESSOR_THREAD_ID,
+                 "codex_turn_id": NEWER_TURN_ID}
+    data = fleet.load_registry()
+    data["workers"]["unrelated-product-worker"] = dict(unrelated)
+    fleet.save_registry(data)
+    old_client, client, _current = _cold_restore_clients(
+        supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
+
+    claim = fleet.read_incarnation()
+    row = fleet.load_registry()["workers"][name]
+    assert claim["state"] == "held"
+    assert claim["incarnation_id"] == incarnation_id
+    assert claim["holder"] == {"provider": "codex", "thread_id": THREAD_ID}
+    assert claim["current_turn_id"] == TURN_ID
+    assert claim["host_generation"] == "host-generation-3"
+    assert row["mode"] == "bypass"
+    assert row["permission_effective"]["sandbox"] == {
+        "type": "dangerFullAccess"}
+    assert fleet.load_registry()["workers"]["unrelated-product-worker"] == unrelated
+    assert journal.load(old_op)["state"] == "observed"
+    new_op = claim["last_operation_id"]
+    assert new_op != old_op
+    assert journal.load(new_op)["state"] == "committed"
+    mutations = [op for op in client.operations
+                 if op["payload"]["method"] == "thread/resume"]
+    assert len(mutations) == 1
+    assert mutations[0]["operation_id"] == new_op
+    assert mutations[0]["payload"]["params"] == {
+        "threadId": THREAD_ID, "excludeTurns": True,
+        "cwd": str(supervisor_home.resolve()), "model": "gpt-5.6-luna",
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": "danger-full-access",
+    }
+    assert all(op["payload"]["method"] not in {"thread/start", "turn/start",
+                                                 "turn/steer"}
+               for op in client.operations)
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "preserve exact mail"
+
+
+@pytest.mark.parametrize("changed", [
+    {"_fleet_home_explicit": False},
+    {"expect_inc": "another-incarnation"},
+    {"expect_thread": SUCCESSOR_THREAD_ID},
+    {"expect_turn": NEWER_TURN_ID},
+    {"expect_resume_op": "another-operation"},
+    {"expect_new_generation": "another-generation"},
+])
+def test_policy_restore_rejects_stale_expectations_before_provider(
+        supervisor_home, monkeypatch, changed):
+    _name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    client = PolicyRestoreLifecycleClient(
+        supervisor_home, generation="host-generation-2",
+        thread_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op, **changed))
+
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert fleet.read_incarnation()["pending_operation"]["operation_id"] == old_op
+    assert journal.load(old_op)["state"] == "observed"
+    assert not any(op["payload"]["method"] == "thread/resume"
+                   for op in client.operations)
+
+
+@pytest.mark.parametrize("case", ["newer-turn", "active-thread",
+                                   "managed-policy", "source", "row",
+                                   "ambiguous-journal"])
+def test_policy_restore_rejects_changed_evidence_before_provider(
+        supervisor_home, monkeypatch, case):
+    name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    client = PolicyRestoreLifecycleClient(
+        supervisor_home, generation="host-generation-2",
+        thread_status="idle", turn_status="completed")
+    source = {"kind": "codex", "claim_id": "current-interface"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: source)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    if case == "newer-turn":
+        client.newer_turn = {"id": NEWER_TURN_ID, "status": "completed",
+                             "itemsView": "notLoaded", "items": []}
+    elif case == "active-thread":
+        client.thread_status = "active"
+        client.turn_status = "inProgress"
+    elif case == "managed-policy":
+        client.requirements = {"allowedSandboxModes": ["workspace-write"]}
+    elif case == "source":
+        source = {"kind": "claude", "claim_id": "other-interface"}
+    elif case == "row":
+        data = fleet.load_registry()
+        data["workers"][name]["permission_effective"]["sandbox"] = {
+            "type": "workspaceWrite"}
+        fleet.save_registry(data)
+    else:
+        other = {"operation_id": "other-unresolved", "method": "rpc",
+                 "payload": {"method": "turn/start", "params": {
+                     "threadId": THREAD_ID}}, "recovery": {}}
+        journal.prepare(other)
+        journal.accept(other["operation_id"])
+
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(_prepare_args(incarnation_id, old_op))
+
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert journal.load(old_op)["state"] == "observed"
+    assert not any(op["payload"]["method"] == "thread/resume"
+                   for op in client.operations)
+
+
+@pytest.mark.parametrize("case", [
+    "live-owner", "live-child", "fresh-heartbeat", "expired-proof",
+    "changed-source", "changed-claim", "changed-row", "already-new-host",
+])
+def test_policy_restore_requires_exact_cold_boundary(
+        supervisor_home, monkeypatch, case):
+    name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old, new, current = _cold_restore_clients(supervisor_home, monkeypatch)
+    source = {"kind": "codex", "claim_id": "current-interface"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: source)
+    _prove_then_stop_cold_host(incarnation_id, old_op, old)
+    if case == "live-owner":
+        old.host_live = True
+    elif case == "live-child":
+        old.app_live = True
+    elif case == "fresh-heartbeat":
+        old.metadata_stale = False
+    elif case == "expired-proof":
+        claim = fleet.read_incarnation()
+        claim["pending_operation"]["policy_restore_preflight"][
+            "observed_at"] -= 301
+        fleet.write_incarnation(claim)
+    elif case == "changed-source":
+        source = {"kind": "codex", "claim_id": "different-interface"}
+    elif case == "changed-claim":
+        claim = fleet.read_incarnation()
+        claim["current_turn_id"] = NEWER_TURN_ID
+        fleet.write_incarnation(claim)
+    elif case == "changed-row":
+        data = fleet.load_registry()
+        data["workers"][name]["permission_effective"]["sandbox"] = {
+            "type": "workspaceWrite"}
+        fleet.save_registry(data)
+    else:
+        current["client"] = new
+
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+    assert journal.load(old_op)["state"] == "observed"
+    assert not any(op["payload"]["method"] == "thread/resume"
+                   for op in new.operations)
+
+
+def test_cold_restore_refuses_workspace_profile_even_with_full_access_sandbox(
+        supervisor_home, monkeypatch):
+    _name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old, new, _current = _cold_restore_clients(
+        supervisor_home, monkeypatch,
+        restored_active_profile={"id": ":workspace", "extends": None})
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old)
+
+    with pytest.raises(fleet.FleetCliError, match="workspace profile"):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+    pending = fleet.read_incarnation()["pending_operation"]
+    assert pending["kind"] == "resume-policy-restore"
+    assert journal.load(old_op)["state"] == "observed"
+    assert journal.load(pending["operation_id"])["state"] == "observed"
+    assert len([op for op in new.operations
+                if op["payload"]["method"] == "thread/resume"]) == 1
+
+
+def test_observed_restore_policy_mismatch_stays_uncertain_without_replay(
+        supervisor_home, monkeypatch):
+    _name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old_client, client, _current = _cold_restore_clients(
+        supervisor_home, monkeypatch, apply_override=False,
+        restore_policy={
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": {"type": "workspaceWrite", "writableRoots": []},
+        })
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    with pytest.raises(fleet.FleetCliError, match="effective sandbox mismatch"):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+    pending = fleet.read_incarnation()["pending_operation"]
+    assert pending["kind"] == "resume-policy-restore"
+    assert journal.load(old_op)["state"] == "observed"
+    assert journal.load(pending["operation_id"])["state"] == "observed"
+    before = len([op for op in client.operations
+                  if op["payload"]["method"] == "thread/resume"])
+    with pytest.raises(fleet.FleetCliError, match="effective sandbox mismatch"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert len([op for op in client.operations
+                if op["payload"]["method"] == "thread/resume"]) == before == 1
+
+
+def test_observed_restore_settles_read_only_after_public_turn_recovers(
+        supervisor_home, monkeypatch):
+    _name, incarnation_id, old_op, journal = \
+        _seed_observed_workspace_resume(supervisor_home)
+    old_client, client, _current = _cold_restore_clients(
+        supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    original_header = fleet._codex_idle_restoration_header
+    observations = []
+
+    def interrupted_second_header(binding, observed_client):
+        observations.append(1)
+        if len(observations) == 2:
+            raise fleet.FleetCliError("public header temporarily unavailable")
+        return original_header(binding, observed_client)
+
+    monkeypatch.setattr(fleet, "_codex_idle_restoration_header",
+                        interrupted_second_header)
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    with pytest.raises(fleet.FleetCliError, match="temporarily unavailable"):
+        fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op))
+    pending = fleet.read_incarnation()["pending_operation"]
+    assert pending["kind"] == "resume-policy-restore"
+    assert journal.load(pending["operation_id"])["state"] == "observed"
+    mutation_count = len([op for op in client.operations
+                          if op["payload"]["method"] == "thread/resume"])
+    monkeypatch.setattr(fleet, "_codex_idle_restoration_header", original_header)
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert fleet.read_incarnation()["state"] == "held"
+    assert journal.load(pending["operation_id"])["state"] == "committed"
+    assert len([op for op in client.operations
+                if op["payload"]["method"] == "thread/resume"]) == mutation_count == 1
 
 
 def _seed_rejected_supervisor_send(home, *, method="turn/steer"):
