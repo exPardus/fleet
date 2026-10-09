@@ -537,6 +537,20 @@ and unknown-kind responses refuse. `serverRequest/resolved` closes the durable
 wait; user-input and elicitation values are not retained in response evidence.
 No mode supplies `acceptForSession` or user input implicitly.
 
+For a held native supervisor, `codex-respond supervisor` has a separate
+Interface-only command-approval path. It requires explicit `--fleet-home`,
+`--expect-inc`, `--expect-thread`, `--expect-turn`,
+`--expect-host-generation`, `--expect-method`, and `--expect-command`;
+`--expect-request-cwd` must match if the durable request carries a cwd.
+The current process-bound Codex Interface, exact held claim and registry row,
+existing host generation, newest active turn awaiting approval, and one
+pending request must agree before the one-shot response. This path accepts
+only literal `accept` for `item/commandExecution/requestApproval`; it does not
+change the supervisor mode or grant a session-wide policy. The host records
+consumption before the provider write. Any transport ambiguity requires
+inspection of that durable record and never triggers a replay. Other targets
+continue through the ordinary worker guard.
+
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
 | --- | --- | --- | --- |
 | `bypass` | `never` | `danger-full-access` | explicit unrestricted mode, still subject to external policy |
