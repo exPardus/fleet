@@ -706,10 +706,9 @@ def test_long_supervisor_history_uses_bounded_public_pages(
         assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
         assert json.loads(capsys.readouterr().out)["verdict"] == "OK"
     methods = [op["payload"]["method"] for op in client.paging_operations]
-    assert methods == ["thread/turns/list", "thread/items/list",
-                       "thread/turns/list"]
+    assert methods == ["thread/turns/list", "thread/turns/list"]
     assert client.paging_operations[0]["payload"]["params"]["limit"] == 2
-    assert client.paging_operations[1]["payload"]["params"]["limit"] == 16
+    assert client.paging_operations[1]["payload"]["params"]["limit"] == 2
 
 
 def test_supervisor_item_page_shrinks_after_explicit_oversize(
@@ -726,9 +725,11 @@ def test_supervisor_item_page_shrinks_after_explicit_oversize(
                     "host response exceeds MAX_IPC_BYTES; page the request")
             return super().call(operation, timeout)
 
-    client = OversizePageClient(supervisor_home)
+    client = OversizePageClient(
+        supervisor_home, thread_status="idle", turn_status="completed")
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
-    assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+    fleet._codex_supervisor_observe(
+        fleet._codex_supervisor_binding(), client=client, require_full=True)
     limits = [op["payload"]["params"]["limit"]
               for op in client.paging_operations
               if op["payload"]["method"] == "thread/items/list"]

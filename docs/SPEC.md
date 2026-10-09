@@ -399,6 +399,19 @@ explicit offered decision against the exact current worker binding; stale,
 wrong, unknown, and already-consumed requests refuse without an implicit
 approval or blind retry.
 
+For an active Codex turn, Fleet validates the newest turn through public paged
+metadata without requiring its durable item pages, which can lag the running
+turn snapshot. Terminal result paths still require complete paged items.
+Ordinary status preserves an already `dead-suspected`/`uncertain` native row:
+that cache alone cannot distinguish a failed read from an accepted mutation.
+`codex-reobserve-active NAME` with an explicit home and expected thread, turn,
+generation and last-operation pins lets the current registered Interface settle
+one such row without sending mail or a provider mutation. It checks the exact home,
+host generation, unchanged row, committed last worker operation, absence of
+unresolved same-worker operations, newest active bound turn and current callback
+scope, then repeats source, journal and row checks before its single registry
+update. A waiting approval remains waiting and uses its exact response path.
+
 The wave-close row's per-home configuration also owns landing gates: a missing
 `supervisor/wave-close.json` preserves the fleet home's `docs-currency` and
 `receipts` gates, while a configured foreign home defaults to no fleet-specific
