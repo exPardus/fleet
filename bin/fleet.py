@@ -2566,6 +2566,7 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
             result_item_id, result_text = item_id, item["text"]
     return {
         "binding": binding, "client": client,
+        "thread_model": thread.get("model"),
         "provider_status": provider_status, "active_flags": list(flags),
         "turn_status": turn_status, "items_view": items_view,
         "result_item_id": result_item_id, "result_text": result_text,
@@ -8964,6 +8965,215 @@ def _resume_one_limited_codex(name: str, rec: dict) -> bool:
     prompt = _compose_codex_worker_continuation(name, binding.cwd, "")
     _cmd_send_codex_native(name, prompt, current, allow_limited=True)
     return True
+
+
+_TERMINAL_QUOTA_SCHEMAS = frozenset({
+    # Exact reviewed 0.155.1 and 0.161.0 app-server schema digests.
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3",
+    "62f227e897351f20fe8b8984341512d1cc4ebf42def4487bc65d36fb7c40bba6",
+})
+
+
+def _terminal_quota_target_mail_absent(thread_id: str) -> None:
+    """A recovery turn must not consume or obscure previously queued mail."""
+    directory = mailbox_dir()
+    target = directory / f"{thread_id}.md"
+    if target.exists() or target.is_symlink() or list(
+            directory.glob(f"{thread_id}.md.claimed.*")):
+        raise FleetCliError(
+            "terminal-quota recovery has target mail or a claimed mail file; "
+            "preserve and reconcile it before resuming")
+
+
+def _terminal_quota_durable_preflight(binding: CodexWorkerBinding,
+                                      client) -> dict:
+    """Prove the old accepted turn and absence of unfinished home intents."""
+    from fleet_codex import CodexApprovalStore, OperationJournal
+
+    record = binding.record
+    if record.get("pending_operation") is not None:
+        raise FleetCliError("terminal-quota recovery has a pending row operation")
+    operation_id = record.get("last_operation_id")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise FleetCliError("terminal-quota recovery has no bound operation ID")
+    operation_dir = state_dir() / "codex" / "operations"
+    approval_dir = state_dir() / "codex" / "approvals"
+    if not operation_dir.is_dir() or not approval_dir.is_dir():
+        raise FleetCliError("terminal-quota recovery journal inventory is unavailable")
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    records = journal.records()
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in records):
+        raise FleetCliError("terminal-quota recovery has an unresolved predecessor")
+    matches = [item for item in records if item.get("operation_id") == operation_id]
+    if len(matches) != 1:
+        raise FleetCliError("terminal-quota recovery bound journal is missing or ambiguous")
+    prior = matches[0]
+    recovery = prior.get("recovery")
+    result = prior.get("result")
+    method = prior.get("public_method")
+    if (prior.get("state") != "committed"
+            or prior.get("home") != str(FLEET_HOME.resolve())
+            or prior.get("generation") != binding.host_generation
+            or not isinstance(recovery, dict)
+            or recovery.get("fleet_name") != binding.name
+            or recovery.get("thread_id") != binding.thread_id
+            or recovery.get("canonical_cwd") != binding.cwd
+            or not isinstance(result, dict)):
+        raise FleetCliError("terminal-quota recovery bound journal disagrees with row")
+    if method == "turn/start":
+        turn = result.get("turn")
+        linked = isinstance(turn, dict) and turn.get("id") == binding.turn_id
+    elif method == "turn/steer":
+        linked = result.get("turnId") == binding.turn_id
+    else:
+        linked = False
+    if not linked:
+        raise FleetCliError("terminal-quota recovery old accepted turn is unlinked")
+
+    evidence = _codex_public_evidence_file(binding)
+    if (not isinstance(evidence, dict)
+            or type(evidence.get("schema")) is not int or evidence["schema"] != 1
+            or evidence.get("turn_status") != "failed"
+            or evidence.get("error_code") != "usageLimitExceeded"):
+        raise FleetCliError("terminal-quota recovery lacks exact durable failed-turn evidence")
+
+    approvals = CodexApprovalStore(FLEET_HOME, binding.host_generation)
+    for wait in approvals.unresolved():
+        if (wait.get("thread_id") == binding.thread_id
+                or (wait.get("generation") == binding.host_generation
+                    and (wait.get("state") == "unknown"
+                         or not wait.get("thread_id")))):
+            raise FleetCliError("terminal-quota recovery has unresolved callback evidence")
+    _terminal_quota_target_mail_absent(binding.thread_id)
+    return prior
+
+
+def _resume_terminal_quota_codex(name: str) -> int:
+    """Start one new turn on an exact loaded quota-failed thread, never replay it."""
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("terminal-quota recovery requires the current genuine Codex Interface")
+    data = read_registry_no_repair()
+    record = data.get("workers", {}).get(name)
+    if not isinstance(record, dict):
+        raise FleetCliError(f"unknown worker: {name!r}")
+    refuse_if_archived(name, record, "resume-limited --terminal-quota")
+    binding = _codex_worker_binding(name, record)
+    if (record.get("status") not in {"dead-suspected", "idle", "limited"}
+            or record.get("adapter_state") not in {"uncertain", "idle"}
+            or record.get("provider_status") != "systemError"
+            or record.get("codex_error_code") != "usageLimitExceeded"):
+        raise FleetCliError("terminal-quota recovery row is not the exact quota/SystemError case")
+    model = _codex_model_slug(record.get("model"))
+    if model is None:
+        raise FleetCliError("terminal-quota recovery row has no Codex model")
+    profile = _codex_permission_profile(record.get("mode"))
+    effective = record.get("permission_effective")
+    if not isinstance(effective, dict):
+        raise FleetCliError("terminal-quota recovery has no recorded effective policy")
+    _validate_codex_thread_effective(dict(effective, model=model), model, profile)
+
+    client = _codex_existing_client(FLEET_HOME)
+    if (client.generation != binding.host_generation
+            or client.schema_digest not in _TERMINAL_QUOTA_SCHEMAS
+            or client.schema_digest != record.get("codex_schema_digest")):
+        raise FleetCliError("terminal-quota recovery host generation or reviewed schema changed")
+    prior = _terminal_quota_durable_preflight(binding, client)
+    observed = _codex_worker_observe(binding, client=client, require_full=True)
+    if (observed["provider_status"] != "systemError"
+            or observed["active_flags"]
+            or observed["turn_status"] != "failed"
+            or observed["error_code"] != "usageLimitExceeded"
+            or observed["thread_model"] != model):
+        raise FleetCliError("terminal-quota recovery public thread is not the exact failed turn")
+    allowed, _reset_at = _codex_rate_limit_state(client)
+    if allowed is not True:
+        raise FleetCliError("terminal-quota recovery needs fresh ordinaryUsageAllowed=true")
+    fresh_client = _codex_existing_client(FLEET_HOME)
+    host_identity = (
+        "generation", "schema_digest", "host_pid", "host_process_identity",
+        "app_server_pid", "app_server_process_identity")
+    if any(getattr(fresh_client, field, None) != getattr(client, field, None)
+           for field in host_identity):
+        raise FleetCliError("terminal-quota recovery host identity changed before reservation")
+    if (not _mail_source_is_current(source)
+            or not isinstance(_registered_interface_mail_source(), dict)):
+        raise FleetCliError("terminal-quota recovery Interface identity changed")
+    _terminal_quota_durable_preflight(binding, client)
+
+    operation_id = f"worker-terminal-quota-{uuid.uuid4()}"
+    reserved = _reserve_codex_worker_operation(
+        binding, operation_id, "terminal-quota/turn-start",
+        expected_record=record)
+    prompt = (
+        "The ordinary Codex usage limit has reset. Continue your existing task "
+        "from this thread's history. Preserve its scope and report the result."
+    )
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": binding.thread_id,
+            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+        }},
+        "recovery": {
+            "kind": "worker/terminal-quota-turn-start",
+            "fleet_name": name, "thread_id": binding.thread_id,
+            "previous_turn_id": binding.turn_id,
+            "previous_operation_id": prior["operation_id"],
+            "canonical_cwd": binding.cwd,
+            "host_generation": binding.host_generation,
+            "schema_digest": client.schema_digest,
+        },
+    }
+    try:
+        reply = fresh_client.call(operation, timeout=30)
+        result = reply.result
+        turn = result.get("turn") if isinstance(result, dict) else None
+        turn_id = _provider_codex_id(
+            turn.get("id") if isinstance(turn, dict) else None,
+            "terminal-quota successor turn")
+        if (reply.generation != binding.host_generation
+                or turn_id == binding.turn_id
+                or turn.get("status") != "inProgress"):
+            raise FleetCliError("terminal-quota successor response is ambiguous")
+        fresh_client.commit(operation_id)
+    except BaseException as exc:
+        _freeze_codex_worker_operation(binding, operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "terminal-quota turn/start acceptance is uncertain; retained the "
+            "reservation and did not retry") from exc
+
+    with fleet_lock():
+        data = load_registry()
+        current = data["workers"].get(name)
+        if current != reserved:
+            raise FleetCliError(
+                "terminal-quota successor was accepted but row changed; "
+                "preserved the reservation for review")
+        current.pop("pending_operation", None)
+        current.update({
+            "codex_turn_id": turn_id, "adapter_state": "active",
+            "provider_status": "active", "status": "working",
+            "last_activity": now_iso(), "last_dispatch_at": now_iso(),
+            "turns": current.get("turns", 0) + 1,
+        })
+        current.pop("ordinary_usage_allowed", None)
+        current.pop("limit_kind", None)
+        current.pop("limit_reset_at", None)
+        current.pop("codex_error_code", None)
+        save_registry(data)
+        _append_event_quiet(
+            "terminal_quota_turn_started", name,
+            codex_thread_id=binding.thread_id,
+            previous_turn_id=binding.turn_id,
+            codex_turn_id=turn_id, operation_id=operation_id,
+            substrate="codex")
+    print(f"{name}: resumed terminal quota on existing Codex thread {binding.thread_id}")
+    return 0
 
 
 def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
