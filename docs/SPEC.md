@@ -406,7 +406,10 @@ rows, committed operation inventory, recorded approval inventory, target mail,
 supervisor queue/journal, and affected worktree heads and lane receipts. Its
 replacement Codex executable is also pinned by absolute path, file identity,
 digest and the old host's exact version, so a newer PATH binary is not used. Its
-durable home barrier blocks provider mutations while recovery is incomplete.
+durable home barrier blocks mutations through the reviewed client and
+replacement host while recovery is incomplete. The already loaded old host
+cannot enforce new source; the Interface must coordinate its callers and
+recheck pinned evidence across the old-host shutdown.
 It refuses an unresolved old-generation operation or callback before staging;
 absence of a recorded callback does not prove that the failed child has no
 undrained callback. The exact Interface must separately record a founder

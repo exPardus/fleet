@@ -19,7 +19,12 @@ its file identity and SHA-256 and verifies that `--version` exactly matches
 the old host. Boot uses this pinned executable for both app-server and schema
 commands. It never silently selects the current PATH version.
 Unrecorded callbacks in the failed child cannot be excluded. The home barrier
-is written before any host or provider lifecycle action. Other homes and
+is written before any host or provider lifecycle action. It is enforced by
+the reviewed client and replacement host; the already loaded old host cannot
+hot-load it. The Interface must coordinate all callers away from that old
+host before interruption, and the post-shutdown evidence CAS catches recorded
+state drift. An unrecorded in-flight effect remains part of the explicit loss
+decision. Other homes and
 unrelated product rows may progress; a newly appeared same-generation row or
 change to pinned evidence refuses subsequent stages.
 
