@@ -157,6 +157,7 @@ see [SECURITY.md](SECURITY.md).
 - [Concepts](docs/concepts.md): the problem fleet solves and how the state machine works.
 - [CLI reference](docs/cli-reference.md): every verb and option, generated from the parser.
 - [Configuration](docs/configuration.md): `worker-settings.json`, `wave-close.json`, the status line.
+- [Provider namespaces](docs/any-provider-fleet-usage.md): run Claude workers through an Anthropic-compatible endpoint and verify routing.
 - [Troubleshooting](docs/troubleshooting.md): lost nonces, busy holders, Codex host restarts, `dead-suspected`.
 - [Codex lanes](docs/codex-lanes.md): running Codex workers.
 - [FAQ](docs/faq.md): short answers to common questions.

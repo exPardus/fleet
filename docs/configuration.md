@@ -128,10 +128,18 @@ repairs state.
 
 ## Environment variables
 
+Provider-specific Claude environment belongs to the daemon namespace, not to a
+Fleet registry record. For an Anthropic-compatible endpoint, use a dedicated
+`CLAUDE_CONFIG_DIR` and set its endpoint, authentication, and model defaults
+before the first `fleet spawn`; the daemon keeps those values for later workers.
+See [Run Claude workers through another provider](any-provider-fleet-usage.md)
+for the recipe and the separate OpenRouter/Codex routes.
+
 | Variable | Effect |
 |---|---|
 | `FLEET_HOME` | default home when no `--fleet-home` option is given |
 | `FLEET_PYTHON` | interpreter used by the `bin/fleet` shim, if you do not want the first one it finds |
+| `CLAUDE_CONFIG_DIR` | Claude Code daemon namespace; one namespace keeps one daemon/backend. Provider setup is described in [any-provider-fleet-usage.md](any-provider-fleet-usage.md). |
 | `CLAUDE_CODE_OAUTH_TOKEN` | a long-lived token that makes Claude Code's remote control refuse to start. Unset it for interface sessions: `env -u CLAUDE_CODE_OAUTH_TOKEN claude` |
 
 ## Keeper

@@ -11,6 +11,7 @@ Git; `fleet init` creates those paths without replacing existing content.
 - [`cli-reference.md`](cli-reference.md) — every visible command, nested subcommand
   and option, generated from the parser.
 - [`configuration.md`](configuration.md) — home files, `worker-settings.json`, `wave-close.json`, status line.
+- [`any-provider-fleet-usage.md`](any-provider-fleet-usage.md) — provider namespaces, compatible endpoints, routing verification, and limits.
 - [`troubleshooting.md`](troubleshooting.md) — nonces, busy holders, `dead-suspected`, Codex host restarts.
 - [`codex-lanes.md`](codex-lanes.md) — running Codex workers.
 - [`faq.md`](faq.md) — short answers to common questions.

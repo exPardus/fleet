@@ -14,6 +14,11 @@ performs the repairs described below. The statusline and the `/fleet:*` views
 read a status snapshot (`fleet.status_snapshot()`), take no lock, and write
 nothing. Use `fleet status` when you need a verdict to be recorded.
 
+For a worker that may have used the wrong model or provider, see [Run Claude
+workers through another provider](any-provider-fleet-usage.md). In particular,
+`fleet result NAME` reports the completed turn's model metadata; transcript paths
+and the shell's current environment are not routing evidence.
+
 For the supervisor, add `fleet sup-status` and `fleet sup-guard`. The operating
 rules behind each recovery step are in [skills/fleet/SKILL.md](../skills/fleet/SKILL.md)
 and [skills/fleet/supervisor.md](../skills/fleet/supervisor.md). Those files
