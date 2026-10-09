@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+import fleet_codex_host
 from fleet_codex import CodexApprovalStore, OperationJournal
 
 
@@ -18,6 +19,8 @@ NEW = "new-apps-host-generation"
 NAME = f"sup|{INC}|boot"
 METHOD = "item/commandExecution/requestApproval"
 COMMAND = "gh pr view 17 -R example/tap --json number,url"
+FRESH_TURN = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
+FRESH_COMMAND = "gh pr view 18 -R example/tap --json number,url"
 
 
 class LegacyAppsHost:
@@ -43,6 +46,14 @@ class LegacyAppsHost:
         self.on_mutation = None
         self.on_pending = None
         self.other_active = False
+        self.cold = cold
+        self.turn_id = TURN
+        self.responses = []
+        if cold:
+            self.host = fleet_codex_host.Host.__new__(fleet_codex_host.Host)
+            self.host.home = home
+            self.host.generation = generation
+            self.host.approvals = store
 
     def _owner_live(self):
         return self.host_live
@@ -61,6 +72,27 @@ class LegacyAppsHost:
             self.on_pending()
         return self.store.unresolved(thread_id=thread_id, turn_id=turn_id)
 
+    def supervisor_approval_reservation_supported(self):
+        return self.cold
+
+    def respond_approval(self, request_id, thread_id, turn_id, decision, timeout,
+                         supervisor_reservation=None):
+        assert self.cold and timeout == 10
+        payload = {"request_id": request_id, "thread_id": thread_id,
+                   "turn_id": turn_id, "decision": decision}
+        with fleet.fleet_lock():
+            self.host._validate_supervisor_approval_reservation(
+                None, payload, supervisor_reservation)
+            record, response = self.store.begin_response(
+                request_id, thread_id, turn_id, decision)
+        self.responses.append(response)
+        current = self.store.mark_responded(record)
+        return {"state": current["state"], "request_id": current["request_id"],
+                "thread_id": thread_id, "turn_id": turn_id}
+
+    def commit(self, operation_id):
+        OperationJournal(self.home, self.generation).commit(operation_id)
+
     def call(self, operation, timeout):
         method = operation["payload"]["method"]
         target = operation["payload"].get("params", {}).get("threadId")
@@ -72,14 +104,17 @@ class LegacyAppsHost:
                            if other else self.thread_status,
                            "activeFlags": [] if other else self.flags}}}
         elif method == "thread/turns/list":
-            result = {"data": [{"id": TURN, "status": (
+            turns = [{"id": self.turn_id, "status": (
                                 "inProgress" if self.other_active else "completed")
                                 if other else self.turn_status,
-                                "itemsView": "notLoaded"}],
-                      "nextCursor": None}
+                                "itemsView": "notLoaded"}]
+            if self.turn_id == FRESH_TURN and not other:
+                turns.append({"id": TURN, "status": "interrupted",
+                              "itemsView": "notLoaded"})
+            result = {"data": turns, "nextCursor": None}
         elif method == "thread/items/list":
             result = {"data": [], "nextCursor": None}
-        elif method in {"turn/interrupt", "thread/resume"}:
+        elif method in {"turn/interrupt", "thread/resume", "turn/start"}:
             journal = OperationJournal(self.home, self.generation)
             journal.prepare(operation)
             journal.accept(operation["operation_id"])
@@ -95,7 +130,7 @@ class LegacyAppsHost:
                 self.store.resolve({"params": {
                     "threadId": THREAD, "requestId": 6}})
                 result = {}
-            else:
+            elif method == "thread/resume":
                 result = {
                     "thread": {"id": THREAD, "cwd": str(self.home)},
                     "cwd": str(self.home), "model": "gpt-6-sol",
@@ -103,6 +138,18 @@ class LegacyAppsHost:
                     "approvalsReviewer": "user",
                     "sandbox": {"type": "workspaceWrite"},
                 }
+            else:
+                self.turn_id = FRESH_TURN
+                self.thread_status = "active"
+                self.turn_status = "inProgress"
+                self.flags = ["waitingOnApproval"]
+                self.store.record_request({"id": 9, "method": METHOD, "params": {
+                    "threadId": THREAD, "turnId": FRESH_TURN,
+                    "itemId": "item-9", "startedAtMs": 9,
+                    "command": FRESH_COMMAND,
+                    "cwd": str(self.home / "tap-wt-ci-edge-fix")}})
+                result = {"turn": {"id": FRESH_TURN,
+                                   "status": "inProgress"}}
             journal.observe(operation["operation_id"], result)
         else:
             raise AssertionError(f"legacy host received unexpected method {method}")
@@ -156,10 +203,22 @@ def apps_home(tmp_path, monkeypatch):
 
     def create_host(_home):
         assert current[0] is old
-        current[0] = LegacyAppsHost(home, NEW, store, cold=True)
+        current[0] = LegacyAppsHost(
+            home, NEW, CodexApprovalStore(home, NEW), cold=True)
         return current[0]
 
     monkeypatch.setattr(fleet, "_codex_native_client", create_host)
+    monkeypatch.setattr(fleet_codex_host, "read_interface_claim",
+                        lambda _home: source)
+    monkeypatch.setattr(fleet_codex_host, "_ipc_peer_credentials",
+                        lambda _connection: (1234, 1000))
+    monkeypatch.setattr(fleet_codex_host.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(fleet_codex_host, "codex_process_source",
+                        lambda _pid: {"uid": 1000})
+    monkeypatch.setattr(fleet_codex_host, "interface_source_matches",
+                        lambda claim, peer: claim == source)
+    monkeypatch.setattr(fleet, "_mail_source_is_current",
+                        lambda value: value == source)
     return home, store, old, current, cwd, mail
 
 
@@ -219,6 +278,35 @@ def test_old_host_cancel_then_exact_cold_resume(apps_home):
     assert fleet.read_registry_no_repair()["workers"]["other-worker"] == other_before
     assert mail.read_bytes() == mail_before
     assert store._load_path(store.path(7))["state"] == "resolved"
+
+
+def test_cold_recovery_new_host_handles_fresh_approval_once(apps_home):
+    _home, old_store, old, current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    assert prepare(apps_home, operation_id) == 0
+    old.host_live = old.app_live = False
+    old.stale = True
+    assert fleet._resume_codex_cancelled_approval(
+        args(cwd, expect_cancel_op=operation_id)) == 0
+    new = current[0]
+    assert new.supervisor_approval_reservation_supported()
+    assert fleet._cmd_send_codex_supervisor(NAME, "continue queued Apps work") == 0
+    fresh = new.store._load_path(new.store.path(9))
+    assert fresh["state"] == "pending"
+    respond = SimpleNamespace(
+        name="supervisor", request_id="9", decision="accept", nonce=None,
+        _fleet_home_explicit=True, expect_inc=INC, expect_thread=THREAD,
+        expect_turn=FRESH_TURN, expect_host_generation=NEW,
+        expect_method=METHOD, expect_command=FRESH_COMMAND,
+        expect_request_cwd=cwd)
+    assert fleet.cmd_codex_respond(respond) == 0
+    assert new.responses == [{"decision": "accept"}]
+    assert new.store._load_path(new.store.path(9))["state"] == "responded"
+    assert old_store._load_path(old_store.path(6))["state"] == "resolved"
+    assert fleet.read_incarnation()["state"] == "held"
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_codex_respond(respond)
+    assert len(new.responses) == 1
 
 
 @pytest.mark.parametrize("change", [
@@ -395,3 +483,26 @@ def test_cold_resume_policy_mismatch_leaves_exact_intent_fenced(apps_home):
     assert fleet.read_incarnation()["state"] == "uncertain"
     assert fleet.read_incarnation()["pending_operation"]["kind"] == \
         "approval-cancelled/resume"
+
+
+def test_new_host_without_reviewed_response_fence_refuses_before_resume(
+        apps_home, monkeypatch):
+    _home, _store, old, current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    assert prepare(apps_home, operation_id) == 0
+    old.host_live = old.app_live = False
+    old.stale = True
+    create = fleet._codex_native_client
+
+    def incapable(home):
+        fresh = create(home)
+        fresh.supervisor_approval_reservation_supported = lambda: False
+        return fresh
+
+    monkeypatch.setattr(fleet, "_codex_native_client", incapable)
+    with pytest.raises(fleet.FleetCliError, match="reviewed supervisor approval fence"):
+        fleet._resume_codex_cancelled_approval(
+            args(cwd, expect_cancel_op=operation_id))
+    assert current[0].mutations == []
+    assert fleet.read_incarnation()["pending_operation"]["kind"] == \
+        "approval-cancelled/cold-resume"

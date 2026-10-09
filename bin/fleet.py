@@ -20474,6 +20474,13 @@ def _resume_codex_cancelled_approval(args) -> int:
     if (client.generation == old_client.generation
             or getattr(client, "_launched_process", None) is None):
         raise FleetCliError("cancelled approval requires a newly launched host")
+    try:
+        if not client.supervisor_approval_reservation_supported():
+            raise FleetCliError("new host lacks supervisor approval fence")
+    except Exception as exc:
+        raise FleetCliError(
+            "cancelled approval cold resume requires the reviewed supervisor "
+            "approval fence on the new host") from exc
     profile = _codex_cancel_original_policy(binding)
     _validate_codex_managed_requirements(client.config_requirements(), profile)
     model = _codex_model_slug(binding.record.get("model"))

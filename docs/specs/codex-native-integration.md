@@ -698,7 +698,10 @@ the host must have no unresolved callbacks or journal operations. Any
 same-host worker-row drift after preparation refuses cold resume.
 After the exact old host and app-server child exit with a stale heartbeat,
 `--resume-cancelled-approval` requires the same explicit pins and proof before
-host creation and provider dispatch. It creates a new host generation and one
+host creation and provider dispatch. The new generation must prove the
+supervisor approval reservation capability before any resume; this keeps a
+later `accept`-mode request serviceable through the reviewed one-shot
+`codex-respond supervisor` route. It creates one
 distinct cold `thread/resume` intent on the **same** thread, with
 `excludeTurns=true`, canonical cwd, recorded model, `approvalPolicy=on-request`,
 `approvalsReviewer=user`, and `sandbox=workspace-write`. The effective response
