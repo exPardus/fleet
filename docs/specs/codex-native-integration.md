@@ -409,6 +409,14 @@ read, malformed evidence, or conflicting identity maps to
 exact bound thread/turn in durable evidence and a validated live `thread/read`,
 with both reporting `completed`; every other status, route, archived row,
 pending operation, evidence mismatch, and host ambiguity stays unchanged.
+The completion-only metadata reader skips item pagination only when the exact
+durable result has complete usage, a genuine result item, and an untruncated
+result. A live approval/user-input flag or any nonstale unresolved durable
+callback wait prevents this repair. An idle successor send uses that same
+exception only after a fresh idle/completed turn read and refuses unresolved
+callbacks before reserving and again before writing mail. Incomplete present
+result evidence cannot authorize the exception. Ordinary active steering and
+host-generation recovery retain their full-read checks.
 Candidate rows are snapshotted under `fleet.lock`, host IPC runs unlocked, and
 the repair commits by complete-row compare-and-swap so a concurrent kill,
 resume reservation, or other mutation wins. Bare `doctor` remains report-only.

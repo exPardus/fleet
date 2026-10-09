@@ -717,6 +717,47 @@ def _write_turn_evidence(home, *, thread_id=THREAD_ID, turn_id=TURN_ID,
         }), encoding="utf-8")
 
 
+def _write_complete_turn_evidence(home, *, thread_id=THREAD_ID,
+                                  turn_id=TURN_ID, turn_status="completed"):
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps({
+            "schema": 1, "thread_id": thread_id, "turn_id": turn_id,
+            "turn_status": turn_status, "result_item_id": "item-final",
+            "result_text": "bounded final", "result_truncated": False,
+            "usage": {
+                "cache_write_input_tokens": 0, "cached_input_tokens": 2,
+                "input_tokens": 10, "output_tokens": 3,
+                "reasoning_output_tokens": 1, "total_tokens": 16,
+            },
+        }), encoding="utf-8")
+
+
+def _record_approval_wait(home, state="pending", *, generation="host-generation-1"):
+    from fleet_codex import CodexApprovalStore
+
+    (home / "state" / "codex").chmod(0o700)
+    store = CodexApprovalStore(home, generation)
+    request = {
+        "id": "request-1",
+        "method": ("unreviewed/request" if state == "unknown"
+                   else "item/commandExecution/requestApproval"),
+        "params": {"threadId": THREAD_ID, "turnId": TURN_ID,
+                   "itemId": "item-1", "startedAtMs": 1,
+                   "command": "git status"},
+    }
+    stored = store.record_request(request)
+    if state in {"responding", "responded", "uncertain"}:
+        stored, _response = store.begin_response(
+            "request-1", THREAD_ID, TURN_ID, "accept")
+        if state == "responded":
+            store.mark_responded(stored)
+        elif state == "uncertain":
+            store.mark_uncertain(stored, "fake response outcome unknown")
+    return store
+
+
 class WorkerVerbClient:
     generation = "host-generation-1"
     schema_digest = "reviewed-schema"
@@ -819,6 +860,29 @@ class WorkerVerbClient:
 
     def commit(self, operation_id):
         self.commits.append(operation_id)
+
+
+def _item_page_unavailable(client, *, newest_turn_id=None):
+    from fleet_codex import HostUnavailable
+
+    original_call = client.call
+    methods = []
+
+    def call(operation, timeout):
+        method = operation.get("payload", {}).get("method")
+        methods.append(method)
+        if method == "thread/items/list":
+            raise HostUnavailable("Codex host response was lost")
+        reply = original_call(operation, timeout)
+        if method == "thread/turns/list":
+            turn = reply.result["data"][0]
+            reply.result["data"][0] = dict(
+                turn, id=newest_turn_id or turn["id"],
+                itemsView="notLoaded", items=[])
+        return reply
+
+    client.call = call
+    return methods
 
 
 class BlockingResumeClient(WorkerVerbClient):
@@ -1020,7 +1084,7 @@ def test_doctor_repair_reconciles_pre_fix_dead_suspected_completion(
     home, lane = native_home
     _install_record(
         lane, status="dead-suspected", adapter_state="uncertain")
-    _write_turn_evidence(home)
+    _write_complete_turn_evidence(home)
     depth = _track_lock(monkeypatch)
     client = WorkerVerbClient(
         lane, provider_status="notLoaded", turn_status="completed")
@@ -1042,6 +1106,78 @@ def test_doctor_repair_reconciles_pre_fix_dead_suspected_completion(
     assert stored["provider_status"] == "notLoaded"
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/read"]
+
+
+def test_doctor_repair_uses_exact_turn_metadata_when_item_page_is_unavailable(
+        native_home, monkeypatch):
+    from fleet_codex import HostUnavailable
+
+    home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain")
+    _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    methods = _item_page_unavailable(client)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    binding = fleet._codex_worker_binding(
+        "cx-native", fleet.load_registry()["workers"]["cx-native"])
+    with pytest.raises(HostUnavailable, match="response was lost"):
+        fleet._codex_worker_observe(binding)
+    methods.clear()
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == ["cx-native"]
+    assert methods == ["thread/read", "thread/turns/list", "thread/turns/list"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == stored["adapter_state"] == "idle"
+    assert stored["codex_thread_id"] == THREAD_ID
+    assert stored["codex_turn_id"] == TURN_ID
+
+
+@pytest.mark.parametrize("missing", ["usage", "result_item_id",
+                                      "result_truncated"])
+def test_doctor_metadata_completion_requires_complete_durable_result(
+        native_home, monkeypatch, missing):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _write_complete_turn_evidence(home)
+    path = (home / "state" / "codex" / "public-evidence"
+            / f"{THREAD_ID}.{TURN_ID}.json")
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence.pop(missing)
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+    assert client.operations == []
+
+
+@pytest.mark.parametrize("obstacle", [
+    "active-flag", "pending", "responding", "responded", "uncertain",
+    "unknown", "unreadable",
+])
+def test_doctor_completed_result_refuses_live_or_durable_wait(
+        native_home, monkeypatch, obstacle):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed",
+        active_flags=["waitingOnApproval"] if obstacle == "active-flag" else [])
+    if obstacle == "unreadable":
+        directory = home / "state" / "codex" / "approvals"
+        directory.mkdir(mode=0o700)
+        (directory / "bad.json").write_text("{", encoding="utf-8")
+    elif obstacle != "active-flag":
+        _record_approval_wait(home, obstacle)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original
 
 
 @pytest.mark.parametrize(
@@ -1076,7 +1212,7 @@ def test_doctor_repair_completion_reconciliation_negative_matrix(
     updates.update(record_updates)
     original = _install_record(lane, **updates)
     if evidence_kwargs is not None:
-        _write_turn_evidence(home, **evidence_kwargs)
+        _write_complete_turn_evidence(home, **evidence_kwargs)
     client = WorkerVerbClient(
         lane, provider_status=provider_status, turn_status=turn_status)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
@@ -1093,7 +1229,7 @@ def test_doctor_repair_completion_reconciliation_rejects_live_identity_mismatch(
     home, lane = native_home
     original = _install_record(
         lane, status="dead-suspected", adapter_state="uncertain")
-    _write_turn_evidence(home)
+    _write_complete_turn_evidence(home)
     client = WorkerVerbClient(
         lane, provider_status="notLoaded", turn_status="completed")
     original_thread = client._thread
@@ -1121,7 +1257,7 @@ def test_doctor_repair_completion_reconciliation_full_row_cas_loses_to_races(
     home, lane = native_home
     _install_record(
         lane, status="dead-suspected", adapter_state="uncertain")
-    _write_turn_evidence(home)
+    _write_complete_turn_evidence(home)
     client = WorkerVerbClient(
         lane, provider_status="notLoaded", turn_status="completed")
     original_call = client.call
@@ -1182,7 +1318,7 @@ def test_doctor_repair_runs_codex_completion_reconciliation(
     home, lane = native_home
     _install_record(
         lane, status="dead-suspected", adapter_state="uncertain")
-    _write_turn_evidence(home)
+    _write_complete_turn_evidence(home)
     client = WorkerVerbClient(
         lane, provider_status="notLoaded", turn_status="completed")
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
@@ -1325,6 +1461,203 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     record = fleet.load_registry()["workers"]["cx-native"]
     assert record["codex_turn_id"] == expected_turn
     assert record["status"] == "working"
+
+
+def test_native_worker_send_after_exact_completion_needs_no_item_page(
+        native_home, monkeypatch):
+    home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain")
+    _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    methods = _item_page_unavailable(client)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == ["cx-native"]
+    assert fleet._cmd_send_codex("cx-native", "continue safely") == 0
+
+    assert methods == [
+        "thread/read", "thread/turns/list", "thread/turns/list",
+        "thread/read", "thread/turns/list", "thread/turns/list",
+        "turn/start",
+    ]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == THREAD_ID
+    assert stored["codex_turn_id"] == NEXT_TURN_ID
+    assert stored["status"] == "working"
+    assert len(client.commits) == 1
+
+
+@pytest.mark.parametrize("missing", ["usage", "result_item_id",
+                                      "result_truncated"])
+def test_native_worker_metadata_send_refuses_incomplete_present_result(
+        native_home, monkeypatch, missing):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="idle", adapter_state="idle", provider_status="idle")
+    _write_complete_turn_evidence(home)
+    path = (home / "state" / "codex" / "public-evidence"
+            / f"{THREAD_ID}.{TURN_ID}.json")
+    evidence = json.loads(path.read_text(encoding="utf-8"))
+    evidence.pop(missing)
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="durable"):
+        fleet._cmd_send_codex("cx-native", "must not send")
+
+    assert client.operations == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+
+
+@pytest.mark.parametrize("obstacle", [
+    "active-flag", "pending", "responding", "responded", "uncertain",
+    "unknown", "unreadable",
+])
+def test_native_worker_completed_send_refuses_live_or_durable_wait(
+        native_home, monkeypatch, obstacle):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="idle", adapter_state="idle", provider_status="idle")
+    _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed",
+        active_flags=["waitingOnApproval"] if obstacle == "active-flag" else [])
+    methods = _item_page_unavailable(client)
+    if obstacle == "unreadable":
+        directory = home / "state" / "codex" / "approvals"
+        directory.mkdir(mode=0o700)
+        (directory / "bad.json").write_text("{", encoding="utf-8")
+    elif obstacle != "active-flag":
+        _record_approval_wait(home, obstacle)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError):
+        fleet._cmd_send_codex("cx-native", "must not send")
+
+    assert "turn/start" not in methods
+    assert "thread/items/list" not in methods
+    assert fleet.load_registry()["workers"]["cx-native"] == original
+
+
+def test_completed_send_releases_reservation_for_wait_arriving_after_precheck(
+        native_home, monkeypatch):
+    home, lane = native_home
+    original = _install_record(
+        lane, status="idle", adapter_state="idle", provider_status="idle")
+    _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    methods = _item_page_unavailable(client)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    original_check = fleet._require_no_codex_current_waits
+    calls = []
+
+    def wait_arrives_after_first_check(name, record):
+        original_check(name, record)
+        calls.append(True)
+        if len(calls) == 1:
+            _record_approval_wait(home)
+
+    monkeypatch.setattr(
+        fleet, "_require_no_codex_current_waits",
+        wait_arrives_after_first_check)
+
+    with pytest.raises(fleet.FleetCliError, match="callback wait"):
+        fleet._cmd_send_codex("cx-native", "must not send")
+
+    assert len(calls) == 1
+    assert "turn/start" not in methods
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_turn_id"] == original["codex_turn_id"]
+    assert "pending_operation" not in stored
+    assert not list((home / "mailbox").iterdir())
+
+
+def test_completed_repair_and_send_ignore_only_stale_generation_wait(
+        native_home, monkeypatch):
+    home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain")
+    _write_complete_turn_evidence(home)
+    _record_approval_wait(home, generation="older-host-generation")
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    methods = _item_page_unavailable(client)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_completions() == ["cx-native"]
+    assert fleet._cmd_send_codex("cx-native", "continue safely") == 0
+    assert methods.count("turn/start") == 1
+    assert "thread/items/list" not in methods
+
+
+@pytest.mark.parametrize("case", ["missing-evidence", "became-active",
+                                    "different-newest-turn"])
+def test_native_worker_send_metadata_exception_stays_closed(
+        native_home, monkeypatch, case):
+    from fleet_codex import HostUnavailable
+
+    home, lane = native_home
+    _install_record(lane, status="idle", adapter_state="idle",
+                    provider_status="idle")
+    if case != "missing-evidence":
+        _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="active" if case == "became-active" else "idle",
+        turn_status="inProgress" if case == "became-active" else "completed")
+    methods = _item_page_unavailable(
+        client, newest_turn_id=(NEXT_TURN_ID
+                                if case == "different-newest-turn" else None))
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    if case == "different-newest-turn":
+        with pytest.raises(fleet.FleetCliError, match="bound turn"):
+            fleet._cmd_send_codex("cx-native", "must not start")
+    else:
+        with pytest.raises(HostUnavailable, match="response was lost"):
+            fleet._cmd_send_codex("cx-native", "must not start")
+
+    assert "turn/start" not in methods
+    assert "turn/steer" not in methods
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_turn_id"] == TURN_ID
+    assert "pending_operation" not in stored
+
+
+def test_native_worker_completed_send_loses_full_row_cas_to_concurrent_change(
+        native_home, monkeypatch):
+    home, lane = native_home
+    _install_record(lane, status="idle", adapter_state="idle",
+                    provider_status="idle")
+    _write_complete_turn_evidence(home)
+    client = WorkerVerbClient(
+        lane, provider_status="idle", turn_status="completed")
+    methods = _item_page_unavailable(client)
+    original_call = client.call
+
+    def change_row_after_public_read(operation, timeout):
+        reply = original_call(operation, timeout)
+        if (operation.get("payload", {}).get("method") == "thread/turns/list"
+                and methods.count("thread/turns/list") == 2):
+            with fleet.fleet_lock():
+                data = fleet.load_registry()
+                data["workers"]["cx-native"]["last_operation_id"] = "concurrent-op"
+                fleet.save_registry(data)
+        return reply
+
+    client.call = change_row_after_public_read
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="changed concurrently"):
+        fleet._cmd_send_codex("cx-native", "must not start")
+
+    assert "turn/start" not in methods
+    assert "thread/items/list" not in methods
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["last_operation_id"] == "concurrent-op"
+    assert "pending_operation" not in stored
 
 
 def test_native_worker_send_resumes_live_thread_after_host_generation_change(
