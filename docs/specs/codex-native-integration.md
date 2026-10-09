@@ -528,7 +528,8 @@ turn/item identity plus host generation before status exposes them. They survive
 restart as visible generation-bound waits; a request from a replaced
 generation is stale and cannot be answered on the new connection.
 
-`fleet codex-respond NAME REQUEST_ID DECISION` is the only response path.
+For ordinary workers, `fleet codex-respond NAME REQUEST_ID DECISION` is the
+response path.
 `DECISION` is an offered literal, an explicit JSON response object, or `@file`;
 the host validates it against the stored request, marks the request consumed
 before writing the JSON-RPC response, and never retries an uncertain write.
@@ -564,6 +565,21 @@ mutation. Reconciliation must inspect the durable approval state and current
 claim/row first; `responding`, `responded`, `resolved`, or `uncertain` never
 authorize replay. A reviewed exact compare-and-swap may clear a stranded
 reservation after classifying the request, without changing unrelated workers.
+
+The separate `codex-decline-fixed` verb handles one fully pinned native
+supervisor command approval on a reviewed older host that lacks the supervisor
+reservation method. It requires the genuine current Codex Interface and
+explicit home, exact held claim and supervisor row with no pending operation,
+typed request ID, request generation/thread/turn/key/digest/item/command/cwd,
+and the pinned old host source and process identity. It permits only literal
+`decline` for `item/commandExecution/requestApproval`; other decisions and
+methods refuse. After public and durable request reads, and immediately before
+reserving the claim and row, the CLI reopens supported host metadata and
+checks both the host and the original app-server child's PID, OS start identity,
+and startup time. A replacement child refuses before reservation or provider
+response. The CLI keeps the exact reservation through the one response and
+clears it only after acknowledged, exact settlement. A lost reply or process
+death after the final check remains uncertain and never authorizes replay.
 
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
 | --- | --- | --- | --- |

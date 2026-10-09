@@ -8472,7 +8472,7 @@ def _settle_codex_supervisor_approval(
 # bytes after process start; the operator procedure must separately prove the
 # loaded process provenance before invoking this compatibility command.
 FIXED_DECLINE_OLD_HOST_SHA256 = (
-    "24229e6968836b407c3b8c32ecad58eb78a7906884b4fdf5759ba16fb3e515f7")
+    "ef4516e021043984f7aee4d408d6c9292393def4696353bf3a01d71b3aa2036b")
 
 
 def _fixed_decline_request_id(raw, kind):
@@ -8568,6 +8568,31 @@ def _fixed_decline_host_matches(client, args, generation):
                                       observed) is True)
 
 
+def _fixed_decline_fresh_processes_match(args, generation):
+    """Reopen supported host metadata after reads; bind the original child."""
+    from fleet_codex import (CodexHostClient, _process_identity,
+                             _process_identities_match)
+    if (type(args.expect_app_server_pid) is not int
+            or args.expect_app_server_pid <= 0
+            or not isinstance(args.expect_app_server_process_identity, str)
+            or not args.expect_app_server_process_identity
+            or type(args.expect_app_server_started_at) is not float
+            or args.expect_app_server_started_at <= 0):
+        return False
+    fresh = CodexHostClient.connect_existing(FLEET_HOME)
+    if (not _fixed_decline_host_matches(fresh, args, generation)
+            or fresh.app_server_pid != args.expect_app_server_pid
+            or fresh.app_server_process_identity
+            != args.expect_app_server_process_identity
+            or fresh.app_server_started_at
+            != args.expect_app_server_started_at):
+        return False
+    observed = _process_identity(args.expect_app_server_pid)
+    return (isinstance(observed, str) and
+            _process_identities_match(
+                args.expect_app_server_process_identity, observed) is True)
+
+
 def _settle_fixed_decline_rejection(
         binding, operation_id, old_claim, old_row, reserved_claim,
         reserved_row, args, typed_id) -> bool:
@@ -8602,6 +8627,12 @@ def cmd_codex_decline_fixed(args) -> int:
             or not args.expect_host_generation
             or not isinstance(args.expect_host_process_identity, str)
             or not args.expect_host_process_identity
+            or type(args.expect_app_server_pid) is not int
+            or args.expect_app_server_pid <= 0
+            or not isinstance(args.expect_app_server_process_identity, str)
+            or not args.expect_app_server_process_identity
+            or type(args.expect_app_server_started_at) is not float
+            or args.expect_app_server_started_at <= 0
             or not isinstance(args.expect_request_key, str)
             or len(args.expect_request_key) != 64
             or not isinstance(args.expect_request_digest, str)
@@ -8675,6 +8706,15 @@ def cmd_codex_decline_fixed(args) -> int:
                     client, args, binding.host_generation)
                 or durable != request):
             raise FleetCliError("fixed decline binding, Interface, or request changed")
+        try:
+            child_unchanged = _fixed_decline_fresh_processes_match(
+                args, binding.host_generation)
+        except Exception as exc:
+            raise FleetCliError(
+                "fixed decline fresh host/child identity is unavailable") from exc
+        if not child_unchanged:
+            raise FleetCliError(
+                "fixed decline original app-server child changed before reservation")
         old_claim = dict(current_claim)
         old_row = dict(current.record)
         reservation = {
@@ -23544,9 +23584,14 @@ def build_parser() -> argparse.ArgumentParser:
                                  choices=("int", "string"))
     for field in ("inc", "thread", "turn", "host-generation", "method",
                   "item-id", "command", "request-key", "request-digest",
-                  "old-host-sha256", "host-process-identity"):
+                  "old-host-sha256", "host-process-identity",
+                  "app-server-process-identity"):
         p_fixed_decline.add_argument(f"--expect-{field}", required=True)
     p_fixed_decline.add_argument("--expect-host-pid", required=True, type=int)
+    p_fixed_decline.add_argument("--expect-app-server-pid", required=True,
+                                 type=int)
+    p_fixed_decline.add_argument("--expect-app-server-started-at", required=True,
+                                 type=float)
     cwd_group = p_fixed_decline.add_mutually_exclusive_group(required=True)
     cwd_group.add_argument("--expect-request-cwd")
     cwd_group.add_argument("--expect-cwd-absent", action="store_true")
