@@ -153,6 +153,102 @@ def test_host_allows_only_linked_explicit_restore_after_observed_resume(
         assert journal.load(original["operation_id"])["state"] == "observed"
         assert journal.load(restored["operation_id"])["state"] == "observed"
         assert len(_app_requests(log, "thread/resume")) == 1
+        before_commit = {
+            "operation_id": "supervisor-send-before-restore-commit",
+            "method": "rpc",
+            "payload": {"method": "turn/start", "params": {
+                "threadId": "thread-1", "input": [{"text": "too early"}]}},
+            "recovery": {"kind": "supervisor/turn/start",
+                         "fleet_name": "sup|inc-1|boot",
+                         "incarnation_id": "inc-1", "thread_id": "thread-1",
+                         "previous_turn_id": "turn-1",
+                         "canonical_cwd": str(home),
+                         "restored_predecessor": {"uncommitted": True}},
+        }
+        with pytest.raises(module.HostRejected, match="unresolved predecessor"):
+            client.call(before_commit, timeout=2)
+        assert _app_requests(log, "turn/start") == []
+        client.commit(restored["operation_id"])
+        link = journal.restored_policy_link(
+            fleet_name="sup|inc-1|boot", incarnation_id="inc-1",
+            thread_id="thread-1")
+        assert link["restore_operation_id"] == restored["operation_id"]
+        mail = "first normal mail after policy restoration"
+        next_turn = {
+            "operation_id": "supervisor-send-next", "method": "rpc",
+            "payload": {"method": "turn/start", "params": {
+                "threadId": "thread-1",
+                "input": [{"type": "text", "text": mail,
+                           "text_elements": []}]}},
+            "recovery": {
+                "kind": "supervisor/turn/start",
+                "fleet_name": "sup|inc-1|boot", "incarnation_id": "inc-1",
+                "thread_id": "thread-1", "previous_turn_id": "turn-1",
+                "canonical_cwd": str(home), "restored_predecessor": link,
+            },
+        }
+        for index, changed in enumerate((
+                {"restored_predecessor": None},
+                {"restored_predecessor": {**link,
+                                          "original_digest": "0" * 64}},
+                {"incarnation_id": "wrong-incarnation"},
+                {"canonical_cwd": "/wrong/home"},
+        )):
+            bad = json.loads(json.dumps(next_turn))
+            bad["operation_id"] = f"supervisor-send-bad-link-{index}"
+            bad["recovery"].update(changed)
+            with pytest.raises(module.HostRejected, match="unresolved predecessor"):
+                client.call(bad, timeout=2)
+        assert _app_requests(log, "turn/start") == []
+        next_result = client.call(next_turn, timeout=2)
+        assert next_result.result["turn"]["status"] == "inProgress"
+        assert len(_app_requests(log, "turn/start")) == 1
+        client.commit(next_turn["operation_id"])
+        assert journal.load(original["operation_id"])["state"] == "observed"
+        assert journal.load(restored["operation_id"])["state"] == "committed"
+        assert journal.load(next_turn["operation_id"])["state"] == "committed"
+        _shutdown(client)
+        assert client.wait_for_exit(2)
+        monkeypatch.setattr(module, "HOST_HEARTBEAT_STALE_SECONDS", 0.0)
+        _module_value, continued, _log = _ensure(tmp_path, home=home)
+        try:
+            reattach = {
+                "operation_id": "supervisor-continuation-next",
+                "method": "rpc",
+                "payload": {"method": "thread/resume", "params": {
+                    "threadId": "thread-1", "excludeTurns": True,
+                    "cwd": str(home), "model": "gpt-5.6-luna",
+                    "approvalPolicy": "never", "approvalsReviewer": "user",
+                    "sandbox": "danger-full-access"}},
+                "recovery": {
+                    "kind": "supervisor/restored-continuation-reattach",
+                    "fleet_name": "sup|inc-1|boot",
+                    "incarnation_id": "inc-1", "thread_id": "thread-1",
+                    "turn_id": "turn-1",
+                    "previous_host_generation": client.generation,
+                    "canonical_cwd": str(home), "restored_predecessor": link,
+                },
+            }
+            assert continued.call(reattach, timeout=2).result["sandbox"] == {
+                "type": "dangerFullAccess"}
+            continued.commit(reattach["operation_id"])
+            after_reattach = json.loads(json.dumps(next_turn))
+            after_reattach["operation_id"] = "supervisor-send-after-reattach"
+            assert continued.call(after_reattach, timeout=2).result[
+                "turn"]["status"] == "inProgress"
+            assert len(_app_requests(log, "turn/start")) == 2
+            assert journal.load(original["operation_id"])["state"] == "observed"
+            other = json.loads(json.dumps(after_reattach))
+            other["operation_id"] = "other-accepted-predecessor"
+            journal.prepare(other)
+            journal.accept(other["operation_id"])
+            blocked = json.loads(json.dumps(after_reattach))
+            blocked["operation_id"] = "supervisor-send-with-other-accepted"
+            with pytest.raises(module.HostRejected, match="unresolved predecessor"):
+                continued.call(blocked, timeout=2)
+            assert len(_app_requests(log, "turn/start")) == 2
+        finally:
+            _shutdown(continued)
     finally:
         _shutdown(client)
         assert client.wait_for_exit(2)

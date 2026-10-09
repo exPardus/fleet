@@ -1823,6 +1823,257 @@ class OperationJournal:
                 and isinstance(sandbox, dict)
                 and sandbox.get("type") == "workspaceWrite")
 
+    def restored_policy_link(
+            self, *, fleet_name: str, incarnation_id: str,
+            thread_id: str, operation_id: str | None = None) -> dict[str, Any] | None:
+        """Prove the sole observed resume has one exact committed restoration.
+
+        The old journal is immutable. This digest link is checked again by the
+        host before provider acceptance, including after a cold host change.
+        """
+        records = self.records()
+        outstanding = [item for item in records
+                       if item.get("operation_id") != operation_id
+                       and item.get("state") in {
+                           "prepared", "accepted", "observed", "uncertain"}]
+        if not outstanding:
+            return None
+        if len(outstanding) != 1:
+            raise HostRejected("restored supervisor has another unresolved intent")
+        original = outstanding[0]
+        old_recovery = original.get("recovery")
+        old_result = original.get("result")
+        old_thread = old_result.get("thread") if isinstance(old_result, dict) else None
+        old_sandbox = old_result.get("sandbox") if isinstance(old_result, dict) else None
+        prior_generation = (old_recovery.get("previous_host_generation")
+                            if isinstance(old_recovery, dict) else None)
+        original_id = original.get("operation_id")
+        expected_old_recovery = {
+            "kind": "supervisor/thread-resume", "fleet_name": fleet_name,
+            "incarnation_id": incarnation_id, "thread_id": thread_id,
+            "previous_host_generation": prior_generation,
+            "canonical_cwd": str(self.home),
+        }
+        if (not isinstance(original_id, str)
+                or not original_id.startswith("supervisor-reconcile-")
+                or not isinstance(prior_generation, str)
+                or not prior_generation
+                or original.get("state") != "observed"
+                or original.get("home") != str(self.home)
+                or not isinstance(original.get("generation"), str)
+                or original["generation"] == prior_generation
+                or original.get("method") != "rpc"
+                or original.get("public_method") != "thread/resume"
+                or original.get("payload_digest") != _digest("rpc", {
+                    "method": "thread/resume", "params": {
+                        "threadId": thread_id, "excludeTurns": True}})
+                or old_recovery != expected_old_recovery
+                or not isinstance(old_thread, dict)
+                or old_thread.get("id") != thread_id
+                or old_thread.get("cwd") != str(self.home)
+                or old_result.get("cwd") != str(self.home)
+                or not isinstance(old_result.get("model"), str)
+                or not old_result["model"]
+                or old_result.get("approvalPolicy") != "never"
+                or old_result.get("approvalsReviewer") != "user"
+                or not isinstance(old_sandbox, dict)
+                or old_sandbox.get("type") != "workspaceWrite"):
+            raise HostRejected("observed predecessor is not the exact old resume")
+        restores = [item for item in records
+                    if isinstance(item.get("recovery"), dict)
+                    and item["recovery"].get("kind") ==
+                    "supervisor/resume-policy-restore"
+                    and item["recovery"].get(
+                        "original_resume_operation_id") == original_id]
+        if len(restores) != 1:
+            raise HostRejected("observed predecessor has no unique restoration")
+        restored = restores[0]
+        restore_recovery = restored["recovery"]
+        turn_id = restore_recovery.get("turn_id")
+        model = old_result["model"]
+        expected_restore_recovery = {
+            "kind": "supervisor/resume-policy-restore",
+            "fleet_name": fleet_name, "incarnation_id": incarnation_id,
+            "thread_id": thread_id, "turn_id": turn_id,
+            "previous_host_generation": prior_generation,
+            "observed_resume_generation": original["generation"],
+            "original_resume_operation_id": original_id,
+            "canonical_cwd": str(self.home),
+        }
+        restore_payload = {"method": "thread/resume", "params": {
+            "threadId": thread_id, "excludeTurns": True,
+            "cwd": str(self.home), "model": model,
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": "danger-full-access"}}
+        restored_result = restored.get("result")
+        restored_thread = (restored_result.get("thread")
+                           if isinstance(restored_result, dict) else None)
+        restored_sandbox = (restored_result.get("sandbox")
+                            if isinstance(restored_result, dict) else None)
+        restored_profile = (restored_result.get("activePermissionProfile")
+                            if isinstance(restored_result, dict) else None)
+        if (not isinstance(restored.get("operation_id"), str)
+                or not restored["operation_id"].startswith(
+                    "supervisor-restore-policy-")
+                or restored.get("state") != "committed"
+                or restored.get("home") != str(self.home)
+                or not isinstance(restored.get("generation"), str)
+                or restored["generation"] == original["generation"]
+                or restored.get("method") != "rpc"
+                or restored.get("public_method") != "thread/resume"
+                or restored.get("payload_digest") != _digest(
+                    "rpc", restore_payload)
+                or restore_recovery != expected_restore_recovery
+                or not isinstance(turn_id, str) or not turn_id
+                or not isinstance(restored_thread, dict)
+                or restored_thread.get("id") != thread_id
+                or restored_thread.get("cwd") != str(self.home)
+                or restored_result.get("cwd") != str(self.home)
+                or restored_result.get("model") != model
+                or restored_result.get("approvalPolicy") != "never"
+                or restored_result.get("approvalsReviewer") != "user"
+                or restored_sandbox != {"type": "dangerFullAccess"}
+                or (isinstance(restored_profile, dict)
+                    and restored_profile.get("id") == ":workspace")):
+            raise HostRejected("committed restoration does not prove exact policy")
+        return {
+            "original_operation_id": original_id,
+            "original_generation": original["generation"],
+            "original_digest": _digest("restored-predecessor", original),
+            "restore_operation_id": restored["operation_id"],
+            "restore_generation": restored["generation"],
+            "restore_digest": _digest("committed-restoration", restored),
+            "turn_id": turn_id,
+            "model": model,
+        }
+
+    def permits_restored_supervisor_continuation(
+            self, operation_id: str, payload: Mapping[str, Any],
+            recovery: Mapping[str, Any]) -> bool:
+        """Allow only a linked restored holder's explicit next mutation."""
+        if (not isinstance(payload, dict)
+                or not isinstance(payload.get("params"), dict)
+                or not isinstance(recovery, dict)
+                or not isinstance(recovery.get("restored_predecessor"), dict)
+                or recovery.get("canonical_cwd") != str(self.home)):
+            return False
+        kind = recovery.get("kind")
+        method = payload.get("method")
+        if kind not in {"supervisor/turn/start", "supervisor/turn/steer",
+                        "supervisor/restored-continuation-reattach"}:
+            return False
+        try:
+            link = self.restored_policy_link(
+                fleet_name=recovery.get("fleet_name"),
+                incarnation_id=recovery.get("incarnation_id"),
+                thread_id=recovery.get("thread_id"),
+                operation_id=operation_id)
+        except HostRejected:
+            return False
+        if link is None or recovery["restored_predecessor"] != link:
+            return False
+        params = payload["params"]
+        thread_id = recovery.get("thread_id")
+        if kind == "supervisor/restored-continuation-reattach":
+            return (method == "thread/resume"
+                    and link["restore_generation"] != self.generation
+                    and recovery.get("previous_host_generation") ==
+                    link["restore_generation"]
+                    and recovery.get("turn_id") == link["turn_id"]
+                    and params == {
+                        "threadId": thread_id, "excludeTurns": True,
+                        "cwd": str(self.home), "model": link["model"],
+                        "approvalPolicy": "never", "approvalsReviewer": "user",
+                        "sandbox": "danger-full-access"})
+        if method not in {"turn/start", "turn/steer"} or kind != \
+                f"supervisor/{method}":
+            return False
+        if link["restore_generation"] != self.generation:
+            reattachments = [item for item in self.records()
+                             if item.get("state") == "committed"
+                             and item.get("generation") == self.generation
+                             and isinstance(item.get("recovery"), dict)
+                             and item["recovery"].get("kind") ==
+                             "supervisor/restored-continuation-reattach"
+                             and item["recovery"].get(
+                                 "restored_predecessor") == link]
+            if len(reattachments) != 1:
+                return False
+            reattached = reattachments[0]
+            reattached_result = reattached.get("result")
+            reattached_thread = (reattached_result.get("thread")
+                                 if isinstance(reattached_result, dict) else None)
+            if (reattached.get("public_method") != "thread/resume"
+                    or reattached.get("home") != str(self.home)
+                    or reattached.get("method") != "rpc"
+                    or reattached.get("recovery") != {
+                        "kind": "supervisor/restored-continuation-reattach",
+                        "fleet_name": recovery.get("fleet_name"),
+                        "incarnation_id": recovery.get("incarnation_id"),
+                        "thread_id": thread_id, "turn_id": link["turn_id"],
+                        "previous_host_generation": link["restore_generation"],
+                        "canonical_cwd": str(self.home),
+                        "restored_predecessor": link}
+                    or reattached.get("payload_digest") != _digest(
+                        "rpc", {"method": "thread/resume", "params": {
+                            "threadId": thread_id, "excludeTurns": True,
+                            "cwd": str(self.home), "model": link["model"],
+                            "approvalPolicy": "never",
+                            "approvalsReviewer": "user",
+                            "sandbox": "danger-full-access"}})
+                    or not isinstance(reattached_thread, dict)
+                    or reattached_thread.get("id") != thread_id
+                    or reattached_thread.get("cwd") != str(self.home)
+                    or reattached_result.get("cwd") != str(self.home)
+                    or reattached_result.get("model") != link["model"]
+                    or reattached_result.get("approvalPolicy") != "never"
+                    or reattached_result.get("approvalsReviewer") != "user"
+                    or reattached_result.get("sandbox") !=
+                    {"type": "dangerFullAccess"}
+                    or (isinstance(reattached_result.get(
+                        "activePermissionProfile"), dict)
+                        and reattached_result[
+                            "activePermissionProfile"].get("id") ==
+                        ":workspace")):
+                return False
+        bound_turn = link["turn_id"]
+        later_turns = [item for item in self.records()
+                       if item.get("state") == "committed"
+                       and isinstance(item.get("recovery"), dict)
+                       and item["recovery"].get("kind") ==
+                       "supervisor/turn/start"
+                       and item["recovery"].get("fleet_name") ==
+                       recovery.get("fleet_name")
+                       and item["recovery"].get("incarnation_id") ==
+                       recovery.get("incarnation_id")
+                       and item["recovery"].get("thread_id") == thread_id
+                       and item["recovery"].get("restored_predecessor") == link]
+        if later_turns:
+            if any(isinstance(item.get("committed_at"), bool)
+                   or not isinstance(item.get("committed_at"), (int, float))
+                   for item in later_turns):
+                return False
+            latest = max(later_turns, key=lambda item: item["committed_at"])
+            if sum(item["committed_at"] == latest["committed_at"]
+                   for item in later_turns) != 1:
+                return False
+            latest_result = latest.get("result")
+            latest_turn = (latest_result.get("turn")
+                           if isinstance(latest_result, dict) else None)
+            if (not isinstance(latest_turn, dict)
+                    or not isinstance(latest_turn.get("id"), str)
+                    or not latest_turn["id"]):
+                return False
+            bound_turn = latest_turn["id"]
+        if (params.get("threadId") != thread_id
+                or not isinstance(params.get("input"), list)
+                or not params["input"]
+                or recovery.get("previous_turn_id") != bound_turn):
+            return False
+        if method == "turn/steer":
+            return params.get("expectedTurnId") == recovery["previous_turn_id"]
+        return set(params) == {"threadId", "input"}
+
 
 class CodexHostClient:
     def __init__(self, home: Path, metadata: Mapping[str, Any], encoded_key: str,
