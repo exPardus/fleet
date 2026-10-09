@@ -7,6 +7,31 @@ import pytest
 from test_codex_host_ipc import _ensure, _shutdown
 
 
+def test_restart_recovery_pages_complete_turn_history_without_items():
+    import fleet_codex_host
+
+    host = fleet_codex_host.Host.__new__(fleet_codex_host.Host)
+    turns = [{"id": f"018f22d3-9b4a-7cc3-8a0e-{index:012x}",
+              "status": "completed", "items": []}
+             for index in range(65)]
+    calls = []
+
+    def request(method, params, _deadline):
+        calls.append((method, dict(params)))
+        start = int(params.get("cursor", "0"))
+        end = start + params["limit"]
+        return {"data": turns[start:end],
+                "nextCursor": str(end) if end < len(turns) else None}
+
+    host._recovery_request = request
+    assert host._recovery_turns("thread-id", 1) == turns
+    assert [params["limit"] for _, params in calls] == [32, 32, 32]
+    assert all(method == "thread/turns/list"
+               and params["itemsView"] == "notLoaded"
+               and params["sortDirection"] == "desc"
+               for method, params in calls)
+
+
 def _module():
     try:
         import fleet_codex

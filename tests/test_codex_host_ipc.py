@@ -58,6 +58,8 @@ for line in sys.stdin:
         stream.write(json.dumps({{"event": "request", "method": message.get("method")}}) + "\n")
     if message.get("method") == "test/echo":
         send({{"id": message["id"], "result": message.get("params")}})
+    elif message.get("method") == "test/large":
+        send({{"id": message["id"], "result": {{"data": "x" * (1024 * 1024)}}}})
     elif message.get("method") == "test/emit-lifecycle":
         params = message.get("params", {{}})
         thread_id = params["threadId"]
@@ -1161,6 +1163,52 @@ def test_host_rejects_oversized_and_non_json_ipc_frames(tmp_path):
         finally:
             connection.close()
         assert client.call(_operation("after-hostile"), timeout=1).result["generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+def test_oversized_host_response_is_explicit_and_host_survives(tmp_path):
+    module, client, _ = _ensure(tmp_path)
+    try:
+        with pytest.raises(module.HostRejected,
+                           match="host response exceeds MAX_IPC_BYTES; page the request"):
+            client.call(_operation(
+                "large-result", "rpc", {"method": "test/large", "params": {}}),
+                timeout=5)
+        assert client.call(_operation("after-large"), timeout=1).result[
+            "generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+def test_oversized_mutation_reply_is_not_classified_as_rejection(
+        tmp_path, monkeypatch):
+    module, client, _ = _ensure(tmp_path)
+    operation = _operation("large-mutation", "rpc", {
+        "method": "turn/start", "params": {
+            "threadId": "thread-1", "input": []}})
+    response = {
+        "ok": False, "operation_id": operation["operation_id"],
+        "host_generation": client.generation,
+        "fleet_home": str(client.home),
+        "payload_digest": module._digest("rpc", operation["payload"]),
+        "error": "host response exceeds MAX_IPC_BYTES; page the request",
+    }
+
+    class Connection:
+        def close(self):
+            pass
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "_connect_authenticated",
+                          lambda *_args: Connection())
+            patch.setattr(module, "_send_frame", lambda *_args: None)
+            patch.setattr(module, "_recv_frame",
+                          lambda *_args: json.dumps(response).encode())
+            with pytest.raises(module.HostUnavailable,
+                               match="mutation outcome is uncertain"):
+                client.call(operation, timeout=2)
     finally:
         _shutdown(client)
 
