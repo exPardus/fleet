@@ -8467,6 +8467,282 @@ def _settle_codex_supervisor_approval(
         return True
 
 
+# This pin identifies the already loaded PR31/32 dispatcher reviewed for the
+# fixed, non-granting denial contract. Host metadata cannot attest Python code
+# bytes after process start; the operator procedure must separately prove the
+# loaded process provenance before invoking this compatibility command.
+FIXED_DECLINE_OLD_HOST_SHA256 = (
+    "24229e6968836b407c3b8c32ecad58eb78a7906884b4fdf5759ba16fb3e515f7")
+
+
+def _fixed_decline_request_id(raw, kind):
+    """Keep JSON string and integer request IDs distinct end to end."""
+    if not isinstance(raw, str) or not raw or len(raw) > 160:
+        raise FleetCliError("fixed decline requires one bounded request ID")
+    if kind == "int":
+        if not raw.isascii() or not raw.isdecimal() or str(int(raw)) != raw:
+            raise FleetCliError("fixed decline integer request ID is not canonical")
+        return int(raw)
+    if kind == "string":
+        return raw
+    raise FleetCliError("fixed decline request ID type is required")
+
+
+def _fixed_decline_request_matches(request, args, binding, typed_id):
+    """Compare the entire immutable target, including the typed store key."""
+    from fleet_codex import (HostRejected, _approval_decision, _approval_key,
+                             _fleet_state_digest)
+    if not isinstance(request, dict):
+        return False
+    params = request.get("params")
+    if not isinstance(params, dict):
+        return False
+    offered = request.get("offered_decisions")
+    cwd_present = "cwd" in params
+    if args.expect_cwd_absent:
+        cwd_matches = not cwd_present
+    else:
+        cwd_matches = (cwd_present and isinstance(params["cwd"], str)
+                       and bool(params["cwd"])
+                       and params["cwd"] == args.expect_request_cwd)
+    if (request.get("schema") != 1
+            or type(request.get("request_id")) is not type(typed_id)
+            or request.get("request_id") != typed_id
+            or request.get("home") != str(FLEET_HOME.resolve())
+            or request.get("generation") != binding.host_generation
+            or request.get("key") != _approval_key(binding.host_generation, typed_id)
+            or request.get("key") != args.expect_request_key
+            or _fleet_state_digest(request) != args.expect_request_digest
+            or request.get("state") != "pending"
+            or request.get("method") != "item/commandExecution/requestApproval"
+            or request.get("method") != args.expect_method
+            or request.get("thread_id") != binding.authority.value
+            or request.get("turn_id") != binding.current_turn_id
+            or request.get("item_id") != args.expect_item_id
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or params.get("command") != args.expect_command
+            or not cwd_matches
+            or not isinstance(offered, list)
+            or any(not isinstance(choice, str) for choice in offered)
+            or "decline" not in offered):
+        return False
+    try:
+        return _approval_decision(request["method"], "decline", params) == {
+            "decision": "decline"}
+    except (ValueError, HostRejected):
+        return False
+
+
+def _fixed_decline_durable_request(args, binding, typed_id):
+    """Read only the host's owner-only durable store, with typed ambiguity."""
+    from fleet_codex import read_pending_requests
+    rows = read_pending_requests(
+        FLEET_HOME, binding.authority.value, binding.current_turn_id,
+        current_generation=binding.host_generation)
+    # The old host compares IDs as text after filtering thread and turn. If
+    # both JSON 6 and "6" exist, it refuses; the CLI must do the same.
+    matches = [row for row in rows
+               if str(row.get("request_id")) == str(typed_id)
+               and row.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        return None
+    current = dict(matches[0])
+    current.pop("stale", None)
+    return current if _fixed_decline_request_matches(
+        current, args, binding, typed_id) else None
+
+
+def _fixed_decline_host_matches(client, args, generation):
+    """Bind the old process, not only a reusable PID or metadata snapshot."""
+    from fleet_codex import _process_identity, _process_identities_match
+    if (type(args.expect_host_pid) is not int or args.expect_host_pid <= 0
+            or client.generation != generation
+            or client.host_pid != args.expect_host_pid
+            or client.host_process_identity != args.expect_host_process_identity):
+        return False
+    observed = _process_identity(args.expect_host_pid)
+    return (isinstance(observed, str) and
+            _process_identities_match(args.expect_host_process_identity,
+                                      observed) is True)
+
+
+def _settle_fixed_decline_rejection(
+        binding, operation_id, old_claim, old_row, reserved_claim,
+        reserved_row, args, typed_id) -> bool:
+    """Release only a returned rejection with exact still-pending evidence."""
+    with fleet_lock():
+        status, claim = read_incarnation_status()
+        registry = read_registry_no_repair()
+        workers = registry.get("workers")
+        row = workers.get(binding.name) if isinstance(workers, dict) else None
+        if (status != "ok" or claim != reserved_claim or row != reserved_row
+                or claim.get("pending_operation", {}).get("operation_id")
+                != operation_id
+                or _fixed_decline_durable_request(args, binding, typed_id) is None):
+            return False
+        registry["workers"][binding.name] = old_row
+        save_registry(registry)
+        write_incarnation(old_claim)
+        return True
+
+
+def cmd_codex_decline_fixed(args) -> int:
+    """Decline one typed, fully pinned supervisor callback on the old host."""
+    from fleet_codex import HostRejected, _fleet_state_digest
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("fixed decline requires explicit --fleet-home")
+    if args.decision != "decline" or args.expect_method != (
+            "item/commandExecution/requestApproval"):
+        raise FleetCliError("fixed decline permits only command approval decline")
+    typed_id = _fixed_decline_request_id(args.request_id, args.request_id_type)
+    if (args.expect_old_host_sha256 != FIXED_DECLINE_OLD_HOST_SHA256
+            or not isinstance(args.expect_host_generation, str)
+            or not args.expect_host_generation
+            or not isinstance(args.expect_host_process_identity, str)
+            or not args.expect_host_process_identity
+            or not isinstance(args.expect_request_key, str)
+            or len(args.expect_request_key) != 64
+            or not isinstance(args.expect_request_digest, str)
+            or len(args.expect_request_digest) != 64
+            or not isinstance(args.expect_item_id, str)
+            or not args.expect_item_id
+            or (not args.expect_cwd_absent
+                and (not isinstance(args.expect_request_cwd, str)
+                     or not args.expect_request_cwd))):
+        raise FleetCliError("fixed decline source or exact target pins are incomplete")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("fixed decline requires the current registered Codex Interface")
+    status, claim = read_incarnation_status()
+    if status != "ok":
+        raise FleetCliError("fixed decline supervisor claim is absent or corrupt")
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    if (binding.incarnation_id != args.expect_inc
+            or binding.authority.value != args.expect_thread
+            or binding.current_turn_id != args.expect_turn
+            or binding.host_generation != args.expect_host_generation
+            or claim.get("pending_operation") is not None
+            or binding.record.get("pending_operation") is not None):
+        raise FleetCliError("fixed decline exact held binding disagrees")
+    client = _codex_existing_client(FLEET_HOME)
+    if not _fixed_decline_host_matches(
+            client, args, binding.host_generation):
+        raise FleetCliError("fixed decline old host identity changed")
+    # A capable host retains its reviewed accept-only reservation route. This
+    # typed denial applies only to the exact old unknown-method dispatcher.
+    try:
+        capability = client.supervisor_approval_reservation_supported()
+    except HostRejected as exc:
+        if str(exc) != "unknown host method":
+            raise FleetCliError("fixed decline host capability is ambiguous") from exc
+    else:
+        raise FleetCliError(
+            "fixed decline old-host compatibility requires absent reservation method"
+            if capability is False else
+            "fixed decline does not alter the capable-host approval route")
+    observed = _codex_supervisor_observe(binding, client=client)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"
+            or "waitingOnApproval" not in observed["active_flags"]):
+        raise FleetCliError("fixed decline current turn is not awaiting approval")
+    waits = client.pending_approvals(
+        binding.authority.value, binding.current_turn_id)
+    if not isinstance(waits, list) or any(not isinstance(row, dict) for row in waits):
+        raise FleetCliError("fixed decline pending request list is malformed")
+    matches = [row for row in waits
+               if str(row.get("request_id")) == str(typed_id)]
+    if (len(matches) != 1
+            or not _fixed_decline_request_matches(
+                matches[0], args, binding, typed_id)):
+        raise FleetCliError("fixed decline exact pending request disagrees")
+    request = matches[0]
+    operation_id = f"supervisor-fixed-decline-{uuid.uuid4().hex}"
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        current = _codex_supervisor_binding(
+            current_claim, current_registry, expected_name=binding.name,
+            allowed_states={"held"}) if current_status == "ok" else None
+        durable = _fixed_decline_durable_request(args, binding, typed_id)
+        if (current_claim != claim or current != binding
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)
+                or not _fixed_decline_host_matches(
+                    client, args, binding.host_generation)
+                or durable != request):
+            raise FleetCliError("fixed decline binding, Interface, or request changed")
+        old_claim = dict(current_claim)
+        old_row = dict(current.record)
+        reservation = {
+            "operation_id": operation_id, "kind": "approval-response",
+            "name": binding.name, "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "host_generation": binding.host_generation,
+            "request_id": typed_id, "request_key": request["key"],
+            "request_digest": _fleet_state_digest(request),
+            "method": request["method"], "command": args.expect_command,
+            "cwd": request["params"].get("cwd"),
+            "item_id": request["item_id"],
+            "claim_digest": _fleet_state_digest(old_claim),
+            "row_digest": _fleet_state_digest(old_row),
+            "previous_claim_operation_id": old_claim.get("last_operation_id"),
+            "previous_record_operation_id": old_row.get("last_operation_id"),
+            "previous_adapter_state": old_row.get("adapter_state"),
+        }
+        current_claim["pending_operation"] = reservation
+        current_claim["last_operation_id"] = operation_id
+        row = current_registry["workers"][binding.name]
+        row["adapter_state"] = "mutating"
+        row["last_operation_id"] = operation_id
+        reserved_claim = dict(current_claim)
+        reserved_row = dict(row)
+        try:
+            write_incarnation(current_claim)
+            save_registry(current_registry)
+        except Exception as exc:
+            raise FleetCliError(
+                "fixed decline reservation write incomplete; request was not sent") from exc
+    try:
+        result = client.respond_approval(
+            typed_id, binding.authority.value, binding.current_turn_id,
+            "decline", timeout=10,
+            supervisor_reservation={key: reservation[key] for key in (
+                "operation_id", "name", "incarnation_id", "thread_id",
+                "turn_id", "host_generation", "request_id", "request_key",
+                "request_digest", "method", "command", "cwd", "item_id")})
+    except Exception as exc:
+        if isinstance(exc, HostRejected):
+            try:
+                _settle_fixed_decline_rejection(
+                    binding, operation_id, old_claim, old_row,
+                    reserved_claim, reserved_row, args, typed_id)
+            except Exception:
+                pass
+        raise FleetCliError(
+            "fixed decline outcome uncertain; inspect exact durable request "
+            "and reservation; never replay") from exc
+    if (not isinstance(result, dict)
+            or result.get("state") not in {"responded", "resolved"}
+            or type(result.get("request_id")) is not type(typed_id)
+            or result.get("request_id") != typed_id
+            or result.get("thread_id") != binding.authority.value
+            or result.get("turn_id") != binding.current_turn_id):
+        raise FleetCliError(
+            "fixed decline result mismatch; preserve reservation and never replay")
+    if not _settle_codex_supervisor_approval(
+            binding, operation_id, old_claim, old_row,
+            reserved_claim, reserved_row):
+        raise FleetCliError(
+            "fixed decline consumed request but reservation settlement needs review")
+    print(f"{binding.name}: fixed request {typed_id!r} declined once")
+    return 0
+
+
 def _cmd_codex_supervisor_respond(args) -> int:
     """Answer one exact held supervisor command request from its Interface."""
     if not getattr(args, "_fleet_home_explicit", False):
@@ -23258,6 +23534,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_codex_respond.add_argument("--expect-command")
     p_codex_respond.add_argument("--expect-request-cwd")
 
+    p_fixed_decline = sub.add_parser(
+        "codex-decline-fixed",
+        help="decline one fully pinned native supervisor command request on "
+             "the reviewed old host")
+    p_fixed_decline.add_argument("request_id")
+    p_fixed_decline.add_argument("decision", choices=("decline",))
+    p_fixed_decline.add_argument("--request-id-type", required=True,
+                                 choices=("int", "string"))
+    for field in ("inc", "thread", "turn", "host-generation", "method",
+                  "item-id", "command", "request-key", "request-digest",
+                  "old-host-sha256", "host-process-identity"):
+        p_fixed_decline.add_argument(f"--expect-{field}", required=True)
+    p_fixed_decline.add_argument("--expect-host-pid", required=True, type=int)
+    cwd_group = p_fixed_decline.add_mutually_exclusive_group(required=True)
+    cwd_group.add_argument("--expect-request-cwd")
+    cwd_group.add_argument("--expect-cwd-absent", action="store_true")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -23757,6 +24050,8 @@ def main(argv=None) -> int:
             parser.error(f"unknown mail command {args.mail_command!r}")
         if args.command == "codex-respond":
             return cmd_codex_respond(args)
+        if args.command == "codex-decline-fixed":
+            return cmd_codex_decline_fixed(args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":
