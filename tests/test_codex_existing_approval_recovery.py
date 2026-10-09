@@ -42,6 +42,7 @@ class LegacyAppsHost:
         self.fail_after_accept = False
         self.on_mutation = None
         self.on_pending = None
+        self.other_active = False
 
     def _owner_live(self):
         return self.host_live
@@ -62,13 +63,18 @@ class LegacyAppsHost:
 
     def call(self, operation, timeout):
         method = operation["payload"]["method"]
+        target = operation["payload"].get("params", {}).get("threadId")
+        other = target == OTHER
         if method == "thread/read":
             result = {"thread": {
-                "id": THREAD, "cwd": str(self.home),
-                "status": {"type": self.thread_status,
-                           "activeFlags": self.flags}}}
+                "id": OTHER if other else THREAD, "cwd": str(self.home),
+                "status": {"type": ("active" if self.other_active else "idle")
+                           if other else self.thread_status,
+                           "activeFlags": [] if other else self.flags}}}
         elif method == "thread/turns/list":
-            result = {"data": [{"id": TURN, "status": self.turn_status,
+            result = {"data": [{"id": TURN, "status": (
+                                "inProgress" if self.other_active else "completed")
+                                if other else self.turn_status,
                                 "itemsView": "notLoaded"}],
                       "nextCursor": None}
         elif method == "thread/items/list":
@@ -177,6 +183,15 @@ def cancel(apps_home):
     return operation_id
 
 
+def prepare(apps_home, operation_id):
+    _home, store, _old, _current, cwd, _mail = apps_home
+    # A different worker's callback completes through its own provider path
+    # before any shared-host shutdown can be prepared.
+    store.resolve({"params": {"threadId": OTHER, "requestId": 7}})
+    return fleet._prepare_codex_cancelled_approval_resume(
+        args(cwd, expect_cancel_op=operation_id))
+
+
 def test_old_host_cancel_then_exact_cold_resume(apps_home):
     home, store, old, current, cwd, mail = apps_home
     other_before = copy.deepcopy(fleet.read_registry_no_repair()["workers"]["other-worker"])
@@ -187,8 +202,7 @@ def test_old_host_cancel_then_exact_cold_resume(apps_home):
     assert terminal["state"] == "resolved" and "response" not in terminal
     assert store._load_path(store.path(7))["state"] == "pending"
     assert fleet.read_incarnation()["state"] == "uncertain"
-    assert fleet._prepare_codex_cancelled_approval_resume(
-        args(cwd, expect_cancel_op=operation_id)) == 0
+    assert prepare(apps_home, operation_id) == 0
     old.host_live = old.app_live = False
     old.stale = True
     assert fleet._resume_codex_cancelled_approval(
@@ -204,7 +218,7 @@ def test_old_host_cancel_then_exact_cold_resume(apps_home):
         "approvalsReviewer": "user", "sandbox": "workspace-write"}
     assert fleet.read_registry_no_repair()["workers"]["other-worker"] == other_before
     assert mail.read_bytes() == mail_before
-    assert store._load_path(store.path(7))["state"] == "pending"
+    assert store._load_path(store.path(7))["state"] == "resolved"
 
 
 @pytest.mark.parametrize("change", [
@@ -236,7 +250,7 @@ def test_preflight_drift_and_live_old_child_refuse_cold_resume(apps_home):
     home, _store, old, _current, cwd, mail = apps_home
     operation_id = cancel(apps_home)
     pinned = args(cwd, expect_cancel_op=operation_id)
-    assert fleet._prepare_codex_cancelled_approval_resume(pinned) == 0
+    assert prepare(apps_home, operation_id) == 0
     with pytest.raises(fleet.FleetCliError, match="must fully exit"):
         fleet._resume_codex_cancelled_approval(pinned)
     old.host_live = old.app_live = False
@@ -251,7 +265,7 @@ def test_unrelated_product_row_can_progress_before_cold_resume(apps_home):
     _home, _store, old, _current, cwd, _mail = apps_home
     operation_id = cancel(apps_home)
     pinned = args(cwd, expect_cancel_op=operation_id)
-    assert fleet._prepare_codex_cancelled_approval_resume(pinned) == 0
+    assert prepare(apps_home, operation_id) == 0
     with fleet.fleet_lock():
         data = fleet.load_registry()
         data["workers"]["other-worker"]["status"] = "dead"
@@ -260,6 +274,53 @@ def test_unrelated_product_row_can_progress_before_cold_resume(apps_home):
     old.stale = True
     assert fleet._resume_codex_cancelled_approval(pinned) == 0
     assert fleet.read_registry_no_repair()["workers"]["other-worker"]["status"] == "dead"
+
+
+def test_active_same_host_worker_blocks_shutdown_preparation(apps_home):
+    _home, _store, old, _current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        other = data["workers"]["other-worker"]
+        other.update({"codex_host_generation": OLD, "codex_turn_id": TURN,
+                      "adapter_state": "active", "status": "working"})
+        fleet.save_registry(data)
+    old.other_active = True
+    with pytest.raises(fleet.FleetCliError, match="another Apps worker is active"):
+        prepare(apps_home, operation_id)
+    assert fleet.read_incarnation()["pending_operation"].get(
+        "approval_resume_preflight") is None
+
+
+def test_unrelated_pending_callback_blocks_shared_host_shutdown(apps_home):
+    _home, store, _old, _current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    with pytest.raises(fleet.FleetCliError, match="unrelated unresolved callback"):
+        fleet._prepare_codex_cancelled_approval_resume(
+            args(cwd, expect_cancel_op=operation_id))
+    assert store._load_path(store.path(7))["state"] == "pending"
+
+
+def test_same_host_worker_change_after_preflight_blocks_cold_resume(apps_home):
+    _home, _store, old, _current, cwd, _mail = apps_home
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        other = data["workers"]["other-worker"]
+        other.update({"codex_host_generation": OLD, "codex_turn_id": TURN,
+                      "adapter_state": "active", "status": "idle"})
+        fleet.save_registry(data)
+    operation_id = cancel(apps_home)
+    pinned = args(cwd, expect_cancel_op=operation_id)
+    assert prepare(apps_home, operation_id) == 0
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        data["workers"]["other-worker"]["last_activity"] = \
+            "2030-01-01T00:00:00Z"
+        fleet.save_registry(data)
+    old.host_live = old.app_live = False
+    old.stale = True
+    with pytest.raises(fleet.FleetCliError, match="prepared claim, row, mail"):
+        fleet._resume_codex_cancelled_approval(pinned)
 
 
 def test_other_worker_progress_during_old_host_interrupt_is_preserved(apps_home):
@@ -306,7 +367,7 @@ def test_cold_resume_policy_mismatch_leaves_exact_intent_fenced(apps_home):
     _home, _store, old, current, cwd, _mail = apps_home
     operation_id = cancel(apps_home)
     pinned = args(cwd, expect_cancel_op=operation_id)
-    assert fleet._prepare_codex_cancelled_approval_resume(pinned) == 0
+    assert prepare(apps_home, operation_id) == 0
     old.host_live = old.app_live = False
     old.stale = True
     original_create = fleet._codex_native_client

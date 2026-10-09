@@ -663,7 +663,11 @@ queued mail.
 
 `--prepare-cancelled-approval-resume` records a five-minute proof of that
 terminal callback, committed interrupt, source, old host and child identities,
-complete supervisor claim and row, and target inbox/claimed-mail contents.
+complete supervisor claim and row, target inbox/claimed-mail contents, and
+every other row sharing the old host generation. Other same-host worker turns
+must be publicly idle or unloaded with terminal turns and no active flags;
+the host must have no unresolved callbacks or journal operations. Any
+same-host worker-row drift after preparation refuses cold resume.
 After the exact old host and app-server child exit with a stale heartbeat,
 `--resume-cancelled-approval` requires the same explicit pins and proof before
 host creation and provider dispatch. It creates a new host generation and one

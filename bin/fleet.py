@@ -20087,7 +20087,8 @@ def _codex_cancel_claim_without_preflight(claim):
 
 
 def _codex_cancel_preflight_state(proof, claim, row, thread_id,
-                                  record, original):
+                                  record, original, registry,
+                                  supervisor_name):
     from fleet_codex import _digest
 
     if (not isinstance(proof, dict)
@@ -20100,10 +20101,55 @@ def _codex_cancel_preflight_state(proof, claim, row, thread_id,
             or proof.get("request_digest") != _digest(
                 "resolved-approval", record)
             or proof.get("journal_digest") != _digest(
-                "committed-cancel", original)):
+                "committed-cancel", original)
+            or proof.get("host_worker_rows") != _codex_cancel_host_worker_rows(
+                registry, claim.get("host_generation"),
+                supervisor_name=supervisor_name)):
         raise FleetCliError(
             "cancelled approval prepared claim, row, mail, request, "
             "or journal changed")
+
+
+def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
+    """Pin every other native row sharing the old Apps host generation."""
+    from fleet_codex import _digest
+
+    workers = registry.get("workers") if isinstance(registry, dict) else None
+    if not isinstance(workers, dict):
+        raise FleetCliError("Apps host worker inventory is unavailable")
+    result = []
+    for name, row in sorted(workers.items()):
+        if name == supervisor_name or not isinstance(row, dict):
+            continue
+        if (_codex_record_route(row) != "native"
+                or row.get("codex_host_generation") != generation):
+            continue
+        if row.get("pending_operation") is not None:
+            raise FleetCliError("another Apps worker has a pending operation")
+        binding = _codex_worker_binding(name, row)
+        result.append({
+            "name": name, "thread_id": binding.thread_id,
+            "turn_id": binding.turn_id,
+            "row_digest": _digest("same-host-worker-row", row),
+        })
+    return result
+
+
+def _codex_cancel_public_host_quiescence(binding, client, registry):
+    rows = _codex_cancel_host_worker_rows(
+        registry, client.generation, supervisor_name=binding.name)
+    if client.pending_approvals(None):
+        raise FleetCliError(
+            "old Apps host still has an unrelated unresolved callback")
+    for item in rows:
+        row = registry["workers"][item["name"]]
+        worker = _codex_worker_binding(item["name"], row)
+        observed = _codex_worker_observe(worker, client=client)
+        if (observed["provider_status"] not in {"idle", "notLoaded"}
+                or observed["turn_status"] == "inProgress"
+                or observed["active_flags"]):
+            raise FleetCliError("another Apps worker is active on old host")
+    return rows
 
 
 def _prepare_codex_cancelled_approval_resume(args) -> int:
@@ -20118,6 +20164,8 @@ def _prepare_codex_cancelled_approval_resume(args) -> int:
     if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
            for item in journal.records()):
         raise FleetCliError("old Apps host has another unresolved operation")
+    host_worker_rows = _codex_cancel_public_host_quiescence(
+        binding, old_client, read_registry_no_repair())
     proof = {
         "host": _codex_restore_host_identity(old_client),
         "source": source,
@@ -20128,6 +20176,7 @@ def _prepare_codex_cancelled_approval_resume(args) -> int:
         "request_digest": _digest("resolved-approval", record),
         "journal_digest": _digest("committed-cancel", original),
         "provider_status": "idle", "turn_status": "interrupted",
+        "host_worker_rows": host_worker_rows,
         "observed_at": time.time(),
     }
     with fleet_lock():
@@ -20138,7 +20187,10 @@ def _prepare_codex_cancelled_approval_resume(args) -> int:
                 or _registered_interface_mail_source() != source
                 or _codex_restore_host_identity(
                     _codex_existing_client(FLEET_HOME)) != proof["host"]
-                or journal.load(pending["operation_id"]) != original):
+                or journal.load(pending["operation_id"]) != original
+                or _codex_cancel_host_worker_rows(
+                    registry, old_client.generation,
+                    supervisor_name=binding.name) != host_worker_rows):
             raise FleetCliError("cancelled approval changed before cold proof")
         proof["claim_digest"] = _digest(
             "cancelled-approval-claim",
@@ -20192,7 +20244,8 @@ def _resume_codex_cancelled_approval(args) -> int:
             or not 0 <= time.time() - proof["observed_at"] <= 300):
         raise FleetCliError("cancelled approval lacks fresh exact cold preflight")
     _codex_cancel_preflight_state(
-        proof, claim, binding.record, binding.authority.value, record, original)
+        proof, claim, binding.record, binding.authority.value,
+        record, original, read_registry_no_repair(), binding.name)
     if (old_client._owner_live() or old_client._app_server_live()
             or not old_client._metadata_stale()):
         raise FleetCliError("cancelled approval old host and child must fully exit "
@@ -20212,7 +20265,8 @@ def _resume_codex_cancelled_approval(args) -> int:
             raise FleetCliError("cancelled approval changed before cold host creation")
         _codex_cancel_preflight_state(
             proof, live, registry["workers"][binding.name],
-            binding.authority.value, record, original)
+            binding.authority.value, record, original, registry,
+            binding.name)
     client = _codex_native_client(FLEET_HOME)
     if (client.generation == old_client.generation
             or getattr(client, "_launched_process", None) is None):
@@ -20240,7 +20294,8 @@ def _resume_codex_cancelled_approval(args) -> int:
             raise FleetCliError("cancelled approval changed before resume reservation")
         _codex_cancel_preflight_state(
             proof, live, registry["workers"][binding.name],
-            binding.authority.value, record, original)
+            binding.authority.value, record, original, registry,
+            binding.name)
         live["pending_operation"] = {
             "operation_id": operation_id,
             "kind": "approval-cancelled/resume",
@@ -20249,6 +20304,7 @@ def _resume_codex_cancelled_approval(args) -> int:
             "new_generation": client.generation,
             "previous_turn_id": binding.current_turn_id,
             "prepared_mail": proof["mail"],
+            "prepared_host_worker_rows": proof["host_worker_rows"],
             "old_request_digest": proof["request_digest"],
             "old_journal_digest": proof["journal_digest"],
         }
@@ -20284,6 +20340,9 @@ def _resume_codex_cancelled_approval(args) -> int:
         if (_registered_interface_mail_source() != source
                 or _codex_existing_client(FLEET_HOME).generation != client.generation
                 or journal.load(pending["operation_id"]) != original
+                or _codex_cancel_host_worker_rows(
+                    registry, binding.host_generation,
+                    supervisor_name=binding.name) != proof["host_worker_rows"]
                 or _digest("resolved-approval", record) !=
                 _codex_cancel_record_digest(binding, pending["request_id"])):
             raise FleetCliError("cancelled approval changed before provider resume")
@@ -20328,6 +20387,9 @@ def _resume_codex_cancelled_approval(args) -> int:
             if (_registered_interface_mail_source() != source
                     or _codex_existing_client(FLEET_HOME).generation != client.generation
                     or journal.load(pending["operation_id"]) != original
+                    or _codex_cancel_host_worker_rows(
+                        registry, binding.host_generation,
+                        supervisor_name=binding.name) != proof["host_worker_rows"]
                     or new_journal.load(operation_id) != observed
                     or _digest("resolved-approval", record) !=
                     _codex_cancel_record_digest(binding, pending["request_id"])):
