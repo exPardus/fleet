@@ -2373,6 +2373,87 @@ def test_preserved_history_prepare_refuses_unsafe_evidence(
     assert fleet.read_incarnation()["state"] == "held"
 
 
+def _store_resolved_restored_callback(home, generation, variant):
+    """Create actual record_request/resolve bytes, not a synthetic valid row."""
+    from fleet_codex import CodexApprovalStore
+
+    store = CodexApprovalStore(home, generation)
+    method = ("mcpServer/elicitation/request" if variant == "mcp-no-turn"
+              else "item/newFutureRequest" if variant == "unknown-method"
+              else "item/commandExecution/requestApproval")
+    params = {"threadId": SUCCESSOR_HANDOFF_THREAD_ID}
+    if variant == "mcp-no-turn":
+        params["serverName"] = "supported-server"
+    else:
+        params.update({"turnId": SUCCESSOR_TURN_ID,
+                       "itemId": "item-1", "startedAtMs": 1})
+    record = store.record_request({"id": "6", "method": method,
+                                   "params": params})
+    if variant == "responded":
+        responding, _response = store.begin_response(
+            "6", SUCCESSOR_HANDOFF_THREAD_ID, SUCCESSOR_TURN_ID, "accept")
+        store.mark_responded(responding)
+    resolved = store.resolve({
+        "method": "serverRequest/resolved",
+        "params": {"requestId": "6", "threadId": SUCCESSOR_HANDOFF_THREAD_ID}})
+    assert resolved["state"] == "resolved"
+    assert resolved["created_at"] == record["created_at"]
+    return store
+
+
+@pytest.mark.parametrize("variant", [
+    "pending", "responded", "unknown-method", "mcp-no-turn",
+])
+def test_preserved_history_prepare_accepts_genuine_resolved_callback_variants(
+        supervisor_home, monkeypatch, variant):
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    evidence_path, evidence_sha, _archived = _seed_preserved_observed_history(
+        supervisor_home, old_client, monkeypatch)
+    args.preserve_retired_history_evidence = str(evidence_path)
+    args.expect_history_sha256 = evidence_sha
+    generation = ("old-resume-generation" if variant == "mcp-no-turn"
+                  else old_client.generation)
+    _store_resolved_restored_callback(supervisor_home, generation, variant)
+    assert fleet.cmd_sup_reconcile(args) == 0
+    assert fleet.read_incarnation()["restored_continuation_preflight"]
+
+
+@pytest.mark.parametrize("change", [
+    "missing-thread", "bad-thread", "missing-method", "missing-params",
+    "missing-created", "missing-resolved", "bad-resolved",
+    "missing-offered",
+])
+def test_preserved_history_prepare_refuses_malformed_resolved_callback(
+        supervisor_home, monkeypatch, change):
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    evidence_path, evidence_sha, _archived = _seed_preserved_observed_history(
+        supervisor_home, old_client, monkeypatch)
+    args.preserve_retired_history_evidence = str(evidence_path)
+    args.expect_history_sha256 = evidence_sha
+    store = _store_resolved_restored_callback(
+        supervisor_home, old_client.generation, "pending")
+    path = store.path("6")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if change == "bad-thread":
+        record["thread_id"] = "not-a-thread-id"
+    elif change == "bad-resolved":
+        record["resolved_at"] = True
+    else:
+        record.pop({
+            "missing-thread": "thread_id", "missing-method": "method",
+            "missing-params": "params", "missing-created": "created_at",
+            "missing-resolved": "resolved_at",
+            "missing-offered": "offered_decisions",
+        }[change])
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(args)
+    assert "restored_continuation_preflight" not in fleet.read_incarnation()
+    assert fleet.read_incarnation()["state"] == "held"
+
+
 @pytest.mark.parametrize("case", [
     "mail", "old-mail", "row", "claim", "source", "expired", "archive",
     "current-journal", "additional-intent", "callback",

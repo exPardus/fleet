@@ -20599,6 +20599,36 @@ def _restored_history_owned_record(path, maximum=1024 * 1024):
     return record, hashlib.sha256(raw).hexdigest()
 
 
+def _restored_resolved_callback(record):
+    """Require the fields written by record_request and resolve, including identity.
+
+    A resolved callback may have been pending, responded, or unknown before
+    resolve. Response fields and a turn/item ID are therefore not universal.
+    """
+    from fleet_codex import _public_uuid7
+
+    required = ("method", "thread_id", "turn_id", "item_id", "params",
+                "offered_decisions", "created_at", "resolved_at")
+    if (not isinstance(record, dict)
+            or record.get("state") != "resolved"
+            or any(field not in record for field in required)
+            or not isinstance(record["method"], str)
+            or not record["method"]
+            or not isinstance(record["offered_decisions"], list)
+            or any(not isinstance(value, str)
+                   for value in record["offered_decisions"])):
+        raise FleetCliError("resolved native callback record is malformed")
+    try:
+        _public_uuid7(record["thread_id"], "resolved callback thread id")
+    except ValueError as exc:
+        raise FleetCliError("resolved native callback thread id is malformed") from exc
+    for field in ("created_at", "resolved_at"):
+        value = record[field]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            raise FleetCliError("resolved native callback timing is malformed")
+
+
 def _restored_continuation_inventory(
         registry, binding, *, pending_operation_id=None, history=None,
         current_host=None):
@@ -20673,6 +20703,8 @@ def _restored_continuation_inventory(
         raise FleetCliError("native operation inventory has an unknown home")
     if any(record.get("state") != "resolved" for record in approvals):
         raise FleetCliError("native callback inventory is unresolved or malformed")
+    for record in approvals:
+        _restored_resolved_callback(record)
     inventory_records = []
     for record in records:
         if (pending_operation_id is not None

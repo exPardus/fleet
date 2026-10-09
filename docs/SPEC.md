@@ -398,8 +398,10 @@ inventory. They remain observed and unresolved. Every implicated old host and
 app-server child must be presently absent, all historical bound turns must
 be publicly terminal and not loaded, the current manager's complete loaded
 list must contain only the held target, and the fresh manager's loaded list
-must be empty before the distinct resume. Callback and historical mail
-inventories stay pinned across the cold boundary. Missing original process
+must be empty before the distinct resume. Every resolved callback must retain
+its store-created request identity, thread identity, and creation and
+resolution evidence. Callback and historical mail inventories stay pinned
+across the cold boundary. Missing original process
 start identity is recorded as missing; present PID absence does not attest
 historical exit or prove zero historical turns. Only the current held thread
 is resumed. Unknown ownership, a newly live old process, accepted historical
