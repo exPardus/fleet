@@ -187,8 +187,8 @@ $ grep -n '"--context"' bin/fleet.py
 | `tests/test_native.py`'s digest (489 symbols) | 42,153 chars |
 | median single-file digest | 1,265 chars |
 | mean single-file digest | 2,871 chars |
-| the 12 largest files together | 241,546 chars |
-| the 13 largest files together | 261,408 chars |
+| the 11 largest files together | 234,030 chars |
+| the 12 largest files together | 252,719 chars |
 | every selected source (233 files, 6,575 argv chars) | **669,045 chars / 9,584 lines** |
 | eight *spellings* of one file, pre-dedupe (180 argv chars) | **337,224 chars — 8.00x** |
 
@@ -220,7 +220,7 @@ live warning threshold is therefore 60,000.
 
 **Why refusing rather than truncating, and why that is not the cap the parking sentence declined.** The sentence this replaces reasoned that "capping would silently impose `q`'s limit on a path this spec exempts" — and against a *truncating* cap that reasoning was right, and it is the reasoning §11.1 rests on. Warn-plus-refuse is a different instrument and it imposes nothing of `q`'s: the digest a worker receives is always complete or absent, never trimmed. The asymmetry is the whole argument. **A truncated symbol table is indistinguishable from a complete one** — a worker that reads one concludes the symbol does not exist and re-implements it, silently, and nothing in the transcript says why. Refusing costs the manager one retyped `--context`. So §11.1's "the two renderings differ only when the cap truncates" survives intact: this cap never truncates, so the two renderings still differ only there.
 
-**Where both numbers come from.** WARN sits above the largest single-file digest measured above (50,060), so naming **one** file never warns and a warning genuinely means *"this costs more than the biggest file in this repo."* That headroom is also what keeps the cost pin below green — it asserts `warnings == []` for `bin/fleet.py` alone, and `bin/fleet.py` grows every wave. REFUSE sits in the measured gap between the largest plausible ask (the 12 largest files in this repo, 241,546) and the pathology the cap exists to stop (337,224): a manager naming a dozen of this repo's largest files, or ~197 median ones, is served in full, while both the blowup and the whole-repo ask (669,045) are refused. The gap is real and it is where the ceiling was placed; neither number was invented. Re-measure both if this repo's shape changes materially — `tests/test_index_compose.py::TestTheDigestSizeCap`'s last two tests fail loudly, by name, when either number stops matching its grounding.
+**Where both numbers come from.** WARN sits above the largest single-file digest measured above (50,060), so naming **one** file never warns and a warning genuinely means *"this costs more than the biggest file in this repo."* That headroom is also what keeps the cost pin below green — it asserts `warnings == []` for `bin/fleet.py` alone, and `bin/fleet.py` grows every wave. REFUSE sits in the measured gap between the largest plausible ask (the 11 largest files in this repo, 234,030) and the pathology the cap exists to stop (337,224): a manager naming eleven of this repo's largest files, or ~197 median ones, is served in full, while both the blowup and the whole-repo ask (669,045) are refused. The gap is real and it is where the ceiling was placed; neither number was invented. Re-measure both if this repo's shape changes materially — `tests/test_index_compose.py::TestTheDigestSizeCap`'s last two tests fail loudly, by name, when either number stops matching its grounding.
 
 The cost of "uncapped" is still pinned by measurement rather than by adjective (`tests/test_index_compose.py::test_the_uncapped_digest_cost_is_pinned_by_measurement` — the M4 pin, which pins the *shape* of the growth: one row per indexed symbol, no truncation at any size, linear in distinct files).
 

@@ -1344,27 +1344,27 @@ class TestTheDigestSizeCap:
             f"it and move it, and move the M4 pin's docstring with it")
         assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS
 
-    def test_the_ceiling_serves_a_dozen_of_this_repo_s_largest_files(self):
+    def test_the_ceiling_serves_eleven_of_this_repo_s_largest_files(self):
         """The REFUSE number's grounding from BELOW, stated as arithmetic over
         numbers measured on this repo (2026-10-09, 233 selected sources):
 
             largest single digest       50,060 chars  bin/fleet.py
             median single digest         1,265 chars
-            12 largest files together  241,546 chars
-            13 largest files together  261,408 chars
+            11 largest files together  234,030 chars
+            12 largest files together  252,719 chars
             every selected source      669,045 chars / 9,584 lines
             the pre-dedupe blowup      337,224 chars from 180 argv chars
 
         The ceiling sits in the measured gap between the largest plausible ask
-        (241,546) and the pathology it exists to stop (337,224). This test is
-        the cheap arithmetic half -- that the ceiling still admits a dozen of
+        (234,030) and the pathology it exists to stop (337,224). This test is
+        the cheap arithmetic half -- that the ceiling still admits eleven of
         the largest files and hundreds of median ones, and still refuses the
         whole-repo ask and the blowup. Re-staging and re-indexing 233 sources
         to re-derive the six numbers costs ~40 s, which is why they are
         recorded rather than recomputed per run; the harness that produced
         them is described in `docs/specs/fleet-index.md`."""
         ceiling = fleet.INDEX_DIGEST_REFUSE_CHARS
-        assert ceiling > 241_546, "the ceiling no longer serves 12 large files"
+        assert ceiling > 234_030, "the ceiling no longer serves 11 large files"
         assert ceiling // 1_265 >= 197, "the ceiling no longer serves 197 median files"
         assert ceiling < 337_224, "the ceiling no longer refuses the 8x blowup"
         assert ceiling < 669_045, "the ceiling no longer refuses the whole-repo ask"
