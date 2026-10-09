@@ -1826,28 +1826,54 @@ class OperationJournal:
     def restored_policy_link(
             self, *, fleet_name: str, incarnation_id: str,
             thread_id: str, operation_id: str | None = None) -> dict[str, Any] | None:
-        """Prove the sole observed resume has one exact committed restoration.
+        """Prove the committed restoration still has its observed predecessor.
 
-        The old journal is immutable. This digest link is checked again by the
-        host before provider acceptance, including after a cold host change.
+        The committed restoration is the durable anchor. An absent or changed
+        original must never make this holder look like an ordinary supervisor.
         """
         records = self.records()
+        history = [item for item in records
+                   if isinstance(item.get("operation_id"), str)
+                   and item["operation_id"].startswith(
+                       "supervisor-restore-policy-")
+                   and ((isinstance(item.get("recovery"), dict)
+                         and item["recovery"].get("thread_id") == thread_id)
+                        or (isinstance(item.get("result"), dict)
+                            and isinstance(item["result"].get("thread"), dict)
+                            and item["result"]["thread"].get("id") ==
+                            thread_id))]
+        restores = [item for item in history if item.get("state") != "failed"]
+        if len(restores) > 1:
+            raise HostRejected("restored supervisor has ambiguous restoration history")
         outstanding = [item for item in records
                        if item.get("operation_id") != operation_id
                        and item.get("state") in {
                            "prepared", "accepted", "observed", "uncertain"}]
-        if not outstanding:
+        if not history and not outstanding:
             return None
+        if not restores:
+            raise HostRejected("unresolved supervisor intent lacks exact restoration")
+        restored = restores[0]
+        restore_recovery = restored.get("recovery")
+        if not isinstance(restore_recovery, dict):
+            raise HostRejected("restored supervisor recovery link is malformed")
+        original_id = restore_recovery.get("original_resume_operation_id")
+        originals = [item for item in records
+                     if item.get("operation_id") == original_id]
+        if len(originals) != 1:
+            raise HostRejected(
+                "restored supervisor committed restoration lost its original resume")
+        original = originals[0]
         if len(outstanding) != 1:
             raise HostRejected("restored supervisor has another unresolved intent")
-        original = outstanding[0]
+        if outstanding[0] != original:
+            raise HostRejected("restored supervisor original is not observed")
         old_recovery = original.get("recovery")
         old_result = original.get("result")
         old_thread = old_result.get("thread") if isinstance(old_result, dict) else None
         old_sandbox = old_result.get("sandbox") if isinstance(old_result, dict) else None
         prior_generation = (old_recovery.get("previous_host_generation")
                             if isinstance(old_recovery, dict) else None)
-        original_id = original.get("operation_id")
         expected_old_recovery = {
             "kind": "supervisor/thread-resume", "fleet_name": fleet_name,
             "incarnation_id": incarnation_id, "thread_id": thread_id,
@@ -1879,16 +1905,6 @@ class OperationJournal:
                 or not isinstance(old_sandbox, dict)
                 or old_sandbox.get("type") != "workspaceWrite"):
             raise HostRejected("observed predecessor is not the exact old resume")
-        restores = [item for item in records
-                    if isinstance(item.get("recovery"), dict)
-                    and item["recovery"].get("kind") ==
-                    "supervisor/resume-policy-restore"
-                    and item["recovery"].get(
-                        "original_resume_operation_id") == original_id]
-        if len(restores) != 1:
-            raise HostRejected("observed predecessor has no unique restoration")
-        restored = restores[0]
-        restore_recovery = restored["recovery"]
         turn_id = restore_recovery.get("turn_id")
         model = old_result["model"]
         expected_restore_recovery = {
@@ -1946,6 +1962,27 @@ class OperationJournal:
             "turn_id": turn_id,
             "model": model,
         }
+
+    def has_restoration_history_for_thread(self, thread_id: str) -> bool:
+        """Find an anchored restore even if its original is now missing."""
+        if not isinstance(thread_id, str) or not thread_id:
+            return False
+        for record in self.records():
+            operation_id = record.get("operation_id")
+            if (not isinstance(operation_id, str)
+                    or not operation_id.startswith(
+                        "supervisor-restore-policy-")):
+                continue
+            recovery = record.get("recovery")
+            result = record.get("result")
+            restored_thread = (result.get("thread")
+                               if isinstance(result, dict) else None)
+            if ((isinstance(recovery, dict)
+                 and recovery.get("thread_id") == thread_id)
+                    or (isinstance(restored_thread, dict)
+                        and restored_thread.get("id") == thread_id)):
+                return True
+        return False
 
     def permits_restored_supervisor_continuation(
             self, operation_id: str, payload: Mapping[str, Any],

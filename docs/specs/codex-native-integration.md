@@ -691,11 +691,16 @@ started.
 
 An exact committed policy restoration can coexist with the intentionally
 observed original resume. A later ordinary supervisor send carries a digest
-link to both journals. The host permits `turn/start` or `turn/steer` only when
-the original operation, generation, home, incarnation, thread, result policy,
+link to both journals. The committed restoration remains the durable anchor
+even if the original observed journal is missing or its state changes: the CLI
+refuses before mail is claimed, and the host refuses an unlinked mutation on
+that restored thread before provider acceptance, even when no unresolved
+journal remains. The host permits `turn/start` or `turn/steer` only when the
+original operation, generation, home, incarnation, thread, result policy,
 committed restoration, and bound turn agree; another unresolved operation
-still blocks the mutation. The normal send remains the sole creator of a new
-turn. A failed pre-acceptance send from an older loaded host can be settled by
+still blocks the mutation. After a successful turn, the next normal send uses
+the genuine latest committed turn ID as its bound turn. The normal send remains
+the sole creator of a new turn. A failed pre-acceptance send from an older loaded host can be settled by
 the authenticated `sup-reconcile` path only when its exact failed journal,
 claimed-mail payload digest, unchanged original and restoration journals,
 idle newest bound turn, claim, row, and Interface source agree. It restores
