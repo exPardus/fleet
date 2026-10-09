@@ -19730,12 +19730,655 @@ def _restore_codex_supervisor_policy(args) -> int:
     return _reconcile_codex_restored_policy(read_incarnation())
 
 
+def _codex_cancel_approval_store(generation):
+    from fleet_codex import CodexApprovalStore
+
+    directory = FLEET_HOME / "state" / "codex" / "approvals"
+    if directory.is_symlink() or not directory.is_dir():
+        raise FleetCliError("existing approval store is missing or unsafe")
+    return CodexApprovalStore(FLEET_HOME, generation)
+
+
+def _codex_cancel_approval_record(client, binding, args, *, terminal=False,
+                                  host_check=True):
+    """Read the one exact old-host callback; never answer or erase it."""
+    records = client.pending_approvals(binding.authority.value) \
+        if host_check else None
+    if host_check:
+        if terminal:
+            if records:
+                raise FleetCliError("cancelled supervisor callback remains unresolved")
+        elif (len(records) != 1 or records[0].get("state") != "pending"):
+            raise FleetCliError(
+                "exact supervisor turn must have one pending callback only")
+    store = _codex_cancel_approval_store(binding.host_generation)
+    matches = [record for record in store.records()
+               if str(record.get("request_id")) == str(args.expect_request_id)
+               and record.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        raise FleetCliError("exact supervisor callback is missing or ambiguous")
+    record = matches[0]
+    params = record.get("params")
+    if (record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or not isinstance(params, dict)
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or params.get("command") != args.expect_command
+            or params.get("cwd") != args.expect_request_cwd
+            or record.get("item_id") != args.expect_item_id
+            or args.expect_method != record.get("method")
+            or record.get("state") != ("resolved" if terminal else "pending")
+            or any(key in record for key in (
+                "response", "responding_at", "responded_at", "uncertain_at"))):
+        raise FleetCliError(
+            "exact supervisor callback identity or no-response proof disagrees")
+    if host_check and not terminal and records[0] != record:
+        raise FleetCliError("host pending callback differs from durable record")
+    return record
+
+
+def _codex_cancel_expectations(args, binding, generation, operation_id=None):
+    if (not getattr(args, "_fleet_home_explicit", False)
+            or args.expect_inc != binding.incarnation_id
+            or args.expect_thread != binding.authority.value
+            or args.expect_turn != binding.current_turn_id
+            or args.expect_host_generation != generation
+            or (operation_id is not None
+                and args.expect_cancel_op != operation_id)):
+        raise FleetCliError(
+            "cancelled supervisor approval requires explicit exact home, "
+            "incarnation, thread, turn, host generation, and operation pins")
+
+
+def _codex_cancel_original_policy(binding):
+    profile = _codex_permission_profile(binding.record.get("mode"))
+    effective = binding.record.get("permission_effective")
+    if (binding.record.get("mode") != "accept"
+            or not isinstance(effective, dict)
+            or effective.get("approvalPolicy") != "on-request"
+            or effective.get("approvalsReviewer") != "user"
+            or not isinstance(effective.get("sandbox"), dict)
+            or effective["sandbox"].get("type") != "workspaceWrite"):
+        raise FleetCliError(
+            "cancelled approval recovery requires the exact recorded accept policy")
+    return profile
+
+
+def _codex_cancel_public_status(binding, client, *, terminal=False):
+    observed = _codex_supervisor_observe(binding, client=client)
+    expected = ("idle", "interrupted", []) if terminal else (
+        "active", "inProgress", ["waitingOnApproval"])
+    if ((observed["provider_status"], observed["turn_status"],
+         observed["active_flags"]) != expected):
+        raise FleetCliError(
+            "exact supervisor public turn is not in the required "
+            + ("terminal" if terminal else "approval-wait") + " state")
+    return observed
+
+
+def _cancel_codex_supervisor_approval(args) -> int:
+    """Abort one pending callback through the old host's journalled turn RPC."""
+    from fleet_codex import OperationJournal, _digest
+
+    if (not isinstance(args.expect_request_id, str)
+            or not args.expect_request_id
+            or not isinstance(args.expect_item_id, str)
+            or not args.expect_item_id
+            or not isinstance(args.expect_command, str)
+            or not args.expect_command
+            or not isinstance(args.expect_request_cwd, str)
+            or not args.expect_request_cwd):
+        raise FleetCliError(
+            "approval cancellation requires exact request, item, command, "
+            "and cwd pins")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    data = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, data, allowed_states={"held"})
+    _codex_cancel_original_policy(binding)
+    client = _codex_existing_client(FLEET_HOME)
+    _codex_cancel_expectations(args, binding, client.generation)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("pending callback belongs to another host generation")
+    if not client._owner_live() or not client._app_server_live():
+        raise FleetCliError("original callback host and app-server are not live")
+    _codex_cancel_public_status(binding, client)
+    record = _codex_cancel_approval_record(client, binding, args)
+    if any(item.get("state") == "unknown"
+           for item in client.pending_approvals(None)):
+        raise FleetCliError("unknown old-host callback blocks cancellation")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in OperationJournal(FLEET_HOME, client.generation).records()):
+        raise FleetCliError("original host has another unresolved operation")
+    operation_id = f"supervisor-approval-cancel-{uuid.uuid4()}"
+    recovery = {
+        "kind": "supervisor/approval-turn-cancel",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "request_id": record["request_id"],
+        "request_digest": _digest("pending-approval", record),
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+    }
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/interrupt", "params": {
+            "threadId": binding.authority.value,
+            "turnId": binding.current_turn_id}},
+        "recovery": recovery,
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME))
+                != _codex_restore_host_identity(client)
+                or _codex_cancel_approval_record(
+                    client, binding, args, host_check=False) != record):
+            raise FleetCliError(
+                "supervisor claim, row, source, host, or callback changed "
+                "before cancellation reservation")
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-turn-cancel",
+            "previous_turn_id": binding.current_turn_id,
+            "previous_claim_operation_id": live.get("last_operation_id"),
+            "previous_record_operation_id": binding.record.get("last_operation_id"),
+            "request_id": record["request_id"],
+            "request_digest": recovery["request_digest"],
+            "old_host": _codex_restore_host_identity(client),
+        }
+        live["last_operation_id"] = operation_id
+        registry["workers"][binding.name]["last_operation_id"] = operation_id
+        registry["workers"][binding.name]["adapter_state"] = "mutating"
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "approval-cancel-row", registry["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "approval-cancel-claim", live)
+        write_incarnation(live)
+        save_registry(registry)
+    try:
+        _codex_cancel_public_status(binding, client)
+        if _codex_cancel_approval_record(client, binding, args) != record:
+            raise FleetCliError("approval callback changed after reservation")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            _codex_cancel_reserved_state(live, registry["workers"].get(binding.name),
+                                         binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_restore_host_identity(
+                        _codex_existing_client(FLEET_HOME))
+                    != _codex_restore_host_identity(client)
+                    or _codex_cancel_approval_record(
+                        client, binding, args, host_check=False) != record):
+                raise FleetCliError("approval cancellation changed before provider dispatch")
+        client.call(operation, timeout=30)
+        terminal_deadline = time.monotonic() + 5.0
+        while True:
+            # Public reads drain the old host's asynchronous resolved
+            # notification; approval/list alone does not drain it.
+            _codex_cancel_public_status(binding, client, terminal=True)
+            outstanding = client.pending_approvals(binding.authority.value)
+            if not outstanding:
+                terminal_record = _codex_cancel_approval_record(
+                    client, binding, args, terminal=True,
+                    host_check=False)
+                break
+            if (len(outstanding) != 1 or outstanding[0].get("key") !=
+                    record.get("key") or outstanding[0].get("state") != "pending"):
+                raise FleetCliError(
+                    "approval callback changed during terminal settlement")
+            if time.monotonic() >= terminal_deadline:
+                raise FleetCliError(
+                    "approval callback resolution was not observed; "
+                    "interrupt will not be replayed")
+            time.sleep(0.05)
+        journal = OperationJournal(FLEET_HOME, client.generation)
+        observed = journal.load(operation_id)
+        if (observed.get("state") != "observed"
+                or observed.get("public_method") != "turn/interrupt"
+                or observed.get("payload_digest") != _digest(
+                    "rpc", operation["payload"])
+                or observed.get("recovery") != recovery):
+            raise FleetCliError("approval cancellation lacks exact observed journal")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            row = registry["workers"].get(binding.name)
+            _codex_cancel_reserved_state(live, row, binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_restore_host_identity(
+                        _codex_existing_client(FLEET_HOME))
+                    != _codex_restore_host_identity(client)
+                    or _codex_cancel_approval_record(
+                        client, binding, args, terminal=True,
+                        host_check=False) != terminal_record
+                    or journal.load(operation_id) != observed):
+                raise FleetCliError("approval cancellation evidence changed at settlement")
+            journal.commit(operation_id)
+            live["state"] = "uncertain"
+            live["uncertainty"] = (
+                "approval callback cancelled; exact cold resume required")
+            live["pending_operation"]["kind"] = "approval-cancelled/cold-resume"
+            live["pending_operation"]["terminal_request_digest"] = _digest(
+                "resolved-approval", terminal_record)
+            live["pending_operation"].pop("reserved_claim_digest")
+            live["pending_operation"].pop("reserved_row_digest")
+            row["adapter_state"] = "uncertain"
+            row["status"] = "idle"
+            row["provider_status"] = "idle"
+            live["provider_status"] = "idle"
+            write_incarnation(live)
+            save_registry(registry)
+    except BaseException:
+        # Once a request may have reached the host, a refusal is never a retry
+        # permission. The durable reservation and journal retain the evidence.
+        raise
+    print("native Codex supervisor approval turn interrupted; callback resolved "
+          "without response; claim remains fenced pending exact cold resume "
+          f"(operation {operation_id})")
+    return 0
+
+
+def _codex_cancel_reserved_state(claim, row, thread_id):
+    """Full claim/row comparison; exclude only the stored own digest field."""
+    from fleet_codex import _digest
+
+    if not isinstance(claim, dict) or not isinstance(row, dict):
+        raise FleetCliError("approval cancellation reservation is missing")
+    pending = claim.get("pending_operation")
+    if not isinstance(pending, dict) or pending.get("kind") != "approval-turn-cancel":
+        raise FleetCliError("approval cancellation reservation changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "approval-cancel-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "approval-cancel-row", row)
+            or pending.get("previous_turn_id") != claim.get("current_turn_id")
+            or claim.get("holder", {}).get("thread_id") != thread_id):
+        raise FleetCliError("approval cancellation claim or row changed")
+
+
+def _codex_cancelled_context(args, *, require_live):
+    """Read a settled cancellation without retrying its public interrupt."""
+    from fleet_codex import OperationJournal, _digest
+
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(
+        claim, registry, allowed_states={"uncertain"})
+    _codex_cancel_original_policy(binding)
+    pending = claim.get("pending_operation")
+    if (not isinstance(pending, dict)
+            or pending.get("kind") != "approval-cancelled/cold-resume"
+            or pending.get("operation_id") != claim.get("last_operation_id")
+            or pending.get("operation_id") != binding.record.get("last_operation_id")
+            or binding.record.get("adapter_state") != "uncertain"):
+        raise FleetCliError("exact cancelled approval is not awaiting cold resume")
+    operation_id = pending["operation_id"]
+    _codex_cancel_expectations(
+        args, binding, binding.host_generation, operation_id)
+    old_client = _codex_existing_client(FLEET_HOME)
+    if (old_client.generation != binding.host_generation
+            or _codex_restore_host_identity(old_client) != pending.get("old_host")):
+        raise FleetCliError("cancelled approval old-host identity changed")
+    if require_live and (not old_client._owner_live()
+                         or not old_client._app_server_live()):
+        raise FleetCliError("cancelled approval old host is not fully live")
+    store = _codex_cancel_approval_store(binding.host_generation)
+    matches = [record for record in store.records()
+               if str(record.get("request_id")) == str(pending.get("request_id"))
+               and record.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        raise FleetCliError("cancelled approval record is missing or ambiguous")
+    record = matches[0]
+    if (record.get("state") != "resolved"
+            or record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or any(key in record for key in (
+                "response", "responding_at", "responded_at", "uncertain_at"))
+            or pending.get("terminal_request_digest") != _digest(
+                "resolved-approval", record)):
+        raise FleetCliError("cancelled callback lacks exact no-response terminal proof")
+    expected_recovery = {
+        "kind": "supervisor/approval-turn-cancel",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "request_id": record["request_id"],
+        "request_digest": pending.get("request_digest"),
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+    }
+    payload = {"method": "turn/interrupt", "params": {
+        "threadId": binding.authority.value,
+        "turnId": binding.current_turn_id}}
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    original = journal.load(operation_id)
+    if (original.get("state") != "committed"
+            or original.get("home") != str(FLEET_HOME.resolve())
+            or original.get("generation") != binding.host_generation
+            or original.get("method") != "rpc"
+            or original.get("public_method") != "turn/interrupt"
+            or original.get("payload_digest") != _digest("rpc", payload)
+            or original.get("recovery") != expected_recovery):
+        raise FleetCliError("cancelled approval has no exact committed interrupt")
+    return source, claim, binding, pending, old_client, record, journal, original
+
+
+def _codex_cancel_claim_without_preflight(claim):
+    value = json.loads(json.dumps(claim))
+    pending = value.get("pending_operation")
+    if not isinstance(pending, dict):
+        raise FleetCliError("cancelled approval pending claim is malformed")
+    pending.pop("approval_resume_preflight", None)
+    return value
+
+
+def _codex_cancel_preflight_state(proof, claim, row, thread_id,
+                                  record, original):
+    from fleet_codex import _digest
+
+    if (not isinstance(proof, dict)
+            or proof.get("claim_digest") != _digest(
+                "cancelled-approval-claim",
+                _codex_cancel_claim_without_preflight(claim))
+            or proof.get("row_digest") != _digest(
+                "cancelled-approval-row", row)
+            or proof.get("mail") != _codex_restore_mail_snapshot(thread_id)
+            or proof.get("request_digest") != _digest(
+                "resolved-approval", record)
+            or proof.get("journal_digest") != _digest(
+                "committed-cancel", original)):
+        raise FleetCliError(
+            "cancelled approval prepared claim, row, mail, request, "
+            "or journal changed")
+
+
+def _prepare_codex_cancelled_approval_resume(args) -> int:
+    """Pin live old-host terminal evidence before a bounded cold boundary."""
+    from fleet_codex import _digest
+
+    source, claim, binding, pending, old_client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=True)
+    _codex_cancel_public_status(binding, old_client, terminal=True)
+    if old_client.pending_approvals(binding.authority.value):
+        raise FleetCliError("cancelled supervisor callback is still unresolved")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in journal.records()):
+        raise FleetCliError("old Apps host has another unresolved operation")
+    proof = {
+        "host": _codex_restore_host_identity(old_client),
+        "source": source,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "operation_id": pending["operation_id"],
+        "request_digest": _digest("resolved-approval", record),
+        "journal_digest": _digest("committed-cancel", original),
+        "provider_status": "idle", "turn_status": "interrupted",
+        "observed_at": time.time(),
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before cold proof")
+        proof["claim_digest"] = _digest(
+            "cancelled-approval-claim",
+            _codex_cancel_claim_without_preflight(live))
+        proof["row_digest"] = _digest(
+            "cancelled-approval-row", registry["workers"][binding.name])
+        proof["mail"] = _codex_restore_mail_snapshot(binding.authority.value)
+        live["pending_operation"]["approval_resume_preflight"] = proof
+        write_incarnation(live)
+    print("native Codex cancelled approval preflight recorded; prove no other "
+          "Apps worker or request needs this host, then shut down only its "
+          "exact generation and prove host and child exit")
+    return 0
+
+
+def _codex_cancel_resumed_state(claim, row, thread_id):
+    from fleet_codex import _digest
+
+    pending = claim.get("pending_operation") if isinstance(claim, dict) else None
+    if not isinstance(pending, dict) or pending.get("kind") != \
+            "approval-cancelled/resume":
+        raise FleetCliError("cancelled approval cold-resume reservation changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "cancelled-resume-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "cancelled-resume-row", row)
+            or pending.get("prepared_mail") != _codex_restore_mail_snapshot(thread_id)):
+        raise FleetCliError("cancelled approval cold-resume state changed")
+
+
+def _resume_codex_cancelled_approval(args) -> int:
+    """Reattach the same thread only after the exact old host and child exit."""
+    from fleet_codex import OperationJournal, _digest
+
+    source, claim, binding, pending, old_client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=False)
+    proof = pending.get("approval_resume_preflight")
+    if (not isinstance(proof, dict)
+            or proof.get("host") != _codex_restore_host_identity(old_client)
+            or proof.get("source") != source
+            or proof.get("incarnation_id") != binding.incarnation_id
+            or proof.get("thread_id") != binding.authority.value
+            or proof.get("turn_id") != binding.current_turn_id
+            or proof.get("operation_id") != pending["operation_id"]
+            or proof.get("provider_status") != "idle"
+            or proof.get("turn_status") != "interrupted"
+            or isinstance(proof.get("observed_at"), bool)
+            or not isinstance(proof.get("observed_at"), (int, float))
+            or not 0 <= time.time() - proof["observed_at"] <= 300):
+        raise FleetCliError("cancelled approval lacks fresh exact cold preflight")
+    _codex_cancel_preflight_state(
+        proof, claim, binding.record, binding.authority.value, record, original)
+    if (old_client._owner_live() or old_client._app_server_live()
+            or not old_client._metadata_stale()):
+        raise FleetCliError("cancelled approval old host and child must fully exit "
+                            "with stale heartbeat")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in journal.records()):
+        raise FleetCliError("old Apps host has another unresolved operation")
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before cold host creation")
+        _codex_cancel_preflight_state(
+            proof, live, registry["workers"][binding.name],
+            binding.authority.value, record, original)
+    client = _codex_native_client(FLEET_HOME)
+    if (client.generation == old_client.generation
+            or getattr(client, "_launched_process", None) is None):
+        raise FleetCliError("cancelled approval requires a newly launched host")
+    profile = _codex_cancel_original_policy(binding)
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    model = _codex_model_slug(binding.record.get("model"))
+    if model is None:
+        raise FleetCliError("cancelled approval recorded model is missing")
+    params = {
+        "threadId": binding.authority.value, "excludeTurns": True,
+        "cwd": str(FLEET_HOME.resolve()), "model": model,
+        "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": "workspace-write",
+    }
+    operation_id = f"supervisor-cancel-resume-{uuid.uuid4()}"
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before resume reservation")
+        _codex_cancel_preflight_state(
+            proof, live, registry["workers"][binding.name],
+            binding.authority.value, record, original)
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-cancelled/resume",
+            "cancel_operation_id": pending["operation_id"],
+            "old_generation": binding.host_generation,
+            "new_generation": client.generation,
+            "previous_turn_id": binding.current_turn_id,
+            "prepared_mail": proof["mail"],
+            "old_request_digest": proof["request_digest"],
+            "old_journal_digest": proof["journal_digest"],
+        }
+        live["last_operation_id"] = operation_id
+        live["uncertainty"] = "explicit cancelled-approval cold resume pending"
+        registry["workers"][binding.name]["last_operation_id"] = operation_id
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "cancelled-resume-row", registry["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "cancelled-resume-claim", live)
+        write_incarnation(live)
+        save_registry(registry)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": params},
+        "recovery": {
+            "kind": "supervisor/cancelled-approval-cold-resume",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "previous_host_generation": binding.host_generation,
+            "cancel_operation_id": pending["operation_id"],
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+        },
+    }
+
+    def guard_reserved(live_claim):
+        registry = read_registry_no_repair()
+        _codex_cancel_resumed_state(
+            live_claim, registry["workers"].get(binding.name),
+            binding.authority.value)
+        if (_registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(pending["operation_id"]) != original
+                or _digest("resolved-approval", record) !=
+                _codex_cancel_record_digest(binding, pending["request_id"])):
+            raise FleetCliError("cancelled approval changed before provider resume")
+
+    try:
+        reply = _call_codex_supervisor_claimed(
+            client, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"uncertain"},
+            pre_call_guard=guard_reserved)
+        result = reply.result
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if (not isinstance(thread, dict)
+                or thread.get("id") != binding.authority.value
+                or {thread.get("cwd"), result.get("cwd")} != {
+                    str(FLEET_HOME.resolve())}):
+            raise FleetCliError("cancelled approval cold resume returned wrong thread")
+        _validate_codex_thread_effective(
+            result, model, profile, verb="thread/resume")
+        if {key: result.get(key) for key in (
+                "approvalPolicy", "approvalsReviewer", "sandbox")} != \
+                binding.record["permission_effective"]:
+            raise FleetCliError("cold resume differs from recorded accept policy")
+        rebound = CodexSupervisorBinding(
+            name=binding.name, incarnation_id=binding.incarnation_id,
+            authority=binding.authority,
+            current_turn_id=binding.current_turn_id,
+            host_generation=client.generation, record=binding.record)
+        _codex_cancel_public_status(rebound, client, terminal=True)
+        new_journal = OperationJournal(FLEET_HOME, client.generation)
+        observed = new_journal.load(operation_id)
+        if (observed.get("state") != "observed"
+                or observed.get("public_method") != "thread/resume"
+                or observed.get("payload_digest") != _digest(
+                    "rpc", operation["payload"])
+                or observed.get("recovery") != operation["recovery"]):
+            raise FleetCliError("cold resume lacks exact observed journal")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            row = registry["workers"].get(binding.name)
+            _codex_cancel_resumed_state(live, row, binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_existing_client(FLEET_HOME).generation != client.generation
+                    or journal.load(pending["operation_id"]) != original
+                    or new_journal.load(operation_id) != observed
+                    or _digest("resolved-approval", record) !=
+                    _codex_cancel_record_digest(binding, pending["request_id"])):
+                raise FleetCliError("cancelled approval changed at resume settlement")
+            new_journal.commit(operation_id)
+            live["state"] = "held"
+            live.pop("pending_operation", None)
+            live.pop("uncertainty", None)
+            live["host_generation"] = client.generation
+            live["provider_status"] = "idle"
+            live["last_operation_id"] = operation_id
+            row["adapter_state"] = "active"
+            row["status"] = "idle"
+            row["provider_status"] = "idle"
+            row["codex_host_generation"] = client.generation
+            row["last_operation_id"] = operation_id
+            write_incarnation(live)
+            save_registry(registry)
+    except BaseException:
+        # The new journal and the fenced claim are retained for a separately
+        # reviewed exact-evidence settlement. Never replay thread/resume.
+        raise
+    print("native Codex supervisor reattached on the same thread and incarnation "
+          "with exact recorded accept policy; no turn was created")
+    return 0
+
+
+def _codex_cancel_record_digest(binding, request_id):
+    from fleet_codex import _digest
+
+    records = [record for record in _codex_cancel_approval_store(
+        binding.host_generation).records()
+        if str(record.get("request_id")) == str(request_id)
+        and record.get("generation") == binding.host_generation]
+    if len(records) != 1:
+        raise FleetCliError("cancelled approval record changed or disappeared")
+    return _digest("resolved-approval", records[0])
+
+
 def cmd_sup_reconcile(args) -> int:
     """Explicitly resume one exact native holder after a host-process restart.
 
     This verb never creates a thread, body, or turn. Ambiguous accepted resume
     evidence freezes the claim so an operator cannot accidentally replay it.
     """
+    if getattr(args, "cancel_pending_approval", False):
+        return _cancel_codex_supervisor_approval(args)
+    if getattr(args, "prepare_cancelled_approval_resume", False):
+        return _prepare_codex_cancelled_approval_resume(args)
+    if getattr(args, "resume_cancelled_approval", False):
+        return _resume_codex_cancelled_approval(args)
     if getattr(args, "prepare_recorded_policy_restore", False):
         return _prepare_codex_supervisor_policy(args)
     if getattr(args, "restore_recorded_policy", False):
@@ -23875,9 +24518,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--restore-recorded-policy", action="store_true",
         help="restore recorded bypass with a distinct policy-bound cold "
              "thread/resume after exact host and app-server exit proof")
+    policy_restore.add_argument(
+        "--cancel-pending-approval", action="store_true",
+        help="interrupt one exact pending native supervisor approval turn "
+             "on its existing host; retain an uncertain claim until cold resume")
+    policy_restore.add_argument(
+        "--prepare-cancelled-approval-resume", action="store_true",
+        help="pin fresh terminal callback, host, claim, row, and mail evidence "
+             "before exact-host shutdown")
+    policy_restore.add_argument(
+        "--resume-cancelled-approval", action="store_true",
+        help="cold resume the same cancelled supervisor thread under its "
+             "recorded accept policy after exact-host shutdown")
     p_supreconcile.add_argument("--expect-inc")
     p_supreconcile.add_argument("--expect-thread")
     p_supreconcile.add_argument("--expect-turn")
+    p_supreconcile.add_argument("--expect-host-generation")
+    p_supreconcile.add_argument("--expect-cancel-op")
+    p_supreconcile.add_argument("--expect-request-id")
+    p_supreconcile.add_argument("--expect-item-id")
+    p_supreconcile.add_argument("--expect-method")
+    p_supreconcile.add_argument("--expect-command")
+    p_supreconcile.add_argument("--expect-request-cwd")
     p_supreconcile.add_argument("--expect-resume-op")
     p_supreconcile.add_argument(
         "--expect-observed-generation", "--expect-new-generation",

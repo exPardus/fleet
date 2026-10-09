@@ -643,6 +643,41 @@ accepted but unverified new response remains uncertain; read-only reconcile can
 settle only its exact observed new operation. No turn is replayed or newly
 started.
 
+An existing native supervisor command approval on a host predating the
+supervisor response reservation cannot be answered through a newer CLI: the
+running host lacks that boundary. For an explicitly abandoned approval turn,
+the registered Codex Interface may instead use `sup-reconcile
+--cancel-pending-approval` with explicit home and exact incarnation, thread,
+turn, old host generation, request ID, item ID, method, raw command and cwd.
+Fleet requires the recorded `accept` policy, one durable pending callback on
+the bound active turn, `waitingOnApproval`, no other unresolved host journal,
+and the exact live old host and child. A full claim/row reservation blocks
+ordinary competing supervisor mutations. The old host's existing journaled
+`turn/interrupt` carries the exact thread and turn IDs. Codex 0.155.1 aborts
+pending per-thread callbacks on `TurnAborted`; Fleet requires the specific
+record to become `resolved` with no response fields, an exact observed
+interrupt journal, and a newest `interrupted`/idle public turn. Any ambiguous
+effect retains the reservation and is never retried. The successful path
+leaves the claim uncertain and fenced: it does not create a turn or consume
+queued mail.
+
+`--prepare-cancelled-approval-resume` records a five-minute proof of that
+terminal callback, committed interrupt, source, old host and child identities,
+complete supervisor claim and row, and target inbox/claimed-mail contents.
+After the exact old host and app-server child exit with a stale heartbeat,
+`--resume-cancelled-approval` requires the same explicit pins and proof before
+host creation and provider dispatch. It creates a new host generation and one
+distinct cold `thread/resume` intent on the **same** thread, with
+`excludeTurns=true`, canonical cwd, recorded model, `approvalPolicy=on-request`,
+`approvalsReviewer=user`, and `sandbox=workspace-write`. The effective response
+must equal the original recorded policy in full, and the newest turn must
+still be interrupted and idle. Settlement uses exact claim/row/mail/source,
+callback, old/new journal and host checks. Unrelated product rows may progress;
+their requests and mail are not edited. Other active workers or unresolved
+requests prevent a safe host shutdown until separately settled. A lost or
+ambiguous interrupt or resume response leaves its intent fenced, with no
+automatic provider replay.
+
 ### 10.4 Retiring an absent legacy Claude claim
 
 From the **current registered native Codex Interface process**, use
