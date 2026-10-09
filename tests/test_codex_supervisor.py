@@ -1842,6 +1842,257 @@ def test_restored_continuation_drift_refuses_before_host_creation(
     assert old_journal.load(old_op)["state"] == "observed"
 
 
+def _seed_platform_historical_inventory(home, client, monkeypatch):
+    """Reproduce the Mac 131 mcx, one legacy, five old-native row shapes."""
+    from fleet_codex import OperationJournal
+
+    data = fleet.load_registry()
+    for index in range(131):
+        data["workers"][f"historical-mcx-{index}"] = {
+            "substrate": "codex", "dispatch_kind": "mcx",
+            "mcx_id": f"mcx-{index}", "session_id": None,
+            "model": "codex:gpt-6-sol", "status": "idle",
+            "archived_at": None, "last_operation_id": None,
+        }
+    legacy_name = "sup|inc-20261008T231137Z-b530|successor"
+    data["workers"][legacy_name] = {
+        "model": "codex:gpt-6-sol", "dispatch_kind": None,
+        "session_id": "legacy-external-session",
+        "status": "working", "archived_at": "2026-10-08T23:19:46Z",
+        "last_operation_id": None,
+    }
+    preclaims = []
+    for index, incarnation in enumerate((
+            "inc-20261009T011922Z-2caf",
+            "inc-20261009T011956Z-db85",
+            "inc-20261009T023025Z-7688")):
+        name = f"sup|{incarnation}|boot"
+        operation_id = f"supervisor-{incarnation}-thread-preclaim-{index}"
+        row = {
+            "substrate": "codex", "dispatch_kind": "codex-app-server",
+            "session_id": None, "model": "codex:gpt-6-sol",
+            "status": "dead-suspected", "adapter_state": "uncertain",
+            "cwd": str(home.resolve()),
+            "supervisor_incarnation_id": incarnation,
+            "codex_thread_id": None, "codex_turn_id": None,
+            "codex_host_generation": None,
+            "last_operation_id": operation_id,
+        }
+        data["workers"][name] = row
+        journal = OperationJournal(home, f"old-preclaim-generation-{index}")
+        journal.prepare({
+            "operation_id": operation_id, "method": "rpc",
+            "payload": {"method": "thread/start", "params": {}},
+            "recovery": {"kind": "supervisor/thread-start",
+                         "fleet_name": name, "incarnation_id": incarnation,
+                         "canonical_cwd": str(home.resolve())},
+        })
+        journal.fail(operation_id, "proved pre-acceptance refusal")
+        preclaims.append((name, journal, operation_id))
+    bound = {}
+    for index, (incarnation, thread_id, turn_id) in enumerate((
+            ("inc-20261009T012003Z-89bb", SUCCESSOR_THREAD_ID,
+             NEWER_TURN_ID),
+            ("inc-20261009T015843Z-0815", SUCCESSOR_HANDOFF_THREAD_ID,
+             SUCCESSOR_TURN_ID))):
+        name = f"sup|{incarnation}|boot"
+        generation = f"old-bound-generation-{index}"
+        operation_id = f"supervisor-send-historical-{index}"
+        data["workers"][name] = {
+            "substrate": "codex", "dispatch_kind": "codex-app-server",
+            "session_id": None, "model": "codex:gpt-6-sol",
+            "status": "dead-suspected", "adapter_state": "uncertain",
+            "cwd": str(home.resolve()),
+            "supervisor_incarnation_id": incarnation,
+            "codex_thread_id": thread_id, "codex_turn_id": turn_id,
+            "codex_host_generation": generation,
+            "last_operation_id": operation_id,
+        }
+        journal = OperationJournal(home, generation)
+        journal.prepare({
+            "operation_id": operation_id, "method": "rpc",
+            "payload": {"method": "turn/start", "params": {
+                "threadId": thread_id, "input": []}},
+            "recovery": {"kind": "supervisor/turn/start",
+                         "fleet_name": name, "incarnation_id": incarnation,
+                         "thread_id": thread_id,
+                         "canonical_cwd": str(home.resolve())},
+        })
+        journal.accept(operation_id)
+        journal.observe(operation_id, {"turnId": turn_id})
+        journal.commit(operation_id)
+        bound[thread_id] = {"name": name, "turn": turn_id,
+                            "journal": journal, "operation": operation_id,
+                            "status": "notLoaded"}
+    fleet.save_registry(data)
+    original_call = client.call
+
+    def read_historical(operation, timeout):
+        payload = operation["payload"]
+        method = payload["method"]
+        params = payload.get("params", {})
+        thread_id = params.get("threadId")
+        if thread_id in bound and method in {"thread/read", "thread/turns/list"}:
+            item = bound[thread_id]
+            if method == "thread/read":
+                result = {"thread": {
+                    "id": thread_id, "cwd": str(home.resolve()),
+                    "status": {"type": item["status"], "activeFlags": []},
+                    "turns": []}}
+            else:
+                result = {"data": [{"id": item["turn"],
+                                    "status": "completed",
+                                    "itemsView": "notLoaded", "items": []}],
+                          "nextCursor": None}
+            return SimpleNamespace(generation=client.generation, result=result)
+        return original_call(operation, timeout)
+
+    monkeypatch.setattr(client, "call", read_historical)
+    return legacy_name, preclaims, bound
+
+
+def test_restored_continuation_accounts_for_reported_historical_inventory(
+        supervisor_home, monkeypatch):
+    _name, _old_op, _old_journal, old_client, current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    _legacy, _preclaims, bound = _seed_platform_historical_inventory(
+        supervisor_home, old_client, monkeypatch)
+    assert fleet.cmd_sup_reconcile(args) == 0
+    proof = fleet.read_incarnation()["restored_continuation_preflight"]
+    assert set(proof["other_native_public"]) == set(bound)
+    assert all(item["status"] == "notLoaded"
+               for item in proof["other_native_public"].values())
+    old_client.host_live = False
+    old_client.app_live = False
+    old_client.metadata_stale = True
+    successor = PolicyRestoreLifecycleClient(
+        supervisor_home, generation="host-generation-4",
+        thread_status="idle", turn_status="completed")
+    successor._launched_process = object()
+    monkeypatch.setattr(
+        fleet, "_codex_native_client",
+        lambda _home: current.update(client=successor) or successor)
+    args.prepare_restored_continuation = False
+    args.reattach_restored_continuation = True
+    assert fleet.cmd_sup_reconcile(args) == 0
+    assert fleet.read_incarnation()["state"] == "held"
+    assert all(item["status"] == "notLoaded" for item in bound.values())
+
+
+@pytest.mark.parametrize("case", [
+    "mcx-native-pin", "mcx-native-protocol", "legacy-no-session",
+    "preclaim-accepted", "preclaim-missing-journal", "bound-observed",
+    "bound-missing-journal", "bound-loaded", "bound-newest-changed",
+    "bound-current-generation", "unknown-callback", "unattributed-intent",
+])
+def test_restored_continuation_historical_inventory_refuses_ambiguity(
+        supervisor_home, monkeypatch, case):
+    from fleet_codex import CodexApprovalStore, OperationJournal
+
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    legacy, preclaims, bound = _seed_platform_historical_inventory(
+        supervisor_home, old_client, monkeypatch)
+    data = fleet.load_registry()
+    if case == "mcx-native-pin":
+        data["workers"]["historical-mcx-0"]["codex_thread_id"] = THREAD_ID
+        fleet.save_registry(data)
+    elif case == "mcx-native-protocol":
+        data["workers"]["historical-mcx-0"]["codex_protocol_version"] = 2
+        fleet.save_registry(data)
+    elif case == "legacy-no-session":
+        data["workers"][legacy]["session_id"] = None
+        fleet.save_registry(data)
+    elif case == "preclaim-accepted":
+        _row, journal, operation = preclaims[0]
+        record = journal.load(operation)
+        record["state"] = "accepted"
+        record["accepted_at"] = 1.0
+        journal.path(operation).write_text(json.dumps(record), encoding="utf-8")
+    elif case == "preclaim-missing-journal":
+        _row, journal, operation = preclaims[0]
+        journal.path(operation).unlink()
+    elif case == "bound-observed":
+        item = next(iter(bound.values()))
+        record = item["journal"].load(item["operation"])
+        record["state"] = "observed"
+        item["journal"].path(item["operation"]).write_text(
+            json.dumps(record), encoding="utf-8")
+    elif case == "bound-missing-journal":
+        item = next(iter(bound.values()))
+        item["journal"].path(item["operation"]).unlink()
+    elif case == "bound-loaded":
+        next(iter(bound.values()))["status"] = "idle"
+    elif case == "bound-newest-changed":
+        next(iter(bound.values()))["turn"] = TURN_ID
+    elif case == "bound-current-generation":
+        item = next(iter(bound.values()))
+        data["workers"][item["name"]]["codex_host_generation"] = \
+            old_client.generation
+        fleet.save_registry(data)
+    elif case == "unknown-callback":
+        store = CodexApprovalStore(supervisor_home, old_client.generation)
+        key = next(iter(bound))
+        store.path("6").write_text(json.dumps({
+            "schema": 1, "home": str(supervisor_home.resolve()),
+            "key": store.path("6").stem,
+            "generation": old_client.generation, "request_id": "6",
+            "thread_id": key, "state": "unknown", "created_at": 1.0,
+        }), encoding="utf-8")
+    else:
+        journal = OperationJournal(supervisor_home, old_client.generation)
+        journal.prepare({"operation_id": "unattributed-live-intent",
+                         "method": "rpc",
+                         "payload": {"method": "thread/start", "params": {}},
+                         "recovery": {"kind": "thread/start"}})
+    with pytest.raises((fleet.FleetCliError, ValueError)):
+        fleet.cmd_sup_reconcile(args)
+    assert "restored_continuation_preflight" not in fleet.read_incarnation()
+    assert fleet.read_incarnation()["state"] == "held"
+
+
+@pytest.mark.parametrize("change", ["old-journal", "old-row", "approval"])
+def test_restored_continuation_historical_evidence_drift_refuses_host_creation(
+        supervisor_home, monkeypatch, change):
+    from fleet_codex import CodexApprovalStore
+
+    _name, _old_op, _old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    _legacy, preclaims, bound = _seed_platform_historical_inventory(
+        supervisor_home, old_client, monkeypatch)
+    assert fleet.cmd_sup_reconcile(args) == 0
+    if change == "old-journal":
+        _row, journal, operation = preclaims[0]
+        record = journal.load(operation)
+        record["reason"] = "changed after proof"
+        journal.path(operation).write_text(json.dumps(record), encoding="utf-8")
+    elif change == "old-row":
+        data = fleet.load_registry()
+        data["workers"][next(iter(bound.values()))["name"]]["last_activity"] = \
+            "2026-10-09T09:00:00Z"
+        fleet.save_registry(data)
+    else:
+        store = CodexApprovalStore(supervisor_home, old_client.generation)
+        store.path("7").write_text(json.dumps({
+            "schema": 1, "home": str(supervisor_home.resolve()),
+            "key": store.path("7").stem,
+            "generation": old_client.generation, "request_id": "7",
+            "thread_id": next(iter(bound)), "state": "resolved",
+            "created_at": 1.0,
+        }), encoding="utf-8")
+    old_client.host_live = False
+    old_client.app_live = False
+    old_client.metadata_stale = True
+    args.prepare_restored_continuation = False
+    args.reattach_restored_continuation = True
+    monkeypatch.setattr(
+        fleet, "_codex_native_client",
+        lambda _home: pytest.fail("historical drift created a host"))
+    with pytest.raises((fleet.FleetCliError, ValueError)):
+        fleet.cmd_sup_reconcile(args)
+    assert fleet.read_incarnation()["state"] == "held"
+
+
 @pytest.mark.parametrize("changed", [
     {"_fleet_home_explicit": False},
     {"expect_inc": "another-incarnation"},

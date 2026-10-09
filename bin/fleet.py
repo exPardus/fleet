@@ -19808,6 +19808,189 @@ def _restore_codex_supervisor_policy(args) -> int:
     return _reconcile_codex_restored_policy(read_incarnation())
 
 
+def _restored_continuation_inventory(
+        registry, binding, *, pending_operation_id=None):
+    """Account for every other row and its durable host evidence, without writes.
+
+    A model name does not identify the adapter.  A historical native row is
+    excluded only with terminal intent evidence; a bound thread additionally
+    needs a fresh public notLoaded observation before the host may be stopped.
+    """
+    from fleet_codex import CodexApprovalStore, OperationJournal, _digest
+
+    workers = registry.get("workers") if isinstance(registry, dict) else None
+    if not isinstance(workers, dict):
+        raise FleetCliError("native worker inventory is unavailable")
+    home = str(FLEET_HOME.resolve())
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    records = journal.records()
+    link = journal.restored_policy_link(
+        fleet_name=binding.name, incarnation_id=binding.incarnation_id,
+        thread_id=binding.authority.value,
+        operation_id=pending_operation_id)
+    approvals = CodexApprovalStore(FLEET_HOME, binding.host_generation).records()
+    if any(not isinstance(record, dict) or record.get("home") != home
+           for record in records):
+        raise FleetCliError("native operation inventory has an unknown home")
+    if any(record.get("state") in {
+            "pending", "responding", "responded", "uncertain", "unknown"}
+           for record in approvals):
+        raise FleetCliError("native callback inventory is unresolved")
+    inventory_records = []
+    for record in records:
+        if (pending_operation_id is not None
+                and record.get("operation_id") == pending_operation_id):
+            recovery = record.get("recovery")
+            if (not isinstance(recovery, dict)
+                    or recovery.get("kind") !=
+                    "supervisor/restored-continuation-reattach"
+                    or recovery.get("fleet_name") != binding.name
+                    or recovery.get("incarnation_id") != binding.incarnation_id
+                    or recovery.get("thread_id") != binding.authority.value
+                    or recovery.get("canonical_cwd") != home
+                    or record.get("method") != "rpc"
+                    or record.get("public_method") != "thread/resume"
+                    or record.get("generation") == binding.host_generation
+                    or record.get("state") not in {
+                        "prepared", "accepted", "observed", "committed"}):
+                raise FleetCliError("reserved reattachment journal is ambiguous")
+            continue
+        recovery = record.get("recovery")
+        owner = recovery.get("fleet_name") if isinstance(recovery, dict) else None
+        if owner == binding.name:
+            if record.get("state") in {
+                    "prepared", "accepted", "observed", "uncertain"}:
+                is_original = (isinstance(link, dict)
+                               and record.get("operation_id") ==
+                               link["original_operation_id"]
+                               and record.get("state") == "observed")
+                if not is_original:
+                    raise FleetCliError("another restored supervisor intent is unresolved")
+        else:
+            if record.get("state") not in {"committed", "failed"}:
+                raise FleetCliError("another native operation is unresolved")
+            if (record.get("state") == "failed"
+                    and any(key in record for key in (
+                        "accepted_at", "observed_at", "uncertain_at"))):
+                raise FleetCliError("failed native intent has acceptance evidence")
+        inventory_records.append(record)
+
+    bound = {}
+    for name, row in workers.items():
+        if name == binding.name:
+            continue
+        if not isinstance(row, dict):
+            raise FleetCliError(
+                "another native or ambiguous worker prevents exact-host shutdown")
+        native_fields = (
+            "codex_thread_id", "codex_turn_id", "codex_host_generation",
+            "codex_protocol_version", "codex_schema_digest",
+            "permission_effective", "adapter_state",
+        )
+        has_native_pin = any(row.get(key) is not None for key in native_fields)
+        route = _codex_record_route(row)
+        model = row.get("model")
+        codex_model = isinstance(model, str) and model.startswith("codex:")
+        if (route == "mcx" and row.get("dispatch_kind") == "mcx"
+                and not has_native_pin and row.get("pending_operation") is None
+                and row.get("last_operation_id") is None):
+            continue
+        # Before the app-server adapter, an archived supervisor had a real
+        # external session id.  Its missing native pins are meaningful only
+        # together with that explicit non-native dispatch provenance.
+        if (row.get("dispatch_kind") is None
+                and isinstance(row.get("session_id"), str)
+                and row["session_id"]
+                and isinstance(row.get("archived_at"), str)
+                and row["archived_at"]
+                and not has_native_pin
+                and row.get("mcx_id") is None
+                and row.get("pending_operation") is None
+                and row.get("last_operation_id") is None):
+            continue
+        if not codex_model and not has_native_pin and route is None:
+            continue
+        if (route != "native"
+                or row.get("dispatch_kind") != "codex-app-server"
+                or row.get("status") != "dead-suspected"
+                or row.get("adapter_state") != "uncertain"
+                or row.get("pending_operation") is not None
+                or row.get("session_id") is not None
+                or not _is_supervisor_shaped(name)
+                or not isinstance(row.get("supervisor_incarnation_id"), str)
+                or not row["supervisor_incarnation_id"]
+                or row.get("cwd") != home):
+            raise FleetCliError(
+                "another native or ambiguous worker prevents exact-host shutdown")
+        operation_id = row.get("last_operation_id")
+        owned = [record for record in inventory_records
+                 if isinstance(record.get("recovery"), dict)
+                 and record["recovery"].get("fleet_name") == name]
+        latest = [record for record in owned
+                  if record.get("operation_id") == operation_id]
+        if (not isinstance(operation_id, str) or len(latest) != 1
+                or latest[0].get("method") != "rpc"
+                or latest[0].get("recovery", {}).get("incarnation_id") !=
+                row["supervisor_incarnation_id"]
+                or latest[0].get("recovery", {}).get("canonical_cwd") != home):
+            raise FleetCliError("historical native supervisor intent is ambiguous")
+        thread_id = row.get("codex_thread_id")
+        turn_id = row.get("codex_turn_id")
+        generation = row.get("codex_host_generation")
+        if thread_id is None:
+            if (turn_id is not None or generation is not None
+                    or latest[0].get("public_method") != "thread/start"
+                    or latest[0].get("recovery", {}).get("kind") !=
+                    "supervisor/thread-start"
+                    or latest[0].get("state") != "failed"):
+                raise FleetCliError("native preclaim lacks pre-acceptance failure proof")
+            continue
+        if (not isinstance(thread_id, str) or not thread_id
+                or not isinstance(turn_id, str) or not turn_id
+                or not isinstance(generation, str) or not generation
+                or generation == binding.host_generation
+                or latest[0].get("generation") != generation
+                or latest[0].get("recovery", {}).get("thread_id") != thread_id
+                or thread_id == binding.authority.value
+                or thread_id in bound):
+            raise FleetCliError("historical native thread ownership is ambiguous")
+        bound[thread_id] = turn_id
+    return {
+        "digest": _digest("restored-continuation-other-evidence", {
+            "operations": inventory_records, "approvals": approvals,
+            "bound_threads": bound}),
+        "bound_threads": bound,
+    }
+
+
+def _restored_continuation_public_inventory(client, binding, inventory):
+    """Prove that each historical bound thread is absent from this loaded host."""
+    observed = {}
+    for thread_id, turn_id in sorted(inventory["bound_threads"].items()):
+        result = _codex_paged_thread_read(
+            client, thread_id, binding.host_generation,
+            "restored-inventory-read").result
+        thread = result.get("thread") if isinstance(result, dict) else None
+        status = thread.get("status") if isinstance(thread, dict) else None
+        turns = thread.get("turns") if isinstance(thread, dict) else None
+        if (not isinstance(thread, dict) or thread.get("id") != thread_id
+                or thread.get("cwd") != str(FLEET_HOME.resolve())
+                or not isinstance(status, dict)
+                or status.get("type") != "notLoaded"
+                or status.get("activeFlags", []) != []
+                or not isinstance(turns, list) or not turns
+                or not isinstance(turns[-1], dict)
+                or turns[-1].get("id") != turn_id
+                or turns[-1].get("status") not in {
+                    "completed", "failed", "interrupted"}):
+            raise FleetCliError(
+                "historical native thread is loaded or public evidence is ambiguous")
+        observed[thread_id] = {"turn_id": turn_id,
+                               "turn_status": turns[-1]["status"],
+                               "status": "notLoaded"}
+    return observed
+
+
 def _restored_continuation_context(claim, registry):
     """Resolve the exact held bypass supervisor and its immutable journal link."""
     from fleet_codex import OperationJournal
@@ -19822,18 +20005,7 @@ def _restored_continuation_context(claim, registry):
             or claim.get("provider_status") != "idle"
             or binding.record.get("status") != "idle"):
         raise FleetCliError("restored supervisor is not idle with recorded bypass")
-    workers = registry.get("workers")
-    if not isinstance(workers, dict):
-        raise FleetCliError("native worker inventory is unavailable")
-    for name, row in workers.items():
-        if name == binding.name:
-            continue
-        if (not isinstance(row, dict)
-                or (isinstance(row.get("model"), str)
-                    and row["model"].startswith("codex:"))
-                or row.get("codex_thread_id") is not None):
-            raise FleetCliError(
-                "another native or ambiguous worker prevents exact-host shutdown")
+    _restored_continuation_inventory(registry, binding)
     link = OperationJournal(FLEET_HOME, binding.host_generation).restored_policy_link(
         fleet_name=binding.name, incarnation_id=binding.incarnation_id,
         thread_id=binding.authority.value)
@@ -19854,9 +20026,21 @@ def _restored_continuation_preflight(claim, registry, binding, link, source):
     proof = claim.get("restored_continuation_preflight")
     reduced = json.loads(json.dumps(claim))
     reduced.pop("restored_continuation_preflight", None)
+    inventory = _restored_continuation_inventory(registry, binding)
+    public = proof.get("other_native_public") if isinstance(proof, dict) else None
     if (not isinstance(proof, dict)
             or proof.get("source") != source
             or proof.get("link") != link
+            or proof.get("other_inventory_digest") != inventory["digest"]
+            or not isinstance(public, dict)
+            or set(public) != set(inventory["bound_threads"])
+            or any(not isinstance(public.get(thread_id), dict)
+                   or public[thread_id].get("status") != "notLoaded"
+                   or public[thread_id].get("turn_id") != turn_id
+                   or public[thread_id].get("turn_status") not in {
+                       "completed", "failed", "interrupted"}
+                   for thread_id, turn_id in
+                   inventory["bound_threads"].items())
             or proof.get("claim_digest") != _digest(
                 "restored-continuation-claim", reduced)
             or proof.get("row_digest") != _digest(
@@ -19888,11 +20072,16 @@ def _prepare_restored_continuation(args) -> int:
             or not client._owner_live() or not client._app_server_live()):
         raise FleetCliError("exact old host and app-server are not live")
     _codex_idle_restoration_header(binding, client)
+    inventory = _restored_continuation_inventory(registry, binding)
+    public_inventory = _restored_continuation_public_inventory(
+        client, binding, inventory)
     profile = _codex_permission_profile(binding.record["mode"])
     _validate_codex_managed_requirements(client.config_requirements(), profile)
     proof = {
         "host": _codex_restore_host_identity(client),
         "source": source, "link": link,
+        "other_inventory_digest": inventory["digest"],
+        "other_native_public": public_inventory,
         "prepared_at": time.time(),
     }
     with fleet_lock():
@@ -19902,6 +20091,8 @@ def _prepare_restored_continuation(args) -> int:
                 or _registered_interface_mail_source() != source
                 or _codex_restore_host_identity(
                     _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or _restored_continuation_inventory(
+                    data, binding)["digest"] != inventory["digest"]
                 or _restored_continuation_context(live, data)[1] != link):
             raise FleetCliError("restored continuation changed before preparation")
         reduced = json.loads(json.dumps(live))
@@ -19970,6 +20161,10 @@ def _reconcile_restored_continuation(claim) -> int:
                 "reserved-restored-continuation-claim", reduced)
             or pending.get("reserved_inventory_digest") != _digest(
                 "reserved-restored-continuation-inventory", registry["workers"])
+            or pending.get("other_inventory_digest") !=
+                _restored_continuation_inventory(
+                    registry, binding,
+                    pending_operation_id=operation_id)["digest"]
             or pending.get("mail") != _codex_restore_mail_snapshot(
                 binding.authority.value)):
         raise FleetCliError("restored continuation reservation changed")
@@ -20013,6 +20208,10 @@ def _reconcile_restored_continuation(claim) -> int:
                     incarnation_id=binding.incarnation_id,
                     thread_id=binding.authority.value,
                     operation_id=operation_id) != link
+                or _restored_continuation_inventory(
+                    data, binding,
+                    pending_operation_id=operation_id)["digest"] !=
+                pending["other_inventory_digest"]
                 or new_journal.load(operation_id) != record
                 or pending.get("mail") != _codex_restore_mail_snapshot(
                     binding.authority.value)):
@@ -20092,6 +20291,7 @@ def _reattach_restored_continuation(args) -> int:
             "previous_turn_id": binding.current_turn_id,
             "restored_predecessor": link,
             "mail": proof["mail"],
+            "other_inventory_digest": proof["other_inventory_digest"],
         }
         live["last_operation_id"] = operation_id
         live["uncertainty"] = "explicit restored continuation pending"
@@ -20133,6 +20333,10 @@ def _reattach_restored_continuation(args) -> int:
                 client.generation
                 or _codex_restore_mail_snapshot(binding.authority.value) !=
                 proof["mail"]
+                or _restored_continuation_inventory(
+                    data, binding,
+                    pending_operation_id=operation_id)["digest"] !=
+                proof["other_inventory_digest"]
                 or _restored_continuation_context_original_link(
                     binding, link) is False):
             raise FleetCliError("restored continuation changed before dispatch")

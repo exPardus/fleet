@@ -671,8 +671,17 @@ For the restored holder before its first successful normal send, use
 `--expect-restore-op`, and `--expect-new-generation`. It pins the complete
 worker inventory, claim, row, linked journals, target mail, registered
 Interface, public idle/completed header, and host and app-server identities
-for five minutes. Another native or ambiguous worker in the home refuses
-preparation. After exact host and child exit with stale heartbeat,
+for five minutes. The inventory distinguishes recorded mcx and archived
+external-session rows from native app-server ownership; model text or an old
+generation alone never proves that a row is external. An old native preclaim
+needs an exact failed-before-acceptance journal. An old bound native thread
+needs terminal operation journals, no unresolved callback, and a fresh public
+`thread/read` status of `notLoaded` with its recorded terminal newest turn.
+Missing, loaded, active, idle, or ambiguous native evidence refuses. The full
+registry and other-operation/callback evidence are pinned and rechecked before
+host creation, dispatch, and settlement. Immediately before shutdown the old
+host must repeat the public `notLoaded` proof for each historical bound thread.
+After exact host and child exit with stale heartbeat,
 `--reattach-restored-continuation` with the same pins starts a fresh host
 generation and sends one distinct policy-bound `thread/resume` with
 `threadId`, `excludeTurns=true`, canonical `cwd`, recorded `model`,
