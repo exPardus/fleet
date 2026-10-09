@@ -1,5 +1,6 @@
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,6 +9,35 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "codex_app_server"
+
+
+def test_hermetic_codex_bare_shell_false_invocation(_hermetic_codex):
+    """The fixture must win the exact production ``shell=False`` launch."""
+    result = subprocess.run(
+        ["codex", "--version"], shell=False, capture_output=True,
+        text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "codex-cli 0.155.1"
+
+
+def test_hermetic_codex_keeps_posix_bare_argv(tmp_path):
+    """Windows' cmd adaptation must never leak into the POSIX contract."""
+    from codex_test_support import hermetic_codex_argv
+
+    command = hermetic_codex_argv(
+        ["codex", "--version"], tmp_path, platform="posix")
+    assert command == ["codex", "--version"]
+
+
+def test_hermetic_codex_models_windows_createprocess_contract(tmp_path):
+    """A Windows batch shim is launched only through an explicit cmd argv."""
+    from codex_test_support import hermetic_codex_argv
+
+    command = hermetic_codex_argv(
+        ["codex", "--version"], tmp_path, platform="nt", comspec="cmd.exe")
+    assert command == [
+        "cmd.exe", "/d", "/c", str(tmp_path / "codex.cmd"), "--version",
+    ]
 
 
 def _generator():

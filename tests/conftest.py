@@ -350,8 +350,10 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
     """
     import hashlib
     import json
+    import subprocess
 
     import fleet_codex
+    from codex_test_support import hermetic_codex_argv
 
     root = tmp_path_factory.mktemp("hermetic-codex")
     # POSIX can execute the extensionless shebang directly.  Windows does not
@@ -376,6 +378,30 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
         (root / "codex.cmd").write_text(
             f'@echo off\r\n"{sys.executable}" "%~dp0{script.name}" %*\r\n',
             encoding="utf-8")
+
+        # The production and test callers intentionally use the same bare
+        # ``["codex", ...]`` argv with ``shell=False``.  A .cmd file cannot be
+        # selected by CreateProcess for that shape, so adapt only this
+        # fixture's command to an explicit cmd.exe invocation.  The real
+        # subprocess calls still use shell=False; no host Codex can win a PATH
+        # race behind the shim.
+        real_run = subprocess.run
+        real_popen = subprocess.Popen
+
+        def run(command, *args, **kwargs):
+            adapted = (hermetic_codex_argv(command, root)
+                       if not isinstance(command, (str, bytes, os.PathLike))
+                       else command)
+            return real_run(adapted, *args, **kwargs)
+
+        def popen(command, *args, **kwargs):
+            adapted = (hermetic_codex_argv(command, root)
+                       if not isinstance(command, (str, bytes, os.PathLike))
+                       else command)
+            return real_popen(adapted, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", run)
+        monkeypatch.setattr(subprocess, "Popen", popen)
     else:
         script.chmod(0o700)
     reviewed = json.loads(
@@ -389,6 +415,7 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
         fleet_codex.REVIEWED_SCHEMA_MANIFESTS, HERMETIC_CODEX_VERSION, manifest)
     monkeypatch.setenv(
         "PATH", f"{root}{os.pathsep}{os.environ.get('PATH', '')}")
+    return root
 
 
 def pytest_collection_modifyitems(config, items):
