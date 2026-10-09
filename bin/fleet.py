@@ -6756,10 +6756,7 @@ def _codex_preaccept_evidence(path: Path) -> tuple[dict, str]:
 
     if not path.is_absolute():
         raise FleetCliError("worker preaccept evidence path must be absolute")
-    try:
-        info = _require_regular(path)
-    except (OSError, ValueError) as exc:
-        raise FleetCliError("supervisor interrupt callback file is unavailable") from exc
+    info = _require_regular(path)
     if info.st_size > 64 * 1024:
         raise FleetCliError("worker preaccept evidence exceeds 64 KiB")
     raw = path.read_bytes()
