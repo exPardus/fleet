@@ -2,8 +2,8 @@
 
 **Status:** Option A approved and native is the default for new Codex workers
 and Codex supervisor bodies. The explicit mcx compatibility selector remains.
-**Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1 and
-0.160.0 v2 JSON Schemas generated from isolated installs with
+**Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1,
+0.160.0 and 0.161.0 v2 JSON Schemas generated from isolated installs with
 `codex app-server generate-json-schema`.
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -90,7 +90,7 @@ That compatibility adapter cannot provide the target lifecycle:
 ### 3.2 Reviewed Codex v2 schemas
 
 For a new host, the adapter selects an explicit reviewed manifest from exact
-`codex --version` output. Versions 0.155.1 and 0.160.0 are reviewed; any other
+`codex --version` output. Versions 0.155.1, 0.160.0 and 0.161.0 are reviewed; any other
 version refuses before host startup, and an installed schema whose digest
 differs from its selected manifest never publishes ready. An already-live host
 is instead authenticated against the reviewed version and digest recorded in
@@ -137,6 +137,14 @@ Review of 0.160.0 against 0.155.1 found no change to any Fleet-used method,
 required parameter, thread/turn/permission type, server notification, effective
 thread-start field, or no-inference RPC sequence. Its only extracted contract
 delta is the additive error codes `flexUnavailable` and `tooManyDenials`.
+
+Review of 0.161.0 against 0.160.0: the extracted contract is byte-identical
+(same `contract_sha256`): no change to any Fleet-used method, required
+parameter, thread/turn/permission type, server notification, error code, or
+no-inference RPC sequence. Only the raw schema digest differs. The generator
+had to learn that 0.161 emits `CodexErrorInfo` variants under `anyOf` rather
+than `oneOf`; without that, `activeTurnNotSteerable` and the object-form
+connection error codes silently dropped out of the extraction.
 
 ## 4. Alternatives
 
@@ -681,7 +689,7 @@ Grade actions and side effects, not wording.
 
 | ID | Layer | Test | Required result |
 | --- | --- | --- | --- |
-| P1 | Schema | Generate 0.155.1 and 0.160.0 v2 schemas; validate each fixture digest | Either reviewed exact version/digest accepted; unknown version or drift disables native only |
+| P1 | Schema | Generate 0.155.1, 0.160.0 and 0.161.0 v2 schemas; validate each fixture digest | Either reviewed exact version/digest accepted; unknown version or drift disables native only |
 | P2 | Protocol | Initialize; start/read/list/resume disposable thread at exact cwd | Real ID/cwd agree |
 | P3 | Protocol | Start, active, steer with expected turn, page history, complete | One real turn lineage; final result persisted |
 | P4 | Protocol | Interrupt active disposable turn | Supported request with real IDs; same turn observed terminal |

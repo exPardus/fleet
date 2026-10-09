@@ -696,7 +696,9 @@ def test_host_state_is_owner_only_and_pid_does_not_decide_identity(tmp_path):
     try:
         metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
         assert metadata["home"] == str(client.home)
-        assert metadata["schema_digest"] == "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3"
+        assert metadata["schema_digest"] == json.loads(
+            _modules().REVIEWED_SCHEMA_MANIFESTS["0.155.1"].read_text(
+                encoding="utf-8"))["schema_sha256"]
         if os.name != "nt":
             assert stat.S_IMODE(client.state_dir.stat().st_mode) == 0o700
             assert stat.S_IMODE(client.key_path.stat().st_mode) == 0o600
@@ -748,7 +750,7 @@ def test_live_old_host_remains_reachable_after_installed_version_change(
     home = _home(tmp_path)
     schemas = {
         version: (json.dumps({"reviewed": version}, sort_keys=True) + "\n").encode()
-        for version in ("0.155.1", "0.160.0")
+        for version in ("0.155.1", "0.160.0", "0.161.0")
     }
     manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
     for version, schema_bytes in schemas.items():
@@ -961,7 +963,7 @@ def test_darwin_identity_source_change_does_not_replace_live_host(monkeypatch):
     assert kill_calls == [(4321, 0)]
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_installed_reviewed_codex_versions_select_their_manifest(
         tmp_path, monkeypatch, version):
     module = _modules()
@@ -976,7 +978,7 @@ def test_installed_reviewed_codex_versions_select_their_manifest(
     assert json.loads(selected.read_text(encoding="utf-8"))["codex_version"] == version
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
 def test_each_reviewed_codex_version_can_publish_a_matching_host(
         tmp_path, monkeypatch, version):
     module = _modules()
