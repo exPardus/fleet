@@ -442,6 +442,60 @@ def test_real_host_barrier_rejects_before_provider_write(tmp_path):
         _shutdown(client)
 
 
+def test_live_host_failed_reader_still_allows_metadata_prepare(staged, tmp_path,
+                                                               monkeypatch):
+    import test_codex_host_ipc as host_tests
+
+    fake, args, _ = staged
+    metadata_path = fake.FLEET_HOME / "state" / "codex" / "host.json"
+    metadata_path.unlink()
+    (fake.FLEET_HOME / "state" / "codex").chmod(0o700)
+    (fake.FLEET_HOME / "state" / "codex" / "operations").chmod(0o700)
+    (fake.FLEET_HOME / "state" / "codex" / "operations" / "old-op.json").chmod(0o600)
+    needle = '    if message.get("method") == "test/echo":'
+    replacement = (
+        '    if message.get("method") == "test/fail":\n'
+        '        sys.stdout.write("not-json\\n")\n'
+        '        sys.stdout.flush()\n'
+        '    elif message.get("method") == "test/echo":')
+    monkeypatch.setattr(host_tests, "FAKE_APP_SERVER",
+                        host_tests.FAKE_APP_SERVER.replace(needle, replacement))
+    _, client, log = _ensure(tmp_path, home=fake.FLEET_HOME)
+    try:
+        with pytest.raises(Exception):
+            client.call({"operation_id": "poison-read", "method": "rpc",
+                "payload": {"method": "test/fail", "params": {}}}, timeout=2)
+        assert client.call({"operation_id": "still-live", "method": "ping",
+                            "payload": {}}, timeout=2).result["generation"] == client.generation
+        with pytest.raises(Exception):
+            client.call({"operation_id": "pre-send-refusal", "method": "rpc",
+                "payload": {"method": "test/echo", "params": {"value": 1}}}, timeout=2)
+        methods = [entry.get("method") for entry in map(json.loads,
+                   log.read_text().splitlines()) if entry.get("event") == "request"]
+        assert methods == ["test/fail"]
+
+        metadata = json.loads(metadata_path.read_text())
+        args.generation = client.generation
+        args.host_pid = metadata["pid"]
+        args.host_start = metadata["process_identity"]
+        args.child_pid = metadata["app_server_pid"]
+        args.child_start = metadata["app_server_process_identity"]
+        fake.claim["host_generation"] = client.generation
+        fake.rows["sup|inc|boot"]["codex_host_generation"] = client.generation
+        old_op = fake.FLEET_HOME / "state" / "codex" / "operations" / "old-op.json"
+        entry = json.loads(old_op.read_text())
+        entry["generation"] = client.generation
+        old_op.write_text(json.dumps(entry))
+        monkeypatch.setattr(recovery.CodexHostClient, "connect_existing",
+                            lambda home: fleet_codex.CodexHostClient._existing(home))
+        recovery._prepare(fake, args)
+        assert recovery._load(fake)["state"] == "prepared"
+        assert [entry.get("method") for entry in map(json.loads,
+                log.read_text().splitlines()) if entry.get("event") == "request"] == ["test/fail"]
+    finally:
+        _shutdown(client)
+
+
 def test_staged_host_gate_binds_full_resume_payload_and_exact_interface(staged, monkeypatch):
     import fleet_codex_host as host_module
 
