@@ -551,6 +551,20 @@ consumption before the provider write. Any transport ambiguity requires
 inspection of that durable record and never triggers a replay. Other targets
 continue through the ordinary worker guard.
 
+The running host must advertise the supervisor approval reservation capability;
+an older host refuses this route before any request or Fleet state mutation.
+The CLI reserves the complete current claim and unique supervisor row under
+`fleet.lock`, and the host revalidates the current Interface peer, reservation,
+full claim and row, and exact command request under the same lock immediately
+before changing the request to `responding`. The reservation blocks competing
+supervisor operations through the provider response and is cleared by exact
+claim/row comparison after an acknowledged result. A partial reservation write
+or ambiguous transport result stays visible and blocks further supervisor
+mutation. Reconciliation must inspect the durable approval state and current
+claim/row first; `responding`, `responded`, `resolved`, or `uncertain` never
+authorize replay. A reviewed exact compare-and-swap may clear a stranded
+reservation after classifying the request, without changing unrelated workers.
+
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
 | --- | --- | --- | --- |
 | `bypass` | `never` | `danger-full-access` | explicit unrestricted mode, still subject to external policy |

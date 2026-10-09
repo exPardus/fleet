@@ -6,6 +6,7 @@ import pytest
 
 import fleet
 import fleet_codex
+import fleet_codex_host
 
 
 THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
@@ -54,8 +55,17 @@ class ApprovalClient:
             self.on_pending()
         return self.store.unresolved(thread_id=thread_id, turn_id=turn_id)
 
-    def respond_approval(self, request_id, thread_id, turn_id, decision, timeout):
+    def supervisor_approval_reservation_supported(self):
+        return True
+
+    def respond_approval(self, request_id, thread_id, turn_id, decision, timeout,
+                         supervisor_reservation=None):
         assert timeout == 10
+        payload = {"request_id": request_id, "thread_id": thread_id,
+                   "turn_id": turn_id, "decision": decision}
+        with fleet.fleet_lock():
+            self.host._validate_supervisor_approval_reservation(
+                None, payload, supervisor_reservation)
         record, response = self.store.begin_response(
             request_id, thread_id, turn_id, decision)
         assert self.store._load_path(self.store.path(record["request_id"]))["state"] == "responding"
@@ -111,6 +121,19 @@ def approval_home(tmp_path, monkeypatch):
         "startedAtMs": 3, "command": "git diff", "cwd": cwd,
     }})
     client = ApprovalClient(home, store)
+    client.host = fleet_codex_host.Host.__new__(fleet_codex_host.Host)
+    client.host.home = home
+    client.host.generation = GEN
+    client.host.approvals = store
+    monkeypatch.setattr(fleet_codex_host, "read_interface_claim",
+                        lambda _home: source)
+    monkeypatch.setattr(fleet_codex_host, "_ipc_peer_credentials",
+                        lambda _connection: (1234, 1000))
+    monkeypatch.setattr(fleet_codex_host.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(fleet_codex_host, "codex_process_source",
+                        lambda _pid: {"uid": 1000})
+    monkeypatch.setattr(fleet_codex_host, "interface_source_matches",
+                        lambda claim, peer: claim == source)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
     return home, store, client, source, cwd
 
@@ -289,7 +312,8 @@ def test_consumed_response_with_lost_reply_is_uncertain_and_never_replayed(
         fleet.cmd_codex_respond(response_args(cwd))
     assert store._load_path(store.path(6))["state"] == "responded"
     assert len(client.provider_writes) == 1
-    with pytest.raises(fleet.FleetCliError, match="pending request disagrees"):
+    assert fleet.read_incarnation()["pending_operation"]["kind"] == "approval-response"
+    with pytest.raises(fleet.FleetCliError, match="exact held binding disagrees"):
         fleet.cmd_codex_respond(response_args(cwd))
     assert len(client.provider_writes) == 1
 
@@ -307,4 +331,102 @@ def test_physical_supervisor_name_still_refuses_ordinary_worker_route(
         setattr(args, key, None)
     with pytest.raises(fleet.FleetCliError, match="not an ordinary worker"):
         fleet.cmd_codex_respond(args)
+    assert client.provider_writes == []
+
+
+@pytest.mark.parametrize("legacy_response", ["absent", "unknown-method"])
+def test_running_host_without_reservation_capability_refuses_before_mutation(
+        approval_home, legacy_response):
+    _home, store, client, _source, cwd = approval_home
+    if legacy_response == "absent":
+        client.supervisor_approval_reservation_supported = lambda: False
+    else:
+        def old_host():
+            raise fleet_codex.HostRejected("unknown host method")
+        client.supervisor_approval_reservation_supported = old_host
+    with pytest.raises(fleet.FleetCliError, match="running host lacks"):
+        fleet.cmd_codex_respond(response_args(cwd))
+    assert fleet.read_incarnation().get("pending_operation") is None
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert client.provider_writes == []
+
+
+def test_host_rejects_changed_pending_request_and_clears_exact_reservation(
+        approval_home):
+    _home, store, client, _source, cwd = approval_home
+    claim = copy.deepcopy(fleet.read_incarnation())
+    registry = copy.deepcopy(fleet.read_registry_no_repair())
+    original = client.respond_approval
+
+    def request_drift(*args, **kwargs):
+        record = store._load_path(store.path(6))
+        record["params"]["command"] = "gh pr view 18"
+        fleet_codex._atomic_json(store.path(6), record)
+        return original(*args, **kwargs)
+
+    client.respond_approval = request_drift
+    with pytest.raises(fleet.FleetCliError, match="outcome uncertain"):
+        fleet.cmd_codex_respond(response_args(cwd))
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert client.provider_writes == []
+    assert fleet.read_incarnation() == claim
+    assert fleet.read_registry_no_repair() == registry
+
+
+def test_competing_supervisor_operation_cannot_commit_after_reservation(
+        approval_home):
+    _home, store, client, _source, cwd = approval_home
+    binding = fleet._codex_supervisor_binding(allowed_states={"held"})
+    original = client.respond_approval
+
+    def race(*args, **kwargs):
+        fleet._reserve_codex_supervisor_operation(
+            binding, "competing-operation", "observe-send", allowed_states={"held"})
+        return original(*args, **kwargs)
+
+    client.respond_approval = race
+    with pytest.raises(fleet.FleetCliError, match="outcome uncertain"):
+        fleet.cmd_codex_respond(response_args(cwd))
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert client.provider_writes == []
+    assert fleet.read_incarnation()["pending_operation"]["kind"] == "approval-response"
+
+
+@pytest.mark.parametrize("drift", ["claim-turn", "claim-release", "row-turn"])
+def test_host_boundary_refuses_raw_binding_drift_before_consumption(
+        approval_home, drift):
+    _home, store, client, _source, cwd = approval_home
+    original = client.respond_approval
+
+    def drift_before_host(*args, **kwargs):
+        if drift == "row-turn":
+            registry = fleet.read_registry_no_repair()
+            registry["workers"][NAME]["codex_turn_id"] = OTHER_THREAD
+            fleet.save_registry(registry)
+        else:
+            claim = fleet.read_incarnation()
+            if drift == "claim-turn":
+                claim["current_turn_id"] = OTHER_THREAD
+            else:
+                claim["state"] = "released"
+            fleet.write_incarnation(claim)
+        return original(*args, **kwargs)
+
+    client.respond_approval = drift_before_host
+    with pytest.raises(fleet.FleetCliError, match="outcome uncertain"):
+        fleet.cmd_codex_respond(response_args(cwd))
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert client.provider_writes == []
+
+
+def test_failed_registry_reservation_write_never_reaches_host(
+        approval_home, monkeypatch):
+    _home, store, client, _source, cwd = approval_home
+    def fail(_registry):
+        raise OSError("injected second-file failure")
+    monkeypatch.setattr(fleet, "save_registry", fail)
+    with pytest.raises(fleet.FleetCliError, match="reservation write incomplete"):
+        fleet.cmd_codex_respond(response_args(cwd))
+    assert fleet.read_incarnation()["pending_operation"]["kind"] == "approval-response"
+    assert store._load_path(store.path(6))["state"] == "pending"
     assert client.provider_writes == []

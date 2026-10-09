@@ -8448,6 +8448,25 @@ def _parse_codex_response_decision(raw: str):
     return parsed
 
 
+def _settle_codex_supervisor_approval(
+        binding, operation_id, old_claim, old_row,
+        reserved_claim, reserved_row) -> bool:
+    """Clear only our complete reservation; preserve independent product rows."""
+    with fleet_lock():
+        status, claim = read_incarnation_status()
+        registry = read_registry_no_repair()
+        workers = registry.get("workers")
+        row = workers.get(binding.name) if isinstance(workers, dict) else None
+        if (status != "ok" or claim != reserved_claim or row != reserved_row
+                or claim.get("pending_operation", {}).get("operation_id") != operation_id):
+            return False
+        registry["workers"][binding.name] = old_row
+        save_registry(registry)
+        # Keep the blocking claim reservation until the row is durable.
+        write_incarnation(old_claim)
+        return True
+
+
 def _cmd_codex_supervisor_respond(args) -> int:
     """Answer one exact held supervisor command request from its Interface."""
     if not getattr(args, "_fleet_home_explicit", False):
@@ -8484,6 +8503,13 @@ def _cmd_codex_supervisor_respond(args) -> int:
     client = _codex_existing_client(FLEET_HOME)
     if client.generation != binding.host_generation:
         raise FleetCliError("supervisor codex-respond host generation changed")
+    try:
+        if not client.supervisor_approval_reservation_supported():
+            raise FleetCliError("supervisor codex-respond host lacks the reservation fence")
+    except Exception as exc:
+        raise FleetCliError(
+            "supervisor codex-respond running host lacks the reviewed reservation "
+            "fence; preserve the request and coordinate host upgrade") from exc
     observed = _codex_supervisor_observe(binding, client=client)
     if (observed["provider_status"] != "active"
             or observed["turn_status"] != "inProgress"
@@ -8520,10 +8546,11 @@ def _cmd_codex_supervisor_respond(args) -> int:
                    for choice in request["offered_decisions"])
             or "accept" not in request["offered_decisions"]):
         raise FleetCliError("supervisor codex-respond exact pending request disagrees")
-    from fleet_codex import _approval_decision
+    from fleet_codex import _approval_decision, _fleet_state_digest
     _approval_decision(request["method"], "accept", params)
     # Recheck the process-bound Interface and complete claim/row identity after
     # provider reads. Unrelated product rows may progress independently.
+    operation_id = f"supervisor-approval-{uuid.uuid4().hex}"
     with fleet_lock():
         current_status, current_claim = read_incarnation_status()
         current_registry = read_registry_no_repair()
@@ -8535,16 +8562,71 @@ def _cmd_codex_supervisor_respond(args) -> int:
                 or not _mail_source_is_current(source)
                 or client.generation != binding.host_generation):
             raise FleetCliError("supervisor codex-respond binding or Interface changed")
+        old_claim = dict(current_claim)
+        old_row = dict(current.record)
+        reservation = {
+            "operation_id": operation_id, "kind": "approval-response",
+            "name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "host_generation": binding.host_generation,
+            "request_id": args.request_id,
+            "request_key": request["key"],
+            "request_digest": _fleet_state_digest(request),
+            "method": request["method"],
+            "command": expected["expect_command"],
+            "cwd": request_cwd,
+            "item_id": request["item_id"],
+            "claim_digest": _fleet_state_digest(old_claim),
+            "row_digest": _fleet_state_digest(old_row),
+            "previous_claim_operation_id": old_claim.get("last_operation_id"),
+            "previous_record_operation_id": old_row.get("last_operation_id"),
+            "previous_adapter_state": old_row.get("adapter_state"),
+        }
+        current_claim["pending_operation"] = reservation
+        current_claim["last_operation_id"] = operation_id
+        row = current_registry["workers"][binding.name]
+        row["adapter_state"] = "mutating"
+        row["last_operation_id"] = operation_id
+        reserved_claim = dict(current_claim)
+        reserved_row = dict(row)
+        # A failed second write leaves a visible, blocking claim reservation.
+        # No host call occurs until both durable files are written.
+        try:
+            write_incarnation(current_claim)
+            save_registry(current_registry)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor codex-respond reservation write incomplete; "
+                "request was not sent; inspect the claim and row before settlement") from exc
     try:
         result = client.respond_approval(
             args.request_id, binding.authority.value,
-            binding.current_turn_id, "accept", timeout=10)
+            binding.current_turn_id, "accept", timeout=10,
+            supervisor_reservation={key: reservation[key] for key in (
+                "operation_id", "name", "incarnation_id", "thread_id",
+                "turn_id", "host_generation", "request_id", "request_key",
+                "request_digest",
+                "method", "command", "cwd", "item_id")})
     except Exception as exc:
-        # The host may have consumed the request before its IPC reply was lost.
-        # Its durable approval record, not this exception, decides the outcome.
+        # A returned pre-consumption rejection may be settled only when the
+        # durable request still says pending. Transport ambiguity stays fenced.
+        from fleet_codex import HostRejected
+        if isinstance(exc, HostRejected):
+            try:
+                pending = [row for row in client.pending_approvals(
+                    binding.authority.value, binding.current_turn_id)
+                    if row.get("key") == request["key"]]
+                if len(pending) == 1 and pending[0].get("state") == "pending":
+                    _settle_codex_supervisor_approval(
+                        binding, operation_id, old_claim, old_row,
+                        reserved_claim, reserved_row)
+            except Exception:
+                pass
         raise FleetCliError(
             "supervisor codex-respond outcome uncertain; inspect the durable "
-            "request and do not retry blindly") from exc
+            "request and reservation; do not retry blindly") from exc
     state = result.get("state") if isinstance(result, dict) else None
     if (state not in {"responded", "resolved"}
             or str(result.get("request_id")) != args.request_id
@@ -8553,6 +8635,12 @@ def _cmd_codex_supervisor_respond(args) -> int:
         raise FleetCliError(
             "supervisor codex-respond outcome uncertain; inspect the durable "
             "request and do not retry blindly")
+    if not _settle_codex_supervisor_approval(
+            binding, operation_id, old_claim, old_row,
+            reserved_claim, reserved_row):
+        raise FleetCliError(
+            "supervisor codex-respond consumed the request but reservation "
+            "settlement needs review; do not retry")
     print(f"{binding.name}: Codex request {args.request_id} response consumed once ({state})")
     return 0
 
