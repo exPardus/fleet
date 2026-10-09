@@ -18239,6 +18239,12 @@ def cmd_sup_release(args, run=subprocess.run, which=shutil.which) -> int:
     return 0
 
 
+def _legacy_supervisor_rows(registry):
+    """Snapshot only supervisor identities; product workers may progress."""
+    return {name: row for name, row in registry["workers"].items()
+            if name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name)}
+
+
 def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
     """Validate one stale Claude holder against public roster and local identity.
 
@@ -18255,7 +18261,9 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
             or not isinstance(claim.get("lineage_id"), str)
             or not claim["lineage_id"]):
         raise FleetCliError("sup-retire-legacy: claim kind or exact identity disagrees")
-    if (handoff_pending_members(claim) or handshake_path().exists()
+    # The helper intentionally hides a malformed scalar as []; this destructive
+    # transition must reject even an empty or torn *present* handoff field.
+    if (HANDOFF_PENDING_KEY in claim or handshake_path().exists()
             or claim.get("pending_operation") is not None):
         raise FleetCliError("sup-retire-legacy: unresolved successor or operation")
     if not isinstance(registry, dict) or not isinstance(registry.get("workers"), dict):
@@ -18273,9 +18281,7 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
     if row.get("status") == "idle":
         raise FleetCliError("sup-retire-legacy: holder is still resumable; sup-guard would WAKE")
     supervisor_sids = set().union(*(
-        _record_sids(other) for other_name, other in registry["workers"].items()
-        if isinstance(other, dict) and (other_name == SUPERVISOR_BODY_NAME
-                                         or _is_supervisor_shaped(other_name))))
+        _record_sids(other) for other in _legacy_supervisor_rows(registry).values()))
     if not isinstance(entries, list):
         raise FleetCliError("sup-retire-legacy: provider roster malformed")
     for entry in entries:
@@ -18288,8 +18294,9 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
                  or _is_supervisor_shaped(entry.get("name")))
         if ((sid in supervisor_sids)
                 or (named and _sup_guard_row_in_home(entry, registry))):
-            if ("pid" in entry and entry.get("pid") not in (None, "", 0)) \
-                    or ("status" in entry and entry.get("state") != "done"):
+            # Terminal public rows have no pid key. A present false/zero/null
+            # pid is malformed evidence, not proof that the process is gone.
+            if "pid" in entry or ("status" in entry and entry.get("state") != "done"):
                 raise FleetCliError("sup-retire-legacy: old supervisor or predecessor is live")
             if entry.get("state") != "done":
                 raise FleetCliError("sup-retire-legacy: old supervisor roster state ambiguous")
@@ -18320,6 +18327,7 @@ def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
     if status != "ok":
         raise FleetCliError("sup-retire-legacy: claim absent or corrupt")
     registry = read_registry_no_repair()
+    supervisor_rows = _legacy_supervisor_rows(registry)
     try:
         journal_bytes = supervisor_journal_path().read_bytes()
     except FileNotFoundError:
@@ -18344,7 +18352,7 @@ def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
         except OSError as exc:
             raise FleetCliError("sup-retire-legacy: supervisor journal unreadable") from exc
         if (current_status != "ok" or current != claim
-                or current_registry["workers"].get(name) != row
+                or _legacy_supervisor_rows(current_registry) != supervisor_rows
                 or _registered_interface_mail_source() != source
                 or current_journal != journal_bytes
                 or not supervisor_goals_active()):
@@ -18354,7 +18362,8 @@ def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
         _legacy_retirement_proof(current, current_registry, entries,
                                  expect_inc, expect_sid)
         retired_at = now_iso()
-        evidence = {"kind": "legacy-supervisor-retirement", "retired_at": retired_at,
+        evidence = {"kind": "legacy-supervisor-retirement", "phase": "prepared",
+                    "retired_at": retired_at,
                     "home": str(FLEET_HOME.resolve()), "claim": claim,
                     "holder_row_name": name, "holder_row": row,
                     "interface_source": source,
@@ -18386,6 +18395,11 @@ def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
                             "legacy_retired_incarnation_id": expect_inc})
         save_registry(current_registry)
         append_event("status_changed", name, old=old_status, new="dead")
+        # This is last: a failure at any earlier write retains the original
+        # claim in prepared evidence, while native spawn refuses that phase.
+        evidence["phase"] = "complete"
+        evidence["completed_at"] = now_iso()
+        _write_json_atomic(evidence_path, evidence)
     try:
         append_interface_log(
             "RULING", f"retired legacy supervisor {expect_inc} sid={expect_sid} "
@@ -20753,6 +20767,50 @@ def _codex_supervisor_boot_prompt(name, incarnation_id, campaign, thread_id):
     )
 
 
+def _require_completed_legacy_retirement(claim, registry):
+    """Gate native boot on both the completed audit and exact old tombstone."""
+    inc = claim.get("incarnation_id")
+    old_sid = claim.get("released_by_sid")
+    expected_path = f"state/supervisor-retirements/{inc}.json"
+    if (not isinstance(inc, str) or not INCARNATION_ID_RE.fullmatch(inc)
+            or not isinstance(old_sid, str) or not _SID_SHAPE_RE.fullmatch(old_sid)
+            or claim.get("retirement_evidence") != expected_path
+            or not isinstance(registry, dict)
+            or not isinstance(registry.get("workers"), dict)):
+        raise FleetCliError("native Codex sup-spawn: legacy retirement incomplete")
+    path = FLEET_HOME / expected_path
+    try:
+        if path.is_symlink():
+            raise ValueError("symlink evidence")
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise FleetCliError("native Codex sup-spawn: legacy retirement evidence incomplete") from exc
+    original = evidence.get("claim") if isinstance(evidence, dict) else None
+    source = evidence.get("interface_source") if isinstance(evidence, dict) else None
+    name = evidence.get("holder_row_name") if isinstance(evidence, dict) else None
+    original_row = evidence.get("holder_row") if isinstance(evidence, dict) else None
+    row = registry["workers"].get(name) if isinstance(name, str) else None
+    if (not isinstance(evidence, dict)
+            or evidence.get("kind") != "legacy-supervisor-retirement"
+            or evidence.get("phase") != "complete"
+            or evidence.get("home") != str(FLEET_HOME.resolve())
+            or evidence.get("retired_at") != claim.get("released_at")
+            or not isinstance(original, dict)
+            or original.get("incarnation_id") != inc
+            or original.get("session_id") != old_sid
+            or original.get("lineage_id") != claim.get("lineage_id")
+            or not isinstance(source, dict)
+            or source.get("claim_id") != claim.get("retired_by_interface_claim_id")
+            or not (name == SUPERVISOR_BODY_NAME or _is_supervisor_shaped(name))
+            or old_sid not in _record_sids(original_row)
+            or not isinstance(row, dict)
+            or old_sid not in _record_sids(row)
+            or row.get("status") != "dead"
+            or row.get("legacy_retired_at") != claim.get("released_at")
+            or row.get("legacy_retired_incarnation_id") != inc):
+        raise FleetCliError("native Codex sup-spawn: legacy retirement incomplete")
+
+
 def _dispatch_codex_supervisor_body(campaign, mode, model, *,
                                     setting_sources=None) -> int:
     """Create and boot one explicit native Codex supervisor.
@@ -20800,12 +20858,13 @@ def _dispatch_codex_supervisor_body(campaign, mode, model, *,
                        _sup_guard_row_in_home(entry, registry) and
                        (not isinstance(entry.get("sessionId"), str)
                         or not entry.get("sessionId")
-                        or ("pid" in entry and entry.get("pid") not in (None, "", 0))
+                        or "pid" in entry
                         or entry.get("state") != "done")
                        for entry in roster)):
             raise FleetCliError(
                 "native Codex sup-spawn: retired legacy supervisor liveness "
                 "is live or ambiguous")
+        _require_completed_legacy_retirement(pre_claim, registry)
         checked_release = pre_claim
     with fleet_lock():
         claim_status, existing_claim = read_incarnation_status()
@@ -20818,6 +20877,8 @@ def _dispatch_codex_supervisor_body(campaign, mode, model, *,
             raise FleetCliError(
                 "native Codex sup-spawn found an existing supervisor claim")
         data = load_registry()
+        if checked_release is not None:
+            _require_completed_legacy_retirement(existing_claim, data)
         if name in data["workers"]:
             raise FleetCliError(f"native Codex supervisor name collision: {name}")
         record = new_worker_record(

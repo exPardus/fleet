@@ -490,6 +490,13 @@ def test_retired_legacy_claim_allows_normal_native_sup_spawn_with_active_lane(
     assert client.operations == []
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         lambda: (True, [{"sessionId": old_sid,
+                                         "name": name, "state": "done",
+                                         "pid": False}]))
+    with pytest.raises(fleet.FleetCliError, match="liveness"):
+        fleet.cmd_sup_spawn(_args())
+    assert client.operations == []
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda: (True, [{"sessionId": old_sid,
                                          "name": name, "state": "done"}]))
     assert fleet.cmd_sup_spawn(_args()) == 0
     assert fleet.read_incarnation()["holder"] == {

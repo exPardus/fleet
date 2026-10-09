@@ -357,7 +357,9 @@ identity, two fresh healthy public Claude rosters proving no live supervisor or
 predecessor, and a locked unchanged claim/row/Interface check. It preserves all
 mail, queues, journals, and unrelated workers, records the original claim in
 ignored retirement evidence, writes a released claim and old-holder tombstone,
-and creates no Codex thread or turn. See
+marks evidence complete only after those writes, and creates no Codex thread
+or turn. Native spawn requires that complete evidence and exact tombstone
+before dispatch. See
 `docs/specs/codex-native-integration.md` §10.4 for CLI semantics and refusals.
 After a native Codex mutation enters the durable `accepted` journal state,
 any host error—including a provider reply too large for the 64 KiB journal
