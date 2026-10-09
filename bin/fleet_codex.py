@@ -102,6 +102,48 @@ def authorize_failed_client_recovery_operation(
     raise HostRejected("failed-client recovery barrier blocks provider mutation")
 
 
+_FAILED_CLIENT_READ_METHODS = frozenset({
+    "thread/read", "thread/turns/list", "thread/items/list", "thread/list",
+    "config/read", "configRequirements/read",
+})
+
+
+def authorize_failed_client_recovery_rpc(
+        home: Path, generation: str, operation_id: str,
+        payload: Any, payload_digest: str) -> None:
+    """Fence the entire RPC surface while recovery is staged or held."""
+    if failed_client_recovery_barrier(home) is None:
+        return
+    if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
+        raise HostRejected("failed-client RPC method is malformed")
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        raise HostRejected("failed-client RPC params are malformed")
+    method = payload["method"]
+    if method in _FAILED_CLIENT_READ_METHODS:
+        return
+    if method not in _MUTATING_PUBLIC_METHODS:
+        raise HostRejected("failed-client recovery blocks unreviewed public RPC")
+    authorize_failed_client_recovery_operation(
+        home, generation, operation_id, method, params.get("threadId"),
+        payload_digest)
+
+
+def authorize_failed_client_recovery_shutdown(
+        home: Path, generation: str, operation_id: str) -> None:
+    """Permit only the staged original-host stop; protect its replacement."""
+    barrier = failed_client_recovery_barrier(home)
+    if barrier is None:
+        return
+    old = barrier.get("old_host")
+    if (barrier.get("state") == "shutdown_sent"
+            and isinstance(old, dict)
+            and old.get("generation") == generation
+            and barrier.get("shutdown_operation") == operation_id):
+        return
+    raise HostRejected("failed-client recovery blocks host shutdown")
+
+
 def _reviewed_schema_manifest(
     command: Sequence[str],
     *,
@@ -2131,6 +2173,12 @@ class CodexHostClient:
         if not isinstance(method, str) or not method:
             raise ValueError("method must be a non-empty string")
         digest = _digest(method, payload)
+        if method == "rpc":
+            authorize_failed_client_recovery_rpc(
+                self.home, self.generation, operation_id, payload, digest)
+        elif method == "host/shutdown":
+            authorize_failed_client_recovery_shutdown(
+                self.home, self.generation, operation_id)
         public_method = _public_method(method, payload)
         if public_method is not None:
             params = payload.get("params") if isinstance(payload, dict) else None

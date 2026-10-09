@@ -196,6 +196,10 @@ def _row_policy(fleet, row: dict[str, Any]) -> tuple[str, dict[str, str]]:
                          and all(isinstance(sandbox[key], bool) for key in
                                  allowed - {"type", "writableRoots"}
                                  if key in sandbox))
+    elif sandbox_name == "read-only":
+        valid_sandbox = (set(sandbox).issubset({"type", "networkAccess"})
+                         and ("networkAccess" not in sandbox
+                              or isinstance(sandbox["networkAccess"], bool)))
     else:
         valid_sandbox = isinstance(sandbox, dict) and set(sandbox) == {"type"}
     approval = effective.get("approvalPolicy")
@@ -208,6 +212,34 @@ def _row_policy(fleet, row: dict[str, Any]) -> tuple[str, dict[str, str]]:
                 and mode_profile["sandbox"] != sandbox_name)):
         raise FleetCliError("recorded effective policy differs from Fleet mode")
     return model, {"approvalPolicy": approval, "sandbox": sandbox_name}
+
+
+def _resume_policy_config(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Encode only policy fields the pinned 0.155.1 resume request can set."""
+    sandbox = row["permission_effective"]["sandbox"]
+    if sandbox["type"] == "readOnly":
+        # The pinned resume request has a sandbox mode, but no read-only
+        # network override. The reviewed schema's mode default is false.
+        if sandbox.get("networkAccess", False) is True:
+            raise FleetCliError(
+                "recorded read-only network access cannot be restored by pinned resume")
+        return None
+    if sandbox["type"] != "workspaceWrite":
+        return None
+    required = {"type", "writableRoots", "networkAccess",
+                "excludeTmpdirEnvVar", "excludeSlashTmp"}
+    if set(sandbox) != required:
+        raise FleetCliError("recorded workspace policy lacks explicit resume fields")
+    roots = sandbox["writableRoots"]
+    if (any(not isinstance(root, str) or not Path(root).is_absolute()
+            for root in roots) or len(set(roots)) != len(roots)):
+        raise FleetCliError("recorded workspace roots are not exact absolute paths")
+    return {"sandbox_workspace_write": {
+        "writable_roots": roots,
+        "network_access": sandbox["networkAccess"],
+        "exclude_tmpdir_env_var": sandbox["excludeTmpdirEnvVar"],
+        "exclude_slash_tmp": sandbox["excludeSlashTmp"],
+    }}
 
 
 def _require_recorded_effective(result: dict[str, Any], row: dict[str, Any]) -> None:
@@ -652,8 +684,10 @@ def _complete_history(fleet, client, thread_id, turn_id, cwd):
         raise FleetCliError("rebind turn history exceeds page bound")
     if (not ids or len({x[0] for x in ids}) != len(ids)
             or ids[0][0] != turn_id
-            or ids[0][1] not in {"completed", "failed", "interrupted"}):
-        raise FleetCliError("bound turn is absent, nonterminal, or not newest")
+            or any(not isinstance(turn, str) or not turn
+                   or status not in {"completed", "failed", "interrupted"}
+                   for turn, status in ids)):
+        raise FleetCliError("turn history has absent, nonterminal, or malformed turn")
     first_again = _call_read(client, "thread/turns/list", {
         "threadId": thread_id, "limit": 100, "sortDirection": "desc",
         "itemsView": "notLoaded"}).get("data")
@@ -702,14 +736,16 @@ def _rebind(fleet, args, record):
     cwd = str(Path(row["cwd"]).resolve())
     _complete_history(fleet, client, thread_id, turn_id, cwd)
     model, profile = _row_policy(fleet, row)
+    policy_config = _resume_policy_config(row)
     operation_id = "failed-client-rebind-" + hashlib.sha256(
         (record["id"] + "\0" + name).encode()).hexdigest()[:36]
+    params = {"threadId": thread_id, "excludeTurns": True, "cwd": cwd,
+              "model": model, "approvalPolicy": profile["approvalPolicy"],
+              "approvalsReviewer": "user", "sandbox": profile["sandbox"]}
+    if policy_config is not None:
+        params["config"] = policy_config
     operation = {"operation_id": operation_id, "method": "rpc",
-                 "payload": {"method": "thread/resume", "params": {
-                     "threadId": thread_id, "excludeTurns": True, "cwd": cwd,
-                     "model": model, "approvalPolicy": profile["approvalPolicy"],
-                     "approvalsReviewer": "user", "sandbox": profile["sandbox"],
-                 }},
+                 "payload": {"method": "thread/resume", "params": params},
                  "recovery": {"kind": "failed-client/thread-resume",
                               "recovery_id": record["id"], "fleet_name": name,
                               "thread_id": thread_id, "bound_turn_id": turn_id,

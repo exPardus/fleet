@@ -1,9 +1,13 @@
 """Bounded failed-client recovery: durable stages, exact CAS and host fence."""
 import copy
 import json
+import os
+import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -11,7 +15,7 @@ import fleet
 import fleet_codex
 import fleet_codex_failed_client_recovery as recovery
 from fleet_errors import FleetCliError
-from test_codex_host_ipc import _ensure, _shutdown
+from test_codex_host_ipc import _ensure, _envelope, _raw_call, _shutdown
 
 
 class FakeFleet:
@@ -43,6 +47,76 @@ class FakeFleet:
     _codex_model_slug = staticmethod(fleet._codex_model_slug)
     _codex_permission_profile = staticmethod(fleet._codex_permission_profile)
     _validate_codex_thread_effective = staticmethod(fleet._validate_codex_thread_effective)
+
+
+_FAKE_LIFECYCLE_APP = r'''#!__PYTHON__
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+REAL_SCHEMA_BINARY = __REAL_SCHEMA_BINARY__
+if sys.argv[1:] == ["--version"]:
+    print("codex-cli 0.155.1")
+    raise SystemExit(0)
+if sys.argv[1:3] == ["app-server", "generate-json-schema"]:
+    raise SystemExit(subprocess.call([REAL_SCHEMA_BINARY, *sys.argv[1:]]))
+if sys.argv[1:] != ["app-server", "--listen", "stdio://"]:
+    raise SystemExit(2)
+
+state_path = Path(os.environ["FAKE_LIFECYCLE_STATE"])
+log_path = Path(os.environ["FAKE_LIFECYCLE_LOG"])
+with log_path.open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps({"event": "started", "pid": os.getpid()}) + "\n")
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+first = json.loads(sys.stdin.readline())
+send({"id": first["id"], "result": {"serverInfo": {
+    "name": "fake-codex", "version": "0.155.1"}}})
+if json.loads(sys.stdin.readline()) != {"method": "initialized"}:
+    raise SystemExit(3)
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    params = message.get("params", {})
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"event": "request", "method": method,
+                                 "params": params}) + "\n")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    thread_id = params.get("threadId")
+    row = state.get(thread_id)
+    if method == "thread/read":
+        result = {"thread": {"id": thread_id, "cwd": row["cwd"],
+                             "status": {"type": "idle" if row["resumed"]
+                                        else "notLoaded", "activeFlags": []}}}
+    elif method == "thread/turns/list":
+        result = {"data": list(reversed(row["turns"])), "nextCursor": None}
+    elif method == "thread/items/list":
+        result = {"data": [], "nextCursor": None}
+    elif method == "thread/resume":
+        row["resumed"] = True
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        result = {"thread": {"id": thread_id, "cwd": row["cwd"]},
+                  "cwd": row["cwd"], "model": params["model"],
+                  "approvalPolicy": params["approvalPolicy"],
+                  "approvalsReviewer": params["approvalsReviewer"],
+                  "sandbox": {"type": "dangerFullAccess"}}
+    elif method == "turn/start":
+        turn = {"id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106bb",
+                "status": "inProgress"}
+        row["turns"].append(turn)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        result = {"turn": turn}
+    else:
+        send({"id": message["id"], "error": {
+            "code": -32601, "message": "unsupported fake method"}})
+        continue
+    send({"id": message["id"], "result": result})
+'''
 
 
 @pytest.fixture
@@ -289,6 +363,69 @@ def test_workspace_write_recorded_policy_preserves_full_effective_shape(staged):
         recovery._require_recorded_effective(response, row)
 
 
+def test_workspace_resume_sends_all_recorded_policy_before_acceptance(staged, monkeypatch):
+    fake, args, old = staged
+    row = fake.rows["sup|inc|boot"]
+    row["mode"] = "dontask"
+    row["permission_effective"]["sandbox"] = {
+        "type": "workspaceWrite", "writableRoots": [str(fake.FLEET_HOME)],
+        "networkAccess": False, "excludeTmpdirEnvVar": True,
+        "excludeSlashTmp": True}
+    recovery._prepare(fake, args)
+    record = recovery._load(fake)
+    record.update({"state": "rebind", "new_generation": "new-generation"})
+    recovery._save(fake, record)
+    old.generation = "new-generation"
+    monkeypatch.setattr(recovery, "_complete_history", lambda *_: {
+        "thread_status": "notLoaded", "bound_turn_status": "interrupted", "turn_count": 1})
+    def lost(operation, timeout):
+        old.calls.append(operation)
+        raise TimeoutError("lost resume")
+    old.call = lost
+    with pytest.raises(FleetCliError, match="never replayed"):
+        recovery._rebind(fake, args, record)
+    assert len(old.calls) == 1
+    params = old.calls[0]["payload"]["params"]
+    assert params["sandbox"] == "workspace-write"
+    assert params["config"] == {"sandbox_workspace_write": {
+        "writable_roots": [str(fake.FLEET_HOME)],
+        "network_access": False, "exclude_tmpdir_env_var": True,
+        "exclude_slash_tmp": True}}
+
+
+@pytest.mark.parametrize("network_access", [False, True])
+def test_readonly_network_policy_accepts_shape_but_holds_unsupported_resume(
+        staged, monkeypatch, network_access):
+    fake, args, old = staged
+    row = fake.rows["sup|inc|boot"]
+    row["mode"] = "plan"
+    row["permission_effective"]["sandbox"] = {
+        "type": "readOnly", "networkAccess": network_access}
+    model, profile = recovery._row_policy(fake, row)
+    assert model == "gpt-6.1-sol" and profile["sandbox"] == "read-only"
+    recovery._prepare(fake, args)
+    record = recovery._load(fake)
+    record.update({"state": "rebind", "new_generation": "new-generation"})
+    recovery._save(fake, record)
+    old.generation = "new-generation"
+    monkeypatch.setattr(recovery, "_complete_history", lambda *_: {
+        "thread_status": "notLoaded", "bound_turn_status": "interrupted", "turn_count": 1})
+    if network_access:
+        with pytest.raises(FleetCliError, match="cannot be restored"):
+            recovery._rebind(fake, args, record)
+        assert old.calls == []
+        assert recovery._load(fake)["current_operation"] is None
+    else:
+        def lost(operation, timeout):
+            old.calls.append(operation)
+            raise TimeoutError("lost resume")
+        old.call = lost
+        with pytest.raises(FleetCliError, match="never replayed"):
+            recovery._rebind(fake, args, record)
+        assert len(old.calls) == 1
+        assert old.calls[0]["payload"]["params"]["sandbox"] == "read-only"
+
+
 @pytest.mark.parametrize("fault", [None, "cursor", "newest", "status", "items"])
 def test_complete_history_pages_and_refuses_incomplete_views(staged, monkeypatch, fault):
     fake, _, _, _ = _prepared(staged)
@@ -439,7 +576,230 @@ def test_real_host_barrier_rejects_before_provider_write(tmp_path):
         assert all(json.loads(line).get("method") != "thread/start"
                    for line in log.read_text().splitlines())
     finally:
+        barrier.unlink(missing_ok=True)
         _shutdown(client)
+
+
+@pytest.mark.parametrize("stage", ["prepared", "rebind", "complete"])
+def test_real_host_fences_unclassified_public_mutations_and_shutdown(tmp_path, stage):
+    _, client, log = _ensure(tmp_path)
+    path = client.home / "state" / "codex" / recovery.BARRIER
+    held = "thread-1"
+    fleet_codex._atomic_json(path, {
+        "schema": 1, "home": str(client.home), "state": stage,
+        "old_host": {"generation": "old-generation"},
+        "new_generation": client.generation,
+        "current_operation": "reserved-resume", "current_thread": held,
+        "current_payload_digest": "a" * 64, "held_threads": [held],
+    })
+    methods = {
+        "thread/rollback": {"threadId": held, "numTurns": 1},
+        "thread/fork": {"threadId": held},
+        "thread/compact/start": {"threadId": held},
+        "thread/archive": {"threadId": held},
+        "thread/name/set": {"threadId": held, "name": "new-name"},
+        "turn/steer": {"threadId": held, "expectedTurnId": "turn-1", "input": []},
+    }
+    try:
+        for index, (method, params) in enumerate(methods.items()):
+            response = _raw_call(client, _envelope(
+                client, f"blocked-{index}", "rpc",
+                {"method": method, "params": params}))
+            assert response["ok"] is False, (stage, method, response)
+            assert not (client.home / "state" / "codex" / "operations" /
+                        f"blocked-{index}.json").exists()
+        stopped = _raw_call(client, _envelope(
+            client, "stale-stop", "host/shutdown"))
+        assert stopped["ok"] is False
+        assert client.call({"operation_id": "still-live", "method": "ping",
+                            "payload": {}}, timeout=2).result["generation"] == client.generation
+        delivered = [entry.get("method") for entry in map(
+            json.loads, log.read_text().splitlines())
+            if entry.get("event") == "request"]
+        assert not set(methods).intersection(delivered)
+    finally:
+        path.unlink(missing_ok=True)
+        _shutdown(client)
+
+
+def test_rebind_read_overflow_holds_one_replacement_child(tmp_path, monkeypatch):
+    import test_codex_host_ipc as host_tests
+
+    needle = '    if message.get("method") == "test/echo":'
+    overflow = (
+        '    if message.get("method") == "thread/read":\n'
+        '        import time\n'
+        '        send({{"method": "thread/status/changed", "params": {{"seq": 1}}}})\n'
+        '        send({{"method": "turn/started", "params": {{"seq": 2}}}})\n'
+        '        time.sleep(0.05)\n'
+        '        send({{"id": message["id"], "result": {{"thread": {{}}}}}})\n'
+        '    elif message.get("method") == "test/echo":')
+    monkeypatch.setattr(host_tests, "FAKE_APP_SERVER",
+                        host_tests.FAKE_APP_SERVER.replace(needle, overflow))
+    _, client, log = _ensure(
+        tmp_path, env_overrides={"FLEET_CODEX_EVENT_QUEUE_MAX": "1"})
+    path = client.home / "state" / "codex" / recovery.BARRIER
+    barrier = {"schema": 1, "home": str(client.home), "state": "rebind",
+               "old_host": {"generation": "old-generation"},
+               "new_generation": client.generation,
+               "rebound": ["already-rebound"], "current_operation": None,
+               "held_threads": []}
+    fleet_codex._atomic_json(path, barrier)
+    metadata_before = client.metadata_path.read_bytes()
+    try:
+        with pytest.raises(fleet_codex.HostRejected, match="replacement child changed"):
+            client.call({"operation_id": "later-history-read", "method": "rpc",
+                         "payload": {"method": "thread/read", "params": {
+                             "threadId": "later-thread", "includeTurns": False}}}, timeout=2)
+        events = list(map(json.loads, log.read_text().splitlines()))
+        assert [item["event"] for item in events].count("started") == 1
+        assert [item.get("method") for item in events].count("thread/read") == 1
+        assert client.metadata_path.read_bytes() == metadata_before
+        assert recovery._load(SimpleNamespace(FLEET_HOME=client.home)) == barrier
+    finally:
+        path.unlink(missing_ok=True)
+        _shutdown(client)
+
+
+def test_complete_fake_host_recovery_lifecycle(tmp_path, monkeypatch):
+    """Exercise every staged verb and one later turn without a model request."""
+    pinned = Path("/usr/local/bin/codex")
+    if not pinned.is_file() or pinned.stat().st_size == 0:
+        pytest.skip("pinned local 0.155.1 schema generator is unavailable")
+    home = (tmp_path / "home").resolve()
+    state_dir = home / "state" / "codex"
+    (state_dir / "operations").mkdir(parents=True)
+    state_dir.chmod(0o700)
+    (state_dir / "operations").chmod(0o700)
+    (home / "supervisor").mkdir()
+    (home / "mailbox").mkdir()
+    (home / "supervisor" / "JOURNAL.md").write_text("original journal\n")
+    supervisor_cwd = tmp_path / "supervisor-worktree"
+    held_cwd = tmp_path / "held-worktree"
+    supervisor_cwd.mkdir()
+    held_cwd.mkdir()
+    supervisor_thread = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
+    supervisor_turn = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
+    held_thread = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9"
+    held_turn = "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba"
+    provider_state = tmp_path / "fake-provider-state.json"
+    provider_log = tmp_path / "fake-provider-log.jsonl"
+    provider_state.write_text(json.dumps({
+        supervisor_thread: {"cwd": str(supervisor_cwd), "resumed": False,
+                            "turns": [{"id": supervisor_turn, "status": "interrupted"}]},
+        held_thread: {"cwd": str(held_cwd), "resumed": False,
+                      "turns": [{"id": held_turn, "status": "completed"}]},
+    }))
+    executable = tmp_path / "fake-codex-0.155.1"
+    executable.write_text(
+        _FAKE_LIFECYCLE_APP.replace("__PYTHON__", str(Path(sys.executable).resolve()))
+        .replace("__REAL_SCHEMA_BINARY__", repr(str(pinned))), encoding="utf-8")
+    executable.chmod(0o700)
+    monkeypatch.setenv("FAKE_LIFECYCLE_STATE", str(provider_state))
+    monkeypatch.setenv("FAKE_LIFECYCLE_LOG", str(provider_log))
+    try:
+        source = fleet_codex.codex_process_source(os.getpid())
+    except fleet_codex.HostRejected:
+        pytest.skip("whole-host authentication requires a genuine Codex ancestor")
+    fleet_codex._atomic_json(home / "state" / "interface-codex.json", {
+        "schema": 1, "home": str(home), "claim_id": str(uuid4()), **source})
+    old_client = fleet_codex.CodexHostClient.ensure(
+        home, app_server_command=[str(executable), "app-server", "--listen", "stdio://"],
+        schema_command=[str(executable)], env=dict(os.environ), ready_timeout=20)
+    new_client = None
+    try:
+        old_meta = json.loads(old_client.metadata_path.read_text())
+        old_generation = old_client.generation
+        row = {"codex_host_generation": old_generation,
+               "codex_thread_id": supervisor_thread, "codex_turn_id": supervisor_turn,
+               "cwd": str(supervisor_cwd), "model": "codex:gpt-6.1-sol",
+               "mode": "bypass", "status": "working", "adapter_state": "working",
+               "permission_effective": {"approvalPolicy": "never",
+                   "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"}}}
+        claim = {"state": "held", "incarnation_id": "inc",
+                 "host_generation": old_generation,
+                 "holder": {"thread_id": supervisor_thread},
+                 "current_turn_id": supervisor_turn, "pending_operation": None}
+        fake = FakeFleet(home, row, claim)
+        fake.rows["held-worker"] = dict(row, codex_thread_id=held_thread,
+                                         codex_turn_id=held_turn, cwd=str(held_cwd),
+                                         status="dead", adapter_state="idle")
+        mail = home / "mailbox" / (supervisor_thread + ".md")
+        mail.write_bytes(b"retained original supervisor mail\n")
+        fleet_codex._atomic_json(state_dir / "operations" / "old-op.json", {
+            "operation_id": "old-op", "home": str(home),
+            "generation": old_generation, "state": "committed"})
+        monkeypatch.setattr(recovery, "_source_identity", lambda: {"head": "reviewed"})
+        monkeypatch.setattr(recovery, "_git", lambda _cwd, *args:
+                            "head" if args[-1] == "HEAD" else "")
+        args = SimpleNamespace(_fleet_home_explicit=True, generation=old_generation,
+            host_pid=old_meta["pid"], host_start=old_meta["process_identity"],
+            child_pid=old_meta["app_server_pid"],
+            child_start=old_meta["app_server_process_identity"],
+            incarnation="inc", thread=supervisor_thread, turn=supervisor_turn,
+            codex_executable=str(executable), decision_file=None,
+            name="sup|inc|boot")
+        recovery._prepare(fake, args)
+        record = recovery._load(fake)
+        assert record["state"] == "prepared" and old_client.generation == old_generation
+        decision = tmp_path / "decision.json"
+        decision.write_text(json.dumps({"recovery_id": record["id"],
+            "home": str(home), "old_generation": old_generation,
+            "authority": "founder", "decision": "accept-controlled-interruption",
+            "consequence": recovery.LOSS_TEXT}))
+        args.decision_file = str(decision)
+        recovery._decision(fake, args, record)
+        recovery._shutdown(fake, recovery._load(fake))
+        assert recovery._load(fake)["state"] == "shutdown_ack"
+        old_client._launched_process.wait(timeout=5)
+        deadline = time.monotonic() + 6
+        while True:
+            try:
+                recovery._exit(fake, recovery._load(fake))
+                break
+            except FleetCliError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        assert recovery._load(fake)["state"] == "exited"
+        original_samefile = os.path.samefile
+        monkeypatch.setattr(recovery.os.path, "samefile", lambda a, b: (
+            True if str(a).endswith("/exe") and str(b) == str(executable)
+            else original_samefile(a, b)))
+        recovery._boot(fake, recovery._load(fake))
+        record = recovery._load(fake)
+        assert record["state"] == "rebind" and record["new_generation"] != old_generation
+        new_client = fleet_codex.CodexHostClient.connect_existing(home)
+        recovery._rebind(fake, args, record)
+        args.name = "held-worker"
+        recovery._rebind(fake, args, recovery._load(fake))
+        assert recovery._load(fake)["held"] == ["held-worker"]
+        recovery._finish(fake, recovery._load(fake))
+        assert recovery._load(fake)["state"] == "complete"
+        assert fake.rows["sup|inc|boot"]["codex_thread_id"] == supervisor_thread
+        assert fake.rows["sup|inc|boot"]["codex_host_generation"] == new_client.generation
+        assert fake.rows["held-worker"]["codex_host_generation"] == old_generation
+        with pytest.raises(fleet_codex.HostRejected, match="held"):
+            new_client.call({"operation_id": "held-turn", "method": "rpc",
+                "payload": {"method": "turn/start", "params": {
+                    "threadId": held_thread, "input": []}}}, timeout=2)
+        new_client.call({"operation_id": "normal-next-turn", "method": "rpc",
+            "payload": {"method": "turn/start", "params": {
+                "threadId": supervisor_thread, "input": []}}}, timeout=2)
+        new_client.commit("normal-next-turn")
+        methods = [entry["method"] for entry in map(
+            json.loads, provider_log.read_text().splitlines())
+            if entry.get("event") == "request"]
+        assert methods.count("thread/resume") == 1
+        assert methods.count("turn/start") == 1
+        assert "thread/start" not in methods
+        assert mail.read_bytes() == b"retained original supervisor mail\n"
+    finally:
+        (state_dir / recovery.BARRIER).unlink(missing_ok=True)
+        if new_client is not None:
+            _shutdown(new_client)
+        else:
+            _shutdown(old_client)
 
 
 def test_live_host_failed_reader_still_allows_metadata_prepare(staged, tmp_path,
@@ -493,6 +853,7 @@ def test_live_host_failed_reader_still_allows_metadata_prepare(staged, tmp_path,
         assert [entry.get("method") for entry in map(json.loads,
                 log.read_text().splitlines()) if entry.get("event") == "request"] == ["test/fail"]
     finally:
+        (fake.FLEET_HOME / "state" / "codex" / recovery.BARRIER).unlink(missing_ok=True)
         _shutdown(client)
 
 

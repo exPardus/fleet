@@ -32,6 +32,8 @@ from fleet_codex import (
     _atomic_json,
     _canonical_home,
     _digest,
+    authorize_failed_client_recovery_rpc,
+    authorize_failed_client_recovery_shutdown,
     _recv_frame,
     _public_evidence,
     _public_method,
@@ -147,6 +149,12 @@ class Host:
 
     def _restart_app_server_after_queue_overflow(self, deadline: float) -> None:
         """Replace only the failed stdio child before read-only recovery."""
+        barrier = failed_client_recovery_barrier(self.home)
+        if (barrier is not None
+                and barrier["state"] in {"boot_requested", "rebind", "complete"}
+                and self.generation != barrier.get("old_host", {}).get("generation")):
+            raise HostRejected(
+                "failed-client replacement child changed; recovery remains held")
         previous = self.client
         if previous is not None:
             self._drain_notifications()
@@ -551,6 +559,9 @@ class Host:
                 elif method == "rpc":
                     if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
                         raise ValueError("rpc payload is malformed")
+                    authorize_failed_client_recovery_rpc(
+                        self.home, self.generation, request["operation_id"],
+                        payload, request["payload_digest"])
                     rpc_timeout = _bounded_rpc_timeout(
                         payload, float(request["operation_timeout"]), deadline)
                     assert self.client is not None
@@ -748,6 +759,8 @@ class Host:
                         "state": current.get("state"),
                     }
                 elif method == "host/shutdown":
+                    authorize_failed_client_recovery_shutdown(
+                        self.home, self.generation, request["operation_id"])
                     result = {"stopping": True}
                     should_stop = True
                 else:
