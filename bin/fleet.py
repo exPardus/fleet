@@ -8455,8 +8455,123 @@ def _parse_codex_response_decision(raw: str):
     return parsed
 
 
+def _cmd_codex_supervisor_respond(args) -> int:
+    """Answer one exact held supervisor command request from its Interface."""
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("supervisor codex-respond requires explicit --fleet-home")
+    if getattr(args, "nonce", None) is not None:
+        raise FleetCliError("supervisor codex-respond uses Interface registration, not a nonce")
+    if not isinstance(args.request_id, str) or not args.request_id:
+        raise FleetCliError("supervisor codex-respond requires one exact request ID")
+    expected = {key: getattr(args, key, None) for key in (
+        "expect_inc", "expect_thread", "expect_turn",
+        "expect_host_generation", "expect_method", "expect_command")}
+    if any(not isinstance(value, str) or not value for value in expected.values()):
+        raise FleetCliError("supervisor codex-respond requires exact claim and request expectations")
+    if (expected["expect_method"] != "item/commandExecution/requestApproval"
+            or args.decision != "accept"):
+        raise FleetCliError("supervisor codex-respond supports one command accept only")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError(
+            "supervisor codex-respond requires the current registered Codex Interface")
+    status, claim = read_incarnation_status()
+    if status != "ok":
+        raise FleetCliError("supervisor codex-respond claim absent or corrupt")
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    if (binding.incarnation_id != expected["expect_inc"]
+            or binding.authority.value != expected["expect_thread"]
+            or binding.current_turn_id != expected["expect_turn"]
+            or binding.host_generation != expected["expect_host_generation"]
+            or claim.get("pending_operation") is not None
+            or binding.record.get("pending_operation") is not None):
+        raise FleetCliError("supervisor codex-respond exact held binding disagrees")
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("supervisor codex-respond host generation changed")
+    observed = _codex_supervisor_observe(binding, client=client)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"
+            or "waitingOnApproval" not in observed["active_flags"]):
+        raise FleetCliError("supervisor codex-respond current turn is not awaiting approval")
+    waits = client.pending_approvals(
+        binding.authority.value, binding.current_turn_id)
+    if not isinstance(waits, list) or any(not isinstance(row, dict) for row in waits):
+        raise FleetCliError("supervisor codex-respond pending request list is malformed")
+    matches = [row for row in waits if str(row.get("request_id")) == args.request_id]
+    if len(matches) != 1:
+        raise FleetCliError("supervisor codex-respond request missing or ambiguous")
+    request = matches[0]
+    params = request.get("params")
+    request_cwd = params.get("cwd") if isinstance(params, dict) else None
+    if (request.get("state") != "pending"
+            or request.get("home") != str(FLEET_HOME.resolve())
+            or request.get("generation") != binding.host_generation
+            or request.get("thread_id") != binding.authority.value
+            or request.get("turn_id") != binding.current_turn_id
+            or request.get("method") != expected["expect_method"]
+            or not isinstance(params, dict)
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or not isinstance(request.get("item_id"), str)
+            or not request["item_id"]
+            or params.get("itemId") != request["item_id"]
+            or params.get("command") != expected["expect_command"]
+            or ("cwd" in params and
+                (not isinstance(request_cwd, str) or not request_cwd))
+            or request_cwd != getattr(args, "expect_request_cwd", None)
+            or not isinstance(request.get("offered_decisions"), list)
+            or any(not isinstance(choice, str)
+                   for choice in request["offered_decisions"])
+            or "accept" not in request["offered_decisions"]):
+        raise FleetCliError("supervisor codex-respond exact pending request disagrees")
+    from fleet_codex import _approval_decision
+    _approval_decision(request["method"], "accept", params)
+    # Recheck the process-bound Interface and complete claim/row identity after
+    # provider reads. Unrelated product rows may progress independently.
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        current = _codex_supervisor_binding(
+            current_claim, current_registry, expected_name=binding.name,
+            allowed_states={"held"}) if current_status == "ok" else None
+        if (current_claim != claim or current != binding
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)
+                or client.generation != binding.host_generation):
+            raise FleetCliError("supervisor codex-respond binding or Interface changed")
+    try:
+        result = client.respond_approval(
+            args.request_id, binding.authority.value,
+            binding.current_turn_id, "accept", timeout=10)
+    except Exception as exc:
+        # The host may have consumed the request before its IPC reply was lost.
+        # Its durable approval record, not this exception, decides the outcome.
+        raise FleetCliError(
+            "supervisor codex-respond outcome uncertain; inspect the durable "
+            "request and do not retry blindly") from exc
+    state = result.get("state") if isinstance(result, dict) else None
+    if (state not in {"responded", "resolved"}
+            or str(result.get("request_id")) != args.request_id
+            or result.get("thread_id") != binding.authority.value
+            or result.get("turn_id") != binding.current_turn_id):
+        raise FleetCliError(
+            "supervisor codex-respond outcome uncertain; inspect the durable "
+            "request and do not retry blindly")
+    print(f"{binding.name}: Codex request {args.request_id} response consumed once ({state})")
+    return 0
+
+
 def cmd_codex_respond(args) -> int:
     """Explicitly consume one current native-Codex blocking request."""
+    if args.name == SUPERVISOR_BODY_NAME:
+        return _cmd_codex_supervisor_respond(args)
+    if any(getattr(args, key, None) is not None for key in (
+            "expect_inc", "expect_thread", "expect_turn", "expect_host_generation",
+            "expect_method", "expect_command", "expect_request_cwd")):
+        raise FleetCliError("supervisor response expectations require target 'supervisor'")
     _supervisor_gate("send", nonce=getattr(args, "nonce", None))
     name = _resolve_worker_target(args.name)
     data = read_registry_no_repair()
@@ -24304,6 +24419,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_codex_respond.add_argument(
         "decision", help="literal offered choice, JSON object, or @file")
     p_codex_respond.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+    p_codex_respond.add_argument("--expect-inc")
+    p_codex_respond.add_argument("--expect-thread")
+    p_codex_respond.add_argument("--expect-turn")
+    p_codex_respond.add_argument("--expect-host-generation")
+    p_codex_respond.add_argument("--expect-method")
+    p_codex_respond.add_argument("--expect-command")
+    p_codex_respond.add_argument("--expect-request-cwd")
 
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
