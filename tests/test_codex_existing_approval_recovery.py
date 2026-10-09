@@ -451,6 +451,25 @@ def test_ambiguous_native_inventory_blocks_preparation(
         "approval_resume_preflight") is None
 
 
+def test_native_dispatch_marker_without_substrate_blocks_preparation(apps_home):
+    _home, _store, _old, _current, cwd, _mail = apps_home
+    operation_id = cancel(apps_home)
+    with fleet.fleet_lock():
+        data = fleet.load_registry()
+        row = data["workers"]["other-worker"]
+        row.pop("substrate")
+        row.pop("codex_thread_id")
+        row.pop("codex_turn_id")
+        row.pop("codex_host_generation")
+        row.pop("adapter_state")
+        row["status"] = "working"
+        fleet.save_registry(data)
+    with pytest.raises(fleet.FleetCliError, match="invalid route"):
+        prepare(apps_home, operation_id)
+    assert fleet.read_incarnation()["pending_operation"].get(
+        "approval_resume_preflight") is None
+
+
 def _add_ambiguous_native_row():
     with fleet.fleet_lock():
         data = fleet.load_registry()

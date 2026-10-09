@@ -20349,8 +20349,10 @@ def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
         if not isinstance(row, dict):
             raise FleetCliError("Apps worker inventory contains a malformed row")
         route = _codex_record_route(row)
-        has_native_fields = any(row.get(key) is not None for key in (
-            "codex_thread_id", "codex_turn_id", "codex_host_generation"))
+        has_native_fields = (row.get("dispatch_kind") == "codex-app-server"
+                             or any(row.get(key) is not None for key in (
+                                 "codex_thread_id", "codex_turn_id",
+                                 "codex_host_generation")))
         if route is None and not has_native_fields:
             continue
         if route == "mcx" and not has_native_fields:

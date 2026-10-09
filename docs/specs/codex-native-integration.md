@@ -699,7 +699,9 @@ terminal callback, committed interrupt, source, old host and child identities,
 complete supervisor claim and row, target inbox/claimed-mail contents, and
 the complete exact-home native worker inventory. A native row with a missing
 or divergent host generation, invalid binding, or invalid route cannot be
-treated as unrelated and blocks preparation. Every proved same-host worker turn
+treated as unrelated and blocks preparation. An explicit `codex-app-server`
+dispatch marker remains native-shaped even if its substrate and thread fields
+are corrupt. Every proved same-host worker turn
 must be publicly idle or unloaded with terminal turns and no active flags;
 the host must have no unresolved callbacks or journal operations. Any
 native inventory drift after preparation refuses shutdown or cold resume.
