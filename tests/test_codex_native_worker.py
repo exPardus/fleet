@@ -88,6 +88,7 @@ for line in sys.stdin:
         send({"id": message["id"], "result": {"data": data,
                                                 "nextCursor": None}})
     elif method == "thread/resume":
+        assert params["excludeTurns"] is True
         thread = state["thread"]
         send({"id": message["id"], "result": {
             "thread": public_thread(state), "cwd": thread["cwd"],
@@ -108,6 +109,10 @@ for line in sys.stdin:
     elif method == "thread/read":
         send({"id": message["id"], "result": {
             "thread": public_thread(state)}})
+    elif method == "thread/turns/list":
+        send({"id": message["id"], "result": {
+            "data": list(reversed(state.get("turns", []))),
+            "nextCursor": None}})
     else:
         send({"id": message["id"], "error": {
             "code": -32601, "message": "unsupported fake method"}})
@@ -162,13 +167,20 @@ class FakeClient:
         self.fail_commit_number = fail_commit_number
         self.thread_fields = thread_fields or {}
         self.operations = []
+        self.paging_operations = []
         self.commits = []
         self.lock_depth = lambda: 0
 
     def call(self, operation, timeout):
         assert self.lock_depth() == 0, "provider call occurred under fleet.lock"
-        self.operations.append(operation)
         method = operation["payload"]["method"]
+        if method == "thread/turns/list":
+            self.paging_operations.append(operation)
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="a" * 64,
+                result={"data": [], "nextCursor": None})
+        self.operations.append(operation)
         record = fleet.load_registry()["workers"]["cx-native"]
         if method == "thread/start":
             assert record["adapter_state"] == "preclaim"
@@ -727,6 +739,7 @@ class WorkerVerbClient:
             "primary": {"resetsAt": 4070908800},
         })
         self.operations = []
+        self.paging_operations = []
         self.commits = []
 
     def _thread(self):
@@ -751,8 +764,21 @@ class WorkerVerbClient:
         }
 
     def call(self, operation, timeout):
-        self.operations.append(operation)
         public = operation.get("payload", {}).get("method")
+        if public in {"thread/turns/list", "thread/items/list"}:
+            self.paging_operations.append(operation)
+            turn = self._thread()["thread"]["turns"][0]
+            if public == "thread/turns/list":
+                result = {"data": [turn], "nextCursor": None}
+            else:
+                result = {"data": [{"turnId": turn["id"], "item": item}
+                                   for item in turn["items"]],
+                          "nextCursor": None}
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="a" * 64,
+                result=result)
+        self.operations.append(operation)
         if self.fail_method is not None and public == self.fail_method:
             from fleet_codex import HostUnavailable
             raise HostUnavailable("response lost")
@@ -1314,6 +1340,7 @@ def test_native_worker_send_resumes_live_thread_after_host_generation_change(
 
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/resume", "thread/read", "turn/steer"]
+    assert client.operations[0]["payload"]["params"]["excludeTurns"] is True
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["codex_thread_id"] == THREAD_ID
     assert stored["codex_turn_id"] == TURN_ID

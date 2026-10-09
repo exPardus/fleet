@@ -131,12 +131,33 @@ class FakeLifecycleClient:
         self.successor_created = False
         self.successor_started = False
         self.operations = []
+        self.paging_operations = []
         self.commits = []
         self.handoff_commits = []
 
     def call(self, operation, timeout):
-        self.operations.append(operation)
         method = operation["payload"]["method"]
+        if method in {"thread/turns/list", "thread/items/list"}:
+            self.paging_operations.append(operation)
+            params = operation["payload"]["params"]
+            turns = self._last_thread["turns"]
+            if method == "thread/turns/list":
+                data = list(reversed(turns))[:params["limit"]]
+                result = {"data": data, "nextCursor": None}
+            else:
+                turn = next((turn for turn in turns
+                             if turn["id"] == params["turnId"]), None)
+                if turn is None or turn.get("itemsView") != "full":
+                    from fleet_codex import HostRejected
+                    raise HostRejected("item history is incomplete")
+                result = {"data": [{"turnId": turn["id"], "item": item}
+                                   for item in turn["items"]],
+                          "nextCursor": None}
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="a" * 64,
+                result=result)
+        self.operations.append(operation)
         if method == self.fail_method:
             raise TimeoutError(f"lost {method} response")
         if method == "thread/read":
@@ -153,6 +174,7 @@ class FakeLifecycleClient:
                             "itemsView": "full", "items": []}]
                           if self.successor_started else
                           list(self.successor_initial_turns)))
+                self._last_thread = {"turns": turns}
                 return SimpleNamespace(
                     operation_id=operation["operation_id"],
                     generation=self.generation, payload_digest="2" * 64,
@@ -184,6 +206,7 @@ class FakeLifecycleClient:
                       "items": items}]
             if self.newer_turn is not None:
                 turns.append(self.newer_turn)
+            self._last_thread = {"turns": turns}
             return SimpleNamespace(
                 operation_id=operation["operation_id"],
                 generation=self.generation, payload_digest="c" * 64,
@@ -534,6 +557,62 @@ def test_native_guard_reads_public_active_thread_and_never_uses_claude_roster(
     assert output["provider_status"] == "active"
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/read"]
+
+
+@pytest.mark.parametrize("verb", ["send", "checkpoint", "guard"])
+def test_long_supervisor_history_uses_bounded_public_pages(
+        supervisor_home, monkeypatch, capsys, verb):
+    _seed_native_supervisor(supervisor_home)
+
+    class LongHistoryClient(FakeLifecycleClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == "thread/read":
+                # A full-history app-server response would overflow host IPC.
+                full_history = {"turns": [{"items": [{"text": "x" *
+                                 (1024 * 1024 + 1)}]}]}
+                assert len(json.dumps(full_history).encode()) > 1024 * 1024
+                assert operation["payload"]["params"]["includeTurns"] is False
+            return super().call(operation, timeout)
+
+    client = LongHistoryClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    if verb == "send":
+        assert fleet.cmd_send(_send_args()) == 0
+    elif verb == "checkpoint":
+        assert fleet.cmd_sup_checkpoint(SimpleNamespace(
+            body="paged checkpoint", kind="CHECKPOINT", sid=None, nonce=None,
+            expect_inc="inc-20260921T000000Z-abcd")) == 0
+    else:
+        assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+        assert json.loads(capsys.readouterr().out)["verdict"] == "OK"
+    methods = [op["payload"]["method"] for op in client.paging_operations]
+    assert methods == ["thread/turns/list", "thread/items/list",
+                       "thread/turns/list"]
+    assert client.paging_operations[0]["payload"]["params"]["limit"] == 2
+    assert client.paging_operations[1]["payload"]["params"]["limit"] == 16
+
+
+def test_supervisor_item_page_shrinks_after_explicit_oversize(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+
+    class OversizePageClient(FakeLifecycleClient):
+        def call(self, operation, timeout):
+            if (operation["payload"]["method"] == "thread/items/list"
+                    and operation["payload"]["params"]["limit"] > 1):
+                self.paging_operations.append(operation)
+                from fleet_codex import HostRejected
+                raise HostRejected(
+                    "host response exceeds MAX_IPC_BYTES; page the request")
+            return super().call(operation, timeout)
+
+    client = OversizePageClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+    limits = [op["payload"]["params"]["limit"]
+              for op in client.paging_operations
+              if op["payload"]["method"] == "thread/items/list"]
+    assert limits == [16, 8, 4, 2, 1]
 
 
 def test_native_guard_reports_parked_idle_claim_without_wake(
@@ -1078,6 +1157,290 @@ def test_native_host_restart_reconciles_same_ids_without_new_body_or_turn(
         encoding="utf-8").strip() == "queued across restart"
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/resume", "thread/read"]
+    assert client.operations[0]["payload"]["params"]["excludeTurns"] is True
+
+
+def _seed_rejected_supervisor_send(home, *, method="turn/steer"):
+    from fleet_codex import OperationJournal
+
+    name, incarnation_id = _seed_native_supervisor(home)
+    binding = fleet._codex_supervisor_binding()
+    operation_id = "supervisor-send-rejected-test"
+    fleet._reserve_codex_supervisor_operation(
+        binding, operation_id, "observe-send")
+    fleet.append_mailbox(THREAD_ID, "claimed before provider rejection")
+    _queued, claimed = fleet.claim_mailbox(THREAD_ID)
+    assert claimed is not None
+    fleet._freeze_codex_supervisor_preclaim(
+        name, incarnation_id, operation_id, "authentication rejected")
+    journal = OperationJournal(home, binding.host_generation)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": method, "params": {"threadId": THREAD_ID}},
+        "recovery": {
+            "kind": f"supervisor/{method}", "fleet_name": name,
+            "incarnation_id": incarnation_id, "thread_id": THREAD_ID,
+            "previous_turn_id": TURN_ID, "canonical_cwd": str(home.resolve()),
+        },
+    }
+    journal.prepare(operation)
+    return name, claimed, journal, operation_id
+
+
+def test_uncertain_send_reconciles_only_failed_intent_and_restores_mail(
+        supervisor_home, monkeypatch):
+    import fleet_codex
+
+    name, claimed, journal, operation_id = _seed_rejected_supervisor_send(
+        supervisor_home)
+    journal.fail(operation_id, "authentication rejected before provider acceptance")
+    client = FakeLifecycleClient(
+        supervisor_home, generation="host-generation-2")
+    monkeypatch.setattr(fleet_codex, "connect_existing", lambda _home: client)
+    source = {"kind": "codex", "claim_id": "current-interface"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: source)
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+
+    claim = fleet.read_incarnation()
+    row = fleet.load_registry()["workers"][name]
+    assert claim["state"] == "held"
+    assert claim["current_turn_id"] == TURN_ID
+    assert claim["host_generation"] == "host-generation-1"
+    assert "pending_operation" not in claim
+    assert row["adapter_state"] == "active"
+    assert row["codex_turn_id"] == TURN_ID
+    assert claimed.exists() is False
+    inbox = (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text()
+    assert "claimed before provider rejection" in inbox
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+def test_legacy_host_auth_refusal_settles_prepared_without_restart_or_replay(
+        supervisor_home, monkeypatch):
+    import fleet_codex
+
+    _name, claimed, journal, operation_id = _seed_rejected_supervisor_send(
+        supervisor_home)
+    claim = fleet.read_incarnation()
+    claim["uncertainty"] = fleet._CODEX_PREACCEPT_AUTH_REJECTION
+    fleet.write_incarnation(claim)
+    client = FakeLifecycleClient(
+        supervisor_home, thread_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet_codex, "connect_existing", lambda _home: client)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert journal.load(operation_id)["state"] == "failed"
+    assert fleet.read_incarnation()["state"] == "held"
+    assert fleet.load_registry()["workers"][_name]["status"] == "idle"
+    assert not claimed.exists()
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+def test_rejected_send_reads_no_item_history_even_if_items_are_oversized(
+        supervisor_home, monkeypatch):
+    import fleet_codex
+
+    _name, _claimed, journal, operation_id = _seed_rejected_supervisor_send(
+        supervisor_home)
+    journal.fail(operation_id, "authentication rejected before provider acceptance")
+    client = FakeLifecycleClient(supervisor_home, items_view="notLoaded")
+    original = client.call
+
+    def no_item_read(operation, timeout):
+        if operation["payload"]["method"] == "thread/items/list":
+            raise fleet.FleetCliError("single history item exceeds IPC bound")
+        return original(operation, timeout)
+
+    client.call = no_item_read
+    monkeypatch.setattr(fleet_codex, "connect_existing", lambda _home: client)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert all(op["payload"]["method"] != "thread/items/list"
+               for op in client.paging_operations)
+
+
+def test_rejected_send_after_host_change_keeps_thread_for_separate_resume(
+        supervisor_home, monkeypatch):
+    import fleet_codex
+
+    name, _claimed, journal, operation_id = _seed_rejected_supervisor_send(
+        supervisor_home)
+    journal.fail(operation_id, "prepared operation was never accepted")
+    client = FakeLifecycleClient(
+        supervisor_home, generation="host-generation-2",
+        thread_status="notLoaded", turn_status="completed")
+    monkeypatch.setattr(fleet_codex, "connect_existing", lambda _home: client)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    claim = fleet.read_incarnation()
+    row = fleet.load_registry()["workers"][name]
+    assert claim["state"] == "held"
+    assert claim["host_generation"] == "host-generation-1"
+    assert row["codex_host_generation"] == "host-generation-1"
+    assert row["status"] == "dead-suspected"
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read"]
+
+
+@pytest.mark.parametrize("failure", ["unaccepted", "accepted", "wrong-source",
+                                      "stale-generation", "newer-turn",
+                                      "oversized-history", "changed-claim",
+                                      "changed-source",
+                                      "missing-mail", "new-inbox"])
+def test_uncertain_send_keeps_claim_and_mail_on_ambiguous_evidence(
+        supervisor_home, monkeypatch, failure):
+    import fleet_codex
+
+    _name, claimed, journal, operation_id = _seed_rejected_supervisor_send(
+        supervisor_home)
+    if failure not in {"unaccepted", "accepted", "stale-generation"}:
+        journal.fail(operation_id, "authentication rejected before provider acceptance")
+    if failure == "accepted":
+        journal.accept(operation_id)
+    if failure == "stale-generation":
+        claim = fleet.read_incarnation()
+        claim["uncertainty"] = fleet._CODEX_PREACCEPT_AUTH_REJECTION
+        fleet.write_incarnation(claim)
+    source = {"kind": "codex", "claim_id": "current-interface"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: None if failure == "wrong-source" else dict(source))
+    newer = ({"id": NEWER_TURN_ID, "status": "completed",
+              "itemsView": "full", "items": []}
+             if failure == "newer-turn" else None)
+    client = FakeLifecycleClient(
+        supervisor_home, newer_turn=newer,
+        generation=("host-generation-2" if failure == "stale-generation"
+                    else None))
+    monkeypatch.setattr(fleet_codex, "connect_existing", lambda _home: client)
+    if failure == "missing-mail":
+        claimed.unlink()
+    if failure == "new-inbox":
+        fleet.append_mailbox(THREAD_ID, "arrived during uncertainty")
+    if failure == "oversized-history":
+        monkeypatch.setattr(
+            fleet, "_codex_paged_thread_read",
+            lambda *_a, **_kw: (_ for _ in ()).throw(
+                fleet.FleetCliError("single public history item exceeds IPC bound")))
+    if failure == "changed-claim":
+        original = fleet._codex_rejected_send_public_header
+
+        def change_claim(*args, **kwargs):
+            observation = original(*args, **kwargs)
+            changed = fleet.read_incarnation()
+            changed["heartbeat_at"] = "2026-10-09T03:00:00Z"
+            fleet.write_incarnation(changed)
+            return observation
+
+        monkeypatch.setattr(fleet, "_codex_rejected_send_public_header", change_claim)
+    if failure == "changed-source":
+        original = fleet._codex_rejected_send_public_header
+
+        def change_source(*args, **kwargs):
+            observation = original(*args, **kwargs)
+            source["claim_id"] = "new-interface"
+            return observation
+
+        monkeypatch.setattr(fleet, "_codex_rejected_send_public_header", change_source)
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert claimed.exists() is (failure != "missing-mail")
+    if failure == "new-inbox":
+        assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+            encoding="utf-8").strip() == "arrived during uncertainty"
+    assert [op["payload"]["method"] for op in client.operations] in (
+        [], ["thread/read"])
+
+
+def test_rejected_preclaim_retires_without_inventing_thread(
+        supervisor_home, monkeypatch):
+    from fleet_codex import OperationJournal
+
+    name, incarnation_id = _seed_native_supervisor(supervisor_home)
+    operation_id = f"supervisor-{incarnation_id}-thread-rejected"
+    claim = fleet.read_incarnation()
+    claim.update({"state": "uncertain", "holder": None,
+                  "preclaim_id": operation_id})
+    claim.pop("current_turn_id", None)
+    claim.pop("host_generation", None)
+    claim.pop("last_operation_id", None)
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][name].update({
+        "adapter_state": "uncertain", "codex_thread_id": None,
+        "codex_turn_id": None, "codex_host_generation": None,
+        "last_operation_id": operation_id,
+    })
+    fleet.save_registry(data)
+    journal = OperationJournal(supervisor_home, "host-generation-1")
+    journal.prepare({
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/start", "params": {
+            "cwd": str(supervisor_home.resolve())}},
+        "recovery": {"kind": "supervisor/thread-start", "fleet_name": name,
+                     "incarnation_id": incarnation_id,
+                     "canonical_cwd": str(supervisor_home.resolve())},
+    })
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    with pytest.raises(fleet.FleetCliError, match="not proved rejected"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    journal.fail(operation_id, "authentication rejected before provider acceptance")
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert fleet.read_incarnation()["state"] == "released"
+    row = fleet.load_registry()["workers"][name]
+    assert row["status"] == "dead"
+    assert row["codex_thread_id"] is None
+
+
+def test_legacy_host_preclaim_auth_refusal_settles_prepared(
+        supervisor_home, monkeypatch):
+    import fleet_codex
+
+    name, incarnation_id = _seed_native_supervisor(supervisor_home)
+    operation_id = f"supervisor-{incarnation_id}-thread-auth-refused"
+    claim = fleet.read_incarnation()
+    claim.update({"state": "uncertain", "holder": None,
+                  "preclaim_id": operation_id,
+                  "uncertainty": fleet._CODEX_PREACCEPT_AUTH_REJECTION})
+    claim.pop("current_turn_id", None)
+    claim.pop("host_generation", None)
+    claim.pop("last_operation_id", None)
+    fleet.write_incarnation(claim)
+    data = fleet.load_registry()
+    data["workers"][name].update({
+        "adapter_state": "uncertain", "codex_thread_id": None,
+        "codex_turn_id": None, "codex_host_generation": None,
+        "last_operation_id": operation_id,
+    })
+    fleet.save_registry(data)
+    journal = fleet_codex.OperationJournal(
+        supervisor_home, "host-generation-1")
+    journal.prepare({
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/start", "params": {
+            "cwd": str(supervisor_home.resolve())}},
+        "recovery": {"kind": "supervisor/thread-start", "fleet_name": name,
+                     "incarnation_id": incarnation_id,
+                     "canonical_cwd": str(supervisor_home.resolve())},
+    })
+    monkeypatch.setattr(fleet_codex, "connect_existing",
+                        lambda _home: FakeLifecycleClient(supervisor_home))
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    assert journal.load(operation_id)["state"] == "failed"
+    assert fleet.read_incarnation()["state"] == "released"
 
 
 def test_native_restart_adopts_exact_activating_turn_without_replay(
@@ -1362,6 +1725,55 @@ def test_native_handoff_lost_activation_never_retries_or_restores_blindly(
             sid=None, nonce=None))
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/read", "thread/start", "thread/read", "turn/start"]
+
+
+def test_oversize_accepted_turn_reply_keeps_handoff_activating(
+        supervisor_home, monkeypatch):
+    """Exercise provider, host, journal, client, and handoff as one path."""
+    import fleet_codex
+    from test_codex_host_ipc import _ensure, _shutdown
+
+    old_name, _inc = _seed_native_supervisor(supervisor_home)
+    _module, real_client, log = _ensure(
+        supervisor_home, home=supervisor_home,
+        env_overrides={"FAKE_OVERSIZE_TURN_RESULT": "1"})
+    try:
+        claim = fleet.read_incarnation()
+        claim["host_generation"] = real_client.generation
+        fleet.write_incarnation(claim)
+        data = fleet.load_registry()
+        data["workers"][old_name]["codex_host_generation"] = real_client.generation
+        fleet.save_registry(data)
+
+        class Hybrid(FakeLifecycleClient):
+            def call(self, operation, timeout):
+                if operation["payload"]["method"] == "turn/start":
+                    return real_client.call(operation, timeout)
+                return super().call(operation, timeout)
+
+        client = Hybrid(supervisor_home, generation=real_client.generation)
+        monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+        with pytest.raises(fleet.FleetCliError, match="activation is uncertain"):
+            fleet.cmd_sup_handoff_begin(SimpleNamespace(
+                model="codex:gpt-5.6-luna", permission_mode="bypass",
+                sid=None, nonce=None))
+
+        live = fleet.read_incarnation()
+        assert live["state"] == "activating"
+        assert live["holder"]["thread_id"] == SUCCESSOR_HANDOFF_THREAD_ID
+        assert live["predecessor"]["name"] == old_name
+        operation_id = live["pending_operation"]["operation_id"]
+        journal = fleet_codex.OperationJournal(
+            supervisor_home, real_client.generation).load(operation_id)
+        assert journal["state"] == "uncertain"
+        assert "post-acceptance" in journal["reason"]
+        requests = [json.loads(line) for line in log.read_text().splitlines()]
+        assert sum(row.get("method") == "turn/start" for row in requests) == 1
+        workers = fleet.load_registry()["workers"]
+        assert old_name in workers and len(workers) == 2
+    finally:
+        _shutdown(real_client)
+        assert real_client.wait_for_exit(5)
 
 
 def test_native_handoff_definitive_turn_rejection_restores_predecessor(

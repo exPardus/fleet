@@ -58,6 +58,8 @@ for line in sys.stdin:
         stream.write(json.dumps({{"event": "request", "method": message.get("method")}}) + "\n")
     if message.get("method") == "test/echo":
         send({{"id": message["id"], "result": message.get("params")}})
+    elif message.get("method") == "test/large":
+        send({{"id": message["id"], "result": {{"data": "x" * (1024 * 1024)}}}})
     elif message.get("method") == "test/emit-lifecycle":
         params = message.get("params", {{}})
         thread_id = params["threadId"]
@@ -88,6 +90,11 @@ for line in sys.stdin:
     elif message.get("method") == "thread/start":
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
+    elif (message.get("method") == "turn/start"
+          and os.environ.get("FAKE_OVERSIZE_TURN_RESULT") == "1"):
+        send({{"id": message["id"], "result": {{
+            "turn": {{"id": "turn-1", "status": "inProgress"}},
+            "padding": "x" * (70 * 1024)}}}})
     elif message.get("method") in ("turn/start", "turn/steer", "turn/interrupt"):
         if (message.get("method") == "turn/start"
                 and os.environ.get("FAKE_DROP_TURN_RESPONSE") == "1"):
@@ -510,6 +517,39 @@ def test_external_interface_thread_is_observe_only(tmp_path, monkeypatch):
     with pytest.raises(host_module.HostRejected, match="observe-only"):
         host._authorize_public_mutation(
             Peer(), "turn/steer", {"params": {"threadId": "external"}})
+
+
+def test_host_records_authentication_rejection_before_provider_acceptance(tmp_path):
+    module, client, log = _ensure(tmp_path)
+    try:
+        claim_path = client.home / "state" / "interface-codex.json"
+        claim_path.write_text(json.dumps({
+            "schema": 1, "home": str(client.home),
+            "thread_id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1",
+            "claim_id": "c1705ad1-8530-4e90-a8fc-869a7450d77b",
+            "ancestor_pid": 999999, "ancestor_start_identity": "stale",
+            "uid": os.getuid(),
+        }), encoding="utf-8")
+        claim_path.chmod(0o600)
+        operation = {
+            "operation_id": "rejected-before-acceptance", "method": "rpc",
+            "payload": {"method": "turn/steer", "params": {
+                "threadId": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7",
+                "expectedTurnId": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8",
+                "input": [],
+            }},
+            "recovery": {"kind": "supervisor/turn/steer"},
+        }
+        with pytest.raises(module.HostRejected):
+            client.call(operation, timeout=5)
+        record = module.OperationJournal(
+            client.home, client.generation).load(operation["operation_id"])
+        assert record["state"] == "failed"
+        assert "authentication rejected before provider acceptance" in record["reason"]
+        requests = [json.loads(line) for line in log.read_text().splitlines()]
+        assert not any(row.get("method") == "turn/steer" for row in requests)
+    finally:
+        _shutdown(client)
 
 
 def test_current_supervisor_source_requires_exact_home_cwd(tmp_path, monkeypatch):
@@ -1207,6 +1247,52 @@ def test_host_rejects_oversized_and_non_json_ipc_frames(tmp_path):
         finally:
             connection.close()
         assert client.call(_operation("after-hostile"), timeout=1).result["generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+def test_oversized_host_response_is_explicit_and_host_survives(tmp_path):
+    module, client, _ = _ensure(tmp_path)
+    try:
+        with pytest.raises(module.HostRejected,
+                           match="host response exceeds MAX_IPC_BYTES; page the request"):
+            client.call(_operation(
+                "large-result", "rpc", {"method": "test/large", "params": {}}),
+                timeout=5)
+        assert client.call(_operation("after-large"), timeout=1).result[
+            "generation"] == client.generation
+    finally:
+        _shutdown(client)
+
+
+def test_oversized_mutation_reply_is_not_classified_as_rejection(
+        tmp_path, monkeypatch):
+    module, client, _ = _ensure(tmp_path)
+    operation = _operation("large-mutation", "rpc", {
+        "method": "turn/start", "params": {
+            "threadId": "thread-1", "input": []}})
+    response = {
+        "ok": False, "operation_id": operation["operation_id"],
+        "host_generation": client.generation,
+        "fleet_home": str(client.home),
+        "payload_digest": module._digest("rpc", operation["payload"]),
+        "error": "host response exceeds MAX_IPC_BYTES; page the request",
+    }
+
+    class Connection:
+        def close(self):
+            pass
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "_connect_authenticated",
+                          lambda *_args: Connection())
+            patch.setattr(module, "_send_frame", lambda *_args: None)
+            patch.setattr(module, "_recv_frame",
+                          lambda *_args: json.dumps(response).encode())
+            with pytest.raises(module.HostUnavailable,
+                               match="mutation outcome is uncertain"):
+                client.call(operation, timeout=2)
     finally:
         _shutdown(client)
 

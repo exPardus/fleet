@@ -2047,7 +2047,23 @@ class CodexHostClient:
         if any(response.get(key) != value for key, value in expected.items()):
             raise HostUnavailable("Codex host response correlation mismatch")
         if response.get("ok") is not True:
-            raise HostRejected(str(response.get("error") or "Codex host rejected operation"))
+            error = str(response.get("error") or "Codex host rejected operation")
+            if public_method is not None:
+                if error == "host response exceeds MAX_IPC_BYTES; page the request":
+                    raise HostUnavailable(error + "; mutation outcome is uncertain")
+                try:
+                    state = OperationJournal(self.home, self.generation).load(
+                        operation_id).get("state")
+                except (OSError, ValueError, FleetCliError) as exc:
+                    raise HostUnavailable(
+                        error + "; mutation journal is unreadable") from exc
+                if state not in {"prepared", "failed"}:
+                    # The provider write begins only after accepted is durable.
+                    # Even a generic host error after that boundary is not a
+                    # rejection and must not trigger a handoff rollback.
+                    raise HostUnavailable(
+                        error + "; mutation outcome is uncertain")
+            raise HostRejected(error)
         return CodexObservation(operation_id, self.generation, digest,
                                 response.get("result"))
 

@@ -112,6 +112,19 @@ by the prior reviewed host. The adapter begins with `initialize` and
 | Limits | `account/rateLimits/read`, `account/rateLimits/updated`, and `sessionBudgetExceeded`, `usageLimitExceeded`, `rateLimitExceeded` |
 | Permissions | thread/turn approval and sandbox settings plus command, file, permission, MCP, and input server requests |
 
+Fleet reads thread metadata with `thread/read(includeTurns=false)`. Worker and
+supervisor observations fetch at most the two newest turns through
+`thread/turns/list(sortDirection=desc, itemsView=notLoaded, limit=2)`; this
+preserves the bound-turn-is-newest check without transferring rollout history.
+The exact newest turn's items are read through `thread/items/list` in ascending
+pages of at most 16. An oversized item page is retried with a smaller limit;
+one item that cannot fit the IPC frame remains an explicit failure. Empty or
+single-turn launch proofs use the same bounded read and refuse an older-turn
+cursor. Provider status, thread ID, cwd, host generation, turn ID, and item
+validation remain required before a mutation or terminal verdict.
+Every `thread/resume` used by worker, supervisor, and queue recovery sets
+`excludeTurns=true`, then obtains any needed turn evidence from those pages.
+
 `ThreadStartResponse` includes canonical cwd and effective model, approval
 policy, reviewer, and sandbox. A thread has a Codex-generated UUIDv7 ID, cwd,
 source, status, and persistent history metadata. `turn/steer` requires
@@ -199,6 +212,11 @@ to an owner-only temporary file, synced, then renamed to `host.key`, so pre-lock
 readers only see a complete key. It is stored
 owner-only through the platform adapter. It authenticates local Fleet IPC; it
 is not a Codex ID, supervisor nonce, or model-visible authority token.
+If a host response exceeds the 1 MiB IPC frame limit, the host returns the
+correlated error `host response exceeds MAX_IPC_BYTES; page the request` and
+keeps serving. For a mutation, the client treats that error as an uncertain
+outcome because the provider may already have accepted it; read-only callers
+can shrink their requested page.
 
 Each request carries `protocol_version`, `host_generation`, `operation_id`,
 `method`, `fleet_home`, a thread ID when known, and immutable payload
@@ -590,6 +608,35 @@ codex:<model>`.
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and
 never creates a second supervisor body.
+An authenticated `sup-reconcile` may also settle an uncertain supervisor send
+whose original operation journal proves rejection before provider acceptance.
+The current registered Codex Interface must match the exact home and process
+source. The pending operation, holder, host generation, journal recovery
+identity, and newest public thread/turn must agree, and the claim and registry
+row must still match under `fleet.lock`. The old Darwin host's precise
+authentication-refusal response may promote its still-prepared journal entry to
+failed only after those checks; a newer host records that rejection as failed
+before responding. The one claimed mail file is restored to an empty inbox by
+an exclusive link before the held claim is unblocked. Concurrent new inbox mail
+leaves both files and the uncertain claim intact for ordered recovery. A failed
+initial `thread/start` preclaim with no
+bound thread may instead be retired to a released claim and dead row, retaining
+its incarnation, journal, and brief. Accepted, uncertain, missing, conflicting,
+or unreadable evidence stays frozen. Neither path repeats `thread/start`,
+`turn/start`, or `turn/steer`; after a host generation change a separate
+`sup-reconcile` reattaches the exact thread without creating a turn.
+Queue-overflow recovery counts the entire persisted turn history through
+`thread/turns/list` pages of at most 32 with items omitted, after validating a
+metadata-only `thread/read`; it requires exactly one turn beyond the durable
+watermark before adopting an uncertain `turn/start`.
+The host journal's 64 KiB metadata bound can be reached by a successful
+provider reply before the 1 MiB IPC response bound. If recording that reply
+fails after the durable `accepted` transition, the host retains or marks the
+operation uncertain. The client checks the exact journal state for every
+correlated mutation error: `accepted`, `uncertain`, `observed`, and `committed`
+raise an uncertain outcome, never a definitive rejection. A handoff therefore
+keeps its activating claim and predecessor disarmed until exact public proof;
+it cannot roll back a live successor because an oversized journal write failed.
 
 ## 11. Explicit home and interface registration
 
