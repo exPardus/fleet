@@ -68,6 +68,34 @@ ID, real turn ID where applicable, and canonical cwd match the Fleet preclaim.
 
 ## 3. Current adapter and public protocol
 
+### Exact worker preaccept authentication rejection
+
+`fleet --fleet-home <exact-home> codex-settle-preaccept <worker> <operation-id>
+<host-generation> --evidence <owner-only-json> --expect-evidence-sha256 <sha>`
+settles one independently classified native worker `thread/start` whose
+original IPC call was rejected by host caller authentication before journal
+acceptance. The current process must be the registered, process-bound Codex
+Interface for that explicit home, and the home must have no supervisor claim.
+The evidence JSON pins the original row and prepared journal digests, exact
+payload, host generation and both live OS process identities, the original
+source provenance file bytes, and the correlated rejection report bytes. An
+operator-written description alone does not
+establish preacceptance; the versioned evidence and prior independent source
+classification must be reviewed before use.
+
+The command reconstructs the original `thread/start` payload and recovery
+metadata from the frozen row, then refuses any changed row, accepted or
+uncertain journal, provider ID, other unresolved operation, unresolved
+callback, host/source drift, or evidence mismatch. It makes no host or provider
+call. Its sole durable transition records the exact authentication rejection
+as a failed-before-acceptance journal disposition, then marks the original row
+`dead` / `preaccept-failed`, retaining its operation link and all launch inputs.
+The journal write precedes the row write; a lost reply or row-write failure is
+recoverable by the same exact invocation and evidence hash. No new worker,
+thread, turn, task, brief, mail, or callback is created or consumed. A future
+ordinary dispatch requires a separate decision and a new name or reviewed
+cleanup; this command does not replay the failed spawn.
+
 ### 3.1 Current mcx adapter
 
 At `6fa06c9`, `--model codex:<model>` sets `substrate=codex`,

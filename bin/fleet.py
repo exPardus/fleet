@@ -6631,6 +6631,465 @@ def _rollback_codex_preclaim(name, expected_record, prior_brief, prior_task):
     return removed
 
 
+_CODEX_PREACCEPT_AUTH_ERROR = (
+    "Codex IPC peer does not hold the current Interface or exact-home "
+    "supervisor claim")
+
+
+def _codex_preaccept_digest(value: dict, label: str) -> str:
+    from fleet_codex import _digest
+    return _digest(f"worker-preaccept-{label}", value)
+
+
+def _codex_preaccept_evidence(path: Path) -> tuple[dict, str]:
+    """Read a reviewed, owner-only classification packet, never a provider path."""
+    from fleet_codex import _require_regular
+
+    if not path.is_absolute():
+        raise FleetCliError("worker preaccept evidence path must be absolute")
+    info = _require_regular(path)
+    if info.st_size > 64 * 1024:
+        raise FleetCliError("worker preaccept evidence exceeds 64 KiB")
+    raw = path.read_bytes()
+    if len(raw) != info.st_size:
+        raise FleetCliError("worker preaccept evidence changed during read")
+    try:
+        evidence = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise FleetCliError("worker preaccept evidence is not JSON") from exc
+    if not isinstance(evidence, dict):
+        raise FleetCliError("worker preaccept evidence is missing")
+    required = {"schema", "kind", "home", "worker", "operation_id",
+                "generation", "payload_digest", "row_digest",
+                "journal_digest", "journal_sha256", "source", "rejection",
+                "classification_sha256"}
+    if (set(evidence) != required or evidence.get("schema") != 1
+            or evidence.get("kind") != "worker/thread-start-auth-rejection"
+            or evidence.get("home") != str(FLEET_HOME.resolve())
+            or not isinstance(evidence.get("worker"), str)
+            or not isinstance(evidence.get("operation_id"), str)
+            or not isinstance(evidence.get("generation"), str)):
+        raise FleetCliError("worker preaccept evidence identity is malformed")
+    for key in ("payload_digest", "row_digest", "journal_digest",
+                "journal_sha256", "classification_sha256"):
+        if not isinstance(evidence.get(key), str) or not re.fullmatch(
+                r"[0-9a-f]{64}", evidence[key]):
+            raise FleetCliError(f"worker preaccept evidence {key} is malformed")
+    source = evidence["source"]
+    rejection = evidence["rejection"]
+    if (not isinstance(source, dict)
+            or set(source) != {"commit", "fleet_sha256", "client_sha256",
+                               "host_sha256", "host_pid", "host_identity",
+                               "host_started_at", "app_server_pid",
+                               "app_server_identity", "app_server_started_at",
+                               "codex_version", "schema_digest",
+                               "provenance_path", "provenance_sha256"}
+            or any(not isinstance(source.get(key), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", source[key])
+                   for key in ("fleet_sha256", "client_sha256",
+                               "host_sha256", "provenance_sha256"))
+            or not isinstance(source.get("commit"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", source["commit"])
+            or not isinstance(source.get("host_pid"), int)
+            or isinstance(source["host_pid"], bool)
+            or source["host_pid"] <= 0
+            or not isinstance(source.get("app_server_pid"), int)
+            or isinstance(source["app_server_pid"], bool)
+            or source["app_server_pid"] <= 0
+            or not isinstance(source.get("host_identity"), str)
+            or not source["host_identity"]
+            or not isinstance(source.get("app_server_identity"), str)
+            or not source["app_server_identity"]
+            or not isinstance(source.get("host_started_at"), (int, float))
+            or isinstance(source["host_started_at"], bool)
+            or not math.isfinite(source["host_started_at"])
+            or not isinstance(source.get("app_server_started_at"), (int, float))
+            or isinstance(source["app_server_started_at"], bool)
+            or not math.isfinite(source["app_server_started_at"])
+            or not isinstance(source.get("codex_version"), str)
+            or not source["codex_version"]
+            or not isinstance(source.get("provenance_path"), str)
+            or not isinstance(source.get("schema_digest"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source["schema_digest"])
+            or not isinstance(rejection, dict)
+            or set(rejection) != {"error", "operation_id", "generation",
+                                  "home", "payload_digest", "report_path",
+                                  "report_sha256"}
+            or rejection.get("error") != _CODEX_PREACCEPT_AUTH_ERROR
+            or not isinstance(rejection.get("report_path"), str)
+            or not isinstance(rejection.get("report_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", rejection["report_sha256"])
+            or any(rejection.get(key) != evidence.get(other)
+                   for key, other in (("operation_id", "operation_id"),
+                                      ("generation", "generation"),
+                                      ("home", "home"),
+                                      ("payload_digest", "payload_digest")))):
+        raise FleetCliError("worker preaccept rejection or source proof is malformed")
+    return evidence, hashlib.sha256(raw).hexdigest()
+
+
+def _codex_preaccept_expected_intent(name: str, row: dict,
+                                     operation_id: str) -> tuple[str, dict]:
+    """Rebuild the one original worker thread/start from immutable row fields."""
+    from fleet_codex import _digest
+
+    try:
+        cwd = str(Path(row["cwd"]).resolve(strict=True))
+        model = _codex_model_slug(row["model"])
+        profile = _codex_permission_profile(row["mode"])
+    except (KeyError, TypeError, OSError) as exc:
+        raise FleetCliError("worker preaccept row has no original launch inputs") from exc
+    if model is None or row["cwd"] != cwd:
+        raise FleetCliError("worker preaccept row launch inputs changed")
+    thread_source = "fleet-spawn-" + hashlib.sha256(
+        operation_id.encode("utf-8")).hexdigest()
+    params = {"cwd": cwd, "model": model, "threadSource": thread_source}
+    params.update({key: value for key, value in profile.items()
+                   if value is not None})
+    recovery = {
+        "kind": "thread/start", "fleet_name": name,
+        "canonical_cwd": cwd, "thread_source": thread_source,
+        "expected_effective": {
+            "model": model,
+            "approval_policies": ([profile["approvalPolicy"]]
+                                  if profile["approvalPolicy"] is not None
+                                  else ["never", "on-request", "untrusted"]),
+            "sandbox_types": ({
+                "danger-full-access": ["dangerFullAccess"],
+                "workspace-write": ["workspaceWrite"],
+                "read-only": ["readOnly"],
+            }.get(profile["sandbox"], [
+                "dangerFullAccess", "workspaceWrite", "readOnly"])),
+        },
+    }
+    return _digest("rpc", {"method": "thread/start", "params": params}), recovery
+
+
+def _codex_preaccept_original_row(name: str, row: dict, evidence: dict,
+                                  settlement: dict) -> bool:
+    """Accept only the frozen original or our exact partial/final row."""
+    if not isinstance(row, dict):
+        return False
+    original = dict(row)
+    if row.get("preaccept_settlement") == settlement:
+        if (row.get("status") != "dead"
+                or row.get("adapter_state") != "preaccept-failed"):
+            return False
+        original.pop("preaccept_settlement")
+        original["status"] = "dead-suspected"
+        original["adapter_state"] = "uncertain"
+    elif "preaccept_settlement" in row:
+        return False
+    if (_codex_preaccept_digest(original, "row") != evidence["row_digest"]
+            or _is_supervisor_shaped(name)
+            or _codex_record_route(original) != "native"
+            or original.get("dispatch_kind") != "codex-app-server"
+            or original.get("adapter_state") != "uncertain"
+            or original.get("status") != "dead-suspected"
+            or original.get("last_operation_id") != evidence["operation_id"]
+            or original.get("pending_operation") is not None
+            or original.get("session_id") is not None
+            or original.get("mcx_id") is not None
+            or any(original.get(key) is not None for key in (
+                "codex_thread_id", "codex_turn_id", "codex_host_generation",
+                "permission_effective", "provider_status"))):
+        return False
+    return True
+
+
+def _codex_preaccept_original_journal(record: dict, evidence: dict,
+                                      settlement: dict) -> bool:
+    if not isinstance(record, dict):
+        return False
+    original = dict(record)
+    if record.get("state") == "failed":
+        if record.get("preaccept_settlement") != settlement:
+            return False
+        if (record.get("reason") !=
+                "authenticated Interface: original IPC rejected before acceptance"
+                or not isinstance(record.get("failed_at"), (int, float))
+                or isinstance(record["failed_at"], bool)):
+            return False
+        for key in ("preaccept_settlement", "reason", "failed_at"):
+            original.pop(key, None)
+        original["state"] = "prepared"
+    elif record.get("state") != "prepared" or any(key in record for key in (
+            "preaccept_settlement", "reason", "failed_at")):
+        return False
+    if (_codex_preaccept_digest(original, "journal") != evidence["journal_digest"]
+            or record.get("schema") != 1
+            or record.get("operation_id") != evidence["operation_id"]
+            or record.get("home") != evidence["home"]
+            or record.get("generation") != evidence["generation"]
+            or record.get("method") != "rpc"
+            or record.get("public_method") != "thread/start"
+            or record.get("payload_digest") != evidence["payload_digest"]
+            or any(key in record for key in (
+                "accepted_at", "observed_at", "uncertain_at", "result"))):
+        return False
+    return True
+
+
+def _codex_preaccept_source_matches(evidence: dict) -> bool:
+    """The live host/client source files must still match the reviewed origin."""
+    root = Path(__file__).resolve().parent
+    source = evidence["source"]
+    for filename, key in (("fleet_codex.py", "client_sha256"),
+                          ("fleet_codex_host.py", "host_sha256")):
+        try:
+            actual = hashlib.sha256((root / filename).read_bytes()).hexdigest()
+        except OSError:
+            return False
+        if actual != source[key]:
+            return False
+    return True
+
+
+def _codex_preaccept_artifact_matches(relative: str, digest: str,
+                                      prefix: tuple[str, str], suffix: str) -> bool:
+    """Pin the reviewed Fleet provenance/report without reaching private state."""
+    path_part = Path(relative)
+    if (path_part.is_absolute() or ".." in path_part.parts
+            or len(path_part.parts) != 3
+            or path_part.parts[:2] != prefix
+            or path_part.suffix != suffix):
+        return False
+    path = FLEET_HOME / path_part
+    try:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) not in {0o600, 0o644}
+                or info.st_size > 128 * 1024):
+            return False
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    return len(raw) == info.st_size and hashlib.sha256(raw).hexdigest() == digest
+
+
+def _codex_preaccept_write_failed(path: Path, value: dict) -> None:
+    """Replace only the exact journal file; never expose partial JSON."""
+    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(data) > 1024 * 1024:
+        raise FleetCliError("worker preaccept disposition is oversized")
+    fd, temporary = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.stem}.preaccept.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def cmd_codex_settle_preaccept(args) -> int:
+    """Settle one reviewed worker auth rejection without dispatch or replay."""
+    from fleet_codex import (HOST_HEARTBEAT_STALE_SECONDS, OperationJournal,
+                             _process_identities_match, _process_identity,
+                             _read_json, _require_directory)
+
+    def host_processes_match(metadata: dict) -> bool:
+        for pid, expected in (
+                (metadata["pid"], metadata["process_identity"]),
+                (metadata["app_server_pid"],
+                 metadata["app_server_process_identity"])):
+            observed = _process_identity(pid)
+            if (not isinstance(observed, str)
+                    or _process_identities_match(expected, observed) is not True):
+                return False
+        return True
+
+    def heartbeat_fresh(metadata: dict) -> bool:
+        value = metadata.get("heartbeat")
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and 0 <= time.time() - value <= HOST_HEARTBEAT_STALE_SECONDS)
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("worker preaccept settlement requires explicit --fleet-home")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("worker preaccept settlement requires current exact-home Codex Interface")
+    evidence, evidence_sha = _codex_preaccept_evidence(Path(args.evidence))
+    if (not isinstance(args.expect_evidence_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", args.expect_evidence_sha256)
+            or evidence_sha != args.expect_evidence_sha256):
+        raise FleetCliError("worker preaccept evidence bytes changed")
+    if (args.name != evidence["worker"]
+            or args.operation_id != evidence["operation_id"]
+            or args.generation != evidence["generation"]):
+        raise FleetCliError("worker preaccept invocation differs from reviewed evidence")
+    if not _codex_preaccept_source_matches(evidence):
+        raise FleetCliError("worker preaccept reviewed host/client source changed")
+    if (not _codex_preaccept_artifact_matches(
+            evidence["source"]["provenance_path"],
+            evidence["source"]["provenance_sha256"],
+            ("state", "interface"), ".json")
+            or not _codex_preaccept_artifact_matches(
+                evidence["rejection"]["report_path"],
+                evidence["rejection"]["report_sha256"],
+                ("mailbox", "done"), ".md")):
+        raise FleetCliError("worker preaccept original provenance/report changed")
+    host = _read_json(FLEET_HOME / "state" / "codex" / "host.json")
+    provenance = evidence["source"]
+    if (not isinstance(host, dict)
+            or host.get("home") != evidence["home"]
+            or host.get("generation") != evidence["generation"]
+            or host.get("pid") != provenance["host_pid"]
+            or host.get("process_identity") != provenance["host_identity"]
+            or host.get("started_at") != provenance["host_started_at"]
+            or host.get("app_server_pid") != provenance["app_server_pid"]
+            or host.get("app_server_process_identity") !=
+            provenance["app_server_identity"]
+            or host.get("app_server_started_at") !=
+            provenance["app_server_started_at"]
+            or host.get("codex_version") != provenance["codex_version"]
+            or host.get("schema_digest") != provenance["schema_digest"]
+            or host.get("ready") is not True
+            or not heartbeat_fresh(host)
+            or not host_processes_match(host)):
+        raise FleetCliError("worker preaccept exact host provenance changed")
+    settlement_core = {
+        "kind": "worker/thread-start-auth-rejection",
+        "evidence_sha256": evidence_sha,
+        "classification_sha256": evidence["classification_sha256"],
+    }
+    _require_directory(FLEET_HOME / "state" / "codex")
+    _require_directory(FLEET_HOME / "state" / "codex" / "operations")
+    journal = OperationJournal(FLEET_HOME, evidence["generation"])
+    with fleet_lock():
+        if (_registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("worker preaccept Interface authority changed")
+        try:
+            incarnation_path().lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise FleetCliError("worker preaccept requires no supervisor claim")
+        if not _codex_preaccept_source_matches(evidence):
+            raise FleetCliError("worker preaccept source changed during settlement")
+        if (not _codex_preaccept_artifact_matches(
+                evidence["source"]["provenance_path"],
+                evidence["source"]["provenance_sha256"],
+                ("state", "interface"), ".json")
+                or not _codex_preaccept_artifact_matches(
+                    evidence["rejection"]["report_path"],
+                    evidence["rejection"]["report_sha256"],
+                    ("mailbox", "done"), ".md")):
+            raise FleetCliError("worker preaccept original provenance/report drifted")
+        current_host = _read_json(FLEET_HOME / "state" / "codex" / "host.json")
+        if (not isinstance(current_host, dict)
+                or any(current_host.get(key) != host.get(key) for key in (
+                    "home", "generation", "pid", "process_identity",
+                    "started_at", "app_server_pid",
+                    "app_server_process_identity", "app_server_started_at",
+                    "codex_version", "schema_digest", "ready"))
+                or not heartbeat_fresh(current_host)
+                or not host_processes_match(current_host)):
+            raise FleetCliError("worker preaccept host identity changed")
+        data = read_registry_no_repair()
+        row = data.get("workers", {}).get(args.name)
+        record = journal.load(evidence["operation_id"])
+        if record.get("state") == "prepared":
+            settlement = {**settlement_core,
+                          "interface_claim_id": source["claim_id"]}
+        else:
+            settlement = record.get("preaccept_settlement")
+            if (not isinstance(settlement, dict)
+                    or set(settlement) != set(settlement_core) | {"interface_claim_id"}
+                    or any(settlement.get(key) != value
+                           for key, value in settlement_core.items())
+                    or not isinstance(settlement.get("interface_claim_id"), str)):
+                raise FleetCliError("worker preaccept prior disposition is ambiguous")
+        if (not _codex_preaccept_original_row(args.name, row, evidence, settlement)
+                or (record.get("state") == "prepared"
+                    and row.get("preaccept_settlement") is not None)):
+            raise FleetCliError("worker preaccept row changed or is actionable")
+        digest, recovery = _codex_preaccept_expected_intent(
+            args.name, row, evidence["operation_id"])
+        if (digest != evidence["payload_digest"]
+                or record.get("recovery") != recovery
+                or not _codex_preaccept_original_journal(
+                    record, evidence, settlement)):
+            raise FleetCliError("worker preaccept immutable journal intent changed")
+        if record["state"] == "prepared" and hashlib.sha256(
+                journal.path(evidence["operation_id"]).read_bytes()
+                ).hexdigest() != evidence["journal_sha256"]:
+            raise FleetCliError("worker preaccept journal bytes changed")
+        records = journal.records()
+        if any(path.suffix != ".json" or not path.stem
+               for path in journal.directory.iterdir()):
+            raise FleetCliError("worker preaccept operation inventory is ambiguous")
+        if (len([item for item in records
+                 if item.get("operation_id") == evidence["operation_id"]]) != 1
+                or any(item.get("operation_id") != evidence["operation_id"]
+                       and (item.get("state") not in {"committed", "failed"}
+                            or (isinstance(item.get("recovery"), dict)
+                                and item["recovery"].get("fleet_name") == args.name)
+                            or (item.get("state") == "failed" and any(
+                                key in item for key in (
+                                    "accepted_at", "observed_at", "uncertain_at"))))
+                       for item in records)):
+            raise FleetCliError("worker preaccept has another unresolved operation")
+        approvals = FLEET_HOME / "state" / "codex" / "approvals"
+        if approvals.exists() or approvals.is_symlink():
+            _require_directory(approvals)
+            for path in approvals.iterdir():
+                if (path.suffix != ".json" or not path.stem
+                        or (_read_json(path) or {}).get("state") != "resolved"):
+                    raise FleetCliError("worker preaccept callback inventory is ambiguous")
+        if record["state"] == "prepared":
+            # This exact disposition is the only permitted transition.  It is
+            # recoverable if the later registry write fails or the reply is lost.
+            latest = journal.load(evidence["operation_id"])
+            if latest != record:
+                raise FleetCliError("worker preaccept journal changed before settlement")
+            failed = dict(record)
+            failed.update({
+                "state": "failed", "failed_at": time.time(),
+                "reason": "authenticated Interface: original IPC rejected before acceptance",
+                "preaccept_settlement": settlement,
+            })
+            _codex_preaccept_write_failed(
+                journal.path(evidence["operation_id"]), failed)
+            record = journal.load(evidence["operation_id"])
+        if not _codex_preaccept_original_journal(record, evidence, settlement):
+            raise FleetCliError("worker preaccept journal changed after settlement")
+        if (_registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("worker preaccept Interface authority changed after journal")
+        final_host = _read_json(FLEET_HOME / "state" / "codex" / "host.json")
+        if (not isinstance(final_host, dict)
+                or any(final_host.get(key) != host.get(key) for key in (
+                    "home", "generation", "pid", "process_identity",
+                    "started_at", "app_server_pid",
+                    "app_server_process_identity", "app_server_started_at",
+                    "codex_version", "schema_digest", "ready"))
+                or not heartbeat_fresh(final_host)
+                or not host_processes_match(final_host)):
+            raise FleetCliError("worker preaccept host changed after journal")
+        if row.get("preaccept_settlement") != settlement:
+            row = dict(row)
+            row.update({"status": "dead", "adapter_state": "preaccept-failed",
+                        "preaccept_settlement": settlement})
+            data["workers"][args.name] = row
+            save_registry(data)
+        if (read_registry_no_repair().get("workers", {}).get(args.name) != row
+                or journal.load(evidence["operation_id"]) != record):
+            raise FleetCliError("worker preaccept settlement changed during commit")
+    print(f"{args.name}: original preaccept authentication rejection settled; "
+          "worker remains terminal and no provider mutation was sent")
+    return 0
+
+
 def _validate_codex_thread_effective(thread_result, requested_model, profile):
     if thread_result.get("model") != requested_model:
         raise FleetCliError(
@@ -22526,6 +22985,17 @@ def build_parser() -> argparse.ArgumentParser:
         "decision", help="literal offered choice, JSON object, or @file")
     p_codex_respond.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
+    p_preaccept = sub.add_parser(
+        "codex-settle-preaccept",
+        help="settle one reviewed native worker thread/start authentication rejection")
+    p_preaccept.add_argument("name")
+    p_preaccept.add_argument("operation_id")
+    p_preaccept.add_argument("generation")
+    p_preaccept.add_argument("--evidence", required=True,
+                             help="owner-only exact preaccept classification JSON")
+    p_preaccept.add_argument("--expect-evidence-sha256", required=True,
+                             help="reviewed SHA-256 of the evidence JSON bytes")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -23066,6 +23536,8 @@ def main(argv=None) -> int:
             return cmd_sup_guard(args)
         if args.command == "sup-reconcile":
             return cmd_sup_reconcile(args)
+        if args.command == "codex-settle-preaccept":
+            return cmd_codex_settle_preaccept(args)
         if args.command == "sup-context":
             return cmd_sup_context(args)
         if args.command == "sup-notify":
