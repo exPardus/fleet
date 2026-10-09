@@ -643,6 +643,37 @@ accepted but unverified new response remains uncertain; read-only reconcile can
 settle only its exact observed new operation. No turn is replayed or newly
 started.
 
+An exact committed policy restoration can coexist with the intentionally
+observed original resume. A later ordinary supervisor send carries a digest
+link to both journals. The host permits `turn/start` or `turn/steer` only when
+the original operation, generation, home, incarnation, thread, result policy,
+committed restoration, and bound turn agree; another unresolved operation
+still blocks the mutation. The normal send remains the sole creator of a new
+turn. A failed pre-acceptance send from an older loaded host can be settled by
+the authenticated `sup-reconcile` path only when its exact failed journal,
+claimed-mail payload digest, unchanged original and restoration journals,
+idle newest bound turn, claim, row, and Interface source agree. It restores
+the claimed mail and the row's active adapter state without replaying a turn.
+
+The older loaded host does not gain the new guard when CLI source changes.
+For the restored holder before its first successful normal send, use
+`sup-reconcile --prepare-restored-continuation` with explicit home and exact
+`--expect-inc`, `--expect-thread`, `--expect-turn`, `--expect-resume-op`,
+`--expect-restore-op`, and `--expect-new-generation`. It pins the complete
+worker inventory, claim, row, linked journals, target mail, registered
+Interface, public idle/completed header, and host and app-server identities
+for five minutes. Another native or ambiguous worker in the home refuses
+preparation. After exact host and child exit with stale heartbeat,
+`--reattach-restored-continuation` with the same pins starts a fresh host
+generation and sends one distinct policy-bound `thread/resume` with
+`threadId`, `excludeTurns=true`, canonical `cwd`, recorded `model`,
+`approvalPolicy=never`, `approvalsReviewer=user`, and
+`sandbox=danger-full-access`. The host requires the same committed link.
+The new result must report the recorded effective bypass policy and the
+same idle completed turn before local settlement. An accepted, uncertain,
+or mismatched result stays fenced, preserving journals and mail without a
+second resume. A plain held-claim `sup-reconcile` refuses this linked state.
+
 ### 10.4 Retiring an absent legacy Claude claim
 
 From the **current registered native Codex Interface process**, use

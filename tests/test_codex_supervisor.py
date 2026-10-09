@@ -336,6 +336,9 @@ class JournalLifecycleClient(FakeLifecycleClient):
         if (predecessor is not None
                 and not self.journal.permits_observed_resume_policy_restore(
                     operation_id, operation["payload"],
+                    operation.get("recovery", {}))
+                and not self.journal.permits_restored_supervisor_continuation(
+                    operation_id, operation["payload"],
                     operation.get("recovery", {}))):
             self.journal.fail(operation_id, "blocked by unresolved predecessor")
             raise HostRejected(
@@ -1472,6 +1475,328 @@ def test_observed_resume_restores_recorded_policy_with_distinct_intent(
                for op in client.operations)
     assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
         encoding="utf-8").strip() == "preserve exact mail"
+
+
+def test_linked_restoration_wakes_with_one_normal_mail_and_same_holder(
+        supervisor_home, monkeypatch):
+    from fleet_codex import OperationJournal
+
+    name, incarnation_id, old_op, _ = _seed_observed_workspace_resume(
+        supervisor_home)
+    old_client, client, _current = _cold_restore_clients(
+        supervisor_home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
+    before = fleet.read_incarnation()
+    assert fleet.load_registry()["workers"][name]["adapter_state"] == "active"
+    assert fleet._cmd_send_codex_supervisor(name, "first normal mail") == 0
+    after = fleet.read_incarnation()
+    journal = OperationJournal(supervisor_home, client.generation)
+    sends = [op for op in client.operations
+             if op["payload"]["method"] == "turn/start"]
+    assert len(sends) == 1
+    assert sends[0]["recovery"]["restored_predecessor"] == \
+        journal.restored_policy_link(
+            fleet_name=name, incarnation_id=incarnation_id,
+            thread_id=THREAD_ID)
+    assert journal.load(sends[0]["operation_id"])["state"] == "committed"
+    assert after["incarnation_id"] == before["incarnation_id"]
+    assert after["holder"] == before["holder"]
+    assert after["current_turn_id"] == WAKE_TURN_ID
+    assert after["state"] == "held"
+    assert not list((supervisor_home / "mailbox").glob(
+        f"{THREAD_ID}.md.claimed.*"))
+
+
+def _seed_restored_predecessor_rejected_send(home, monkeypatch):
+    from fleet_codex import OperationJournal
+    import fleet_codex
+
+    name, incarnation_id, old_op, journal = _seed_observed_workspace_resume(home)
+    old_client, client, _current = _cold_restore_clients(home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    monkeypatch.setattr(fleet_codex, "connect_existing", lambda _home: client)
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
+    binding = fleet._codex_supervisor_binding()
+    operation_id = "supervisor-send-post-restore-rejected"
+    fleet._reserve_codex_supervisor_operation(binding, operation_id,
+                                              "observe-send")
+    fleet.append_mailbox(THREAD_ID, "preserve this rejected normal mail")
+    _queued, claimed = fleet.claim_mailbox(THREAD_ID)
+    assert claimed is not None
+    send_journal = OperationJournal(home, client.generation)
+    send_journal.prepare({
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": THREAD_ID, "input": [{"type": "text",
+                                           "text": "preserve this rejected normal mail",
+                                           "text_elements": []}]}},
+        "recovery": {
+            "kind": "supervisor/turn/start", "fleet_name": name,
+            "incarnation_id": incarnation_id, "thread_id": THREAD_ID,
+            "previous_turn_id": TURN_ID, "canonical_cwd": str(home.resolve()),
+        },
+    })
+    send_journal.fail(operation_id,
+                      "blocked by unresolved predecessor operation")
+    fleet._freeze_codex_supervisor_preclaim(
+        name, incarnation_id, operation_id,
+        f"unresolved predecessor operation {old_op} blocks mutation")
+    return name, old_op, journal, claimed, send_journal, operation_id, client
+
+
+def test_restored_predecessor_failed_send_settles_without_mail_loss(
+        supervisor_home, monkeypatch):
+    name, old_op, old_journal, claimed, send_journal, operation_id, client = \
+        _seed_restored_predecessor_rejected_send(supervisor_home, monkeypatch)
+    claim = fleet.read_incarnation()
+    # The deployed PR33 restoration left this field uncertain. It does not
+    # change the committed restoration, current row, or failed-send journal.
+    claim["pending_operation"]["previous_adapter_state"] = "uncertain"
+    fleet.write_incarnation(claim)
+    assert fleet.cmd_sup_reconcile(SimpleNamespace()) == 0
+    settled = fleet.read_incarnation()
+    row = fleet.load_registry()["workers"][name]
+    assert settled["state"] == "held"
+    assert "pending_operation" not in settled
+    assert row["adapter_state"] == "active"
+    assert row["status"] == "idle"
+    assert claimed.exists() is False
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "preserve this rejected normal mail"
+    assert send_journal.load(operation_id)["state"] == "failed"
+    assert old_journal.load(old_op)["state"] == "observed"
+    assert [op["payload"]["method"] for op in client.operations].count(
+        "turn/start") == 0
+
+
+@pytest.mark.parametrize("case", [
+    "accepted", "digest", "new-inbox", "newer-turn", "source",
+    "old-journal", "restore-journal", "wrong-turn",
+])
+def test_restored_failed_send_ambiguous_evidence_preserves_claim_and_mail(
+        supervisor_home, monkeypatch, case):
+    name, old_op, old_journal, claimed, send_journal, operation_id, client = \
+        _seed_restored_predecessor_rejected_send(supervisor_home, monkeypatch)
+    if case in {"accepted", "digest"}:
+        record = send_journal.load(operation_id)
+        if case == "accepted":
+            record["state"] = "accepted"
+            record["accepted_at"] = 1.0
+        else:
+            record["payload_digest"] = "0" * 64
+        send_journal.path(operation_id).write_text(
+            json.dumps(record), encoding="utf-8")
+    elif case == "new-inbox":
+        fleet.append_mailbox(THREAD_ID, "later queued mail")
+    elif case == "newer-turn":
+        client.newer_turn = {"id": NEWER_TURN_ID, "status": "completed",
+                             "itemsView": "notLoaded", "items": []}
+    elif case == "source":
+        monkeypatch.setattr(
+            fleet, "_registered_interface_mail_source",
+            lambda: {"kind": "claude-session", "session_id": "wrong"})
+    elif case == "old-journal":
+        record = old_journal.load(old_op)
+        record["result"]["model"] = "different-model"
+        old_journal.path(old_op).write_text(
+            json.dumps(record), encoding="utf-8")
+    elif case == "restore-journal":
+        claim = fleet.read_incarnation()
+        restore_id = claim["pending_operation"]["previous_claim_operation_id"]
+        record = send_journal.load(restore_id)
+        record["state"] = "observed"
+        send_journal.path(restore_id).write_text(
+            json.dumps(record), encoding="utf-8")
+    else:
+        claim = fleet.read_incarnation()
+        claim["pending_operation"]["previous_turn_id"] = NEWER_TURN_ID
+        fleet.write_incarnation(claim)
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert claimed.exists()
+    assert fleet.load_registry()["workers"][name]["adapter_state"] == "uncertain"
+    assert [op["payload"]["method"] for op in client.operations].count(
+        "turn/start") == 0
+
+
+def _restored_continuation_setup(home, monkeypatch):
+    name, incarnation_id, old_op, old_journal = \
+        _seed_observed_workspace_resume(home)
+    old_client, client, current = _cold_restore_clients(home, monkeypatch)
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                        lambda: {"kind": "codex", "claim_id": "current-interface"})
+    _prove_then_stop_cold_host(incarnation_id, old_op, old_client)
+    assert fleet.cmd_sup_reconcile(_restore_args(incarnation_id, old_op)) == 0
+    claim = fleet.read_incarnation()
+    args = SimpleNamespace(
+        _fleet_home_explicit=True, prepare_restored_continuation=True,
+        reattach_restored_continuation=False,
+        expect_inc=incarnation_id, expect_thread=THREAD_ID,
+        expect_turn=TURN_ID, expect_resume_op=old_op,
+        expect_restore_op=claim["last_operation_id"],
+        expect_new_generation=client.generation)
+    return name, old_op, old_journal, client, current, args
+
+
+def test_restored_continuation_cold_reattaches_without_turn_or_policy_change(
+        supervisor_home, monkeypatch):
+    from fleet_codex import OperationJournal
+
+    name, old_op, old_journal, old_client, current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    with pytest.raises(fleet.FleetCliError, match="explicit policy-bound"):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    fleet.append_mailbox(THREAD_ID, "mail held across cold boundary")
+    assert fleet.cmd_sup_reconcile(args) == 0
+    assert fleet.cmd_sup_reconcile(args) == 0  # refresh while same old host lives
+    old_client.host_live = False
+    old_client.app_live = False
+    old_client.metadata_stale = True
+    next_client = PolicyRestoreLifecycleClient(
+        supervisor_home, generation="host-generation-4",
+        thread_status="idle", turn_status="completed")
+    next_client._launched_process = object()
+    next_client.host_pid = 333
+    next_client.app_server_pid = 444
+    next_client.host_process_identity = "host-identity-333"
+    next_client.app_server_process_identity = "app-identity-444"
+
+    def ensure_new(_home):
+        assert not old_client.host_live and not old_client.app_live
+        current["client"] = next_client
+        return next_client
+
+    monkeypatch.setattr(fleet, "_codex_native_client", ensure_new)
+    args.prepare_restored_continuation = False
+    args.reattach_restored_continuation = True
+    assert fleet.cmd_sup_reconcile(args) == 0
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "held"
+    assert claim["host_generation"] == next_client.generation
+    assert claim["holder"] == {"provider": "codex", "thread_id": THREAD_ID}
+    assert claim["current_turn_id"] == TURN_ID
+    assert fleet.load_registry()["workers"][name]["adapter_state"] == "active"
+    assert old_journal.load(old_op)["state"] == "observed"
+    new_journal = OperationJournal(supervisor_home, next_client.generation)
+    assert new_journal.load(claim["last_operation_id"])["state"] == "committed"
+    writes = [op for op in next_client.operations
+              if op["payload"]["method"] in {"thread/resume", "turn/start"}]
+    assert len(writes) == 1
+    assert writes[0]["payload"]["method"] == "thread/resume"
+    assert writes[0]["payload"]["params"]["sandbox"] == "danger-full-access"
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "mail held across cold boundary"
+    assert fleet._cmd_send_codex_supervisor(name, "first normal turn") == 0
+    assert len([op for op in next_client.operations
+                if op["payload"]["method"] == "turn/start"]) == 1
+    assert old_journal.load(old_op)["state"] == "observed"
+
+
+def test_restored_continuation_lost_resume_reply_never_replays(
+        supervisor_home, monkeypatch):
+    from fleet_codex import OperationJournal
+
+    _name, old_op, old_journal, old_client, current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    fleet.append_mailbox(THREAD_ID, "mail must remain")
+    assert fleet.cmd_sup_reconcile(args) == 0
+    old_client.host_live = False
+    old_client.app_live = False
+    old_client.metadata_stale = True
+    next_client = PolicyRestoreLifecycleClient(
+        supervisor_home, generation="host-generation-4",
+        thread_status="idle", turn_status="completed",
+        fail_method="thread/resume")
+    next_client._launched_process = object()
+    monkeypatch.setattr(fleet, "_codex_native_client",
+                        lambda _home: current.update(client=next_client)
+                        or next_client)
+    args.prepare_restored_continuation = False
+    args.reattach_restored_continuation = True
+    with pytest.raises(fleet.FleetCliError, match="uncertain"):
+        fleet.cmd_sup_reconcile(args)
+    pending = fleet.read_incarnation()["pending_operation"]
+    new_journal = OperationJournal(supervisor_home, next_client.generation)
+    assert new_journal.load(pending["operation_id"])["state"] == "uncertain"
+    assert fleet.read_incarnation()["state"] == "uncertain"
+    assert old_journal.load(old_op)["state"] == "observed"
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_sup_reconcile(SimpleNamespace())
+    assert len([op for op in next_client.operations
+                if op["payload"]["method"] == "thread/resume"]) == 1
+    assert (supervisor_home / "mailbox" / f"{THREAD_ID}.md").read_text(
+        encoding="utf-8").strip() == "mail must remain"
+
+
+@pytest.mark.parametrize("case", [
+    "active-worker", "claim", "row", "mail", "journal", "source",
+    "expired", "host-live", "child-live", "wrong-expect",
+])
+def test_restored_continuation_drift_refuses_before_host_creation(
+        supervisor_home, monkeypatch, case):
+    import time
+
+    name, old_op, old_journal, old_client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    if case == "active-worker":
+        data = fleet.load_registry()
+        data["workers"]["active-product"] = {
+            "model": "codex:gpt-5.6-luna", "status": "working",
+            "codex_thread_id": SUCCESSOR_THREAD_ID}
+        fleet.save_registry(data)
+        with pytest.raises(fleet.FleetCliError, match="worker"):
+            fleet.cmd_sup_reconcile(args)
+        assert "restored_continuation_preflight" not in fleet.read_incarnation()
+        return
+    assert fleet.cmd_sup_reconcile(args) == 0
+    old_client.host_live = False
+    old_client.app_live = False
+    old_client.metadata_stale = True
+    args.prepare_restored_continuation = False
+    args.reattach_restored_continuation = True
+    if case == "claim":
+        claim = fleet.read_incarnation()
+        claim["heartbeat_at"] = "2026-10-09T03:00:00Z"
+        fleet.write_incarnation(claim)
+    elif case == "row":
+        data = fleet.load_registry()
+        data["workers"][name]["last_activity"] = "2026-10-09T03:00:00Z"
+        fleet.save_registry(data)
+    elif case == "mail":
+        fleet.append_mailbox(THREAD_ID, "new mail after preparation")
+    elif case == "journal":
+        original = old_journal.load(old_op)
+        original["result"]["sandbox"]["type"] = "dangerFullAccess"
+        old_journal.path(old_op).write_text(json.dumps(original), encoding="utf-8")
+    elif case == "source":
+        monkeypatch.setattr(
+            fleet, "_registered_interface_mail_source",
+            lambda: {"kind": "codex", "claim_id": "other-interface"})
+    elif case == "expired":
+        claim = fleet.read_incarnation()
+        claim["restored_continuation_preflight"]["prepared_at"] = \
+            time.time() - 301
+        fleet.write_incarnation(claim)
+    elif case == "host-live":
+        old_client.host_live = True
+    elif case == "child-live":
+        old_client.app_live = True
+    else:
+        args.expect_restore_op = "wrong-restoration"
+    monkeypatch.setattr(
+        fleet, "_codex_native_client",
+        lambda _home: pytest.fail("stale continuation created a host"))
+    with pytest.raises((fleet.FleetCliError, ValueError)):
+        fleet.cmd_sup_reconcile(args)
+    assert fleet.read_incarnation()["state"] == "held"
+    assert fleet.read_incarnation().get("pending_operation") is None
+    assert old_journal.load(old_op)["state"] == "observed"
 
 
 @pytest.mark.parametrize("changed", [

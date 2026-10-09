@@ -613,6 +613,9 @@ class Host:
                             if (predecessor is not None
                                     and not self.journal.permits_observed_resume_policy_restore(
                                         operation_id, payload,
+                                        request.get("recovery", {}))
+                                    and not self.journal.permits_restored_supervisor_continuation(
+                                        operation_id, payload,
                                         request.get("recovery", {}))):
                                 self.journal.fail(
                                     operation_id,

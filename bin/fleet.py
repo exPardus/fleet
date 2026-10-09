@@ -8482,7 +8482,23 @@ def cmd_codex_respond(args) -> int:
 
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
     """Queue once, then steer active or wake idle on the exact claimed thread."""
+    from fleet_codex import OperationJournal
+
     binding = _codex_supervisor_binding(expected_name=name)
+    restored_link = OperationJournal(
+        FLEET_HOME, binding.host_generation).restored_policy_link(
+            fleet_name=binding.name,
+            incarnation_id=binding.incarnation_id,
+            thread_id=binding.authority.value)
+    if restored_link is not None:
+        _codex_recovery_interface_source()
+        if (binding.record.get("mode") != "bypass"
+                or binding.record.get("permission_effective") != {
+                    "approvalPolicy": "never", "approvalsReviewer": "user",
+                    "sandbox": {"type": "dangerFullAccess"}}
+                or binding.record.get("adapter_state") not in {"active", "idle"}):
+            raise FleetCliError(
+                "restored supervisor is not ready for a policy-bound send")
     operation_id = f"supervisor-send-{uuid.uuid4()}"
     _reserve_codex_supervisor_operation(binding, operation_id, "observe-send")
     try:
@@ -8536,6 +8552,8 @@ def _cmd_send_codex_supervisor(name: str, message: str) -> int:
             "thread_id": binding.authority.value,
             "previous_turn_id": binding.current_turn_id,
             "canonical_cwd": str(FLEET_HOME.resolve()),
+            **({"restored_predecessor": restored_link}
+               if restored_link is not None else {}),
         },
     }
     client = observed["client"]
@@ -19076,22 +19094,78 @@ def _reconcile_codex_rejected_send(claim) -> int:
     journal = _codex_failed_supervisor_intent(
         operation_id, binding.host_generation, expected,
         allow_prepared=legacy_prepared)
+    blocked_by_restored_predecessor = (
+        journal.get("reason") == "blocked by unresolved predecessor operation")
+    restored_link = None
+    if blocked_by_restored_predecessor:
+        restored_link = OperationJournal(
+            FLEET_HOME, binding.host_generation).restored_policy_link(
+                fleet_name=binding.name,
+                incarnation_id=binding.incarnation_id,
+                thread_id=binding.authority.value)
+        if (restored_link is None
+                or restored_link["restore_generation"] != binding.host_generation
+                or pending.get("previous_claim_operation_id") !=
+                restored_link["restore_operation_id"]
+                or pending.get("previous_record_operation_id") !=
+                restored_link["restore_operation_id"]
+                or pending.get("previous_turn_id") != restored_link["turn_id"]
+                or pending.get("previous_adapter_state") not in {
+                    "uncertain", "active"}
+                or claim.get("uncertainty") != (
+                    "unresolved predecessor operation "
+                    + restored_link["original_operation_id"]
+                    + " blocks mutation")
+                or any(key in journal for key in (
+                    "accepted_at", "observed_at", "uncertain_at"))):
+            raise FleetCliError(
+                "restored supervisor send is not proved rejected before acceptance")
     observed = _codex_rejected_send_public_header(binding, client)
+    if (blocked_by_restored_predecessor
+            and observed != {"provider_status": "idle",
+                            "turn_status": "completed"}):
+        raise FleetCliError(
+            "restored supervisor failed send lacks idle completed turn proof")
     mail_paths = list(mailbox_dir().glob(
         f"{binding.authority.value}.md.claimed.*"))
     if (len(mail_paths) != 1 or mail_paths[0].is_symlink()
             or not mail_paths[0].is_file()):
         raise FleetCliError(
             "native Codex claimed mail is missing or ambiguous; claim remains uncertain")
+    mail_snapshot = _codex_restore_mail_snapshot(binding.authority.value)
+    if blocked_by_restored_predecessor:
+        from fleet_codex import _digest
+        queued = mail_paths[0].read_text(
+            encoding="utf-8", errors="replace").strip()
+        if not queued:
+            raise FleetCliError("restored supervisor claimed mail is empty")
+        params = {"threadId": binding.authority.value,
+                  "input": [{"type": "text", "text": queued,
+                             "text_elements": []}]}
+        if public_method == "turn/steer":
+            params["expectedTurnId"] = binding.current_turn_id
+        if journal.get("payload_digest") != _digest(
+                "rpc", {"method": public_method, "params": params}):
+            raise FleetCliError(
+                "restored supervisor failed send does not match claimed mail")
     with fleet_lock():
         live_claim = read_incarnation()
         data = read_registry_no_repair()
         if (live_claim != claim
                 or data["workers"].get(binding.name) != binding.record
                 or _registered_interface_mail_source() != source
+                or _codex_restore_mail_snapshot(binding.authority.value) !=
+                mail_snapshot
                 or _codex_failed_supervisor_intent(
                     operation_id, binding.host_generation, expected,
-                    allow_prepared=legacy_prepared) != journal):
+                    allow_prepared=legacy_prepared) != journal
+                or (restored_link is not None
+                    and OperationJournal(
+                        FLEET_HOME, binding.host_generation).restored_policy_link(
+                            fleet_name=binding.name,
+                            incarnation_id=binding.incarnation_id,
+                            thread_id=binding.authority.value)
+                    != restored_link)):
             raise FleetCliError(
                 "native Codex claim, Interface, or journal changed during recovery")
         if legacy_prepared:
@@ -19111,7 +19185,9 @@ def _reconcile_codex_rejected_send(claim) -> int:
         else:
             live_claim["last_operation_id"] = prior_claim_op
         row = data["workers"][binding.name]
-        row["adapter_state"] = pending.get("previous_adapter_state") or "active"
+        row["adapter_state"] = (
+            "active" if restored_link is not None else
+            pending.get("previous_adapter_state") or "active")
         row["provider_status"] = observed["provider_status"]
         if observed["provider_status"] in {"active", "idle"}:
             row["status"] = ("working" if observed["provider_status"] == "active"
@@ -19570,7 +19646,9 @@ def _reconcile_codex_restored_policy(claim) -> int:
         live["provider_status"] = "idle"
         live["last_operation_id"] = operation_id
         row = data["workers"][binding.name]
-        row["adapter_state"] = pending.get("previous_adapter_state") or "active"
+        # The original mismatched resume left this row uncertain. The exact
+        # committed cold restoration makes the same holder usable again.
+        row["adapter_state"] = "active"
         row["status"] = "idle"
         row["provider_status"] = "idle"
         row["codex_host_generation"] = client.generation
@@ -19730,6 +19808,358 @@ def _restore_codex_supervisor_policy(args) -> int:
     return _reconcile_codex_restored_policy(read_incarnation())
 
 
+def _restored_continuation_context(claim, registry):
+    """Resolve the exact held bypass supervisor and its immutable journal link."""
+    from fleet_codex import OperationJournal
+
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    if (claim.get("pending_operation") is not None
+            or binding.record.get("mode") != "bypass"
+            or binding.record.get("permission_effective") != {
+                "approvalPolicy": "never", "approvalsReviewer": "user",
+                "sandbox": {"type": "dangerFullAccess"}}
+            or binding.record.get("adapter_state") != "active"
+            or claim.get("provider_status") != "idle"
+            or binding.record.get("status") != "idle"):
+        raise FleetCliError("restored supervisor is not idle with recorded bypass")
+    workers = registry.get("workers")
+    if not isinstance(workers, dict):
+        raise FleetCliError("native worker inventory is unavailable")
+    for name, row in workers.items():
+        if name == binding.name:
+            continue
+        if (not isinstance(row, dict)
+                or (isinstance(row.get("model"), str)
+                    and row["model"].startswith("codex:"))
+                or row.get("codex_thread_id") is not None):
+            raise FleetCliError(
+                "another native or ambiguous worker prevents exact-host shutdown")
+    link = OperationJournal(FLEET_HOME, binding.host_generation).restored_policy_link(
+        fleet_name=binding.name, incarnation_id=binding.incarnation_id,
+        thread_id=binding.authority.value)
+    if (link is None or link["restore_generation"] != binding.host_generation
+            or claim.get("last_operation_id") != link["restore_operation_id"]
+            or binding.record.get("last_operation_id") !=
+            link["restore_operation_id"]
+            or binding.current_turn_id != link["turn_id"]
+            or _codex_model_slug(binding.record.get("model")) != link["model"]):
+        raise FleetCliError("restored supervisor journal link or claim changed")
+    return binding, link
+
+
+def _restored_continuation_preflight(claim, registry, binding, link, source):
+    """Compare all state pinned before the old host and child were stopped."""
+    from fleet_codex import _digest
+
+    proof = claim.get("restored_continuation_preflight")
+    reduced = json.loads(json.dumps(claim))
+    reduced.pop("restored_continuation_preflight", None)
+    if (not isinstance(proof, dict)
+            or proof.get("source") != source
+            or proof.get("link") != link
+            or proof.get("claim_digest") != _digest(
+                "restored-continuation-claim", reduced)
+            or proof.get("row_digest") != _digest(
+                "restored-continuation-row", binding.record)
+            or proof.get("inventory_digest") != _digest(
+                "restored-continuation-inventory", registry["workers"])
+            or proof.get("mail") != _codex_restore_mail_snapshot(
+                binding.authority.value)
+            or isinstance(proof.get("prepared_at"), bool)
+            or not isinstance(proof.get("prepared_at"), (int, float))
+            or not 0 <= time.time() - proof["prepared_at"] <= 300):
+        raise FleetCliError(
+            "restored continuation preflight expired or durable evidence changed")
+    return proof
+
+
+def _prepare_restored_continuation(args) -> int:
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("restored continuation requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    binding, link = _restored_continuation_context(claim, registry)
+    _restored_continuation_expectations(args, binding, link)
+    client = _codex_existing_client(FLEET_HOME)
+    if (client.generation != binding.host_generation
+            or not client._owner_live() or not client._app_server_live()):
+        raise FleetCliError("exact old host and app-server are not live")
+    _codex_idle_restoration_header(binding, client)
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    proof = {
+        "host": _codex_restore_host_identity(client),
+        "source": source, "link": link,
+        "prepared_at": time.time(),
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim or data != registry
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or _restored_continuation_context(live, data)[1] != link):
+            raise FleetCliError("restored continuation changed before preparation")
+        reduced = json.loads(json.dumps(live))
+        reduced.pop("restored_continuation_preflight", None)
+        proof["claim_digest"] = _digest(
+            "restored-continuation-claim", reduced)
+        proof["row_digest"] = _digest(
+            "restored-continuation-row", binding.record)
+        proof["inventory_digest"] = _digest(
+            "restored-continuation-inventory", data["workers"])
+        proof["mail"] = _codex_restore_mail_snapshot(binding.authority.value)
+        live["restored_continuation_preflight"] = proof
+        write_incarnation(live)
+    print("restored supervisor continuation prepared; prove exact Platform "
+          "host and app-server exit before explicit cold reattachment")
+    return 0
+
+
+def _restored_continuation_expectations(args, binding, link):
+    if (getattr(args, "expect_inc", None) != binding.incarnation_id
+            or getattr(args, "expect_thread", None) != binding.authority.value
+            or getattr(args, "expect_turn", None) != binding.current_turn_id
+            or getattr(args, "expect_resume_op", None) !=
+            link["original_operation_id"]
+            or getattr(args, "expect_restore_op", None) !=
+            link["restore_operation_id"]
+            or getattr(args, "expect_new_generation", None) !=
+            binding.host_generation):
+        raise FleetCliError("restored continuation expectations changed")
+
+
+def _reconcile_restored_continuation(claim) -> int:
+    """Settle an observed policy-bound reattach without replaying the RPC."""
+    from fleet_codex import OperationJournal, _digest
+
+    source = _codex_recovery_interface_source()
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(
+        claim, registry, allowed_states={"uncertain"})
+    pending = claim.get("pending_operation")
+    if (not isinstance(pending, dict)
+            or pending.get("kind") != "restored-continuation-reattach"
+            or pending.get("previous_generation") != binding.host_generation
+            or pending.get("previous_turn_id") != binding.current_turn_id):
+        raise FleetCliError("restored continuation reservation is ambiguous")
+    link = pending.get("restored_predecessor")
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    operation_id = pending.get("operation_id")
+    if (not isinstance(link, dict)
+            or journal.restored_policy_link(
+                fleet_name=binding.name, incarnation_id=binding.incarnation_id,
+                thread_id=binding.authority.value,
+                operation_id=operation_id) != link):
+        raise FleetCliError("restored continuation original link changed")
+    client = _codex_existing_client(FLEET_HOME)
+    if (not isinstance(operation_id, str)
+            or not operation_id.startswith("supervisor-continuation-")
+            or client.generation != pending.get("new_generation")
+            or claim.get("last_operation_id") != operation_id
+            or binding.record.get("last_operation_id") != operation_id
+            or binding.record.get("adapter_state") != "uncertain"):
+        raise FleetCliError("restored continuation host or intent changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "reserved-restored-continuation-claim", reduced)
+            or pending.get("reserved_inventory_digest") != _digest(
+                "reserved-restored-continuation-inventory", registry["workers"])
+            or pending.get("mail") != _codex_restore_mail_snapshot(
+                binding.authority.value)):
+        raise FleetCliError("restored continuation reservation changed")
+    params = {
+        "threadId": binding.authority.value, "excludeTurns": True,
+        "cwd": str(FLEET_HOME.resolve()), "model": link["model"],
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": "danger-full-access",
+    }
+    expected_recovery = {
+        "kind": "supervisor/restored-continuation-reattach",
+        "fleet_name": binding.name, "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "previous_host_generation": binding.host_generation,
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+        "restored_predecessor": link,
+    }
+    new_journal = OperationJournal(FLEET_HOME, client.generation)
+    record = new_journal.load(operation_id)
+    if (record.get("state") not in {"observed", "committed"}
+            or record.get("home") != str(FLEET_HOME.resolve())
+            or record.get("generation") != client.generation
+            or record.get("method") != "rpc"
+            or record.get("public_method") != "thread/resume"
+            or record.get("payload_digest") != _digest(
+                "rpc", {"method": "thread/resume", "params": params})
+            or record.get("recovery") != expected_recovery):
+        raise FleetCliError("restored continuation has no exact observed result")
+    _codex_restored_resume_result(record.get("result"), binding)
+    _codex_idle_restoration_header(binding, client)
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim or data != registry
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation !=
+                client.generation
+                or journal.restored_policy_link(
+                    fleet_name=binding.name,
+                    incarnation_id=binding.incarnation_id,
+                    thread_id=binding.authority.value,
+                    operation_id=operation_id) != link
+                or new_journal.load(operation_id) != record
+                or pending.get("mail") != _codex_restore_mail_snapshot(
+                    binding.authority.value)):
+            raise FleetCliError("restored continuation changed during settlement")
+        if record["state"] == "observed":
+            new_journal.commit(operation_id)
+        live["state"] = "held"
+        live.pop("pending_operation", None)
+        live.pop("uncertainty", None)
+        live.pop("restored_continuation_preflight", None)
+        live["host_generation"] = client.generation
+        live["provider_status"] = "idle"
+        row = data["workers"][binding.name]
+        row["adapter_state"] = "active"
+        row["status"] = "idle"
+        row["provider_status"] = "idle"
+        row["codex_host_generation"] = client.generation
+        write_incarnation(live)
+        save_registry(data)
+    print("restored supervisor reattached with exact recorded policy; "
+          "no turn or original intent was replayed")
+    return 0
+
+
+def _reattach_restored_continuation(args) -> int:
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("restored continuation requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    binding, link = _restored_continuation_context(claim, registry)
+    _restored_continuation_expectations(args, binding, link)
+    proof = _restored_continuation_preflight(
+        claim, registry, binding, link, source)
+    old_client = _codex_existing_client(FLEET_HOME)
+    if (proof["host"] != _codex_restore_host_identity(old_client)
+            or old_client._owner_live() or old_client._app_server_live()
+            or not old_client._metadata_stale()):
+        raise FleetCliError(
+            "exact old host and app-server must exit with stale heartbeat")
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim or data != registry
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or _restored_continuation_context(live, data)[1] != link):
+            raise FleetCliError("restored continuation changed before host creation")
+        _restored_continuation_preflight(live, data, binding, link, source)
+    client = _codex_native_client(FLEET_HOME)
+    if (client.generation in {old_client.generation,
+                              link["original_generation"]}
+            or getattr(client, "_launched_process", None) is None):
+        raise FleetCliError("continuation requires a fresh host generation")
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    operation_id = f"supervisor-continuation-{uuid.uuid4()}"
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim or data != registry
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation !=
+                client.generation
+                or _restored_continuation_context(live, data)[1] != link):
+            raise FleetCliError("restored continuation changed before reservation")
+        _restored_continuation_preflight(live, data, binding, link, source)
+        live["state"] = "uncertain"
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "restored-continuation-reattach",
+            "previous_generation": binding.host_generation,
+            "new_generation": client.generation,
+            "previous_turn_id": binding.current_turn_id,
+            "restored_predecessor": link,
+            "mail": proof["mail"],
+        }
+        live["last_operation_id"] = operation_id
+        live["uncertainty"] = "explicit restored continuation pending"
+        data["workers"][binding.name]["last_operation_id"] = operation_id
+        data["workers"][binding.name]["adapter_state"] = "uncertain"
+        live["pending_operation"]["reserved_inventory_digest"] = _digest(
+            "reserved-restored-continuation-inventory", data["workers"])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "reserved-restored-continuation-claim", live)
+        reserved_claim = json.loads(json.dumps(live))
+        reserved_registry = json.loads(json.dumps(data))
+        write_incarnation(live)
+        save_registry(data)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": binding.authority.value, "excludeTurns": True,
+            "cwd": str(FLEET_HOME.resolve()), "model": link["model"],
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": "danger-full-access"}},
+        "recovery": {
+            "kind": "supervisor/restored-continuation-reattach",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "previous_host_generation": binding.host_generation,
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+            "restored_predecessor": link,
+        },
+    }
+
+    def guard_reserved(live_claim):
+        data = read_registry_no_repair()
+        if (live_claim != reserved_claim
+                or data != reserved_registry
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation !=
+                client.generation
+                or _codex_restore_mail_snapshot(binding.authority.value) !=
+                proof["mail"]
+                or _restored_continuation_context_original_link(
+                    binding, link) is False):
+            raise FleetCliError("restored continuation changed before dispatch")
+
+    try:
+        _call_codex_supervisor_claimed(
+            client, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"uncertain"},
+            pre_call_guard=guard_reserved)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "restored continuation outcome uncertain; no reattach replayed") from exc
+    return _reconcile_restored_continuation(read_incarnation())
+
+
+def _restored_continuation_context_original_link(binding, link):
+    from fleet_codex import OperationJournal
+
+    return OperationJournal(
+        FLEET_HOME, binding.host_generation).restored_policy_link(
+            fleet_name=binding.name,
+            incarnation_id=binding.incarnation_id,
+            thread_id=binding.authority.value) == link
+
+
 def cmd_sup_reconcile(args) -> int:
     """Explicitly resume one exact native holder after a host-process restart.
 
@@ -19740,6 +20170,10 @@ def cmd_sup_reconcile(args) -> int:
         return _prepare_codex_supervisor_policy(args)
     if getattr(args, "restore_recorded_policy", False):
         return _restore_codex_supervisor_policy(args)
+    if getattr(args, "prepare_restored_continuation", False):
+        return _prepare_restored_continuation(args)
+    if getattr(args, "reattach_restored_continuation", False):
+        return _reattach_restored_continuation(args)
     claim = read_incarnation()
     if not _claim_uses_native_codex(claim):
         raise FleetCliError("sup-reconcile requires a native Codex supervisor claim")
@@ -19748,6 +20182,9 @@ def cmd_sup_reconcile(args) -> int:
         if (isinstance(pending, dict)
                 and pending.get("kind") == "resume-policy-restore"):
             return _reconcile_codex_restored_policy(claim)
+        if (isinstance(pending, dict)
+                and pending.get("kind") == "restored-continuation-reattach"):
+            return _reconcile_restored_continuation(claim)
         if (isinstance(pending, dict)
                 and pending.get("kind") == "thread/resume"):
             raise FleetCliError(
@@ -19769,6 +20206,17 @@ def cmd_sup_reconcile(args) -> int:
         claim, allowed_states=allowed_states)
     if claim.get("pending_operation") is not None:
         raise FleetCliError("native Codex supervisor operation is already pending")
+    if claim.get("state") == "held":
+        from fleet_codex import OperationJournal
+        linked = OperationJournal(
+            FLEET_HOME, binding.host_generation).restored_policy_link(
+                fleet_name=binding.name,
+                incarnation_id=binding.incarnation_id,
+                thread_id=binding.authority.value)
+        if linked is not None:
+            raise FleetCliError(
+                "restored supervisor requires explicit policy-bound continuation; "
+                "plain reconcile cannot resume its preserved observed predecessor")
     operation_id = f"supervisor-reconcile-{uuid.uuid4()}"
     _reserve_codex_supervisor_operation(
         binding, operation_id, "thread/resume",
@@ -23875,10 +24323,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--restore-recorded-policy", action="store_true",
         help="restore recorded bypass with a distinct policy-bound cold "
              "thread/resume after exact host and app-server exit proof")
+    policy_restore.add_argument(
+        "--prepare-restored-continuation", action="store_true",
+        help="pin the linked committed restoration, exact idle Platform "
+             "host, claim, row, inventory, journal, and mail before shutdown")
+    policy_restore.add_argument(
+        "--reattach-restored-continuation", action="store_true",
+        help="after exact host and child exit, cold resume the restored "
+             "supervisor with its recorded bypass policy and no new turn")
     p_supreconcile.add_argument("--expect-inc")
     p_supreconcile.add_argument("--expect-thread")
     p_supreconcile.add_argument("--expect-turn")
     p_supreconcile.add_argument("--expect-resume-op")
+    p_supreconcile.add_argument("--expect-restore-op")
     p_supreconcile.add_argument(
         "--expect-observed-generation", "--expect-new-generation",
         dest="expect_new_generation",
