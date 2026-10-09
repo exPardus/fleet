@@ -95,6 +95,14 @@ recoverable by the same exact invocation and evidence hash. No new worker,
 thread, turn, task, brief, mail, or callback is created or consumed. A future
 ordinary dispatch requires a separate decision and a new name or reviewed
 cleanup; this command does not replay the failed spawn.
+The bounded operation inventory requires an explicit, current or archived
+registry owner for every unrelated terminal journal; malformed or ownerless
+entries refuse. Any target inbox or claimed target mail refuses before the
+journal transition and is checked again before the row write. The registry,
+operation, callback, and mailbox scans have explicit size or entry bounds.
+The registry lock retains a live process owner past its age threshold, so a
+slow inventory or suspended writer cannot be replaced by another current
+Fleet CLI writer during the journal-first transition.
 
 ### 3.1 Current mcx adapter
 

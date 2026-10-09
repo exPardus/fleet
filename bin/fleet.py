@@ -841,6 +841,39 @@ class FleetLockTimeout(Exception):
     """Raised when state/fleet.lock could not be acquired within the timeout."""
 
 
+def _fleet_lock_live_owner(path: Path) -> bool:
+    """A delayed live owner must not be mistaken for a stale crashed owner."""
+    try:
+        raw = path.read_text(encoding="ascii")
+        modern = "|" in raw
+        parts = raw.split("|", 2) if modern else raw.split(":", 1)
+        pid = int(parts[0])
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, UnicodeError, IndexError):
+        return False
+    # The original token format contained only PID and nonce. Treat a live
+    # PID as ambiguous rather than unlinking a lock that might still be held.
+    if not modern or len(parts) != 3:
+        return True
+    if parts[1] == "unknown":
+        return True
+    try:
+        from fleet_codex import _process_identities_match, _process_identity
+        observed = _process_identity(pid)
+        if not isinstance(observed, str):
+            return True
+        matches = _process_identities_match(parts[1], observed)
+        return matches is not False
+    except Exception:  # noqa: BLE001 -- unknown liveness cannot authorize unlink
+        return True
+
+
 @contextmanager
 def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     """Lock one home's registry; ``home`` avoids changing global selection."""
@@ -849,7 +882,9 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
     fd = None
-    token = f"{os.getpid()}:{uuid.uuid4().hex}"
+    from fleet_codex import _process_identity
+    identity = _process_identity(os.getpid()) or "unknown"
+    token = f"{os.getpid()}|{identity}|{uuid.uuid4().hex}"
     while fd is None:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -858,7 +893,7 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
                 age = time.time() - path.stat().st_mtime
             except FileNotFoundError:
                 continue  # someone else already broke/released it; retry immediately
-            if age > LOCK_STALE_SECONDS:
+            if age > LOCK_STALE_SECONDS and not _fleet_lock_live_owner(path):
                 try:
                     path.unlink()
                 except FileNotFoundError:
@@ -6867,6 +6902,26 @@ def _codex_preaccept_artifact_matches(relative: str, digest: str,
     return len(raw) == info.st_size and hashlib.sha256(raw).hexdigest() == digest
 
 
+def _codex_preaccept_target_mail_absent(name: str) -> bool:
+    """An old unconsumed or claimed target message needs its own review."""
+    directory = mailbox_dir()
+    try:
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        count = 0
+        for path in directory.iterdir():
+            count += 1
+            if count > 1024:
+                return False
+            if (path.name == f"{name}.md"
+                    or path.name.startswith(f"{name}.md.claimed.")):
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def _codex_preaccept_write_failed(path: Path, value: dict) -> None:
     """Replace only the exact journal file; never expose partial JSON."""
     data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -6926,6 +6981,8 @@ def cmd_codex_settle_preaccept(args) -> int:
             or args.operation_id != evidence["operation_id"]
             or args.generation != evidence["generation"]):
         raise FleetCliError("worker preaccept invocation differs from reviewed evidence")
+    if not _codex_preaccept_target_mail_absent(args.name):
+        raise FleetCliError("worker preaccept target mail is present or ambiguous")
     if not _codex_preaccept_source_matches(evidence):
         raise FleetCliError("worker preaccept reviewed host/client source changed")
     if (not _codex_preaccept_artifact_matches(
@@ -6976,6 +7033,8 @@ def cmd_codex_settle_preaccept(args) -> int:
             raise FleetCliError("worker preaccept requires no supervisor claim")
         if not _codex_preaccept_source_matches(evidence):
             raise FleetCliError("worker preaccept source changed during settlement")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared")
         if (not _codex_preaccept_artifact_matches(
                 evidence["source"]["provenance_path"],
                 evidence["source"]["provenance_sha256"],
@@ -6995,6 +7054,12 @@ def cmd_codex_settle_preaccept(args) -> int:
                 or not heartbeat_fresh(current_host)
                 or not host_processes_match(current_host)):
             raise FleetCliError("worker preaccept host identity changed")
+        registry_info = registry_path().lstat()
+        if (not stat.S_ISREG(registry_info.st_mode)
+                or registry_info.st_uid != os.getuid()
+                or stat.S_IMODE(registry_info.st_mode) != 0o600
+                or registry_info.st_size > 1024 * 1024):
+            raise FleetCliError("worker preaccept registry ownership or size changed")
         data = read_registry_no_repair()
         row = data.get("workers", {}).get(args.name)
         record = journal.load(evidence["operation_id"])
@@ -7024,16 +7089,33 @@ def cmd_codex_settle_preaccept(args) -> int:
                 journal.path(evidence["operation_id"]).read_bytes()
                 ).hexdigest() != evidence["journal_sha256"]:
             raise FleetCliError("worker preaccept journal bytes changed")
+        operation_paths = []
+        operation_bytes = 0
+        for path in journal.directory.iterdir():
+            operation_paths.append(path)
+            if len(operation_paths) > 128:
+                raise FleetCliError("worker preaccept operation inventory exceeds bound")
+            info = path.lstat()
+            operation_bytes += info.st_size
+            if (path.suffix != ".json" or not path.stem
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_size > 128 * 1024
+                    or operation_bytes > 8 * 1024 * 1024):
+                raise FleetCliError("worker preaccept operation inventory is ambiguous")
         records = journal.records()
-        if any(path.suffix != ".json" or not path.stem
-               for path in journal.directory.iterdir()):
+        if len(records) != len(operation_paths):
             raise FleetCliError("worker preaccept operation inventory is ambiguous")
         if (len([item for item in records
                  if item.get("operation_id") == evidence["operation_id"]]) != 1
                 or any(item.get("operation_id") != evidence["operation_id"]
-                       and (item.get("state") not in {"committed", "failed"}
-                            or (isinstance(item.get("recovery"), dict)
-                                and item["recovery"].get("fleet_name") == args.name)
+                       and (not isinstance(item.get("recovery"), dict)
+                            or not isinstance(item["recovery"].get("fleet_name"), str)
+                            or not NAME_RE.fullmatch(item["recovery"]["fleet_name"])
+                            or item["recovery"]["fleet_name"] not in data["workers"]
+                            or item["recovery"]["fleet_name"] == args.name
+                            or item.get("state") not in {"committed", "failed"}
                             or (item.get("state") == "failed" and any(
                                 key in item for key in (
                                     "accepted_at", "observed_at", "uncertain_at"))))
@@ -7042,10 +7124,22 @@ def cmd_codex_settle_preaccept(args) -> int:
         approvals = FLEET_HOME / "state" / "codex" / "approvals"
         if approvals.exists() or approvals.is_symlink():
             _require_directory(approvals)
+            approval_count = 0
+            approval_bytes = 0
             for path in approvals.iterdir():
-                if (path.suffix != ".json" or not path.stem
+                approval_count += 1
+                info = path.lstat()
+                approval_bytes += info.st_size
+                if (approval_count > 128 or approval_bytes > 8 * 1024 * 1024
+                        or path.suffix != ".json" or not path.stem
+                        or not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_size > 128 * 1024
                         or (_read_json(path) or {}).get("state") != "resolved"):
                     raise FleetCliError("worker preaccept callback inventory is ambiguous")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared before transition")
         if record["state"] == "prepared":
             # This exact disposition is the only permitted transition.  It is
             # recoverable if the later registry write fails or the reply is lost.
@@ -7063,6 +7157,8 @@ def cmd_codex_settle_preaccept(args) -> int:
             record = journal.load(evidence["operation_id"])
         if not _codex_preaccept_original_journal(record, evidence, settlement):
             raise FleetCliError("worker preaccept journal changed after settlement")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared after journal")
         if (_registered_interface_mail_source() != source
                 or not _mail_source_is_current(source)):
             raise FleetCliError("worker preaccept Interface authority changed after journal")
@@ -7085,6 +7181,8 @@ def cmd_codex_settle_preaccept(args) -> int:
         if (read_registry_no_repair().get("workers", {}).get(args.name) != row
                 or journal.load(evidence["operation_id"]) != record):
             raise FleetCliError("worker preaccept settlement changed during commit")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared after settlement")
     print(f"{args.name}: original preaccept authentication rejection settled; "
           "worker remains terminal and no provider mutation was sent")
     return 0

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import threading
 from types import SimpleNamespace
 import time
 
@@ -34,7 +35,9 @@ def preaccept_home(tmp_path, monkeypatch):
         "task": "original task", "created": "2026-10-09T00:00:00Z",
     }
     sibling = {"status": "working", "task": "unrelated"}
-    fleet.save_registry({"workers": {name: row, "sibling": sibling},
+    site_owner = {"status": "dead", "task": "separate failed predecessor"}
+    fleet.save_registry({"workers": {name: row, "sibling": sibling,
+                                     "site-agent-readiness-native": site_owner},
                          "unrelated_top_level": {"keep": True}})
     journal = fleet_codex.OperationJournal(tmp_path, generation)
     digest, recovery = fleet._codex_preaccept_expected_intent(
@@ -128,12 +131,13 @@ def preaccept_home(tmp_path, monkeypatch):
                            _fleet_home_explicit=True)
     preserved = {}
     for filename in ("state/tasks/root-worker.md", "state/briefs/root-worker.md",
-                     "mailbox/root-worker.md"):
+                     "mailbox/sibling.md"):
         target = tmp_path / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(filename, encoding="utf-8")
         preserved[filename] = target.read_bytes()
     return SimpleNamespace(home=tmp_path, name=name, row=row, sibling=sibling,
+                           site_owner=site_owner,
                            journal=journal, record=record, evidence=evidence,
                            evidence_path=path, args=args, source=source,
                            preserved=preserved, site_operation=site_operation,
@@ -144,6 +148,7 @@ def preaccept_home(tmp_path, monkeypatch):
 def _assert_preserved(case):
     data = fleet.read_registry_no_repair()
     assert data["workers"]["sibling"] == case.sibling
+    assert data["workers"]["site-agent-readiness-native"] == case.site_owner
     assert data["unrelated_top_level"] == {"keep": True}
     for filename, content in case.preserved.items():
         assert (case.home / filename).read_bytes() == content
@@ -250,6 +255,7 @@ def test_cli_exposes_exact_supported_method():
     "supervisor-claim", "same-worker-intent", "accepted-marker-failed",
     "provenance-drift", "report-drift", "provenance-symlink",
     "host-process-drift", "child-process-drift", "unknown-operation-entry",
+    "target-mail", "target-claimed-mail", "ownerless-terminal",
 ])
 def test_ambiguity_refuses_without_target_write(preaccept_home, monkeypatch, kind):
     case = preaccept_home
@@ -318,6 +324,21 @@ def test_ambiguity_refuses_without_target_write(preaccept_home, monkeypatch, kin
             "fake-host-start" if pid == os.getpid() else "different-child"))
     elif kind == "unknown-operation-entry":
         (case.journal.directory / "unindexed-entry").write_text("unknown\n")
+    elif kind == "target-mail":
+        (case.home / "mailbox" / f"{case.name}.md").write_text("new target mail\n")
+    elif kind == "target-claimed-mail":
+        (case.home / "mailbox" / f"{case.name}.md.claimed.123").write_text(
+            "unconsumed claimed mail\n")
+    elif kind == "ownerless-terminal":
+        other = "other-failed-unknown-owner"
+        case.journal.prepare({"operation_id": other, "method": "rpc",
+                              "payload": {"method": "thread/start", "params": {}},
+                              "recovery": {"kind": "thread/start",
+                                           "fleet_name": "sibling"}})
+        case.journal.fail(other, "before acceptance")
+        record = case.journal.load(other)
+        record["recovery"] = None
+        fleet_codex._atomic_json(case.journal.path(other), record)
     target_before = case.journal.path(case.args.operation_id).read_bytes()
     row_before = fleet.read_registry_no_repair()["workers"][case.name]
     with pytest.raises((fleet.FleetCliError, fleet_codex.UnsafeHostState)):
@@ -344,4 +365,103 @@ def test_journal_drift_after_inventory_refuses_before_transition(
         fleet.cmd_codex_settle_preaccept(case.args)
     assert case.journal.load(case.args.operation_id)["state"] == "accepted"
     assert fleet.read_registry_no_repair()["workers"][case.name] == case.row
+    _assert_preserved(case)
+
+
+@pytest.mark.parametrize("window", ["before-journal", "after-journal"])
+def test_delayed_live_lock_owner_cannot_be_stale_broken_through_both_writes(
+        preaccept_home, monkeypatch, window):
+    case = preaccept_home
+    monkeypatch.setattr(fleet, "LOCK_STALE_SECONDS", 0.03)
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+    if window == "before-journal":
+        original = fleet_codex.OperationJournal.records
+
+        def paused(self):
+            records = original(self)
+            if self.home == case.home:
+                entered.set()
+                assert release.wait(3), "review pause expired"
+            return records
+
+        monkeypatch.setattr(fleet_codex.OperationJournal, "records", paused)
+    else:
+        original = fleet._codex_preaccept_write_failed
+
+        def paused(path, value):
+            original(path, value)
+            entered.set()
+            assert release.wait(3), "review pause expired"
+
+        monkeypatch.setattr(fleet, "_codex_preaccept_write_failed", paused)
+
+    def first():
+        try:
+            fleet.cmd_codex_settle_preaccept(case.args)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    try:
+        assert entered.wait(3), "settlement did not reach delayed window"
+        time.sleep(0.07)
+        with pytest.raises(fleet.FleetLockTimeout):
+            with fleet.fleet_lock(timeout=0.15):
+                pytest.fail("second owner entered through a stale live lock")
+    finally:
+        release.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    assert not errors
+    assert fleet.read_registry_no_repair()["workers"][case.name]["status"] == "dead"
+    _assert_preserved(case)
+
+
+def test_aged_legacy_live_owner_token_is_not_broken(preaccept_home):
+    path = fleet.lock_path()
+    path.write_text(f"{os.getpid()}:legacy-nonce", encoding="ascii")
+    old = time.time() - 60
+    os.utime(path, (old, old))
+    try:
+        with pytest.raises(fleet.FleetLockTimeout):
+            with fleet.fleet_lock(timeout=0.12):
+                pytest.fail("legacy live owner was stale-broken")
+    finally:
+        path.unlink()
+
+
+def test_aged_modern_dead_owner_token_is_recoverable(preaccept_home):
+    path = fleet.lock_path()
+    path.write_text("999999999|dead-start|nonce", encoding="ascii")
+    old = time.time() - 60
+    os.utime(path, (old, old))
+    with fleet.fleet_lock(timeout=0.5):
+        assert path.exists()
+    assert not path.exists()
+
+
+def test_target_mail_arriving_after_journal_write_preserves_partial_recovery(
+        preaccept_home, monkeypatch):
+    case = preaccept_home
+    mail = case.home / "mailbox" / f"{case.name}.md"
+    original = fleet._codex_preaccept_write_failed
+
+    def write_then_deliver(path, value):
+        original(path, value)
+        mail.write_text("new target instruction\n", encoding="utf-8")
+
+    monkeypatch.setattr(fleet, "_codex_preaccept_write_failed", write_then_deliver)
+    with pytest.raises(fleet.FleetCliError, match="target mail appeared after journal"):
+        fleet.cmd_codex_settle_preaccept(case.args)
+    assert case.journal.load(case.args.operation_id)["state"] == "failed"
+    assert fleet.read_registry_no_repair()["workers"][case.name] == case.row
+    assert mail.read_text(encoding="utf-8") == "new target instruction\n"
+    _assert_preserved(case)
+
+    monkeypatch.setattr(fleet, "_codex_preaccept_write_failed", original)
+    mail.unlink()
+    assert fleet.cmd_codex_settle_preaccept(case.args) == 0
     _assert_preserved(case)
