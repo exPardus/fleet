@@ -90,6 +90,16 @@ for line in sys.stdin:
     elif message.get("method") == "thread/start":
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
+    elif message.get("method") == "thread/resume":
+        params = message.get("params", {{}})
+        send({{"id": message["id"], "result": {{
+            "thread": {{"id": params.get("threadId"),
+                         "cwd": params.get("cwd")}},
+            "cwd": params.get("cwd"), "model": params.get("model"),
+            "approvalPolicy": params.get("approvalPolicy"),
+            "approvalsReviewer": params.get("approvalsReviewer"),
+            "sandbox": {{"type": "dangerFullAccess"}},
+        }}}})
     elif (message.get("method") == "turn/start"
           and os.environ.get("FAKE_OVERSIZE_TURN_RESULT") == "1"):
         send({{"id": message["id"], "result": {{

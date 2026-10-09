@@ -608,6 +608,40 @@ codex:<model>`.
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and
 never creates a second supervisor body.
+The effective policy in a successful public `thread/resume` response is checked
+against the supervisor row's requested Fleet mode before generation adoption.
+For example, `workspaceWrite` under a recorded `bypass`/`dangerFullAccess`
+holder is a mismatch even if the thread and newest turn still match. Fleet
+keeps the original generation and uncertain claim, preserves the accepted or
+observed new-generation journal and all mail, and never repeats that resume
+or starts a turn. The normal resume builder supplies only the existing thread
+ID and `excludeTurns=true`.
+For an original `bypass` holder with an exact observed `workspaceWrite` resume,
+the current registered Codex Interface first runs
+`sup-reconcile --prepare-recorded-policy-restore` with explicit `--fleet-home`
+and exact expected incarnation, thread, turn, original resume operation, and
+observed host generation. This records a five-minute claim-bound proof of the
+original journal, current managed requirements, and bounded public
+idle/completed/no-new-turn evidence. It durably pins the exact prepared
+supervisor claim and row plus the thread inbox and claimed-mail identities and
+digests. Any later supervisor or target-mail change refuses before host
+creation, before provider dispatch, and before settlement; unrelated product
+worker rows may change. A loaded thread may be idle, and pinned
+0.155.1 ignores resume policy overrides for a loaded thread; `thread/unsubscribe`
+does not unload it. The exact observed Platform host and app-server child must
+exit and its heartbeat become stale. Then `--restore-recorded-policy` with the
+same pins creates only a fresh Platform host, validates the preflight and cold
+boundary, and reserves a new auditable resume intent. The pinned public
+`thread/resume` request supplies `threadId`,
+`excludeTurns=true`, canonical `cwd`, recorded `model`, `approvalPolicy=never`,
+`approvalsReviewer=user`, and `sandbox=danger-full-access`. A narrow host
+journal gate permits this linked request behind only the matching observed
+original intent from the prior generation. The original journal stays observed.
+Fleet adopts the fresh generation only after an exact effective bypass response,
+repeat public header, and locked claim/row/mail/source/host/journal comparison. An
+accepted but unverified new response remains uncertain; read-only reconcile can
+settle only its exact observed new operation. No turn is replayed or newly
+started.
 
 ### 10.4 Retiring an absent legacy Claude claim
 

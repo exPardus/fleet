@@ -2598,7 +2598,8 @@ def _resume_codex_worker_on_current_host(
                 or {thread.get("cwd"), result.get("cwd")} != {binding.cwd}):
             raise FleetCliError(
                 f"{binding.name}: native Codex resumed the wrong worker thread")
-        _validate_codex_thread_effective(result, requested_model, profile)
+        _validate_codex_thread_effective(
+            result, requested_model, profile, verb="thread/resume")
         rebound = CodexWorkerBinding(
             name=binding.name, thread_id=binding.thread_id,
             turn_id=binding.turn_id, host_generation=client.generation,
@@ -2938,7 +2939,8 @@ def _codex_supervisor_holder_matches(
 
 
 def _call_codex_supervisor_claimed(client, incarnation_id, authority,
-                                   operation, timeout, *, allowed_states=None):
+                                   operation, timeout, *, allowed_states=None,
+                                   pre_call_guard=None):
     """Call only while the exact provider holder still owns the claim.
 
     This is the mutation boundary for the initial supervisor slice. A supplied
@@ -2958,6 +2960,8 @@ def _call_codex_supervisor_claimed(client, incarnation_id, authority,
                      or pending.get("operation_id") != operation.get("operation_id"))):
             raise FleetCliError(
                 "another native Codex supervisor operation owns the claim")
+        if pre_call_guard is not None:
+            pre_call_guard(claim)
     return client.call(operation, timeout=timeout)
 
 
@@ -6632,10 +6636,13 @@ def _rollback_codex_preclaim(name, expected_record, prior_brief, prior_task):
     return removed
 
 
-def _validate_codex_thread_effective(thread_result, requested_model, profile):
+def _validate_codex_thread_effective(
+        thread_result, requested_model, profile, *, verb="thread/start"):
+    if verb not in {"thread/start", "thread/resume"}:
+        raise ValueError("unsupported Codex thread policy validation verb")
     if thread_result.get("model") != requested_model:
         raise FleetCliError(
-            f"Codex thread/start effective model mismatch: expected {requested_model!r}, "
+            f"Codex {verb} effective model mismatch: expected {requested_model!r}, "
             f"got {thread_result.get('model')!r}")
     approval = thread_result.get("approvalPolicy")
     reviewer = thread_result.get("approvalsReviewer")
@@ -6650,15 +6657,15 @@ def _validate_codex_thread_effective(thread_result, requested_model, profile):
     }
     if (expected_approval is not None and approval != expected_approval) or (
             expected_approval is None and approval not in known_approvals):
-        raise FleetCliError("Codex thread/start effective approval policy mismatch")
+        raise FleetCliError(f"Codex {verb} effective approval policy mismatch")
     if reviewer != "user":
-        raise FleetCliError("Codex thread/start effective approvals reviewer mismatch")
+        raise FleetCliError(f"Codex {verb} effective approvals reviewer mismatch")
     sandbox_type = sandbox.get("type") if isinstance(sandbox, dict) else None
     if (expected_sandbox is not None
             and sandbox_type != known_sandboxes[expected_sandbox]) or (
                 expected_sandbox is None
                 and sandbox_type not in set(known_sandboxes.values())):
-        raise FleetCliError("Codex thread/start effective sandbox mismatch")
+        raise FleetCliError(f"Codex {verb} effective sandbox mismatch")
 
 
 def _commit_codex_journal(client, name, journal_operation_id,
@@ -18585,7 +18592,8 @@ def _reconcile_codex_activating() -> int:
                         str(FLEET_HOME.resolve())}):
                 raise FleetCliError(
                     "native Codex activating resume returned the wrong thread")
-            _validate_codex_thread_effective(result, bare_model, profile)
+            _validate_codex_thread_effective(
+                result, bare_model, profile, verb="thread/resume")
             resumed_observed = _codex_activation_observe(client, binding)
             if resumed_observed["turn_id"] != observed["turn_id"]:
                 raise FleetCliError(
@@ -19193,16 +19201,559 @@ def _reconcile_codex_rejected_preclaim(claim) -> int:
     return 0
 
 
+def _codex_resume_restore_context(claim, observed_generation):
+    """Pin the old observed resume and original bypass policy, without replay."""
+    from fleet_codex import OperationJournal, _digest
+
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(
+        claim, registry, allowed_states={"uncertain"})
+    pending = claim.get("pending_operation")
+    if not isinstance(pending, dict):
+        raise FleetCliError("native Codex resume restoration has no pending intent")
+    kind = pending.get("kind")
+    if kind not in {"thread/resume", "resume-policy-restore"}:
+        raise FleetCliError("native Codex resume restoration has wrong pending kind")
+    operation_id = pending.get("operation_id")
+    original_id = (operation_id if kind == "thread/resume" else
+                   pending.get("original_resume_operation_id"))
+    if (not isinstance(operation_id, str)
+            or not operation_id.startswith("supervisor-")
+            or not isinstance(original_id, str)
+            or not original_id.startswith("supervisor-reconcile-")
+            or claim.get("last_operation_id") != operation_id
+            or binding.record.get("last_operation_id") != operation_id
+            or binding.record.get("adapter_state") != "uncertain"
+            or pending.get("previous_turn_id") != binding.current_turn_id
+            or observed_generation == binding.host_generation
+            or (kind == "resume-policy-restore"
+                and pending.get("observed_resume_generation") !=
+                observed_generation)):
+        raise FleetCliError("native Codex resume restoration identity is ambiguous")
+    if binding.record.get("mode") != "bypass":
+        raise FleetCliError("native Codex resume restoration requires recorded bypass mode")
+    original_effective = {
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": {"type": "dangerFullAccess"},
+    }
+    if binding.record.get("permission_effective") != original_effective:
+        raise FleetCliError(
+            "native Codex recorded bypass effective policy is incomplete")
+    journal = OperationJournal(FLEET_HOME, observed_generation)
+    old_record = journal.load(original_id)
+    expected_recovery = {
+        "kind": "supervisor/thread-resume",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "previous_host_generation": binding.host_generation,
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+    }
+    old_payload = {"method": "thread/resume", "params": {
+        "threadId": binding.authority.value, "excludeTurns": True}}
+    if (old_record.get("state") != "observed"
+            or old_record.get("home") != str(FLEET_HOME.resolve())
+            or old_record.get("generation") != observed_generation
+            or old_record.get("method") != "rpc"
+            or old_record.get("public_method") != "thread/resume"
+            or old_record.get("payload_digest") != _digest("rpc", old_payload)
+            or old_record.get("recovery") != expected_recovery):
+        raise FleetCliError(
+            "native Codex original resume is not an exact observed intent")
+    result = old_record.get("result")
+    thread = result.get("thread") if isinstance(result, dict) else None
+    sandbox = result.get("sandbox") if isinstance(result, dict) else None
+    if (not isinstance(thread, dict)
+            or thread.get("id") != binding.authority.value
+            or thread.get("cwd") != str(FLEET_HOME.resolve())
+            or result.get("cwd") != str(FLEET_HOME.resolve())
+            or result.get("model") != _codex_model_slug(binding.record.get("model"))
+            or result.get("approvalPolicy") != "never"
+            or result.get("approvalsReviewer") != "user"
+            or not isinstance(sandbox, dict)
+            or sandbox.get("type") != "workspaceWrite"):
+        raise FleetCliError(
+            "native Codex original resume has different or incomplete policy evidence")
+    return binding, pending, original_id, journal, old_record
+
+
+def _codex_restored_resume_result(result, binding) -> None:
+    """Require the explicit response to restore the original effective tuple."""
+    if not isinstance(result, dict):
+        raise FleetCliError("native Codex restored resume response is malformed")
+    thread = result.get("thread")
+    if (not isinstance(thread, dict)
+            or thread.get("id") != binding.authority.value
+            or {thread.get("cwd"), result.get("cwd")} != {
+                str(FLEET_HOME.resolve())}):
+        raise FleetCliError("native Codex restored resume has wrong thread or home")
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_thread_effective(
+        result, _codex_model_slug(binding.record.get("model")), profile,
+        verb="thread/resume")
+    if {key: result.get(key) for key in (
+            "approvalPolicy", "approvalsReviewer", "sandbox")} != \
+            binding.record["permission_effective"]:
+        raise FleetCliError(
+            "native Codex restored resume differs from recorded effective policy")
+    active_profile = result.get("activePermissionProfile")
+    if (isinstance(active_profile, dict)
+            and active_profile.get("id") == ":workspace"):
+        raise FleetCliError(
+            "native Codex restored resume still reports workspace profile")
+
+
+def _codex_idle_restoration_header(binding, client) -> None:
+    observed = _codex_rejected_send_public_header(binding, client)
+    if observed != {"provider_status": "idle", "turn_status": "completed"}:
+        raise FleetCliError(
+            "native Codex resume restoration requires idle completed bound turn")
+
+
+def _codex_restore_expectations(args, binding, original_id,
+                                observed_generation) -> None:
+    if (getattr(args, "expect_inc", None) != binding.incarnation_id
+            or getattr(args, "expect_thread", None) != binding.authority.value
+            or getattr(args, "expect_turn", None) != binding.current_turn_id
+            or getattr(args, "expect_resume_op", None) != original_id
+            or getattr(args, "expect_new_generation", None) !=
+            observed_generation):
+        raise FleetCliError(
+            "recorded-policy restoration expectations do not match exact claim")
+
+
+def _codex_restore_one_predecessor(journal, original_id) -> None:
+    outstanding = [record for record in journal.records()
+                   if record.get("state") in {
+                       "prepared", "accepted", "observed", "uncertain"}]
+    if (len(outstanding) != 1
+            or outstanding[0].get("operation_id") != original_id
+            or outstanding[0].get("state") != "observed"):
+        raise FleetCliError(
+            "native Codex policy restoration has another unresolved journal")
+
+
+def _codex_restore_host_identity(client) -> dict:
+    return {
+        "generation": client.generation,
+        "host_pid": client.host_pid,
+        "host_process_identity": client.host_process_identity,
+        "app_server_pid": client.app_server_pid,
+        "app_server_process_identity": client.app_server_process_identity,
+    }
+
+
+def _codex_restore_claim_without_proof(claim: dict) -> dict:
+    """Canonical prepared claim, excluding only this recovery's own proof."""
+    value = json.loads(json.dumps(claim))
+    pending = value.get("pending_operation")
+    if not isinstance(pending, dict):
+        raise FleetCliError("native Codex restoration pending claim is malformed")
+    pending.pop("policy_restore_preflight", None)
+    return value
+
+
+def _codex_restore_mail_snapshot(thread_id: str) -> list[dict]:
+    """Pin the exact inbox and claimed files without following replacements."""
+    target = mailbox_dir() / f"{thread_id}.md"
+    try:
+        claimed = sorted(mailbox_dir().glob(f"{thread_id}.md.claimed.*"))
+        if len(claimed) > 32:
+            raise FleetCliError("native Codex target claimed mail is ambiguous")
+        paths = [target, *claimed]
+        snapshot = []
+        for path in paths:
+            try:
+                before = path.lstat()
+            except FileNotFoundError:
+                if path == target:
+                    continue
+                raise FleetCliError("native Codex target claimed mail changed")
+            if not stat.S_ISREG(before.st_mode) or before.st_size > 16 * 1024 * 1024:
+                raise FleetCliError("native Codex target mail is unsafe or oversized")
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(fd)
+                digest = hashlib.sha256()
+                size = 0
+                while True:
+                    chunk = os.read(fd, 64 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > 16 * 1024 * 1024:
+                        raise FleetCliError("native Codex target mail exceeds recovery bound")
+                    digest.update(chunk)
+                closed = os.fstat(fd)
+            finally:
+                os.close(fd)
+            after = path.lstat()
+            signature = lambda row: (
+                row.st_dev, row.st_ino, row.st_size,
+                row.st_mtime_ns, row.st_ctime_ns)
+            if (signature(before) != signature(opened)
+                    or signature(opened) != signature(closed)
+                    or signature(closed) != signature(after)
+                    or size != after.st_size):
+                raise FleetCliError("native Codex target mail changed during proof")
+            snapshot.append({
+                "name": path.name, "dev": after.st_dev, "ino": after.st_ino,
+                "size": size, "mtime_ns": after.st_mtime_ns,
+                "ctime_ns": after.st_ctime_ns, "sha256": digest.hexdigest(),
+            })
+        return snapshot
+    except OSError as exc:
+        raise FleetCliError("native Codex target mail cannot be proved") from exc
+
+
+def _codex_restore_preflight_state(proof, claim, row, thread_id) -> None:
+    """Reject any same-supervisor progress since the durable preparation."""
+    from fleet_codex import _digest
+
+    if (not isinstance(proof, dict)
+            or proof.get("claim_digest") != _digest(
+                "prepared-supervisor-claim",
+                _codex_restore_claim_without_proof(claim))
+            or proof.get("row_digest") != _digest(
+                "prepared-supervisor-row", row)
+            or proof.get("mail") != _codex_restore_mail_snapshot(thread_id)):
+        raise FleetCliError(
+            "native Codex prepared claim, supervisor row, or target mail changed")
+
+
+def _codex_restore_reserved_state(pending, claim, row, thread_id) -> None:
+    """Keep the post-reservation row and claim fixed through settlement."""
+    from fleet_codex import _digest
+
+    if not isinstance(pending, dict):
+        raise FleetCliError("native Codex restoration reservation is malformed")
+    reduced = json.loads(json.dumps(claim))
+    reduced_pending = reduced.get("pending_operation")
+    if not isinstance(reduced_pending, dict):
+        raise FleetCliError("native Codex restoration claim is malformed")
+    reduced_pending.pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "reserved-supervisor-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "reserved-supervisor-row", row)
+            or pending.get("prepared_mail") != _codex_restore_mail_snapshot(thread_id)):
+        raise FleetCliError(
+            "native Codex reserved claim, supervisor row, or target mail changed")
+
+
+def _prepare_codex_supervisor_policy(args) -> int:
+    """Record a fresh bounded old-host idle proof before its cold shutdown."""
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError(
+            "recorded-policy preparation requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    client = _codex_existing_client(FLEET_HOME)
+    binding, pending, original_id, journal, old_record = \
+        _codex_resume_restore_context(claim, client.generation)
+    if pending.get("kind") != "thread/resume":
+        raise FleetCliError("native Codex original resume is no longer pending")
+    _codex_restore_expectations(args, binding, original_id, client.generation)
+    _codex_restore_one_predecessor(journal, original_id)
+    if not client._owner_live() or not client._app_server_live():
+        raise FleetCliError("native Codex observed host is not fully live for proof")
+    _codex_idle_restoration_header(binding, client)
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    proof = {
+        "host": _codex_restore_host_identity(client),
+        "source": source, "journal_digest": _digest("proof", old_record),
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "original_resume_operation_id": original_id,
+        "provider_status": "idle", "turn_status": "completed",
+        "observed_at": time.time(),
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(original_id) != old_record):
+            raise FleetCliError(
+                "native Codex claim, source, host, or journal changed before proof")
+        proof["claim_digest"] = _digest(
+            "prepared-supervisor-claim",
+            _codex_restore_claim_without_proof(live))
+        proof["row_digest"] = _digest(
+            "prepared-supervisor-row", data["workers"][binding.name])
+        proof["mail"] = _codex_restore_mail_snapshot(binding.authority.value)
+        live["pending_operation"]["policy_restore_preflight"] = proof
+        write_incarnation(live)
+    print("native Codex policy restoration preflight recorded; shut down only "
+          "this exact Platform host and prove host and app-server exit before "
+          "explicit cold restoration")
+    return 0
+
+
+def _reconcile_codex_restored_policy(claim) -> int:
+    """Adopt one already observed explicit restoration without provider replay."""
+    from fleet_codex import OperationJournal, _digest
+
+    source = _codex_recovery_interface_source()
+    client = _codex_existing_client(FLEET_HOME)
+    pending = claim.get("pending_operation")
+    observed_generation = (pending.get("observed_resume_generation")
+                           if isinstance(pending, dict) else None)
+    binding, pending, original_id, journal, old_record = \
+        _codex_resume_restore_context(claim, observed_generation)
+    if pending.get("kind") != "resume-policy-restore":
+        raise FleetCliError("native Codex explicit restoration is not pending")
+    if pending.get("new_generation") != client.generation:
+        raise FleetCliError("native Codex restoration host generation changed")
+    _codex_restore_reserved_state(
+        pending, claim, binding.record, binding.authority.value)
+    operation_id = pending["operation_id"]
+    params = {
+        "threadId": binding.authority.value, "excludeTurns": True,
+        "cwd": str(FLEET_HOME.resolve()),
+        "model": _codex_model_slug(binding.record.get("model")),
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": "danger-full-access",
+    }
+    expected_recovery = {
+        "kind": "supervisor/resume-policy-restore",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "previous_host_generation": binding.host_generation,
+        "observed_resume_generation": observed_generation,
+        "original_resume_operation_id": original_id,
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+    }
+    restored_journal = OperationJournal(FLEET_HOME, client.generation)
+    restored = restored_journal.load(operation_id)
+    if (restored.get("state") not in {"observed", "committed"}
+            or restored.get("home") != str(FLEET_HOME.resolve())
+            or restored.get("generation") != client.generation
+            or restored.get("method") != "rpc"
+            or restored.get("public_method") != "thread/resume"
+            or restored.get("payload_digest") != _digest(
+                "rpc", {"method": "thread/resume", "params": params})
+            or restored.get("recovery") != expected_recovery):
+        raise FleetCliError(
+            "native Codex explicit restoration has no exact observed result")
+    _codex_restored_resume_result(restored.get("result"), binding)
+    _codex_idle_restoration_header(binding, client)
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(original_id) != old_record
+                or restored_journal.load(operation_id) != restored):
+            raise FleetCliError(
+                "native Codex claim, source, host, or journal changed during restoration")
+        _codex_restore_reserved_state(
+            pending, live, data["workers"][binding.name],
+            binding.authority.value)
+        if restored["state"] == "observed":
+            restored_journal.commit(operation_id)
+        live["state"] = "held"
+        live.pop("pending_operation", None)
+        live.pop("uncertainty", None)
+        live["host_generation"] = client.generation
+        live["provider_status"] = "idle"
+        live["last_operation_id"] = operation_id
+        row = data["workers"][binding.name]
+        row["adapter_state"] = pending.get("previous_adapter_state") or "active"
+        row["status"] = "idle"
+        row["provider_status"] = "idle"
+        row["codex_host_generation"] = client.generation
+        row["last_operation_id"] = operation_id
+        write_incarnation(live)
+        save_registry(data)
+    print("native Codex recorded supervisor policy restored on the existing "
+          "thread; no turn or original resume was replayed")
+    return 0
+
+
+def _restore_codex_supervisor_policy(args) -> int:
+    """Issue one policy-bound cold resume after the proved old host exits."""
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError(
+            "recorded-policy restoration requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    old_client = _codex_existing_client(FLEET_HOME)
+    binding, pending, original_id, journal, old_record = \
+        _codex_resume_restore_context(claim, old_client.generation)
+    if pending.get("kind") != "thread/resume":
+        raise FleetCliError(
+            "native Codex original resume is no longer pending")
+    _codex_restore_expectations(
+        args, binding, original_id, old_client.generation)
+    proof = pending.get("policy_restore_preflight")
+    if (not isinstance(proof, dict)
+            or proof.get("host") != _codex_restore_host_identity(old_client)
+            or proof.get("source") != source
+            or proof.get("journal_digest") != _digest("proof", old_record)
+            or proof.get("incarnation_id") != binding.incarnation_id
+            or proof.get("thread_id") != binding.authority.value
+            or proof.get("turn_id") != binding.current_turn_id
+            or proof.get("original_resume_operation_id") != original_id
+            or proof.get("provider_status") != "idle"
+            or proof.get("turn_status") != "completed"
+            or isinstance(proof.get("observed_at"), bool)
+            or not isinstance(proof.get("observed_at"), (int, float))
+            or not 0 <= time.time() - proof["observed_at"] <= 300):
+        raise FleetCliError(
+            "native Codex cold restoration lacks fresh exact preflight proof")
+    _codex_restore_preflight_state(
+        proof, claim, binding.record, binding.authority.value)
+    _codex_restore_one_predecessor(journal, original_id)
+    if (old_client._owner_live() or old_client._app_server_live()
+            or not old_client._metadata_stale()):
+        raise FleetCliError(
+            "native Codex observed host and app-server must fully exit and "
+            "host heartbeat become stale before cold restoration")
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(original_id) != old_record):
+            raise FleetCliError(
+                "native Codex claim, source, host, or journal changed before cold start")
+        _codex_restore_preflight_state(
+            proof, live, data["workers"][binding.name],
+            binding.authority.value)
+    client = _codex_native_client(FLEET_HOME)
+    if (client.generation == old_client.generation
+            or client.generation == binding.host_generation
+            or getattr(client, "_launched_process", None) is None):
+        raise FleetCliError(
+            "native Codex restoration requires a freshly launched host generation")
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    operation_id = f"supervisor-restore-policy-{uuid.uuid4()}"
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(original_id) != old_record):
+            raise FleetCliError(
+                "native Codex claim, source, host, or journal changed before restoration")
+        _codex_restore_preflight_state(
+            proof, live, data["workers"][binding.name],
+            binding.authority.value)
+        live["pending_operation"] = {
+            "operation_id": operation_id, "kind": "resume-policy-restore",
+            "original_resume_operation_id": original_id,
+            "observed_resume_generation": old_client.generation,
+            "new_generation": client.generation,
+            "previous_turn_id": binding.current_turn_id,
+            "previous_adapter_state": pending.get("previous_adapter_state"),
+            "prior_uncertainty": live.get("uncertainty"),
+            "prepared_claim_digest": proof["claim_digest"],
+            "prepared_row_digest": proof["row_digest"],
+            "prepared_mail": proof["mail"],
+        }
+        live["last_operation_id"] = operation_id
+        live["uncertainty"] = "explicit recorded-policy restoration pending"
+        data["workers"][binding.name]["last_operation_id"] = operation_id
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "reserved-supervisor-row", data["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "reserved-supervisor-claim", live)
+        write_incarnation(live)
+        save_registry(data)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": binding.authority.value, "excludeTurns": True,
+            "cwd": str(FLEET_HOME.resolve()),
+            "model": _codex_model_slug(binding.record.get("model")),
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": "danger-full-access",
+        }},
+        "recovery": {
+            "kind": "supervisor/resume-policy-restore",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "previous_host_generation": binding.host_generation,
+            "observed_resume_generation": old_client.generation,
+            "original_resume_operation_id": original_id,
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+        },
+    }
+
+    def guard_reserved_before_dispatch(live_claim):
+        data = read_registry_no_repair()
+        row = data["workers"].get(binding.name)
+        current_pending = live_claim.get("pending_operation")
+        if (not isinstance(current_pending, dict)
+                or current_pending.get("operation_id") != operation_id
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(original_id) != old_record):
+            raise FleetCliError(
+                "native Codex restoration changed before provider dispatch")
+        _codex_restore_reserved_state(
+            current_pending, live_claim, row, binding.authority.value)
+
+    try:
+        _call_codex_supervisor_claimed(
+            client, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"uncertain"},
+            pre_call_guard=guard_reserved_before_dispatch)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "native Codex explicit policy restoration is uncertain; "
+            "the distinct resume intent was not replayed") from exc
+    return _reconcile_codex_restored_policy(read_incarnation())
+
+
 def cmd_sup_reconcile(args) -> int:
     """Explicitly resume one exact native holder after a host-process restart.
 
     This verb never creates a thread, body, or turn. Ambiguous accepted resume
     evidence freezes the claim so an operator cannot accidentally replay it.
     """
+    if getattr(args, "prepare_recorded_policy_restore", False):
+        return _prepare_codex_supervisor_policy(args)
+    if getattr(args, "restore_recorded_policy", False):
+        return _restore_codex_supervisor_policy(args)
     claim = read_incarnation()
     if not _claim_uses_native_codex(claim):
         raise FleetCliError("sup-reconcile requires a native Codex supervisor claim")
     if claim.get("state") == "uncertain":
+        pending = claim.get("pending_operation")
+        if (isinstance(pending, dict)
+                and pending.get("kind") == "resume-policy-restore"):
+            return _reconcile_codex_restored_policy(claim)
+        if (isinstance(pending, dict)
+                and pending.get("kind") == "thread/resume"):
+            raise FleetCliError(
+                "native Codex supervisor thread/resume is unresolved; "
+                "preserve its journal and effective policy evidence; no "
+                "resume or turn was replayed")
         if claim.get("holder") is None:
             return _reconcile_codex_rejected_preclaim(claim)
         return _reconcile_codex_rejected_send(claim)
@@ -19266,7 +19817,8 @@ def cmd_sup_reconcile(args) -> int:
                     or {thread.get("cwd"), result.get("cwd")} != {
                         str(FLEET_HOME.resolve())}):
                 raise FleetCliError("native Codex resumed the wrong supervisor thread")
-            _validate_codex_thread_effective(result, bare_model, profile)
+            _validate_codex_thread_effective(
+                result, bare_model, profile, verb="thread/resume")
             rebound = CodexSupervisorBinding(
                 name=binding.name, incarnation_id=binding.incarnation_id,
                 authority=binding.authority,
@@ -23310,10 +23862,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true",
         help="include read-only guard detail as one JSON line")
 
-    sub.add_parser(
+    p_supreconcile = sub.add_parser(
         "sup-reconcile",
         help="explicitly reconcile a native Codex supervisor after host restart; "
              "never creates a thread or turn")
+    policy_restore = p_supreconcile.add_mutually_exclusive_group()
+    policy_restore.add_argument(
+        "--prepare-recorded-policy-restore", action="store_true",
+        help="record exact idle and completed-turn proof before stopping "
+             "the observed host for cold policy restoration")
+    policy_restore.add_argument(
+        "--restore-recorded-policy", action="store_true",
+        help="restore recorded bypass with a distinct policy-bound cold "
+             "thread/resume after exact host and app-server exit proof")
+    p_supreconcile.add_argument("--expect-inc")
+    p_supreconcile.add_argument("--expect-thread")
+    p_supreconcile.add_argument("--expect-turn")
+    p_supreconcile.add_argument("--expect-resume-op")
+    p_supreconcile.add_argument(
+        "--expect-observed-generation", "--expect-new-generation",
+        dest="expect_new_generation",
+        help="generation of the accepted original resume; the cold host "
+             "gets a fresh generation")
 
     # three-tier §11.2: self-monitored context band measurement (read-only).
     p_supctx = sub.add_parser(
