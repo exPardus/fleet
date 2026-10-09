@@ -55,6 +55,53 @@ class HostRejected(FleetCliError):
     """The home host refused an invalid or unauthorized operation."""
 
 
+def failed_client_recovery_barrier(home: Path) -> dict[str, Any] | None:
+    """Read the durable recovery fence without repairing or creating state."""
+    path = _canonical_home(home) / "state" / "codex" / "failed-client-recovery.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    _require_regular(path)
+    if path.stat().st_size > 2 * 1024 * 1024:
+        raise UnsafeHostState("failed-client recovery barrier exceeds its bound")
+    value = _read_json(path)
+    if (not isinstance(value, dict) or value.get("schema") != 1
+            or value.get("home") != str(_canonical_home(home))
+            or value.get("state") not in {
+                "prepared", "authorized", "shutdown_sent", "shutdown_ack",
+                "exited", "boot_requested", "rebind", "complete",
+            }):
+        raise UnsafeHostState("failed-client recovery barrier is malformed")
+    return value
+
+
+def authorize_failed_client_recovery_operation(
+        home: Path, generation: str, operation_id: str,
+        public_method: str, target_thread: str | None = None,
+        payload_digest: str | None = None) -> None:
+    """Allow only the one staged rebind mutation while a home is fenced."""
+    barrier = failed_client_recovery_barrier(home)
+    if barrier is None:
+        return
+    if barrier["state"] == "complete":
+        held = barrier.get("held_threads")
+        if (not isinstance(held, list)
+                or any(not isinstance(item, str) or not item for item in held)):
+            raise HostRejected("failed-client held-thread fence is malformed")
+        if target_thread is not None and target_thread in held:
+            raise HostRejected("failed-client historical thread remains held")
+        return
+    if (barrier["state"] == "rebind"
+            and public_method == "thread/resume"
+            and barrier.get("new_generation") == generation
+            and barrier.get("current_operation") == operation_id
+            and barrier.get("current_thread") == target_thread
+            and barrier.get("current_payload_digest") == payload_digest
+            and isinstance(payload_digest, str)
+            and len(payload_digest) == 64):
+        return
+    raise HostRejected("failed-client recovery barrier blocks provider mutation")
+
+
 def _reviewed_schema_manifest(
     command: Sequence[str],
     *,
@@ -2086,6 +2133,11 @@ class CodexHostClient:
         digest = _digest(method, payload)
         public_method = _public_method(method, payload)
         if public_method is not None:
+            params = payload.get("params") if isinstance(payload, dict) else None
+            target = params.get("threadId") if isinstance(params, dict) else None
+            authorize_failed_client_recovery_operation(
+                self.home, self.generation, operation_id, public_method, target,
+                digest)
             prepared = OperationJournal(self.home, self.generation).prepare(operation)
             if prepared.get("payload_digest") != digest:
                 raise HostRejected(
