@@ -577,11 +577,14 @@ writes a new registration.
 - **Nag predicate is file-only** (views never probe): GOALS active AND (no claim OR heartbeat older than S) — `supervisor_goals_active`/`supervisor_status_line` @7037/@7049, surfaced by `_doctor_check_supervisor_claim`/`_doctor_check_supervisor_handoff` @7079/@7088. The keeper can wake an existing idle supervisor through the guard; spawning a supervisor remains the interface's action.
 
 The shared tmux notification sender used by both the keeper and `sup-notify`
-waits `INTERFACE_PASTE_SETTLE_SECONDS` (0.5 seconds) after a successful literal
-send before sending its single Enter. This bounded settle is required by
-Codex's paste-burst composer behavior; a failed literal never sends Enter, and
-an Enter failure is reported as a failed delivery. Unit tests inject the clock
-sleep, so they do not incur the wall delay.
+sanitizes and bounds one line, writes it to a uniquely named tmux buffer, then
+uses `paste-buffer -p -d` and sends one Enter after a bounded 0.5-second settle.
+Codex handles the bracketed frame as a `Paste` event, separate from Enter;
+without bracketed mode, tmux sends raw characters and the settle preserves that
+fallback for other CLI panes. The 0.5-second bound exceeds Codex's pinned 120 ms
+plain-character burst window. Failed buffer creation or paste never sends
+Enter; failed paste deletes its temporary buffer. Failed submission remains
+undelivered, so callers do not record the page as delivered.
 
 Heartbeat primitive: in-session `ScheduleWakeup` self-rearm, confirmed real (G7); `claude stop` permanently kills a scheduled wake — a stopped supervisor never self-resumes.
 

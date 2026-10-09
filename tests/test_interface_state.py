@@ -133,8 +133,8 @@ def test_keeper_pages_unregistered_interface_without_creating_window(
         now_fn=lambda: 1_800_000_000.0, out=out) == 0
 
     assert "interface is not registered" in out.getvalue()
-    sends = [argv for argv in calls if argv[:2] == ["tmux", "send-keys"]]
-    assert sends and "interface is not registered" in sends[0][-1]
+    buffers = [argv for argv in calls if argv[:2] == ["tmux", "set-buffer"]]
+    assert buffers and "interface is not registered" in buffers[0][-1]
     assert not any(argv[1] == "new-window" for argv in calls)
 
 

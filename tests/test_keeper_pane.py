@@ -9,15 +9,21 @@ import fleet
 import fleet_keeper as k
 
 
+@pytest.fixture(autouse=True)
+def no_interface_settle(monkeypatch):
+    monkeypatch.setattr(fleet.time, "sleep", lambda _seconds: None)
+
+
 class TmuxRunner:
     def __init__(self, *, window="claude", command="claude", dead=False,
-                 named_pane=None, scan_rc=0, send_rc=0):
+                 named_pane=None, scan_rc=0, send_rc=0, paste_rc=0):
         self.calls = []
         self.panes = {"%42": (window, command, dead)}
         if named_pane:
             self.panes[named_pane] = ("fleet", "claude", False)
         self.scan_rc = scan_rc
         self.send_rc = send_rc
+        self.paste_rc = paste_rc
 
     def __call__(self, argv, **kwargs):
         argv = list(argv)
@@ -44,10 +50,15 @@ class TmuxRunner:
                     for pid, cmd, dead in rows)
         elif argv[1] == "send-keys":
             rc = self.send_rc
+        elif argv[1] == "paste-buffer":
+            rc = self.paste_rc
         return subprocess.CompletedProcess(argv, rc, stdout=output, stderr="")
 
     def tmux(self, verb):
         return [argv for argv in self.calls if argv[:2] == ["tmux", verb]]
+
+    def paste_targets(self):
+        return [argv[argv.index("-t") + 1] for argv in self.tmux("paste-buffer")]
 
 
 def tick(home, runner, monkeypatch, *extra):
@@ -77,12 +88,16 @@ def test_manual_resume_in_claude_window_pages_registered_pane_without_creating(
 
     assert runner.tmux("new-window") == [], runner.calls
     assert runner.tmux("kill-window") == [], runner.calls
+    buffers = runner.tmux("set-buffer")
+    pastes = runner.tmux("paste-buffer")
     sends = runner.tmux("send-keys")
-    assert len(sends) == 2, runner.calls
-    assert sends[0][:5] == ["tmux", "send-keys", "-t", "%42", "-l"]
-    assert sends[0][-1].startswith(
+    assert len(buffers) == len(pastes) == len(sends) == 1, runner.calls
+    assert buffers[0][-1].startswith(
         f"[{fleet.home_tag(tmp_path)}] KEEPER: supervisor stalled")
-    assert sends[1] == ["tmux", "send-keys", "-t", "%42", "Enter"]
+    assert "-p" in pastes[0] and "-d" in pastes[0]
+    assert pastes[0][pastes[0].index("-b") + 1] == buffers[0][3]
+    assert pastes[0][pastes[0].index("-t") + 1] == "%42"
+    assert sends[0] == ["tmux", "send-keys", "-t", "%42", "Enter"]
     assert (tmp_path / "state" / "interface-pane").read_text() == "%42\n"
 
 
@@ -92,7 +107,7 @@ def test_claude_registration_is_the_only_registered_pane(tmp_path, monkeypatch):
     tick(tmp_path, runner, monkeypatch)
     assert runner.tmux("new-window") == []
     assert runner.tmux("kill-window") == []
-    assert [argv[3] for argv in runner.tmux("send-keys")] == ["%42", "%42"]
+    assert runner.paste_targets() == ["%42"]
 
 
 def test_shell_registration_falls_back_to_window_and_still_pages(
@@ -104,7 +119,7 @@ def test_shell_registration_falls_back_to_window_and_still_pages(
                      "falling back to window") == 1
     assert len(runner.tmux("kill-window")) == 1
     assert len(runner.tmux("new-window")) == 1
-    assert [argv[3] for argv in runner.tmux("send-keys")] == ["work:fleet"] * 2
+    assert runner.paste_targets() == ["work:fleet"]
     assert not (tmp_path / "state" / "interface-pane").exists()
 
 
@@ -115,7 +130,7 @@ def test_dead_registration_falls_back_to_window_and_still_pages(
     tick(tmp_path, runner, monkeypatch)
     assert len(runner.tmux("kill-window")) == 1
     assert len(runner.tmux("new-window")) == 1
-    assert [argv[3] for argv in runner.tmux("send-keys")] == ["work:fleet"] * 2
+    assert runner.paste_targets() == ["work:fleet"]
     assert not (tmp_path / "state" / "interface-pane").exists()
 
 
@@ -128,7 +143,7 @@ def test_duplicate_window_warns_only_when_registration_is_elsewhere(
     assert out.count("keeper: two interface candidates") == warnings
     assert runner.tmux("kill-window") == []
     assert runner.tmux("new-window") == []
-    assert [argv[3] for argv in runner.tmux("send-keys")] == ["%42", "%42"]
+    assert runner.paste_targets() == ["%42"]
 
 
 @pytest.mark.parametrize("registration", ["absent", "gone", "dead"])
@@ -143,9 +158,9 @@ def test_missing_or_dead_registration_falls_back_to_window_creation(
     assert creates[0][:8] == ["tmux", "new-window", "-d", "-t", "work",
                             "-n", "fleet", "-c"]
     if registration == "dead":
-        assert len(runner.tmux("send-keys")) == 2
+        assert len(runner.tmux("paste-buffer")) == 1
     else:
-        assert runner.tmux("send-keys") == []  # Existing startup deferral.
+        assert runner.tmux("paste-buffer") == []  # Existing startup deferral.
 
 
 def test_gone_registration_pages_existing_named_window(tmp_path, monkeypatch):
@@ -153,7 +168,7 @@ def test_gone_registration_pages_existing_named_window(tmp_path, monkeypatch):
     runner = TmuxRunner(named_pane="%9")
     tick(tmp_path, runner, monkeypatch)
     assert runner.tmux("new-window") == []
-    assert [argv[3] for argv in runner.tmux("send-keys")] == ["work:fleet"] * 2
+    assert runner.paste_targets() == ["work:fleet"]
 
 
 def test_dry_run_recognises_registered_pane_without_mutating(tmp_path, monkeypatch):
@@ -185,14 +200,15 @@ def test_unknown_registration_defers_without_creating_or_recording_pages(
 
 def test_failed_pane_send_retries_without_creating_a_window(tmp_path, monkeypatch):
     register(tmp_path)
-    runner = TmuxRunner(send_rc=1)
+    runner = TmuxRunner(paste_rc=1)
     tick(tmp_path, runner, monkeypatch)
     state = json.loads((tmp_path / "state" / "keeper" / "last-page.json").read_text())
     assert "supervisor-stalled" not in state
-    assert len(runner.tmux("send-keys")) == 1  # No Enter after a failed literal send.
-    runner.send_rc = 0
+    assert runner.tmux("send-keys") == []  # No Enter after a failed paste.
+    runner.paste_rc = 0
     tick(tmp_path, runner, monkeypatch)
-    assert [argv[3] for argv in runner.tmux("send-keys")] == ["%42"] * 3
-    assert runner.tmux("send-keys")[-1] == ["tmux", "send-keys", "-t", "%42", "Enter"]
+    assert runner.paste_targets() == ["%42", "%42"]
+    assert runner.tmux("send-keys") == [
+        ["tmux", "send-keys", "-t", "%42", "Enter"]]
     assert runner.tmux("new-window") == []
     assert runner.tmux("kill-window") == []

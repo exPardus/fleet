@@ -5533,10 +5533,7 @@ SUPERVISOR_LINE_PREFIX = "SUPERVISOR: "
 
 # Maximum delivered interface-line length, including its prefix.
 INTERFACE_LINE_LIMIT = 200
-
-# Codex's composer treats a rapid literal+Enter burst as pasted input and can
-# consume the Enter as part of that burst.  Let the composer settle first.
-INTERFACE_PASTE_SETTLE_SECONDS = 0.5
+INTERFACE_PASTE_SETTLE_SECONDS = 0.5  # Codex 0.161's plain-character window is 120 ms.
 
 # Only the CSI form is matched here; a bare ESC left by any other escape shape
 # is dropped by the C0 filter in `one_line` a line later.
@@ -5614,17 +5611,20 @@ def _tmux_window_name(run, pane):
 
 
 def type_interface_line(run, target, text, *, prefix, out=sys.stdout,
-                        limit=INTERFACE_LINE_LIMIT, label="fleet",
-                        settle_seconds=INTERFACE_PASTE_SETTLE_SECONDS,
-                        sleep_fn=time.sleep):
-    """Submit one sanitised tmux line; return whether delivery succeeded.
-    Send Enter only after the literal send succeeds, to avoid submitting an
-    unrelated half-typed prompt. Callers may record delivery only on True."""
+                        limit=INTERFACE_LINE_LIMIT, label="fleet"):
+    """Bracket-paste one sanitised line, settle, then submit once; keep raw fallback."""
     line = interface_line(text, prefix, limit)
-    if not tmux_command(run, out, "send-keys", "-t", target, "-l", line,
+    buffer = f"fleet-interface-{uuid.uuid4().hex}"
+    if not tmux_command(run, out, "set-buffer", "-b", buffer, line,
                         label=label):
         return False
-    sleep_fn(settle_seconds)
+    if not tmux_command(run, out, "paste-buffer", "-p", "-d", "-b", buffer,
+                        "-t", target, label=label):
+        # `-d` deletes on success.  A failed paste leaves the uniquely named
+        # buffer behind, so clean it without ever submitting a partial line.
+        tmux_command(run, out, "delete-buffer", "-b", buffer, label=label)
+        return False
+    time.sleep(INTERFACE_PASTE_SETTLE_SECONDS)
     return tmux_command(run, out, "send-keys", "-t", target, "Enter",
                         label=label)
 
