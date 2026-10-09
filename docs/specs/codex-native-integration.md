@@ -638,6 +638,48 @@ repeat public header, and locked claim/row/source/host/journal comparison. An
 accepted but unverified new response remains uncertain; read-only reconcile can
 settle only its exact observed new operation. No turn is replayed or newly
 started.
+
+### 10.4 Retiring an absent legacy Claude claim
+
+From the **current registered native Codex Interface process**, use
+`fleet --fleet-home <exact-home> sup-retire-legacy --expect-inc <legacy-incarnation> --expect-sid <old-Claude-session-id>`
+only after `sup-guard` reports `DISPATCH` and the old body and predecessors have
+been stopped or otherwise proved absent. This command does not take a nonce,
+accept a replacement SID, dispatch a thread, or start a turn. It requires an
+explicit home, the process-bound exclusive Codex Interface registration, and
+the exact legacy Claude claim and unique supervisor registry row. It refuses a
+Codex, released, pending, corrupt, changed, or fresh claim; any present
+`handoff_pending` field (including empty or malformed values) or handshake;
+missing or ambiguous identity; and a failed, empty, malformed,
+or suspicious `claude agents --json --all` roster. Two fresh roster observations
+must show every home-scoped supervisor body and predecessor in documented
+terminal state `done` or `stopped` with neither `pid` nor `status` fields,
+as observed for reaped `done` and supported `claude stop` in
+`docs/specs/native-substrate.md` §G3/G10. Even `pid: false` or a status field
+on an otherwise terminal row is malformed proof.
+A registry `dead-suspected` label alone is never proof. The claim, complete
+supervisor row identity set, and Interface registration are compared again under
+`fleet.lock`; a newer journal checkpoint or concurrent change refuses. An idle
+resumable holder is refused because the legacy guard would offer `WAKE`.
+
+Success stores the original claim, holder row, roster evidence, and Interface
+source under `state/supervisor-retirements/<incarnation>.json` with a prepared
+phase; rewrites the
+claim to `released` without legacy nonce or holder fields; and tombstones only
+the old holder row. Only after the registry and event writes succeed does it
+mark the evidence complete. The released claim names the old SID in `released_by_sid`
+so the existing boot liveness gate still protects against a returning body.
+The operator's queue, all mail (including claimed mail), worker rows, briefs,
+and journals remain in place. Normal `sup-spawn --model codex:<model>` can then
+create a new supervisor incarnation; it rechecks the public Claude roster and
+old supervisor absence before creating a thread. It also requires matching
+complete retirement evidence and the exact old-holder tombstone, rechecked
+under `fleet.lock`. Run `sup-guard` again immediately before that dispatch.
+An interrupted write may leave prepared evidence, a released claim, or an
+incomplete tombstone. Native spawn refuses that state; the operator preserves
+the evidence and resolves it through reviewed recovery, without an automatic
+retry or overwrite.
+
 An authenticated `sup-reconcile` may also settle an uncertain supervisor send
 whose original operation journal proves rejection before provider acceptance.
 The current registered Codex Interface must match the exact home and process

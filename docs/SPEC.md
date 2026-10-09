@@ -370,6 +370,18 @@ matching effective response after another public header and locked
 claim/row/source/host/journal check. Rejection or ambiguity stays uncertain.
 No turn or original resume is replayed, and recorded policy is never changed
 implicitly.
+
+For a stale legacy Claude supervisor claim whose nonce cannot be recovered,
+`sup-retire-legacy --expect-inc ... --expect-sid ...` is a separate explicit
+registered-Codex-Interface transition. It requires the exact home and old
+identity, two fresh healthy public Claude rosters proving no live supervisor or
+predecessor, and a locked unchanged claim/row/Interface check. It preserves all
+mail, queues, journals, and unrelated workers, records the original claim in
+ignored retirement evidence, writes a released claim and old-holder tombstone,
+marks evidence complete only after those writes, and creates no Codex thread
+or turn. Native spawn requires that complete evidence and exact tombstone
+before dispatch. See
+`docs/specs/codex-native-integration.md` §10.4 for CLI semantics and refusals.
 After a native Codex mutation enters the durable `accepted` journal state,
 any host error—including a provider reply too large for the 64 KiB journal
 record—surfaces as uncertain. The client checks that exact operation state

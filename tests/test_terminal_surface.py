@@ -939,7 +939,8 @@ class TestCommandFiles:
                          "sup-handoff-abort",
                          "sup-boot", "sup-handoff-begin", "sup-handoff-complete",
                          "sup-decision --clear", "sup-spawn", "sup-checkpoint",
-                         "sup-release", "homes --add", "homes --retire",
+                         "sup-release", "sup-retire-legacy",
+                         "homes --add", "homes --retire",
                          "relay-ack",
                          # [w59/inithome] `init --home` landed 2026-08-10 with
                          # the operator's E2/init ruling, in the SAME commit as
