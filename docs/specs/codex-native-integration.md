@@ -705,6 +705,10 @@ the authenticated `sup-reconcile` path only when its exact failed journal,
 claimed-mail payload digest, unchanged original and restoration journals,
 idle newest bound turn, claim, row, and Interface source agree. It restores
 the claimed mail and the row's active adapter state without replaying a turn.
+Every public mutation requires object-shaped `params` before the host checks
+restoration history or accepts the journal. A malformed authenticated request
+becomes a correlated pre-acceptance failed journal; it cannot exit the shared
+host, reach the provider, or block a later valid operation as prepared intent.
 
 The older loaded host does not gain the new guard when CLI source changes.
 For the restored holder before its first successful normal send, use

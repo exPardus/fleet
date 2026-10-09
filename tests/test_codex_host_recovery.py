@@ -66,6 +66,32 @@ def _app_requests(log, method):
             if row.get("event") == "request" and row.get("method") == method]
 
 
+@pytest.mark.parametrize("params", [None, [], "wrong"])
+def test_malformed_public_mutation_refuses_without_stopping_host(
+        tmp_path, params):
+    module, client, log = _ensure(tmp_path)
+    malformed = _mutation("malformed-params")
+    malformed["payload"]["params"] = params
+    try:
+        with pytest.raises(module.HostRejected,
+                           match="public mutation params must be an object"):
+            client.call(malformed, timeout=2)
+        record = module.OperationJournal(client.home, client.generation).load(
+            malformed["operation_id"])
+        assert record["state"] == "failed"
+        assert "before provider acceptance" in record["reason"]
+        assert _app_requests(log, "turn/start") == []
+        assert client._ping(0.5)
+
+        valid = _mutation("healthy-after-malformed")
+        assert client.call(valid, timeout=2).result["turn"]["id"] == "turn-1"
+        client.commit(valid["operation_id"])
+        assert len(_app_requests(log, "turn/start")) == 1
+    finally:
+        _shutdown(client)
+        assert client.wait_for_exit(2)
+
+
 def test_same_operation_replays_observed_result_without_second_mutation(tmp_path):
     module, client, log = _ensure(tmp_path)
     operation = _mutation()
