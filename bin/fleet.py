@@ -15264,7 +15264,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
     :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23057`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
     safe; the age boundary distinguishes respawn.

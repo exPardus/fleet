@@ -917,14 +917,13 @@ class TestContextDigest:
           * N distinct files cost the sum of their digests -- there is no
             budget, so the manager's `--context` list IS the budget.
 
-        Measured 2026-07-27 at this fix wave's base commit: `bin/fleet.py`
-        (16,075 source lines) rendered **539 digest lines / 27,835 chars**,
-        and fifty distinct files of that size would render ~1.39 MB into a
-        single prompt. No cap was added: §11.1 states the digest and
-        `q --outline` differ only when the cap truncates, so capping here
-        would silently impose `q`'s limit on a path the spec exempts, and that
-        is a spec decision rather than a fix-wave one. Dedup WAS added
-        (`parse_context_arg`) -- paying twice for the same file defends
+        Re-measured 2026-10-09 after the CLI help formatter landed: `bin/fleet.py`
+        (23,389 source lines) rendered **890 digest lines / 50,060 chars**,
+        and fifty distinct files of that size would render ~2.5 MB into a
+        single prompt. The aggregate cap warns and then refuses, but never
+        truncates: §11.1 states the digest and `q --outline` differ only when
+        a cap truncates, so complete-or-absent remains the contract. Dedup WAS
+        added (`parse_context_arg`) -- paying twice for the same file defends
         nothing.
         """
         root = tmp_path / "real"
@@ -962,7 +961,7 @@ class TestContextDigest:
     def test_naming_the_same_path_twice_is_paid_for_once(self, indexed_project):
         """M4's one honest mitigation. Before this, `--context a.py,a.py`
         rendered `a.py` twice for zero additional information -- and with a
-        27,835-char digest behind it, the second copy is not free."""
+        50,060-char digest behind it, the second copy is not free."""
         once = _compose("w1", indexed_project, context=["src/api.py"])
         twice = _compose("w1", indexed_project,
                          context=fleet.parse_context_arg("src/api.py,src/api.py"))
@@ -1170,14 +1169,14 @@ class TestTheDigestSizeCap:
     does is wrong.** This was measured both ways rather than assumed:
 
       * truncate at the CEILING (`digest[:250_000]`) -- M4 stays **GREEN**.
-        M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of
-        it (~55,482); neither reaches 250,000, so the truncation never fires
+        M4's fixture is `bin/fleet.py` alone (50,060 chars) plus two copies of
+        it (~100,120); neither reaches 250,000, so the truncation never fires
         in M4 at all. Four tests in THIS class caught it; M4 saw nothing.
-      * truncate at the WARN threshold (`digest[:50_000]`) -- M4 goes RED,
+      * truncate at the WARN threshold (`digest[:60_000]`) -- M4 goes RED,
         because its two-copies assertion (`len(both) > 2 * len(digest) - 200`)
-        does cross 50,000.
+        does cross 60,000.
 
-    So M4 reds only for a cap that trims below ~55,500 chars, and the more
+    So M4 reds only for a cap that trims below ~100,000 chars, and the more
     plausible wrong implementation -- trim at the ceiling -- slips past it
     entirely. Anyone leaning on "M4 will catch it" is relying on a coincidence
     of fixture size. What actually catches truncation is
@@ -1190,7 +1189,7 @@ class TestTheDigestSizeCap:
     digest chars as produced -- never on a proxy. A proxy fails here by three
     orders of magnitude: 180 argv chars produced 327,944 digest chars. The
     measurements behind the two constants are recorded at their definition in
-    `bin/fleet.py`; the two tests at the end of this class re-derive the ones
+    `bin/fleet_index.py`; the two tests at the end of this class re-derive the ones
     that can be re-derived from the repo itself.
     """
 
@@ -1327,9 +1326,9 @@ class TestTheDigestSizeCap:
         and a warning genuinely means "more than the biggest file here".
 
         Re-derived against `bin/fleet.py`, the file the M4 cost pin uses and
-        the one that grows every wave. Measured 2026-07-30: 27,741 chars.
-        `tests/test_native.py` is actually this repo's largest digest at
-        40,993 chars -- also under the threshold -- but it is not staged here,
+        the one that grows every wave. Measured 2026-10-09: 50,060 chars.
+        `tests/test_native.py` is this repo's next-largest digest at
+        42,153 chars -- also under the threshold -- but it is not staged here,
         because this test's job is to guarantee the M4 pin's `warnings == []`
         keeps holding as `bin/fleet.py` grows."""
         root = tmp_path / "real"
@@ -1341,34 +1340,34 @@ class TestTheDigestSizeCap:
         assert warnings == [], (
             f"bin/fleet.py's own digest is {len(digest)} chars and now trips "
             f"the {fleet.INDEX_DIGEST_WARN_CHARS}-char warn threshold. The "
-            f"threshold was measured against a 27,741-char digest; re-measure "
+            f"threshold was measured against a 50,060-char digest; re-measure "
             f"it and move it, and move the M4 pin's docstring with it")
         assert len(digest) < fleet.INDEX_DIGEST_WARN_CHARS
 
     def test_the_ceiling_serves_a_dozen_of_this_repo_s_largest_files(self):
         """The REFUSE number's grounding from BELOW, stated as arithmetic over
-        numbers measured on this repo (2026-07-30, 177 selected sources):
+        numbers measured on this repo (2026-10-09, 233 selected sources):
 
-            largest single digest       40,993 chars  tests/test_native.py
-            median single digest           893 chars
-            13 largest files together  246,919 chars
-            14 largest files together  255,236 chars
-            every selected source      492,570 chars / 6,812 lines
-            the pre-dedupe blowup      327,944 chars from 180 argv chars
+            largest single digest       50,060 chars  bin/fleet.py
+            median single digest         1,265 chars
+            12 largest files together  241,546 chars
+            13 largest files together  261,408 chars
+            every selected source      669,045 chars / 9,584 lines
+            the pre-dedupe blowup      337,224 chars from 180 argv chars
 
         The ceiling sits in the measured gap between the largest plausible ask
-        (246,919) and the pathology it exists to stop (327,944). This test is
+        (241,546) and the pathology it exists to stop (337,224). This test is
         the cheap arithmetic half -- that the ceiling still admits a dozen of
         the largest files and hundreds of median ones, and still refuses the
-        whole-repo ask and the blowup. Re-staging and re-indexing 177 sources
+        whole-repo ask and the blowup. Re-staging and re-indexing 233 sources
         to re-derive the six numbers costs ~40 s, which is why they are
         recorded rather than recomputed per run; the harness that produced
         them is described in `docs/specs/fleet-index.md`."""
         ceiling = fleet.INDEX_DIGEST_REFUSE_CHARS
-        assert ceiling > 246_919, "the ceiling no longer serves 13 large files"
-        assert ceiling // 893 >= 200, "the ceiling no longer serves 200 median files"
-        assert ceiling < 327_944, "the ceiling no longer refuses the 8x blowup"
-        assert ceiling < 492_570, "the ceiling no longer refuses the whole-repo ask"
+        assert ceiling > 241_546, "the ceiling no longer serves 12 large files"
+        assert ceiling // 1_265 >= 197, "the ceiling no longer serves 197 median files"
+        assert ceiling < 337_224, "the ceiling no longer refuses the 8x blowup"
+        assert ceiling < 669_045, "the ceiling no longer refuses the whole-repo ask"
 
 
 class TestDigestNeverServesAnUnverifiedCoordinate:
