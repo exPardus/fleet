@@ -131,12 +131,33 @@ class FakeLifecycleClient:
         self.successor_created = False
         self.successor_started = False
         self.operations = []
+        self.paging_operations = []
         self.commits = []
         self.handoff_commits = []
 
     def call(self, operation, timeout):
-        self.operations.append(operation)
         method = operation["payload"]["method"]
+        if method in {"thread/turns/list", "thread/items/list"}:
+            self.paging_operations.append(operation)
+            params = operation["payload"]["params"]
+            turns = self._last_thread["turns"]
+            if method == "thread/turns/list":
+                data = list(reversed(turns))[:params["limit"]]
+                result = {"data": data, "nextCursor": None}
+            else:
+                turn = next((turn for turn in turns
+                             if turn["id"] == params["turnId"]), None)
+                if turn is None or turn.get("itemsView") != "full":
+                    from fleet_codex import HostRejected
+                    raise HostRejected("item history is incomplete")
+                result = {"data": [{"turnId": turn["id"], "item": item}
+                                   for item in turn["items"]],
+                          "nextCursor": None}
+            return SimpleNamespace(
+                operation_id=operation["operation_id"],
+                generation=self.generation, payload_digest="a" * 64,
+                result=result)
+        self.operations.append(operation)
         if method == self.fail_method:
             raise TimeoutError(f"lost {method} response")
         if method == "thread/read":
@@ -153,6 +174,7 @@ class FakeLifecycleClient:
                             "itemsView": "full", "items": []}]
                           if self.successor_started else
                           list(self.successor_initial_turns)))
+                self._last_thread = {"turns": turns}
                 return SimpleNamespace(
                     operation_id=operation["operation_id"],
                     generation=self.generation, payload_digest="2" * 64,
@@ -184,6 +206,7 @@ class FakeLifecycleClient:
                       "items": items}]
             if self.newer_turn is not None:
                 turns.append(self.newer_turn)
+            self._last_thread = {"turns": turns}
             return SimpleNamespace(
                 operation_id=operation["operation_id"],
                 generation=self.generation, payload_digest="c" * 64,
@@ -534,6 +557,62 @@ def test_native_guard_reads_public_active_thread_and_never_uses_claude_roster(
     assert output["provider_status"] == "active"
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/read"]
+
+
+@pytest.mark.parametrize("verb", ["send", "checkpoint", "guard"])
+def test_long_supervisor_history_uses_bounded_public_pages(
+        supervisor_home, monkeypatch, capsys, verb):
+    _seed_native_supervisor(supervisor_home)
+
+    class LongHistoryClient(FakeLifecycleClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == "thread/read":
+                # A full-history app-server response would overflow host IPC.
+                full_history = {"turns": [{"items": [{"text": "x" *
+                                 (1024 * 1024 + 1)}]}]}
+                assert len(json.dumps(full_history).encode()) > 1024 * 1024
+                assert operation["payload"]["params"]["includeTurns"] is False
+            return super().call(operation, timeout)
+
+    client = LongHistoryClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    if verb == "send":
+        assert fleet.cmd_send(_send_args()) == 0
+    elif verb == "checkpoint":
+        assert fleet.cmd_sup_checkpoint(SimpleNamespace(
+            body="paged checkpoint", kind="CHECKPOINT", sid=None, nonce=None,
+            expect_inc="inc-20260921T000000Z-abcd")) == 0
+    else:
+        assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+        assert json.loads(capsys.readouterr().out)["verdict"] == "OK"
+    methods = [op["payload"]["method"] for op in client.paging_operations]
+    assert methods == ["thread/turns/list", "thread/items/list",
+                       "thread/turns/list"]
+    assert client.paging_operations[0]["payload"]["params"]["limit"] == 2
+    assert client.paging_operations[1]["payload"]["params"]["limit"] == 16
+
+
+def test_supervisor_item_page_shrinks_after_explicit_oversize(
+        supervisor_home, monkeypatch):
+    _seed_native_supervisor(supervisor_home)
+
+    class OversizePageClient(FakeLifecycleClient):
+        def call(self, operation, timeout):
+            if (operation["payload"]["method"] == "thread/items/list"
+                    and operation["payload"]["params"]["limit"] > 1):
+                self.paging_operations.append(operation)
+                from fleet_codex import HostRejected
+                raise HostRejected(
+                    "host response exceeds MAX_IPC_BYTES; page the request")
+            return super().call(operation, timeout)
+
+    client = OversizePageClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+    limits = [op["payload"]["params"]["limit"]
+              for op in client.paging_operations
+              if op["payload"]["method"] == "thread/items/list"]
+    assert limits == [16, 8, 4, 2, 1]
 
 
 def test_native_guard_reports_parked_idle_claim_without_wake(
@@ -1078,6 +1157,7 @@ def test_native_host_restart_reconciles_same_ids_without_new_body_or_turn(
         encoding="utf-8").strip() == "queued across restart"
     assert [op["payload"]["method"] for op in client.operations] == [
         "thread/resume", "thread/read"]
+    assert client.operations[0]["payload"]["params"]["excludeTurns"] is True
 
 
 def test_native_restart_adopts_exact_activating_turn_without_replay(
