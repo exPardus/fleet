@@ -18298,7 +18298,8 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
             # pid is malformed evidence, not proof that the process is gone.
             if "pid" in entry or ("status" in entry and entry.get("state") != "done"):
                 raise FleetCliError("sup-retire-legacy: old supervisor or predecessor is live")
-            if entry.get("state") != "done":
+            # A supported `claude stop` leaves a state-only stopped row.
+            if entry.get("state") not in ("done", "stopped"):
                 raise FleetCliError("sup-retire-legacy: old supervisor roster state ambiguous")
     verdict, reason = supervisor_claim_decision(
         claim, _roster_live_sids(entries), supervisor_journal_latest(),
@@ -20859,7 +20860,9 @@ def _dispatch_codex_supervisor_body(campaign, mode, model, *,
                        (not isinstance(entry.get("sessionId"), str)
                         or not entry.get("sessionId")
                         or "pid" in entry
-                        or entry.get("state") != "done")
+                        or entry.get("state") not in ("done", "stopped")
+                        or (entry.get("state") == "stopped"
+                            and "status" in entry))
                        for entry in roster)):
             raise FleetCliError(
                 "native Codex sup-spawn: retired legacy supervisor liveness "

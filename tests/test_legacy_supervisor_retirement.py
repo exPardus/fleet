@@ -93,6 +93,29 @@ def test_old_roster_absent_with_unrelated_live_worker_still_retires(home):
     assert fleet.read_registry_no_repair()["workers"]["product-lane"]["status"] == "working"
 
 
+def test_stopped_holder_and_done_predecessors_retire_with_exact_home(home):
+    before_product = copy.deepcopy(
+        fleet.read_registry_no_repair()["workers"]["product-lane"])
+    old = {"sessionId": OLD_SID, "name": NAME, "state": "stopped",
+           "cwd": str(home)}
+    predecessors = [
+        {"sessionId": OTHER_SID, "name": f"sup|{INC}|successor",
+         "state": "done", "cwd": str(home)},
+        {"sessionId": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+         "name": "sup|inc-20260101T010000Z-bbbb|successor",
+         "state": "done", "cwd": str(home)},
+    ]
+    assert fleet.cmd_sup_retire_legacy(
+        args(), roster_fn=lambda: roster(old, predecessors)) == 0
+    released = fleet.read_incarnation()
+    assert released["state"] == "released"
+    assert fleet.read_registry_no_repair()["workers"]["product-lane"] == before_product
+    evidence = json.loads((home / released["retirement_evidence"]).read_text())
+    assert evidence["phase"] == "complete"
+    assert [entry["state"] for entry in evidence["roster_supervisor_rows"]] == [
+        "stopped", "done", "done"]
+
+
 @pytest.mark.parametrize("mutate", [
     lambda claim: claim.update(provider="codex"),
     lambda claim: claim.update(holder={"provider": "codex", "thread_id": OTHER_SID}),
@@ -135,6 +158,8 @@ def test_present_handoff_pending_refuses_without_losing_claim_or_mail(home, pend
     {"sessionId": OLD_SID, "name": NAME, "state": "working"},
     {"sessionId": OLD_SID, "name": NAME, "state": "done", "pid": 42},
     {"sessionId": OLD_SID, "name": NAME, "state": "done", "pid": False},
+    {"sessionId": OLD_SID, "name": NAME, "state": "stopped", "pid": False},
+    {"sessionId": OLD_SID, "name": NAME, "state": "stopped", "status": "idle"},
     {"sessionId": OLD_SID, "name": NAME, "state": "unknown"},
 ])
 def test_live_or_ambiguous_old_body_refuses(home, old):

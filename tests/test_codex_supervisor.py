@@ -474,13 +474,13 @@ def test_retired_legacy_claim_allows_normal_native_sup_spawn_with_active_lane(
                         lambda: {"kind": "codex", "claim_id": "interface-test"})
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         lambda: (True, [{"sessionId": old_sid,
-                                         "name": name, "state": "done"}]))
+                                         "name": name, "state": "stopped"}]))
     client = FakeSupervisorClient(supervisor_home)
     monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
     assert fleet.cmd_sup_retire_legacy(SimpleNamespace(
         expect_inc=inc, expect_sid=old_sid, _fleet_home_explicit=True),
         roster_fn=lambda: (True, [{"sessionId": old_sid,
-                                   "name": name, "state": "done"}])) == 0
+                                   "name": name, "state": "stopped"}])) == 0
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         lambda: (True, [{"sessionId": old_sid,
                                          "name": name, "state": "working",
@@ -490,14 +490,21 @@ def test_retired_legacy_claim_allows_normal_native_sup_spawn_with_active_lane(
     assert client.operations == []
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         lambda: (True, [{"sessionId": old_sid,
-                                         "name": name, "state": "done",
+                                         "name": name, "state": "stopped",
                                          "pid": False}]))
     with pytest.raises(fleet.FleetCliError, match="liveness"):
         fleet.cmd_sup_spawn(_args())
     assert client.operations == []
     monkeypatch.setattr(fleet, "_fetch_agents_roster",
                         lambda: (True, [{"sessionId": old_sid,
-                                         "name": name, "state": "done"}]))
+                                         "name": name, "state": "stopped",
+                                         "status": "idle"}]))
+    with pytest.raises(fleet.FleetCliError, match="liveness"):
+        fleet.cmd_sup_spawn(_args())
+    assert client.operations == []
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda: (True, [{"sessionId": old_sid,
+                                         "name": name, "state": "stopped"}]))
     assert fleet.cmd_sup_spawn(_args()) == 0
     assert fleet.read_incarnation()["holder"] == {
         "provider": "codex", "thread_id": THREAD_ID}

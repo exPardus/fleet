@@ -622,9 +622,12 @@ Codex, released, pending, corrupt, changed, or fresh claim; any present
 `handoff_pending` field (including empty or malformed values) or handshake;
 missing or ambiguous identity; and a failed, empty, malformed,
 or suspicious `claude agents --json --all` roster. Two fresh roster observations
-must show every home-scoped supervisor body and predecessor terminal with no
-`pid` field; even `pid: false` is malformed proof. A registry `dead-suspected`
-label alone is never proof. The claim, complete supervisor row identity set,
+must show every home-scoped supervisor body and predecessor in documented
+terminal state `done` or `stopped` with no `pid` field; a `stopped` row must
+also have no `status` field, as observed for supported `claude stop` in
+`docs/specs/native-substrate.md` §G10. Even `pid: false` is malformed proof.
+A registry `dead-suspected` label alone is never proof. The claim, complete
+supervisor row identity set,
 and Interface registration are compared again under
 `fleet.lock`; a newer journal checkpoint or concurrent change refuses. An idle
 resumable holder is refused because the legacy guard would offer `WAKE`.
