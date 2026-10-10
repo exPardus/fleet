@@ -597,7 +597,12 @@ class Host:
                             except HostRejected:
                                 prepared = None
                             if (prepared is not None
-                                    and prepared.get("state") == "prepared"):
+                                    and prepared.get("state") == "prepared"
+                                    and prepared.get("generation") == self.generation
+                                    and prepared.get("method") == request["method"]
+                                    and prepared.get("public_method") == public_method
+                                    and prepared.get("payload_digest")
+                                    == request["payload_digest"]):
                                 self.journal.fail(
                                     request["operation_id"],
                                     "failed-client recovery barrier refused before "

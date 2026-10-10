@@ -643,6 +643,47 @@ def test_barrier_arrival_between_client_prepare_and_host_dispatch_preserves_jour
         _shutdown(client)
 
 
+@pytest.mark.parametrize("mismatch", ["payload", "generation"])
+def test_barrier_refusal_does_not_fail_a_different_prepared_intent(
+        tmp_path, mismatch):
+    _, client, log = _ensure(tmp_path)
+    barrier = client.home / "state" / "codex" / recovery.BARRIER
+    original_payload = {"method": "turn/start", "params": {
+        "threadId": "thread-1", "input": []}}
+    original_generation = ("prior-generation" if mismatch == "generation"
+                          else client.generation)
+    journal = fleet_codex.OperationJournal(client.home, original_generation)
+    original = journal.prepare({
+        "operation_id": "barrier-exact-intent",
+        "method": "rpc",
+        "payload": original_payload,
+        "recovery": {"kind": "turn/start", "thread_id": "thread-1",
+                     "canonical_cwd": str(client.home),
+                     "history_watermark": 0},
+    })
+    request_payload = copy.deepcopy(original_payload)
+    if mismatch == "payload":
+        request_payload["params"]["threadId"] = "thread-2"
+    fleet_codex._atomic_json(barrier, {
+        "schema": 1, "home": str(client.home), "state": "prepared",
+        "old_host": {"generation": "old-generation"},
+    })
+    try:
+        response = _raw_call(client, _envelope(
+            client, "barrier-exact-intent", "rpc", request_payload))
+        assert response["ok"] is False
+        assert "recovery barrier" in response["error"]
+        current = journal.load("barrier-exact-intent")
+        assert current["state"] == "prepared"
+        assert current["generation"] == original["generation"]
+        assert current["payload_digest"] == original["payload_digest"]
+        assert all(json.loads(line).get("method") != "turn/start"
+                   for line in log.read_text().splitlines())
+    finally:
+        barrier.unlink(missing_ok=True)
+        _shutdown(client)
+
+
 @pytest.mark.parametrize("stage", ["prepared", "rebind", "complete"])
 def test_real_host_fences_unclassified_public_mutations_and_shutdown(tmp_path, stage):
     _, client, log = _ensure(tmp_path)

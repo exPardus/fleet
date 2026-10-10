@@ -825,9 +825,11 @@ becomes a correlated pre-acceptance failed journal; it cannot exit the shared
 host, reach the provider, or block a later valid operation as prepared intent.
 The failed-client barrier is also checked at both client and host boundaries.
 If it appears after the client prepares a mutation but before the host dispatches
-it, the host marks only that still-`prepared` intent failed as a proved
-pre-acceptance refusal. Accepted or uncertain journal states remain unresolved;
-the barrier never turns ambiguous provider work into a failed operation.
+it, the host marks only that still-`prepared` intent failed when its generation,
+method, public method, and payload digest exactly match the authenticated request.
+Accepted or uncertain journal states and mismatched intents remain unresolved;
+the barrier never turns ambiguous or unrelated provider work into a failed
+operation.
 
 The older loaded host does not gain the new guard when CLI source changes.
 For the restored holder before its first successful normal send, use
