@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -2518,6 +2518,7 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
             result_item_id, result_text = item_id, item["text"]
     return {
         "binding": binding, "client": client,
+        "thread_model": thread.get("model"),
         "provider_status": provider_status, "active_flags": list(flags),
         "turn_status": turn_status, "items_view": items_view,
         "result_item_id": result_item_id, "result_text": result_text,
@@ -3897,7 +3898,7 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 
 # Fleet identity resolves registry sid unions; FLEET_WORKER is a diagnostic witness.
 # The worker-turn claim gate uses registry identity (SPEC.md:204). The ceiling's
-# stamp-absence exemption has a separate limitation documented at its predicate.
+# stamp-absence exemption applies only after known claim holders are excluded.
 #
 # RATIFIED DOCTRINE -- claim-nonce §18:
 # The daemon substitutes the session environment wholesale, therefore no
@@ -4045,14 +4046,13 @@ def _resolve_worker_target(name):
 
 
 def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
-    """Return a dispatch refusal at the supervisor soft or hard band.
-    Exempt absent FLEET_WORKER, absent sid and definite non-holders, in that order.
-    Unknown holder identity remains subject; unknown occupancy refuses. Read the
-    caller's own transcript and compare the supervisor soft and hard thresholds.
-    ``force_band`` override may pass the soft band, but never the hard ceiling.
-    The stamp-absence exemption can also exempt a hosted supervisor because the
-    daemon substitutes its environment; this is a current limitation (§18.4).
-    SPEC.md:204's worker-turn claim prohibition concerns the separate claim gate.
+    """Apply current supervisor bands to known claim holders, regardless of stamp.
+
+    Resolve direct claim identity and the registry sid union before considering
+    stamp absence, including adopted callers and fork-steer claim restamp lag.
+    A proven non-holder remains exempt. An unstamped indeterminate caller retains
+    the human-channel exemption; stamped indeterminate callers fail toward the
+    band. Neither path changes soft/hard thresholds or the force-band contract.
 
     RATIFIED DOCTRINE -- claim-nonce §18:
     The daemon substitutes the session environment wholesale, therefore no
@@ -4062,18 +4062,15 @@ def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
     every other env observation on a hosted body is evidence about the daemon's
     cold-starter, not about the body; the registry sid union is the only sound
     identity channel.
-    The exemption and unknown-identity rule give opposite answers for an absent
-    registry member; this function retains both behaviors pending their resolution.
     """
-    # Stamp absence exempts before sid or registry reads. Hosted bodies can also lack
-    # this stamp; see the predicate's documented limitation.
-    if not (os.environ.get("FLEET_WORKER") or "").strip():
-        return None
     caller = current_caller_session()
     if caller is None:
-        return None                     # no sid -> cannot be the claim-holder body
-    if _caller_holds_supervisor_claim(caller) is False:
-        return None                     # a claim is held, this is not its holder
+        return None                     # no sid -> cannot establish claim holdership
+    holder = _caller_holds_supervisor_claim(caller)
+    if holder is False:
+        return None                     # proven non-holder, regardless of stamp
+    if holder is not True and not (os.environ.get("FLEET_WORKER") or "").strip():
+        return None                     # indeterminate human channel remains exempt
     # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
     # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
@@ -4091,11 +4088,8 @@ def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
             f"the ceiling, start NO new worker turns: let the in-flight wave finish and "
             f"READ its outcomes (`fleet status`/`result`/`peek`/`wait`), then hand off "
             f"(`fleet sup-handoff-begin`). The handoff verbs are exempt from this refusal. "
-            f"(Fleet-enforced, not discretion. A session with no `FLEET_WORKER` stamp is "
-            f"exempt structurally, three-tier §11.3 ND4c -- so if you believe you are the "
-            f"interface tier and are reading this, the hosting daemon substituted an "
-            f"environment carrying a stamp into a session it never launched: `fleet doctor` "
-            f"names that leak.)")
+            f"(Fleet-enforced, not discretion. A known claim holder remains subject "
+            f"with or without a FLEET_WORKER stamp.)")
     return (
         f"{verb}: refusing -- the supervisor claim-holder's context occupancy ({occ_txt}) "
         f"is at or above the {SUPERVISOR_BAND_SOFT_TOKENS:,}-token soft trigger but below "
@@ -7712,24 +7706,30 @@ def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
     return 0
 
 
-def cmd_status(args) -> int:
-    """Recompute worker state, conditionally persist transitions and print a table.
-    Read the snapshot without repair, probe outside the lock, then merge under
-    fleet_lock only when the record still equals its pre-probe snapshot.
-    Concurrent writes win over stale verdicts. --stale-ok reads committed state."""
-    # --stale-ok reads committed state without probes, locks or writes.
-    # Named queries include tombstones; default bulk listings hide them.
+def cmd_status(args, run=subprocess.run, which=shutil.which) -> int:
+    if getattr(args, "stale_ok", False):
+        return _cmd_status_view(args)
+    return _cmd_status_refresh(args, run=run, which=which)
+
+
+def _cmd_status_view(args) -> int:
+    """Render committed state only; no recompute or mutation edge."""
     if args.name is not None:
         args.name = _resolve_worker_target(args.name)
     include_archived = getattr(args, "all", False) or args.name is not None
-    if getattr(args, "stale_ok", False):
-        snap = status_snapshot(include_archived=include_archived)
-        if getattr(args, "json", False):
-            print(json.dumps(snap, indent=2))
-        else:
-            _print_snapshot_table(snap, args.name)
-        return 0
+    snap = status_snapshot(include_archived=include_archived)
+    if getattr(args, "json", False):
+        print(json.dumps(snap, indent=2))
+    else:
+        _print_snapshot_table(snap, args.name)
+    return 0
 
+
+def _cmd_status_refresh(args, run=subprocess.run, which=shutil.which) -> int:
+    """Explicit authoritative recompute; may persist transitions and notify."""
+    if args.name is not None:
+        args.name = _resolve_worker_target(args.name)
+    include_archived = getattr(args, "all", False) or args.name is not None
     # D4: read the pre-probe snapshot without repair or lock; a corrupt registry
     # must refuse before any merge could quarantine it. The ordinary status verb
     # still probes and persists; --stale-ok is the file-only view.
@@ -8876,7 +8876,7 @@ def _mint_wake_nonce(claim: dict, now=None) -> str:
 
 
 def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str,
-                                 message: str) -> str:
+                                 message: str, pending_handles=()) -> str:
     """Render the wake bootstrap for an idle supervisor body's fresh, unforked
     turn (Cut 1, w87). No new generation is minted: sup-boot's own `resume`
     verdict (claim-nonce doctrine) restamps THIS incarnation onto the new sid
@@ -8890,6 +8890,10 @@ def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str
     home = FLEET_HOME.as_posix()
     bundle = boot_bundle_path(name).as_posix()
     mail_block = f"<MANAGER MESSAGE>\n{message.strip()}\n</MANAGER MESSAGE>\n\n" if message.strip() else ""
+    aborts = "".join(
+        f'   "{py}" "{fleet_py}" --fleet-home "{home}" '
+        f"sup-handoff-abort {handle} --nonce {wake_nonce}\n"
+        for handle in pending_handles) or "   (none recorded at wake time)\n"
     return f"""You are the claude-fleet supervisor, incarnation {incarnation_id}, woken from idle
 by `fleet send`. This is NOT a new generation -- you are the SAME incarnation continuing on a
 fresh session; never a successor, never a fork.
@@ -8918,8 +8922,9 @@ fresh session; never a successor, never a fork.
    file.
 4. Before any campaign action, run:
    "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
-   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE:
-   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort --successor-inc <inc> [--successor-sid <sid>] --nonce <CURRENT-NONCE>
+   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE.
+   Run exactly these first; each presents the wake nonce, which step 1 made your live generation:
+{aborts}   For any other successor status lists, run the same command with its exact handle.
    If a sid-less attempt is still inside its join window, wait until it becomes resolvable, then retry. Run each nonce-minting
    verb directly: never pipe or filter its output, and record every newly printed NONCE before the
    next abort. A lost-nonce wake must not leave a successor able to take over afterward.
@@ -8953,6 +8958,7 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
                 save_registry(data)
 
     claim_changed = False
+    pending_handles = ()
     with fleet_lock():
         claim = read_incarnation()
         if (claim is None or claim.get("incarnation_id") != incarnation_id
@@ -8971,6 +8977,11 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
             claim_changed = True
         else:
             wake_nonce = _mint_wake_nonce(claim)
+            pending_handles = tuple(
+                f"--successor-sid {entry['successor_sid']}"
+                if entry.get("successor_sid")
+                else f"--successor-inc {entry['successor_inc']}"
+                for entry in handoff_pending_entries(claim))
             write_incarnation(claim)
     if claim_changed:
         _rollback_pre_claim()
@@ -8979,7 +8990,8 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
             f"{incarnation_id}) -- refusing to dispatch a wake that "
             f"cannot resume it; another body may already hold the claim")
 
-    prompt_body = _render_supervisor_wake_task(name, incarnation_id, wake_nonce, mail)
+    prompt_body = _render_supervisor_wake_task(
+        name, incarnation_id, wake_nonce, mail, pending_handles=pending_handles)
     try:
         result = dispatch_bg(
             name, cwd, prompt_body, mode, model=model,
@@ -9638,6 +9650,372 @@ def cmd_codex_respond(args) -> int:
     return 0
 
 
+# Retained old-host contract, not the currently installed host module. As with
+# fixed decline, loaded Python bytes need separate operator provenance; metadata
+# and an unknown-method response alone cannot attest the source after startup.
+SUP_INTERRUPT_OLD_HOST_SHA256 = (
+    "ef4516e021043984f7aee4d408d6c9292393def4696353bf3a01d71b3aa2036b")
+
+
+def _sup_interrupt_old_host(client):
+    """Refuse capable/ambiguous hosts; provenance is a separate operator gate."""
+    from fleet_codex import HostRejected
+    try:
+        client.supervisor_approval_reservation_supported()
+    except HostRejected as exc:
+        if str(exc) == "unknown host method":
+            return
+        raise FleetCliError("supervisor interrupt old-host capability is ambiguous") from exc
+    raise FleetCliError("supervisor interrupt requires the retained old-host dispatcher")
+
+
+def _sup_interrupt_request_id(raw, kind):
+    """Preserve JSON integer versus string IDs for one bound callback."""
+    if not isinstance(raw, str) or not raw or len(raw) > 160:
+        raise FleetCliError("supervisor interrupt request ID is invalid")
+    if kind == "int":
+        if not raw.isascii() or not raw.isdecimal() or str(int(raw)) != raw:
+            raise FleetCliError("supervisor interrupt integer ID is not canonical")
+        return int(raw)
+    if kind == "string":
+        return raw
+    raise FleetCliError("supervisor interrupt request ID type is required")
+
+
+def _sup_interrupt_record(args, binding, typed_id, *, state, original=None):
+    """Read one owner-only exact callback; never infer resolution from turn state."""
+    from fleet_codex import _approval_key, _require_regular
+    key = _approval_key(binding.host_generation, typed_id)
+    if key != args.expect_request_key:
+        raise FleetCliError("supervisor interrupt callback key disagrees")
+    path = state_dir() / "codex" / "approvals" / f"{key}.json"
+    info = _require_regular(path)
+    if info.st_size > 48 * 1024:
+        raise FleetCliError("supervisor interrupt callback is oversized")
+    raw = path.read_bytes()
+    try:
+        record = json.loads(raw)
+    except (UnicodeError, ValueError) as exc:
+        raise FleetCliError("supervisor interrupt callback is unreadable") from exc
+    params = record.get("params") if isinstance(record, dict) else None
+    if (not isinstance(record, dict) or not isinstance(params, dict)
+            or record.get("schema") != 1
+            or record.get("home") != str(FLEET_HOME.resolve())
+            or record.get("generation") != binding.host_generation
+            or record.get("key") != key
+            or type(record.get("request_id")) is not type(typed_id)
+            or record.get("request_id") != typed_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("item_id") != args.expect_item_id
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or (state is not None and record.get("state") != state)):
+        raise FleetCliError("supervisor interrupt callback identity or state changed")
+    if (any(field in record for field in (
+            "response", "responding_at", "responded_at", "uncertain_at"))
+            or (record.get("state") == "pending" and "resolved_at" in record)):
+        raise FleetCliError("supervisor interrupt callback has response or consumption evidence")
+    if original is None:
+        if hashlib.sha256(raw).hexdigest() != args.expect_request_sha256:
+            raise FleetCliError("supervisor interrupt callback bytes changed")
+    elif (any(record.get(field) != original.get(field) for field in (
+            "schema", "home", "generation", "key", "request_id", "method",
+            "thread_id", "turn_id", "item_id", "params", "offered_decisions"))
+          or "response" in record):
+        raise FleetCliError("supervisor interrupt callback was answered or retargeted")
+    return record
+
+
+def _sup_interrupt_fresh_processes(args, generation):
+    """Reopen old-host metadata after reads and bind both live OS identities."""
+    from fleet_codex import (CodexHostClient, _process_identity,
+                             _process_identities_match)
+    fresh = CodexHostClient.connect_existing(FLEET_HOME)
+    if (fresh.generation != generation
+            or fresh.host_pid != args.expect_host_pid
+            or fresh.host_process_identity != args.expect_host_process_identity
+            or fresh.app_server_pid != args.expect_app_server_pid
+            or fresh.app_server_process_identity
+            != args.expect_app_server_process_identity
+            or fresh.app_server_started_at != args.expect_app_server_started_at):
+        raise FleetCliError("supervisor interrupt original host or child changed")
+    for pid, expected in (
+            (args.expect_host_pid, args.expect_host_process_identity),
+            (args.expect_app_server_pid, args.expect_app_server_process_identity)):
+        observed = _process_identity(pid)
+        if (not isinstance(observed, str)
+                or _process_identities_match(expected, observed) is not True):
+            raise FleetCliError("supervisor interrupt OS process identity changed")
+    return fresh
+
+
+def _sup_interrupt_durable_inventory(binding, original):
+    """Reject a second unresolved callback for this turn; preserve others."""
+    from fleet_codex import read_pending_requests
+    durable = read_pending_requests(
+        FLEET_HOME, binding.authority.value, binding.current_turn_id,
+        current_generation=binding.host_generation)
+    if len(durable) != 1 or {**original, "stale": False} != durable[0]:
+        raise FleetCliError("supervisor interrupt durable callback is ambiguous")
+
+
+def _sup_interrupt_no_unresolved(binding):
+    """A fresh public empty list cannot replace the durable turn inventory."""
+    from fleet_codex import read_pending_requests
+    if read_pending_requests(
+            FLEET_HOME, binding.authority.value, binding.current_turn_id,
+            current_generation=binding.host_generation):
+        raise FleetCliError("supervisor interrupt has a new unresolved turn callback")
+
+
+def _sup_interrupt_pending(args, binding, typed_id, client, original):
+    """Require one matching old-host unresolved request on the current turn."""
+    waits = client.pending_approvals(
+        binding.authority.value, binding.current_turn_id)
+    if (not isinstance(waits, list) or len(waits) != 1
+            or waits[0] != original):
+        raise FleetCliError("supervisor interrupt public callback is ambiguous")
+    _sup_interrupt_durable_inventory(binding, original)
+
+
+def _sup_interrupt_no_prior_operation(generation, operation_id):
+    """Match the old host's exact journal predecessor gate before dispatch."""
+    from fleet_codex import OperationJournal
+    if not (state_dir() / "codex" / "operations").is_dir():
+        raise FleetCliError("supervisor interrupt host journal is absent")
+    journal = OperationJournal(FLEET_HOME, generation)
+    if journal.unresolved_predecessor(operation_id) is not None:
+        raise FleetCliError(
+            "supervisor interrupt host journal has an unresolved predecessor")
+
+
+def cmd_codex_sup_interrupt_current(args) -> int:
+    """Interrupt one held supervisor turn, never answer its pending callback."""
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("supervisor interrupt requires explicit --fleet-home")
+    typed_id = _sup_interrupt_request_id(args.request_id, args.request_id_type)
+    if (args.expect_old_host_sha256 != SUP_INTERRUPT_OLD_HOST_SHA256
+            or type(args.expect_host_pid) is not int or args.expect_host_pid <= 0
+            or type(args.expect_app_server_pid) is not int
+            or args.expect_app_server_pid <= 0
+            or type(args.expect_app_server_started_at) is not float
+            or args.expect_app_server_started_at <= 0
+            or any(not isinstance(value, str) or not value for value in (
+                args.expect_inc, args.expect_thread, args.expect_turn,
+                args.expect_host_generation, args.expect_host_process_identity,
+                args.expect_app_server_process_identity, args.expect_item_id))
+            or any(not isinstance(value, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", value) for value in (
+                args.expect_request_key, args.expect_request_sha256))):
+        raise FleetCliError("supervisor interrupt exact source or target pins are incomplete")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("supervisor interrupt requires genuine current Codex Interface")
+    status, claim = read_incarnation_status()
+    registry = read_registry_no_repair()
+    if status != "ok":
+        raise FleetCliError("supervisor interrupt claim is absent or corrupt")
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    old_row = dict(binding.record)
+    if (binding.incarnation_id != args.expect_inc
+            or binding.authority.value != args.expect_thread
+            or binding.current_turn_id != args.expect_turn
+            or binding.host_generation != args.expect_host_generation
+            or claim.get("pending_operation") is not None
+            or old_row.get("pending_operation") is not None
+            or old_row.get("status") != "working"
+            or old_row.get("adapter_state") != "active"):
+        raise FleetCliError("supervisor interrupt held claim or row disagrees")
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("supervisor interrupt host generation changed")
+    _sup_interrupt_old_host(client)
+    observed = _codex_supervisor_observe(binding, client=client, require_full=True)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"
+            or observed["active_flags"] != ["waitingOnApproval"]):
+        raise FleetCliError("supervisor interrupt current turn is not waiting on one approval")
+    original = _sup_interrupt_record(args, binding, typed_id, state="pending")
+    _sup_interrupt_pending(args, binding, typed_id, client, original)
+    operation_id = f"supervisor-current-interrupt-{uuid.uuid4().hex}"
+    _sup_interrupt_no_prior_operation(binding.host_generation, operation_id)
+    _sup_interrupt_fresh_processes(args, binding.host_generation)
+    if args.preflight:
+        print("supervisor interrupt exact current turn and pending callback "
+              "verified; no reservation or provider mutation")
+        return 0
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        current = (_codex_supervisor_binding(
+            current_claim, current_registry, expected_name=binding.name,
+            allowed_states={"held"}) if current_status == "ok" else None)
+        if (current_claim != claim or current is None
+                or current.record != old_row
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("supervisor interrupt claim, row or Interface changed")
+        _sup_interrupt_record(args, binding, typed_id, state="pending")
+        _sup_interrupt_durable_inventory(binding, original)
+        _sup_interrupt_no_prior_operation(binding.host_generation, operation_id)
+        fresh = _sup_interrupt_fresh_processes(args, binding.host_generation)
+        old_claim = dict(current_claim)
+        reservation = {
+            "operation_id": operation_id, "kind": "supervisor/current-turn-interrupt",
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "host_generation": binding.host_generation,
+            "request_id": typed_id, "request_key": args.expect_request_key,
+            "request_sha256": args.expect_request_sha256,
+            "previous_claim_operation_id": old_claim.get("last_operation_id"),
+            "previous_row_operation_id": old_row.get("last_operation_id"),
+        }
+        current_claim["pending_operation"] = reservation
+        current_claim["last_operation_id"] = operation_id
+        row = current_registry["workers"][binding.name]
+        row["adapter_state"] = "mutating"
+        row["last_operation_id"] = operation_id
+        reserved_claim, reserved_row = dict(current_claim), dict(row)
+        try:
+            write_incarnation(current_claim)
+            save_registry(current_registry)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor interrupt reservation incomplete; no request sent") from exc
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/interrupt", "params": {
+            "threadId": binding.authority.value,
+            "turnId": binding.current_turn_id}},
+        "recovery": {
+            "kind": "supervisor/current-turn-interrupt",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "request_key": args.expect_request_key,
+            "canonical_cwd": str(FLEET_HOME.resolve())},
+    }
+    try:
+        with fleet_lock():
+            now_claim = read_incarnation()
+            now_registry = read_registry_no_repair()
+            if (now_claim != reserved_claim
+                    or now_registry.get("workers", {}).get(binding.name)
+                    != reserved_row
+                    or _registered_interface_mail_source() != source
+                    or not _mail_source_is_current(source)):
+                raise FleetCliError("supervisor interrupt reservation changed before send")
+            _sup_interrupt_record(args, binding, typed_id, state="pending")
+            _sup_interrupt_durable_inventory(binding, original)
+            _sup_interrupt_no_prior_operation(binding.host_generation, operation_id)
+            fresh = _sup_interrupt_fresh_processes(args, binding.host_generation)
+        mutation = _call_codex_supervisor_claimed(
+            fresh, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"held"})
+        if (mutation.operation_id != operation_id
+                or mutation.generation != binding.host_generation
+                or not isinstance(mutation.result, dict)):
+            raise FleetCliError("supervisor interrupt accepted result is contradictory")
+        # On a1ee, successful mutation and approval/list do not drain provider
+        # notifications. Each public thread read does; repeat only those reads,
+        # never the interrupt, while waiting briefly for resolved evidence.
+        for attempt in range(3):
+            terminal = _codex_supervisor_observe(
+                binding, client=fresh, require_full=True)
+            record = _sup_interrupt_record(
+                args, binding, typed_id, state=None, original=original)
+            waits = fresh.pending_approvals(
+                binding.authority.value, binding.current_turn_id)
+            if (terminal["provider_status"] == "idle"
+                    and terminal["turn_id"] == binding.current_turn_id
+                    and terminal["turn_status"] in {
+                        "completed", "failed", "interrupted"}
+                    and not terminal["active_flags"]
+                    and record["state"] == "resolved"
+                    and waits == []):
+                break
+            if (record["state"] not in {"pending", "resolved"}
+                    or not isinstance(waits, list)
+                    or any(not isinstance(wait, dict) for wait in waits)):
+                raise FleetCliError("supervisor interrupt callback outcome is contradictory")
+            if attempt == 2:
+                raise FleetCliError(
+                    "supervisor interrupt lacks terminal and resolved proof")
+            time.sleep(0.25)
+        _sup_interrupt_fresh_processes(args, binding.host_generation)
+        _sup_interrupt_no_unresolved(binding)
+        fresh.commit(operation_id)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "supervisor interrupt outcome uncertain; reservation retained; "
+            "inspect journal, turn and callback; never replay") from exc
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        row = current_registry.get("workers", {}).get(binding.name)
+        if (current_status != "ok" or current_claim != reserved_claim
+                or row != reserved_row
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError(
+                "supervisor interrupt accepted but claim/row settlement changed; "
+                "reservation retained")
+        try:
+            _sup_interrupt_fresh_processes(args, binding.host_generation)
+            terminal = _codex_supervisor_observe(binding, client=fresh, require_full=True)
+            if (terminal["provider_status"] != "idle"
+                    or terminal["turn_id"] != binding.current_turn_id
+                    or terminal["turn_status"] not in {"completed", "failed", "interrupted"}
+                    or terminal["active_flags"]
+                    or fresh.pending_approvals(binding.authority.value,
+                                               binding.current_turn_id) != []):
+                raise FleetCliError("terminal turn or public callback inventory changed")
+            _sup_interrupt_record(args, binding, typed_id,
+                                  state="resolved", original=original)
+            _sup_interrupt_no_unresolved(binding)
+            # Public reads may replace a stale app-server child. Rebind both
+            # original OS starts after the last read, before publishing idle.
+            _sup_interrupt_fresh_processes(args, binding.host_generation)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor interrupt final terminal/callback proof changed; "
+                "reservation retained; never replay") from exc
+        settled_claim = dict(old_claim)
+        settled_claim.update({"provider_status": "idle",
+                              "last_operation_id": operation_id,
+                              "heartbeat_at": now_iso()})
+        settled_row = dict(old_row)
+        settled_row.update({"status": "idle", "adapter_state": "idle",
+                            "provider_status": "idle",
+                            "provider_turn_status": terminal["turn_status"],
+                            "last_operation_id": operation_id,
+                            "last_activity": now_iso()})
+        current_registry["workers"][binding.name] = settled_row
+        try:
+            save_registry(current_registry)
+            write_incarnation(settled_claim)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor interrupt settlement incomplete; inspect claim/row; "
+                "never replay") from exc
+        _append_event_quiet(
+            "interrupted", binding.name,
+            codex_thread_id=binding.authority.value,
+            codex_turn_id=binding.current_turn_id,
+            turn_status=terminal["turn_status"])
+    print(f"{binding.name}: current native Codex turn terminal and callback "
+          "resolved; supervisor remains held and idle")
+    return 0
+
+
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
     """Queue once, then steer active or wake idle on the exact claimed thread."""
     from fleet_codex import OperationJournal
@@ -10117,6 +10495,254 @@ def _resume_one_limited_codex(name: str, rec: dict) -> bool:
     return True
 
 
+_TERMINAL_QUOTA_SCHEMAS = frozenset({
+    # Exact reviewed 0.155.1 and 0.161.0 app-server schema digests.
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3",
+    "62f227e897351f20fe8b8984341512d1cc4ebf42def4487bc65d36fb7c40bba6",
+})
+
+
+# Schema shapes do not prove a conditional quota recovery. No reviewed source
+# proves effective policy continuity and exclusion of concurrent turn/start.
+# This source hold has no CLI or environment override.
+_TERMINAL_QUOTA_DISPATCH_PROVEN_SCHEMAS = frozenset()
+
+
+def _terminal_quota_target_mail_absent(thread_id: str) -> None:
+    """A recovery turn must not consume or obscure previously queued mail."""
+    directory = mailbox_dir()
+    target = directory / f"{thread_id}.md"
+    if target.exists() or target.is_symlink() or list(
+            directory.glob(f"{thread_id}.md.claimed.*")):
+        raise FleetCliError(
+            "terminal-quota recovery has target mail or a claimed mail file; "
+            "preserve and reconcile it before resuming")
+
+
+def _terminal_quota_durable_preflight(binding: CodexWorkerBinding) -> tuple[dict, str]:
+    """Prove the old accepted turn and absence of unfinished home intents."""
+    from fleet_codex import CodexApprovalStore, OperationJournal
+
+    record = binding.record
+    if record.get("pending_operation") is not None:
+        raise FleetCliError("terminal-quota recovery has a pending row operation")
+    operation_id = record.get("last_operation_id")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise FleetCliError("terminal-quota recovery has no bound operation ID")
+    operation_dir = state_dir() / "codex" / "operations"
+    approval_dir = state_dir() / "codex" / "approvals"
+    if not operation_dir.is_dir() or not approval_dir.is_dir():
+        raise FleetCliError("terminal-quota recovery journal inventory is unavailable")
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    records = journal.records()
+    if any(item.get("state") not in {"committed", "failed"}
+           for item in records):
+        raise FleetCliError("terminal-quota recovery has an unresolved or unknown predecessor")
+    matches = [item for item in records if item.get("operation_id") == operation_id]
+    if len(matches) != 1:
+        raise FleetCliError("terminal-quota recovery bound journal is missing or ambiguous")
+    prior = matches[0]
+    recovery = prior.get("recovery")
+    result = prior.get("result")
+    method = prior.get("public_method")
+    if (prior.get("state") != "committed"
+            or type(prior.get("schema")) is not int or prior["schema"] != 1
+            or prior.get("method") != "rpc"
+            or not isinstance(prior.get("payload_digest"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", prior["payload_digest"])
+            or prior.get("home") != str(FLEET_HOME.resolve())
+            or prior.get("generation") != binding.host_generation
+            or not isinstance(recovery, dict)
+            or recovery.get("fleet_name") != binding.name
+            or recovery.get("thread_id") != binding.thread_id
+            or recovery.get("canonical_cwd") != binding.cwd
+            or not isinstance(result, dict)):
+        raise FleetCliError("terminal-quota recovery bound journal disagrees with row")
+    if method == "turn/start":
+        turn = result.get("turn")
+        linked = isinstance(turn, dict) and turn.get("id") == binding.turn_id
+    elif method == "turn/steer":
+        linked = result.get("turnId") == binding.turn_id
+    else:
+        linked = False
+    if not linked:
+        raise FleetCliError("terminal-quota recovery old accepted turn is unlinked")
+
+    evidence = _codex_public_evidence_file(binding)
+    if (not isinstance(evidence, dict)
+            or type(evidence.get("schema")) is not int or evidence["schema"] != 1
+            or evidence.get("turn_status") != "failed"
+            or evidence.get("error_code") != "usageLimitExceeded"):
+        raise FleetCliError("terminal-quota recovery lacks exact durable failed-turn evidence")
+
+    approvals = CodexApprovalStore(FLEET_HOME, binding.host_generation)
+    if approvals.unresolved():
+        raise FleetCliError("terminal-quota recovery has unresolved callback evidence")
+    _terminal_quota_target_mail_absent(binding.thread_id)
+    return prior, json.dumps({"operations": records,
+                             "callbacks": approvals.records(),
+                             "evidence": evidence}, sort_keys=True)
+
+
+def _resume_terminal_quota_codex(name: str) -> int:
+    """Start one new turn on an exact loaded quota-failed thread, never replay it."""
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("terminal-quota recovery requires the current genuine Codex Interface")
+    data = read_registry_no_repair()
+    record = data.get("workers", {}).get(name)
+    if not isinstance(record, dict):
+        raise FleetCliError(f"unknown worker: {name!r}")
+    refuse_if_archived(name, record, "resume-limited --terminal-quota")
+    binding = _codex_worker_binding(name, record)
+    if (record.get("status") != "dead-suspected"
+            or record.get("adapter_state") != "uncertain"
+            or record.get("provider_status") != "systemError"
+            or record.get("codex_error_code") != "usageLimitExceeded"):
+        raise FleetCliError("terminal-quota recovery row is not the exact quota/SystemError case")
+    model = _codex_model_slug(record.get("model"))
+    if model is None:
+        raise FleetCliError("terminal-quota recovery row has no Codex model")
+    profile = _codex_permission_profile(record.get("mode"))
+    effective = record.get("permission_effective")
+    if not isinstance(effective, dict):
+        raise FleetCliError("terminal-quota recovery has no recorded effective policy")
+    _validate_codex_thread_effective(dict(effective, model=model), model, profile)
+    if type(record.get("turns")) is not int or record["turns"] < 1:
+        raise FleetCliError("terminal-quota recovery has an invalid turn counter")
+
+    # Until the missing provider fence is reviewed, stop before touching the
+    # existing host. Its ordinary read path may itself replace an overflowed
+    # app-server child, so 'read-only RPC' is not a preservation guarantee.
+    if record.get("codex_schema_digest") not in _TERMINAL_QUOTA_DISPATCH_PROVEN_SCHEMAS:
+        raise FleetCliError(
+            "terminal-quota recovery source HOLD: effective policy continuity "
+            "and conditional same-thread turn/start are not proven; no host RPC or dispatch")
+    client = _codex_existing_client(FLEET_HOME)
+    if (client.generation != binding.host_generation
+            or client.schema_digest not in _TERMINAL_QUOTA_SCHEMAS
+            or client.schema_digest != record.get("codex_schema_digest")):
+        raise FleetCliError("terminal-quota recovery host generation or reviewed schema changed")
+    host_identity = (
+        "generation", "schema_digest", "host_pid", "host_process_identity",
+        "app_server_pid", "app_server_process_identity")
+    original_identity = tuple(getattr(client, field, None) for field in host_identity)
+    if any(value is None for value in original_identity):
+        raise FleetCliError("terminal-quota recovery host identity is incomplete")
+    prior, inventory = _terminal_quota_durable_preflight(binding)
+    observed = _codex_worker_observe(binding, client=client, require_full=True)
+    if (observed["provider_status"] != "systemError"
+            or observed["active_flags"]
+            or observed["turn_status"] != "failed"
+            or observed["error_code"] != "usageLimitExceeded"
+            or observed["thread_model"] != model):
+        raise FleetCliError("terminal-quota recovery public thread is not the exact failed turn")
+    allowed, _reset_at = _codex_rate_limit_state(client)
+    if allowed is not True:
+        raise FleetCliError("terminal-quota recovery needs fresh ordinaryUsageAllowed=true")
+    fresh_client = _codex_existing_client(FLEET_HOME)
+    if tuple(getattr(fresh_client, field, None) for field in host_identity) != original_identity:
+        raise FleetCliError("terminal-quota recovery host identity changed before reservation")
+    if (not _mail_source_is_current(source)
+            or not isinstance(_registered_interface_mail_source(), dict)):
+        raise FleetCliError("terminal-quota recovery Interface identity changed")
+    _prior, current_inventory = _terminal_quota_durable_preflight(binding)
+    if current_inventory != inventory:
+        raise FleetCliError("terminal-quota recovery durable inventory changed")
+    final_observed = _codex_worker_observe(binding, client=fresh_client,
+                                          require_full=True)
+    if any(final_observed[key] != observed[key] for key in (
+            "provider_status", "active_flags", "turn_status", "error_code",
+            "thread_model")):
+        raise FleetCliError("terminal-quota recovery public turn changed")
+    if _codex_rate_limit_state(fresh_client)[0] is not True:
+        raise FleetCliError("terminal-quota recovery allowance changed before dispatch")
+    if (_terminal_quota_durable_preflight(binding)[1] != inventory
+            or not _mail_source_is_current(source)
+            or _registered_interface_mail_source() != source):
+        raise FleetCliError("terminal-quota recovery inventory or Interface changed")
+    dispatch_client = _codex_existing_client(FLEET_HOME)
+    if tuple(getattr(dispatch_client, field, None) for field in host_identity) != original_identity:
+        raise FleetCliError("terminal-quota recovery host identity changed before dispatch")
+    if fresh_client.schema_digest not in _TERMINAL_QUOTA_DISPATCH_PROVEN_SCHEMAS:
+        raise FleetCliError(
+            "terminal-quota recovery source HOLD: effective policy continuity "
+            "and conditional same-thread turn/start are not proven; no dispatch")
+
+    operation_id = f"worker-terminal-quota-{uuid.uuid4()}"
+    reserved = _reserve_codex_worker_operation(
+        binding, operation_id, "terminal-quota/turn-start",
+        expected_record=record)
+    prompt = (
+        "The ordinary Codex usage limit has reset. Continue your existing task "
+        "from this thread's history. Preserve its scope and report the result."
+    )
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": binding.thread_id,
+            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+        }},
+        "recovery": {
+            "kind": "worker/terminal-quota-turn-start",
+            "fleet_name": name, "thread_id": binding.thread_id,
+            "previous_turn_id": binding.turn_id,
+            "previous_operation_id": prior["operation_id"],
+            "canonical_cwd": binding.cwd,
+            "host_generation": binding.host_generation,
+            "schema_digest": client.schema_digest,
+        },
+    }
+    try:
+        reply = dispatch_client.call(operation, timeout=30)
+        result = reply.result
+        turn = result.get("turn") if isinstance(result, dict) else None
+        turn_id = _provider_codex_id(
+            turn.get("id") if isinstance(turn, dict) else None,
+            "terminal-quota successor turn")
+        if (reply.generation != binding.host_generation
+                or turn_id == binding.turn_id
+                or turn.get("status") != "inProgress"):
+            raise FleetCliError("terminal-quota successor response is ambiguous")
+        dispatch_client.commit(operation_id)
+    except BaseException as exc:
+        _freeze_codex_worker_operation(binding, operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "terminal-quota turn/start acceptance is uncertain; retained the "
+            "reservation and did not retry") from exc
+
+    with fleet_lock():
+        data = load_registry()
+        current = data["workers"].get(name)
+        if current != reserved:
+            raise FleetCliError(
+                "terminal-quota successor was accepted but row changed; "
+                "preserved the reservation for review")
+        current.pop("pending_operation", None)
+        current.update({
+            "codex_turn_id": turn_id, "adapter_state": "active",
+            "provider_status": "active", "status": "working",
+            "last_activity": now_iso(), "last_dispatch_at": now_iso(),
+            "turns": current.get("turns", 0) + 1,
+        })
+        current.pop("ordinary_usage_allowed", None)
+        current.pop("limit_kind", None)
+        current.pop("limit_reset_at", None)
+        current.pop("codex_error_code", None)
+        save_registry(data)
+        _append_event_quiet(
+            "terminal_quota_turn_started", name,
+            codex_thread_id=binding.thread_id,
+            previous_turn_id=binding.turn_id,
+            codex_turn_id=turn_id, operation_id=operation_id,
+            substrate="codex")
+    print(f"{name}: resumed terminal quota on existing Codex thread {binding.thread_id}")
+    return 0
+
+
 def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
     """Claim and fork-steer one still-limited worker.
     Re-check limited under the lock so concurrent sweeps cannot double-dispatch.
@@ -10177,6 +10803,13 @@ def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
     Views only flag eligibility; this gated verb performs the actual relaunch."""
     _supervisor_gate("resume-limited", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
+    if getattr(args, "terminal_quota", False):
+        if (not args.name or getattr(args, "force_now", False)
+                or not getattr(args, "_fleet_home_explicit", False)):
+            raise FleetCliError(
+                "resume-limited --terminal-quota requires one named worker and "
+                "explicit --fleet-home; --force-now is not supported")
+        return _resume_terminal_quota_codex(args.name)
     force_now = bool(getattr(args, "force_now", False))
 
     with fleet_lock():
@@ -11700,8 +12333,9 @@ def _steer_supervisor_release(name, reason, *, run, which, sleep):
         f"Stop what you are doing. Release the supervisor claim yourself -- fleet "
         f"cannot do it for you (three-tier §10.4 B5: `sup-release` requires YOUR "
         f"current generation, which only you hold).\n\n"
-        f"Run exactly this, presenting your own nonce:\n"
-        f'  "{py}" "{fleet_py}" sup-release --reason "{reason}" --nonce <your nonce>\n\n'
+        f"Run this with the exact value from your most recent `NONCE:` line, "
+        f"appended after `--nonce`:\n"
+        f'  "{py}" "{fleet_py}" sup-release --reason "{reason}" --nonce\n\n'
         f"Then take NO further fleet actions and END YOUR TURN. The body is stopped "
         f"as soon as the claim reads `released`.")
     try:
@@ -13887,7 +14521,145 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
     return reconciled
 
 
-def _doctor_check_dead_suspected(workers: dict, reconciled=()):
+def _codex_claim_fingerprint(path: Path):
+    """Bind retained claimed mail to its regular inode and exact bytes."""
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise FleetCliError("native Codex retained mail is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            content = stream.read()
+        after = os.fstat(fd)
+        linked = path.lstat()
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if (identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or identity != (linked.st_dev, linked.st_ino, linked.st_size, linked.st_mtime_ns)):
+            raise FleetCliError("native Codex retained mail changed during read")
+        return identity, hashlib.sha256(content).hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _reconcile_frozen_codex_worker_operations() -> list[str]:
+    """Settle a successful send only; uncertain acceptance is never released.
+
+    Exact journal success, current paged provider state, callback scope, retained
+    mail and the full registry row must agree. No mutation is replayed, and no
+    terminal predecessor is interpreted as proof of rejection.
+    """
+    from fleet_codex import OperationJournal
+    with fleet_lock():
+        candidates = {
+            name: dict(record)
+            for name, record in load_registry().get("workers", {}).items()
+            if (isinstance(record, dict)
+                and record.get("archived_at") is None
+                and record.get("status") == "dead-suspected"
+                and record.get("adapter_state") == "uncertain"
+                and isinstance(record.get("pending_operation"), dict)
+                and record["pending_operation"].get("kind")
+                in {"turn/start", "turn/steer"}
+                and _codex_record_route(record) == "native"
+                and not _is_supervisor_shaped(name))
+        }
+    reconciled = []
+    for name, before in candidates.items():
+        try:
+            binding = _codex_worker_binding(name, before)
+            operation_id = before["pending_operation"].get("operation_id")
+            if before.get("last_operation_id") != operation_id:
+                continue
+            journal = OperationJournal(FLEET_HOME, binding.host_generation)
+            identity = dict(fleet_name=name, thread_id=binding.thread_id,
+                            previous_turn_id=binding.turn_id, canonical_cwd=binding.cwd)
+            turn_id = journal.worker_turn_id(operation_id, **identity)
+            if journal.load(operation_id).get("public_method") != before["pending_operation"]["kind"]:
+                continue
+            if journal.unresolved_predecessor(operation_id) is not None:
+                continue
+            # A sole claim belongs to this fenced dispatch; multiple old claims
+            # cannot be safely attributed to its success.
+            claims = list(mailbox_dir().glob(f"{binding.thread_id}.md.claimed.*"))
+            if len(claims) != 1:
+                continue
+            claim = claims[0]
+            fingerprint = _codex_claim_fingerprint(claim)
+            queued = claim.read_text(encoding="utf-8", errors="replace").strip()
+            if not queued or _codex_claim_fingerprint(claim) != fingerprint:
+                continue
+            method = before["pending_operation"]["kind"]
+            params = {"threadId": binding.thread_id,
+                      "input": [{"type": "text", "text": queued, "text_elements": []}]}
+            if method == "turn/steer":
+                params["expectedTurnId"] = binding.turn_id
+            operation = {
+                "operation_id": operation_id, "method": "rpc",
+                "payload": {"method": method, "params": params},
+                "recovery": {"kind": f"worker/{method}", **identity},
+            }
+            journal.observed_operation(operation)
+            client = _codex_existing_client(FLEET_HOME)
+            if client.generation != binding.host_generation:
+                continue
+            rebound = CodexWorkerBinding(
+                name=name, thread_id=binding.thread_id, turn_id=turn_id,
+                host_generation=binding.host_generation, cwd=binding.cwd,
+                record=before)
+            _codex_active_reobserve_unknown_callback()
+            _require_no_codex_current_waits(name, before)
+            target = dict(before, codex_turn_id=turn_id)
+            _require_no_codex_current_waits(name, target)
+            observed = _codex_worker_observe(rebound, client=client, hydrate_items=False)
+            if observed["provider_status"] not in {"active", "idle"}:
+                continue
+            status, adapter_state = _codex_worker_status(observed)
+            if status == "dead-suspected":
+                continue
+            with fleet_lock():
+                data = load_registry()
+                if data["workers"].get(name) != before:
+                    continue
+                if (list(mailbox_dir().glob(f"{binding.thread_id}.md.claimed.*")) != claims
+                        or _codex_claim_fingerprint(claim) != fingerprint):
+                    continue
+                _codex_active_reobserve_unknown_callback()
+                _require_no_codex_current_waits(name, before)
+                _require_no_codex_current_waits(name, target)
+                if journal.unresolved_predecessor(operation_id) is not None:
+                    continue
+                if (journal.load(operation_id).get("public_method")
+                        != before["pending_operation"]["kind"]
+                        or _codex_existing_client(FLEET_HOME).generation != binding.host_generation):
+                    continue
+                journal.observed_operation(operation)
+                journal.adopt_worker_turn(operation_id, turn_id=turn_id, **identity)
+                updated = dict(before, codex_turn_id=turn_id, status=status,
+                               adapter_state=adapter_state,
+                               provider_status=observed["provider_status"],
+                               last_activity=now_iso())
+                updated.pop("pending_operation", None)
+                updated.pop("uncertain_reason", None)
+                if turn_id != binding.turn_id:
+                    updated["turns"] = before.get("turns", 0) + 1
+                    updated["last_dispatch_at"] = now_iso()
+                data["workers"][name] = updated
+                save_registry(data)
+                # Persist the row before removing proven delivered mail. A crash
+                # retains evidence rather than losing a still-fenced claim.
+                finalize_mailbox_claim(claim)
+                reconciled.append(name)
+                _append_event_quiet("codex_operation_reconciled", name,
+                                    outcome="adopted", codex_thread_id=binding.thread_id,
+                                    codex_turn_id=turn_id)
+        except (FleetCliError, OSError, ValueError):
+            continue
+    return reconciled
+
+
+def _doctor_check_dead_suspected(workers: dict, reconciled=(), sends=()):
     """Note dead-suspected rows in the supplied snapshot without recomputing.
     The verdict is advisory and recomputable, never a sticky respawn trigger.
     """
@@ -13895,6 +14667,8 @@ def _doctor_check_dead_suspected(workers: dict, reconciled=()):
         f"reconciled {len(reconciled)} exact native Codex completion(s): "
         f"{', '.join(sorted(reconciled))}; "
         if reconciled else "")
+    if sends:
+        repaired += f"settled {len(sends)} proven native Codex send(s): {', '.join(sorted(sends))}; "
     names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
     if names:
         return ("dead-suspected", True,
@@ -13992,7 +14766,7 @@ def _doctor_check_orphaned_claims(workers=None):
                               if p.is_file() and not p.name.endswith(".tmp") and p.name not in known_sids)
         if orphan_ceils:
             parts.append(
-                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings/<sid> matching no "
+                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings entries matching no "
                 f"registered worker; run `fleet clean` or remove manually): {', '.join(orphan_ceils)}")
     if parts:
         return ("orphaned-claims", True, " | ".join(parts))
@@ -14011,14 +14785,12 @@ DAEMON_ENV_LEAK_REMEDY = (
     "NO OBSERVATION OF THIS VARIABLE IS EVIDENCE ABOUT THIS BODY, IN EITHER "
     "DIRECTION (claim-nonce §18, ratified 2026-07-30) -- it is a WITNESS: "
     "worth reporting when it disagrees with the registry, never worth "
-    "believing over it. EXACTLY ONE GUARD STILL KEYS ON IT AND THAT IS A KNOWN "
-    "LIVE HOLE, not a sound read: three-tier §11.3 ND4c exempts a session with "
-    f"no stamp from the {SUPERVISOR_BAND_HARD_TOKENS:,}-token dispatch ceiling, "
-    "so a body whose daemon was "
-    "cold-started unstamped is exempt from a ceiling that applies to it. The "
-    "re-grounding is ordered and BLOCKED on an operator ruling (it collides "
-    "with ND4b on the same input); the accounting and the three candidates are "
-    "in claim-nonce §18.4. The sid itself is NOT affected -- the vendor stamps "
+    "believing over it. ND4c now resolves direct claim identity and registry "
+    "sid unions before stamp absence: a known holder, including adopted and "
+    "fork-steered bodies, remains subject to the current dispatch bands. "
+    "The residual LIVE HOLE is confined to indeterminate unstamped identity, "
+    "which retains the human-channel exemption (claim-nonce §18.4). "
+    "The sid itself is NOT affected -- the vendor stamps "
     "each hosted session's own sid over the substituted environment (§18.2, "
     "closed by counting), which is what makes the registry union readable at "
     "all")
@@ -14063,14 +14835,12 @@ def _doctor_check_identity_witness(workers: dict):
                     f"hosts, so a daemon cold-started by an unstamped launcher "
                     f"produces exactly this, and no observation of "
                     f"FLEET_WORKER (present, absent or blank) is evidence about "
-                    f"this body (claim-nonce §18). WHAT IT STILL COSTS, and it "
-                    f"is why this row is red rather than a note: three-tier "
-                    f"§11.3 ND4c exempts a stamp-less session from the "
-                    f"{SUPERVISOR_BAND_HARD_TOKENS:,}-token "
-                    f"dispatch ceiling, so until that exemption is re-grounded "
-                    f"this body is exempt from a ceiling the registry says "
-                    f"applies to it. The re-grounding is ordered and BLOCKED on "
-                    f"an operator ruling (claim-nonce §18.4). Remedy for the "
+                    f"this body (claim-nonce §18). Known claim holders remain "
+                    f"subject to the dispatch ceiling without a stamp, including "
+                    f"adopted and fork-steered identities. Indeterminate unstamped "
+                    f"identity retains the human-channel exemption (claim-nonce "
+                    f"§18.4). This witness is red because the channels disagree, "
+                    f"not because a known holder bypasses its band. Remedy for the "
                     f"witness itself: let the daemon idle-exit so the next "
                     f"dispatch starts a fresh one.")
         return ("identity-witness", True,
@@ -14522,10 +15292,12 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     registry_quarantined = None
     registry_rename_attempted = False
     reconciled_codex = []
+    reconciled_sends = []
     try:
         if repair:
             with fleet_lock():
                 data = load_registry()          # the ONE quarantine site left
+            reconciled_sends = _reconcile_frozen_codex_worker_operations()
             reconciled_codex = _reconcile_dead_suspected_codex_completions()
             # Refresh the diagnostic snapshot after the conditional repair.
             with fleet_lock():
@@ -14563,7 +15335,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(
-            _doctor_check_dead_suspected, workers, reconciled_codex),
+            _doctor_check_dead_suspected, workers, reconciled_codex, reconciled_sends),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_permission_denials, workers),
@@ -15360,7 +16132,7 @@ _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
 Append-only checkpoint log (spec §4). Single writer: the current claim
 holder, via `fleet sup-*` commands only. Never edit or delete entries.
-Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
+Entry header format: `## UTC_ISO KIND inc=INCARNATION_ID sid=SESSION_ID`
 plus an optional trailing ` substrate=<substrate>` when the body's registry row
 records one (item 28, e.g. `substrate=openrouter/stealth/union-alpha`).
 Kinds: BOOT, CHECKPOINT, PROPOSAL, PARKED, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
@@ -16060,7 +16832,7 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
             f"successors answer to it ("
             + ", ".join(f"{e.get('successor_inc')}" for e in rivals)
             + "). Refusing to guess which session to stop; name one with "
-              "`--successor-inc <inc>`")}
+              "`--successor-inc` with the exact incarnation id")}
     entry = rivals[0] if rivals else None
     if entry is None:
         named = successor_sid or successor_inc
@@ -16575,7 +17347,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
     :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23057`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -17013,6 +17785,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     path (morning / post-reboot / post-handoff, spec §4). Epoch check runs
     BEFORE the claim decision; the roster subprocess runs OUTSIDE fleet_lock
     (F4 doctrine: never hold the lock across a subprocess)."""
+    _refuse_ph(args)
     caller_sid = getattr(args, "sid", None) or current_caller_session()
     if not caller_sid:
         raise FleetCliError("sup-boot: caller session unknown -- run from a Claude "
@@ -17261,6 +18034,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     frame must carry the exemption. Send to the current claim holder has its
     own identity-checked mailbox carve-out below. Validation never rotates a nonce.
     """
+    _refuse_ph(nonce=nonce)
     caller = current_caller_session()
     if caller is None:
         return
@@ -17316,8 +18090,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Only offer --nonce when the actual entry point accepts it; the gate frame
     # label can differ from the command the caller ran.
     if verb in GATE_VERBS_ACCEPTING_NONCE:
-        remedy = ("Present the current generation with `--nonce <value>` "
-                  "(the value the last `sup-*` verb printed), or escalate to "
+        remedy = ("Present the exact value printed after `NONCE:` by the last "
+                  "`sup-*` verb with `--nonce`, or escalate to "
                   "the supervisor session.")
     else:
         remedy = (f"THERE IS NOTHING YOU CAN PRESENT: `fleet {verb}` declares no "
@@ -17504,15 +18278,106 @@ def _acknowledge_pending(claim: dict) -> None:
 
 
 def _continuity_refusal(verb, claim: dict) -> FleetCliError:
-    """Build an agent-facing refusal naming ambiguity and human escalation.
-    Do not name a unilateral recovery lever: either indistinguishable body may
-    be legitimate. Human recovery instructions live in the supervisor runbook.
-    """
+    """Build an agent-facing continuity refusal with the ratified recovery path."""
     return SupervisorContinuityError(
         f"{verb}: continuity proof failed (expected generation "
         f"{claim.get('nonce_seq', '?')}) -- a second body of your lineage may be "
         f"acting. STOP: take no further supervisor actions and escalate to the "
-        f"operator.")
+        f"operator." + _recovery_steps(claim))
+
+
+def _wake_cmd(home=None):
+    """Return the exact, non-destructive Interface wake command for one home."""
+    py = Path(sys.executable).as_posix()
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
+    fleet_home = Path(home if home is not None else FLEET_HOME).as_posix()
+    return (f'"{py}" "{fleet_py}" --fleet-home "{fleet_home}" send supervisor '
+            '"Continuity recovery: resume this incarnation and abort every pending '
+            'handoff successor before any other supervisor verb."')
+
+
+def _recovery_steps(claim):
+    """Name the exact Interface recovery and successor handles; never repeat a nonce."""
+    try:
+        incarnation_id = (claim.get("incarnation_id", "?")
+                          if isinstance(claim, dict) else "?")
+        holder_row = "the holder row (fleet status lists it)"
+        records = _registry_records_or_none()
+        workers = records.get("workers") if isinstance(records, dict) else None
+        for name, record in (workers.items() if isinstance(workers, dict) else ()):
+            if _record_is_supervisor_claim_holder(record, claim=claim) is True:
+                holder_row = f"the holder row {name} (status now: {record.get('status')})"
+                break
+        lines = [
+            "",
+            "RECOVERY (claim-nonce §5.7 founder override, 2026-10-08):",
+            "1. End this turn now; run no further supervisor verbs from this body.",
+            f"2. Once {holder_row} is idle, the Interface or operator runs exactly:",
+            f"   {_wake_cmd()}",
+            f"   This wakes the same incarnation {incarnation_id} on a fresh session "
+            "with a fresh nonce. A busy holder only queues the mail: wait for idle.",
+        ]
+        handles = [
+            f"--successor-sid {entry['successor_sid']}"
+            if isinstance(entry.get("successor_sid"), str) and entry["successor_sid"]
+            else f"--successor-inc {entry['successor_inc']}"
+            for entry in handoff_pending_entries(claim)]
+        if handles:
+            lines.append(
+                "3. Take the nonce only from the woken body's most recent `NONCE:` "
+                "output; this refusal never repeats it. The woken body then aborts "
+                "each pending successor by its exact handle:")
+            lines.extend(f"   fleet sup-handoff-abort {handle} --nonce"
+                         for handle in handles)
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _is_ph(value):
+    """Recognize template text; minted URL-safe nonces never contain angle brackets."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or "<" in text or ">" in text:
+        return True
+    bare = text.strip("{}[]()$'\"` ").lower().replace("_", "-").replace(" ", "-")
+    return bare in {
+        "value", "nonce", "your-nonce", "current-nonce", "nonce-value",
+        "the-nonce", "my-nonce", "token", "handoff-token", "generation",
+        "current-generation",
+    }
+
+
+def _refuse_ph(args=None, nonce=None, home=None):
+    """Refuse a placeholder credential before the command can mutate state."""
+    pairs = ((("--nonce", getattr(args, "nonce", None)),
+              ("--handoff-token", getattr(args, "handoff_token", None)))
+             if args is not None else (("--nonce", nonce),))
+    for flag, value in pairs:
+        if value is None or not _is_ph(value):
+            continue
+        shown = repr(value if len(value) <= 40 else value[:40] + "...")
+        if flag == "--nonce":
+            recovery = (
+                "Present the exact value printed after `NONCE:` by your last "
+                "`sup-*` verb, `sup-boot` or wake bootstrap. If that value is lost, "
+                "do not guess or retry:\n"
+                "1. End this turn now; run no further supervisor verbs.\n"
+                "2. Once the holder row is idle, the Interface or operator runs "
+                f"exactly:\n   {_wake_cmd(home=home)}\n"
+                "   This wakes the same incarnation with a fresh nonce; its "
+                "bootstrap aborts every pending handoff successor by exact handle "
+                "before any other work.")
+        else:
+            recovery = (
+                "Present the exact token from your successor task file. If it is "
+                "lost, end this turn: the holder aborts this attempt with "
+                "`sup-handoff-abort` and begins a new one.")
+        raise FleetCliError(
+            f"{flag} {shown} is a placeholder, not a minted value -- refused "
+            f"before any state change (nothing written, logged or rotated). "
+            f"{recovery}")
 
 
 SPEED_BUMP_NOTE = (
@@ -17610,6 +18475,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     and quarantine completeness; all other values refuse. Worker turns are gated
     before claim reads. This enforces the journal's single-writer contract.
     """
+    _refuse_ph(nonce=nonce)
     # Resolve caller identity once, including --sid, for role and continuity checks.
     # SPEC.md:281 makes refused the doctor alarm kind, so role classification must
     # use the same caller whose continuity is being tested.
@@ -22113,6 +22979,896 @@ def _restored_continuation_context_original_link(binding, link):
             thread_id=binding.authority.value) == link
 
 
+_CODEX_CANCEL_VERSION = "0.155.1"
+_CODEX_CANCEL_SCHEMA = (
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3")
+
+
+def _codex_cancel_pinned_old_host(client) -> dict:
+    """Bind the cancellation proof to the validated, running old host."""
+    identity = _codex_cancel_host_identity(client)
+    if (identity["codex_version"] != _CODEX_CANCEL_VERSION
+            or identity["schema_digest"] != _CODEX_CANCEL_SCHEMA):
+        raise FleetCliError(
+            "approval cancellation requires running Codex 0.155.1 and its "
+            "exact reviewed schema")
+    return identity
+
+
+def _codex_cancel_host_identity(client) -> dict:
+    """Add cancellation-specific version pins without changing restoration proof."""
+    return {**_codex_restore_host_identity(client),
+            "codex_version": getattr(client, "codex_version", None),
+            "schema_digest": getattr(client, "schema_digest", None)}
+
+
+def _codex_cancel_approval_store(generation):
+    from fleet_codex import CodexApprovalStore
+
+    directory = FLEET_HOME / "state" / "codex" / "approvals"
+    if directory.is_symlink() or not directory.is_dir():
+        raise FleetCliError("existing approval store is missing or unsafe")
+    return CodexApprovalStore(FLEET_HOME, generation)
+
+
+def _codex_cancel_approval_record(client, binding, args, *, terminal=False,
+                                  host_check=True):
+    """Read the one exact old-host callback; never answer or erase it."""
+    records = client.pending_approvals(binding.authority.value) \
+        if host_check else None
+    if host_check:
+        if terminal:
+            if records:
+                raise FleetCliError("cancelled supervisor callback remains unresolved")
+        elif (len(records) != 1 or records[0].get("state") != "pending"):
+            raise FleetCliError(
+                "exact supervisor turn must have one pending callback only")
+    store = _codex_cancel_approval_store(binding.host_generation)
+    matches = [record for record in store.records()
+               if str(record.get("request_id")) == str(args.expect_request_id)
+               and record.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        raise FleetCliError("exact supervisor callback is missing or ambiguous")
+    record = matches[0]
+    params = record.get("params")
+    if (record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or not isinstance(params, dict)
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or params.get("command") != args.expect_command
+            or params.get("cwd") != args.expect_request_cwd
+            or record.get("item_id") != args.expect_item_id
+            or args.expect_method != record.get("method")
+            or record.get("state") != ("resolved" if terminal else "pending")
+            or any(key in record for key in (
+                "response", "responding_at", "responded_at", "uncertain_at"))):
+        raise FleetCliError(
+            "exact supervisor callback identity or no-response proof disagrees")
+    if host_check and not terminal and records[0] != record:
+        raise FleetCliError("host pending callback differs from durable record")
+    return record
+
+
+def _codex_cancel_expectations(args, binding, generation, operation_id=None):
+    if (not getattr(args, "_fleet_home_explicit", False)
+            or args.expect_inc != binding.incarnation_id
+            or args.expect_thread != binding.authority.value
+            or args.expect_turn != binding.current_turn_id
+            or args.expect_host_generation != generation
+            or (operation_id is not None
+                and args.expect_cancel_op != operation_id)):
+        raise FleetCliError(
+            "cancelled supervisor approval requires explicit exact home, "
+            "incarnation, thread, turn, host generation, and operation pins")
+
+
+def _codex_cancel_original_policy(binding):
+    profile = _codex_permission_profile(binding.record.get("mode"))
+    effective = binding.record.get("permission_effective")
+    if (binding.record.get("mode") != "accept"
+            or not isinstance(effective, dict)
+            or effective.get("approvalPolicy") != "on-request"
+            or effective.get("approvalsReviewer") != "user"
+            or not isinstance(effective.get("sandbox"), dict)
+            or effective["sandbox"].get("type") != "workspaceWrite"):
+        raise FleetCliError(
+            "cancelled approval recovery requires the exact recorded accept policy")
+    return profile
+
+
+def _codex_cancel_public_status(binding, client, *, terminal=False):
+    observed = _codex_supervisor_observe(binding, client=client)
+    expected = ("idle", "interrupted", []) if terminal else (
+        "active", "inProgress", ["waitingOnApproval"])
+    if ((observed["provider_status"], observed["turn_status"],
+         observed["active_flags"]) != expected):
+        raise FleetCliError(
+            "exact supervisor public turn is not in the required "
+            + ("terminal" if terminal else "approval-wait") + " state")
+    return observed
+
+
+def _codex_cancel_actionable(claim, row):
+    """A journal-free reservation is still authoritative; never replace it."""
+    holder = claim.get("holder") if isinstance(claim, dict) else None
+    if (not isinstance(claim, dict) or not isinstance(row, dict)
+            or not isinstance(holder, dict)
+            or claim.get("pending_operation") is not None
+            or holder.get("pending_operation") is not None
+            or row.get("pending_operation") is not None):
+        raise FleetCliError("approval cancellation has an existing or ambiguous reservation")
+    if (claim.get("state") != "held"
+            or row.get("adapter_state") not in {"active", "waiting"}
+            or row.get("status") != "working"
+            or row.get("archived_at") is not None):
+        raise FleetCliError("approval cancellation holder is not actionable")
+
+
+def _cancel_codex_supervisor_approval(args) -> int:
+    """Abort one pending callback through the old host's journalled turn RPC."""
+    from fleet_codex import OperationJournal, _digest
+
+    if (not isinstance(args.expect_request_id, str)
+            or not args.expect_request_id
+            or not isinstance(args.expect_item_id, str)
+            or not args.expect_item_id
+            or not isinstance(args.expect_command, str)
+            or not args.expect_command
+            or not isinstance(args.expect_request_cwd, str)
+            or not args.expect_request_cwd):
+        raise FleetCliError(
+            "approval cancellation requires exact request, item, command, "
+            "and cwd pins")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    data = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, data, allowed_states={"held"})
+    _codex_cancel_actionable(claim, binding.record)
+    _codex_cancel_original_policy(binding)
+    client = _codex_existing_client(FLEET_HOME)
+    old_host = _codex_cancel_pinned_old_host(client)
+    _codex_cancel_expectations(args, binding, client.generation)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("pending callback belongs to another host generation")
+    if not client._owner_live() or not client._app_server_live():
+        raise FleetCliError("original callback host and app-server are not live")
+    _codex_cancel_public_status(binding, client)
+    record = _codex_cancel_approval_record(client, binding, args)
+    if any(item.get("state") == "unknown"
+           for item in client.pending_approvals(None)):
+        raise FleetCliError("unknown old-host callback blocks cancellation")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in OperationJournal(FLEET_HOME, client.generation).records()):
+        raise FleetCliError("original host has another unresolved operation")
+    operation_id = f"supervisor-approval-cancel-{uuid.uuid4()}"
+    recovery = {
+        "kind": "supervisor/approval-turn-cancel",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "request_id": record["request_id"],
+        "request_digest": _digest("pending-approval", record),
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+        "old_host": old_host,
+    }
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/interrupt", "params": {
+            "threadId": binding.authority.value,
+            "turnId": binding.current_turn_id}},
+        "recovery": recovery,
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        _codex_cancel_actionable(live, registry.get("workers", {}).get(binding.name))
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_cancel_host_identity(
+                    _codex_existing_client(FLEET_HOME))
+                != old_host
+                or _codex_cancel_approval_record(
+                    client, binding, args, host_check=False) != record):
+            raise FleetCliError(
+                "supervisor claim, row, source, host, or callback changed "
+                "before cancellation reservation")
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-turn-cancel",
+            "previous_turn_id": binding.current_turn_id,
+            "previous_claim_operation_id": live.get("last_operation_id"),
+            "previous_record_operation_id": binding.record.get("last_operation_id"),
+            "request_id": record["request_id"],
+            "request_digest": recovery["request_digest"],
+            "old_host": old_host,
+        }
+        live["last_operation_id"] = operation_id
+        registry["workers"][binding.name]["last_operation_id"] = operation_id
+        registry["workers"][binding.name]["adapter_state"] = "mutating"
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "approval-cancel-row", registry["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "approval-cancel-claim", live)
+        write_incarnation(live)
+        save_registry(registry)
+    try:
+        _codex_cancel_public_status(binding, client)
+        if _codex_cancel_approval_record(client, binding, args) != record:
+            raise FleetCliError("approval callback changed after reservation")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            _codex_cancel_reserved_state(live, registry["workers"].get(binding.name),
+                                         binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_cancel_host_identity(
+                        _codex_existing_client(FLEET_HOME))
+                    != old_host
+                    or _codex_cancel_approval_record(
+                        client, binding, args, host_check=False) != record):
+                raise FleetCliError("approval cancellation changed before provider dispatch")
+        client.call(operation, timeout=30)
+        terminal_deadline = time.monotonic() + 5.0
+        while True:
+            # Public reads drain the old host's asynchronous resolved
+            # notification; approval/list alone does not drain it.
+            _codex_cancel_public_status(binding, client, terminal=True)
+            outstanding = client.pending_approvals(binding.authority.value)
+            if not outstanding:
+                terminal_record = _codex_cancel_approval_record(
+                    client, binding, args, terminal=True,
+                    host_check=False)
+                break
+            if (len(outstanding) != 1 or outstanding[0].get("key") !=
+                    record.get("key") or outstanding[0].get("state") != "pending"):
+                raise FleetCliError(
+                    "approval callback changed during terminal settlement")
+            if time.monotonic() >= terminal_deadline:
+                raise FleetCliError(
+                    "approval callback resolution was not observed; "
+                    "interrupt will not be replayed")
+            time.sleep(0.05)
+        journal = OperationJournal(FLEET_HOME, client.generation)
+        observed = journal.load(operation_id)
+        if (observed.get("state") != "observed"
+                or observed.get("public_method") != "turn/interrupt"
+                or observed.get("payload_digest") != _digest(
+                    "rpc", operation["payload"])
+                or observed.get("recovery") != recovery):
+            raise FleetCliError("approval cancellation lacks exact observed journal")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            row = registry["workers"].get(binding.name)
+            _codex_cancel_reserved_state(live, row, binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_cancel_host_identity(
+                        _codex_existing_client(FLEET_HOME))
+                    != old_host
+                    or _codex_cancel_approval_record(
+                        client, binding, args, terminal=True,
+                        host_check=False) != terminal_record
+                    or journal.load(operation_id) != observed):
+                raise FleetCliError("approval cancellation evidence changed at settlement")
+            journal.commit(operation_id)
+            live["state"] = "uncertain"
+            live["uncertainty"] = (
+                "approval callback cancelled; exact cold resume required")
+            live["pending_operation"]["kind"] = "approval-cancelled/cold-resume"
+            live["pending_operation"]["terminal_request_digest"] = _digest(
+                "resolved-approval", terminal_record)
+            live["pending_operation"].pop("reserved_claim_digest")
+            live["pending_operation"].pop("reserved_row_digest")
+            row["adapter_state"] = "uncertain"
+            row["status"] = "idle"
+            row["provider_status"] = "idle"
+            live["provider_status"] = "idle"
+            write_incarnation(live)
+            save_registry(registry)
+    except BaseException:
+        # Once a request may have reached the host, a refusal is never a retry
+        # permission. The durable reservation and journal retain the evidence.
+        raise
+    print("native Codex supervisor approval turn interrupted; callback resolved "
+          "without response; claim remains fenced pending exact cold resume "
+          f"(operation {operation_id})")
+    return 0
+
+
+def _codex_cancel_reserved_state(claim, row, thread_id):
+    """Full claim/row comparison; exclude only the stored own digest field."""
+    from fleet_codex import _digest
+
+    if not isinstance(claim, dict) or not isinstance(row, dict):
+        raise FleetCliError("approval cancellation reservation is missing")
+    pending = claim.get("pending_operation")
+    if not isinstance(pending, dict) or pending.get("kind") != "approval-turn-cancel":
+        raise FleetCliError("approval cancellation reservation changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "approval-cancel-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "approval-cancel-row", row)
+            or pending.get("previous_turn_id") != claim.get("current_turn_id")
+            or claim.get("holder", {}).get("thread_id") != thread_id):
+        raise FleetCliError("approval cancellation claim or row changed")
+
+
+def _codex_cancelled_context(args, *, require_live, source=None):
+    """Read a settled cancellation without retrying its public interrupt."""
+    from fleet_codex import OperationJournal, _digest
+
+    if source is None:
+        source = _codex_recovery_interface_source()
+    elif not _mail_source_is_current(source):
+        raise FleetCliError("cancelled approval Interface changed")
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(
+        claim, registry, allowed_states={"uncertain"})
+    _codex_cancel_original_policy(binding)
+    pending = claim.get("pending_operation")
+    if (not isinstance(pending, dict)
+            or pending.get("kind") != "approval-cancelled/cold-resume"
+            or pending.get("operation_id") != claim.get("last_operation_id")
+            or pending.get("operation_id") != binding.record.get("last_operation_id")
+            or binding.record.get("adapter_state") != "uncertain"):
+        raise FleetCliError("exact cancelled approval is not awaiting cold resume")
+    operation_id = pending["operation_id"]
+    _codex_cancel_expectations(
+        args, binding, binding.host_generation, operation_id)
+    old_client = _codex_existing_client(FLEET_HOME)
+    _codex_cancel_pinned_old_host(old_client)
+    if (old_client.generation != binding.host_generation
+            or _codex_cancel_host_identity(old_client) != pending.get("old_host")):
+        raise FleetCliError("cancelled approval old-host identity changed")
+    if require_live and (not old_client._owner_live()
+                         or not old_client._app_server_live()):
+        raise FleetCliError("cancelled approval old host is not fully live")
+    store = _codex_cancel_approval_store(binding.host_generation)
+    matches = [record for record in store.records()
+               if str(record.get("request_id")) == str(pending.get("request_id"))
+               and record.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        raise FleetCliError("cancelled approval record is missing or ambiguous")
+    record = matches[0]
+    if (record.get("state") != "resolved"
+            or record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or any(key in record for key in (
+                "response", "responding_at", "responded_at", "uncertain_at"))
+            or pending.get("terminal_request_digest") != _digest(
+                "resolved-approval", record)):
+        raise FleetCliError("cancelled callback lacks exact no-response terminal proof")
+    expected_recovery = {
+        "kind": "supervisor/approval-turn-cancel",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "request_id": record["request_id"],
+        "request_digest": pending.get("request_digest"),
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+        "old_host": pending.get("old_host"),
+    }
+    payload = {"method": "turn/interrupt", "params": {
+        "threadId": binding.authority.value,
+        "turnId": binding.current_turn_id}}
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    original = journal.load(operation_id)
+    if (original.get("state") != "committed"
+            or original.get("home") != str(FLEET_HOME.resolve())
+            or original.get("generation") != binding.host_generation
+            or original.get("method") != "rpc"
+            or original.get("public_method") != "turn/interrupt"
+            or original.get("payload_digest") != _digest("rpc", payload)
+            or original.get("recovery") != expected_recovery):
+        raise FleetCliError("cancelled approval has no exact committed interrupt")
+    return source, claim, binding, pending, old_client, record, journal, original
+
+
+def _codex_cancel_claim_without_preflight(claim):
+    value = json.loads(json.dumps(claim))
+    pending = value.get("pending_operation")
+    if not isinstance(pending, dict):
+        raise FleetCliError("cancelled approval pending claim is malformed")
+    pending.pop("approval_resume_preflight", None)
+    return value
+
+
+def _codex_cancel_preflight_state(proof, claim, row, thread_id,
+                                  record, original, registry,
+                                  supervisor_name):
+    from fleet_codex import _digest
+
+    if (not isinstance(proof, dict)
+            or proof.get("claim_digest") != _digest(
+                "cancelled-approval-claim",
+                _codex_cancel_claim_without_preflight(claim))
+            or proof.get("row_digest") != _digest(
+                "cancelled-approval-row", row)
+            or proof.get("mail") != _codex_restore_mail_snapshot(thread_id)
+            or proof.get("request_digest") != _digest(
+                "resolved-approval", record)
+            or proof.get("journal_digest") != _digest(
+                "committed-cancel", original)
+            or proof.get("host_worker_rows") != _codex_cancel_host_worker_rows(
+                registry, claim.get("host_generation"),
+                supervisor_name=supervisor_name)):
+        raise FleetCliError(
+            "cancelled approval prepared claim, row, mail, request, "
+            "or journal changed")
+
+
+def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
+    """Validate and pin the complete exact-home native Apps inventory."""
+    from fleet_codex import _digest
+
+    workers = registry.get("workers") if isinstance(registry, dict) else None
+    if not isinstance(workers, dict):
+        raise FleetCliError("Apps host worker inventory is unavailable")
+    result = []
+    for name, row in sorted(workers.items()):
+        if name == supervisor_name:
+            continue
+        if not isinstance(row, dict):
+            raise FleetCliError("Apps worker inventory contains a malformed row")
+        route = _codex_record_route(row)
+        has_native_fields = (row.get("dispatch_kind") == "codex-app-server"
+                             or any(row.get(key) is not None for key in (
+                                 "codex_thread_id", "codex_turn_id",
+                                 "codex_host_generation")))
+        if route is None and not has_native_fields:
+            continue
+        if route == "mcx" and not has_native_fields:
+            continue
+        if route != "native":
+            raise FleetCliError("Apps native worker row has an invalid route")
+        if row.get("codex_host_generation") != generation:
+            raise FleetCliError(
+                "Apps native worker host generation is missing or ambiguous")
+        if row.get("pending_operation") is not None:
+            raise FleetCliError("another Apps worker has a pending operation")
+        binding = _codex_worker_binding(name, row)
+        result.append({
+            "name": name, "thread_id": binding.thread_id,
+            "turn_id": binding.turn_id,
+            "row_digest": _digest("exact-home-native-worker-row", row),
+        })
+    return result
+
+
+def _codex_cancel_public_host_quiescence(binding, client, registry):
+    rows = _codex_cancel_host_worker_rows(
+        registry, client.generation, supervisor_name=binding.name)
+    if client.pending_approvals(None):
+        raise FleetCliError(
+            "old Apps host still has an unrelated unresolved callback")
+    for item in rows:
+        row = registry["workers"][item["name"]]
+        worker = _codex_worker_binding(item["name"], row)
+        observed = _codex_worker_observe(worker, client=client)
+        if (observed["provider_status"] not in {"idle", "notLoaded"}
+                or observed["turn_status"] == "inProgress"
+                or observed["active_flags"]):
+            raise FleetCliError("another Apps worker is active on old host")
+    return rows
+
+
+def _prepare_codex_cancelled_approval_resume(args) -> int:
+    """Pin live old-host terminal evidence before a bounded cold boundary."""
+    from fleet_codex import _digest
+
+    source, claim, binding, pending, old_client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=True)
+    _codex_cancel_public_status(binding, old_client, terminal=True)
+    if old_client.pending_approvals(binding.authority.value):
+        raise FleetCliError("cancelled supervisor callback is still unresolved")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in journal.records()):
+        raise FleetCliError("old Apps host has another unresolved operation")
+    host_worker_rows = _codex_cancel_public_host_quiescence(
+        binding, old_client, read_registry_no_repair())
+    proof = {
+        "host": _codex_cancel_host_identity(old_client),
+        "source": source,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "operation_id": pending["operation_id"],
+        "request_digest": _digest("resolved-approval", record),
+        "journal_digest": _digest("committed-cancel", original),
+        "provider_status": "idle", "turn_status": "interrupted",
+        "host_worker_rows": host_worker_rows,
+        "observed_at": time.time(),
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_cancel_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(pending["operation_id"]) != original
+                or _codex_cancel_host_worker_rows(
+                    registry, old_client.generation,
+                    supervisor_name=binding.name) != host_worker_rows):
+            raise FleetCliError("cancelled approval changed before cold proof")
+        proof["claim_digest"] = _digest(
+            "cancelled-approval-claim",
+            _codex_cancel_claim_without_preflight(live))
+        proof["row_digest"] = _digest(
+            "cancelled-approval-row", registry["workers"][binding.name])
+        proof["mail"] = _codex_restore_mail_snapshot(binding.authority.value)
+        live["pending_operation"]["approval_resume_preflight"] = proof
+        write_incarnation(live)
+    print("native Codex cancelled approval preflight recorded; exact checked "
+          "host shutdown is required before cold resume; an external shutdown "
+          "cannot substitute for its receipt")
+    return 0
+
+
+def _codex_cancel_resumed_state(claim, row, thread_id):
+    from fleet_codex import _digest
+
+    pending = claim.get("pending_operation") if isinstance(claim, dict) else None
+    if not isinstance(pending, dict) or pending.get("kind") != \
+            "approval-cancelled/resume":
+        raise FleetCliError("cancelled approval cold-resume reservation changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "cancelled-resume-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "cancelled-resume-row", row)
+            or pending.get("prepared_mail") != _codex_restore_mail_snapshot(thread_id)):
+        raise FleetCliError("cancelled approval cold-resume state changed")
+
+
+def _codex_cancel_shutdown_receipt_path(proof):
+    from fleet_codex import _digest
+    return state_dir() / "codex" / (
+        "cancelled-approval-shutdown-" + _digest(
+            "cancelled-approval-shutdown-host", proof["host"]) + ".json")
+
+
+def _checked_cancelled_approval_shutdown(
+        client, expected_proof_digest, source, *, before_publish):
+    """Recheck cancellation quiescence inside the serialized host service loop."""
+    from fleet_codex import _atomic_json, _digest
+
+    initial = read_incarnation()
+    pending = initial.get("pending_operation", {})
+    proof = pending.get("approval_resume_preflight")
+    if (not isinstance(proof, dict) or proof.get("source") != source
+            or _digest("cancelled-approval-shutdown-proof", proof)
+            != expected_proof_digest
+            or isinstance(proof.get("observed_at"), bool)
+            or not isinstance(proof.get("observed_at"), (int, float))
+            or not 0 <= time.time() - proof["observed_at"] <= 300):
+        raise FleetCliError("cancelled approval checked shutdown preflight changed")
+    records = [row for row in _codex_cancel_approval_store(
+        client.generation).records()
+        if str(row.get("request_id")) == str(pending.get("request_id"))]
+    if len(records) != 1 or not isinstance(records[0].get("params"), dict):
+        raise FleetCliError("cancelled approval checked shutdown request changed")
+    record = records[0]
+    args = SimpleNamespace(
+        _fleet_home_explicit=True, expect_inc=initial.get("incarnation_id"),
+        expect_thread=initial.get("holder", {}).get("thread_id"),
+        expect_turn=initial.get("current_turn_id"),
+        expect_host_generation=client.generation,
+        expect_cancel_op=pending.get("operation_id"),
+        expect_request_id=str(record.get("request_id")),
+        expect_item_id=record.get("item_id"), expect_method=record.get("method"),
+        expect_command=record["params"].get("command"),
+        expect_request_cwd=record["params"].get("cwd"))
+    _source, claim, binding, pending, old, record, journal, original = \
+        _codex_cancelled_context(args, require_live=True, source=source)
+    if (claim != initial or client.generation != binding.host_generation
+            or _codex_cancel_host_identity(client) != proof["host"]):
+        raise FleetCliError("cancelled approval checked shutdown host changed")
+    registry = read_registry_no_repair()
+    _codex_cancel_preflight_state(
+        proof, claim, binding.record, binding.authority.value,
+        record, original, registry, binding.name)
+    operations = journal.records()
+    callbacks = _codex_cancel_approval_store(client.generation).records()
+    if (any(row.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+            for row in operations) or client.pending_approvals(None)):
+        raise FleetCliError("cancelled approval checked shutdown has unresolved work")
+    _codex_cancel_public_status(binding, client, terminal=True)
+    loaded = {binding.authority.value}
+    for item in proof["host_worker_rows"]:
+        worker = _codex_worker_binding(item["name"], registry["workers"][item["name"]])
+        observed = _codex_worker_observe(worker, client=client)
+        if (observed["provider_status"] not in {"idle", "notLoaded"}
+                or observed["turn_status"] not in {"completed", "failed", "interrupted"}
+                or observed["active_flags"]):
+            raise FleetCliError("cancelled approval checked shutdown worker is active")
+        if observed["provider_status"] == "idle":
+            loaded.add(worker.thread_id)
+    _restored_history_loaded(client, loaded)
+    receipt = {"schema": 1, "host": proof["host"],
+               "proof_digest": expected_proof_digest}
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim or data.get("workers", {}).get(binding.name) != binding.record
+                or not _mail_source_is_current(source)
+                or _codex_cancel_host_identity(_codex_existing_client(FLEET_HOME))
+                != proof["host"] or journal.records() != operations
+                or _codex_cancel_approval_store(client.generation).records() != callbacks
+                or _codex_cancel_approval_store(client.generation).unresolved()):
+            raise FleetCliError("cancelled approval checked shutdown local evidence changed")
+        _codex_cancel_preflight_state(
+            proof, live, data["workers"][binding.name], binding.authority.value,
+            record, original, data, binding.name)
+        path = _codex_cancel_shutdown_receipt_path(proof)
+        if path.exists() or path.is_symlink():
+            raise FleetCliError("cancelled approval checked shutdown already has receipt")
+        before_publish()
+        _atomic_json(path, receipt)
+    return receipt
+
+
+def _shutdown_codex_cancelled_approval(args) -> int:
+    from fleet_codex import _digest
+    source, claim, binding, pending, client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=True)
+    proof = pending.get("approval_resume_preflight")
+    if not isinstance(proof, dict):
+        raise FleetCliError("cancelled approval has no checked shutdown preflight")
+    digest = _digest("cancelled-approval-shutdown-proof", proof)
+    try:
+        result = client.call({
+            "operation_id": f"cancelled-shutdown-{uuid.uuid4()}",
+            "method": "host/shutdown-cancelled-approval",
+            "payload": {"proof_digest": digest}}, timeout=60)
+    except Exception as exc:
+        raise FleetCliError(
+            "cancelled approval checked shutdown unavailable or uncertain; "
+            "preserve old host and receipt; never substitute an external shutdown") from exc
+    if (result.generation != binding.host_generation or result.result != {
+            "schema": 1, "host": proof["host"], "proof_digest": digest}):
+        raise FleetCliError("cancelled approval checked shutdown acknowledgement uncertain")
+    print("cancelled approval shutdown checked; wait for exact host and child exit")
+    return 0
+
+
+def _resume_codex_cancelled_approval(args) -> int:
+    """Reattach the same thread only after the exact old host and child exit."""
+    from fleet_codex import OperationJournal, _digest
+
+    source, claim, binding, pending, old_client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=False)
+    proof = pending.get("approval_resume_preflight")
+    if (not isinstance(proof, dict)
+            or proof.get("host") != _codex_cancel_host_identity(old_client)
+            or proof.get("source") != source
+            or proof.get("incarnation_id") != binding.incarnation_id
+            or proof.get("thread_id") != binding.authority.value
+            or proof.get("turn_id") != binding.current_turn_id
+            or proof.get("operation_id") != pending["operation_id"]
+            or proof.get("provider_status") != "idle"
+            or proof.get("turn_status") != "interrupted"
+            or isinstance(proof.get("observed_at"), bool)
+            or not isinstance(proof.get("observed_at"), (int, float))
+            or not 0 <= time.time() - proof["observed_at"] <= 300):
+        raise FleetCliError("cancelled approval lacks fresh exact cold preflight")
+    _codex_cancel_preflight_state(
+        proof, claim, binding.record, binding.authority.value,
+        record, original, read_registry_no_repair(), binding.name)
+    if (old_client._owner_live() or old_client._app_server_live()
+            or not old_client._metadata_stale()):
+        raise FleetCliError("cancelled approval old host and child must fully exit "
+                            "with stale heartbeat")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in journal.records()):
+        raise FleetCliError("old Apps host has another unresolved operation")
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_cancel_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before cold host creation")
+        _codex_cancel_preflight_state(
+            proof, live, registry["workers"][binding.name],
+            binding.authority.value, record, original, registry,
+            binding.name)
+    # A cached preparation never authorizes killing provider work that advanced
+    # afterwards. Only the authenticated serialized host can publish this proof.
+    try:
+        receipt, _raw_sha = _restored_history_owned_record(
+            _codex_cancel_shutdown_receipt_path(proof))
+    except (FleetCliError, OSError) as exc:
+        raise FleetCliError("cancelled approval lacks exact checked shutdown") from exc
+    if receipt != {"schema": 1, "host": proof["host"],
+                   "proof_digest": _digest("cancelled-approval-shutdown-proof", proof)}:
+        raise FleetCliError("cancelled approval lacks exact checked shutdown")
+    client = _codex_native_client(FLEET_HOME)
+    if (client.generation == old_client.generation
+            or getattr(client, "_launched_process", None) is None):
+        raise FleetCliError("cancelled approval requires a newly launched host")
+    try:
+        if not client.supervisor_approval_reservation_supported():
+            raise FleetCliError("new host lacks supervisor approval fence")
+    except Exception as exc:
+        raise FleetCliError(
+            "cancelled approval cold resume requires the reviewed supervisor "
+            "approval fence on the new host") from exc
+    profile = _codex_cancel_original_policy(binding)
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    model = _codex_model_slug(binding.record.get("model"))
+    if model is None:
+        raise FleetCliError("cancelled approval recorded model is missing")
+    params = {
+        "threadId": binding.authority.value, "excludeTurns": True,
+        "cwd": str(FLEET_HOME.resolve()), "model": model,
+        "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": "workspace-write",
+    }
+    operation_id = f"supervisor-cancel-resume-{uuid.uuid4()}"
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before resume reservation")
+        _codex_cancel_preflight_state(
+            proof, live, registry["workers"][binding.name],
+            binding.authority.value, record, original, registry,
+            binding.name)
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-cancelled/resume",
+            "cancel_operation_id": pending["operation_id"],
+            "old_generation": binding.host_generation,
+            "old_host": proof["host"],
+            "new_generation": client.generation,
+            "previous_turn_id": binding.current_turn_id,
+            "prepared_mail": proof["mail"],
+            "prepared_host_worker_rows": proof["host_worker_rows"],
+            "old_request_digest": proof["request_digest"],
+            "old_journal_digest": proof["journal_digest"],
+        }
+        live["last_operation_id"] = operation_id
+        live["uncertainty"] = "explicit cancelled-approval cold resume pending"
+        registry["workers"][binding.name]["last_operation_id"] = operation_id
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "cancelled-resume-row", registry["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "cancelled-resume-claim", live)
+        write_incarnation(live)
+        save_registry(registry)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": params},
+        "recovery": {
+            "kind": "supervisor/cancelled-approval-cold-resume",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "previous_host_generation": binding.host_generation,
+            "previous_host": proof["host"],
+            "cancel_operation_id": pending["operation_id"],
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+        },
+    }
+
+    def guard_reserved(live_claim):
+        registry = read_registry_no_repair()
+        _codex_cancel_resumed_state(
+            live_claim, registry["workers"].get(binding.name),
+            binding.authority.value)
+        if (_registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(pending["operation_id"]) != original
+                or _codex_cancel_host_worker_rows(
+                    registry, binding.host_generation,
+                    supervisor_name=binding.name) != proof["host_worker_rows"]
+                or _digest("resolved-approval", record) !=
+                _codex_cancel_record_digest(binding, pending["request_id"])):
+            raise FleetCliError("cancelled approval changed before provider resume")
+
+    try:
+        reply = _call_codex_supervisor_claimed(
+            client, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"uncertain"},
+            pre_call_guard=guard_reserved)
+        result = reply.result
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if (not isinstance(thread, dict)
+                or thread.get("id") != binding.authority.value
+                or {thread.get("cwd"), result.get("cwd")} != {
+                    str(FLEET_HOME.resolve())}):
+            raise FleetCliError("cancelled approval cold resume returned wrong thread")
+        _validate_codex_thread_effective(
+            result, model, profile, verb="thread/resume")
+        if {key: result.get(key) for key in (
+                "approvalPolicy", "approvalsReviewer", "sandbox")} != \
+                binding.record["permission_effective"]:
+            raise FleetCliError("cold resume differs from recorded accept policy")
+        rebound = CodexSupervisorBinding(
+            name=binding.name, incarnation_id=binding.incarnation_id,
+            authority=binding.authority,
+            current_turn_id=binding.current_turn_id,
+            host_generation=client.generation, record=binding.record)
+        _codex_cancel_public_status(rebound, client, terminal=True)
+        new_journal = OperationJournal(FLEET_HOME, client.generation)
+        observed = new_journal.load(operation_id)
+        if (observed.get("state") != "observed"
+                or observed.get("public_method") != "thread/resume"
+                or observed.get("payload_digest") != _digest(
+                    "rpc", operation["payload"])
+                or observed.get("recovery") != operation["recovery"]):
+            raise FleetCliError("cold resume lacks exact observed journal")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            row = registry["workers"].get(binding.name)
+            _codex_cancel_resumed_state(live, row, binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_existing_client(FLEET_HOME).generation != client.generation
+                    or journal.load(pending["operation_id"]) != original
+                    or _codex_cancel_host_worker_rows(
+                        registry, binding.host_generation,
+                        supervisor_name=binding.name) != proof["host_worker_rows"]
+                    or new_journal.load(operation_id) != observed
+                    or _digest("resolved-approval", record) !=
+                    _codex_cancel_record_digest(binding, pending["request_id"])):
+                raise FleetCliError("cancelled approval changed at resume settlement")
+            new_journal.commit(operation_id)
+            live["state"] = "held"
+            live.pop("pending_operation", None)
+            live.pop("uncertainty", None)
+            live["host_generation"] = client.generation
+            live["provider_status"] = "idle"
+            live["last_operation_id"] = operation_id
+            row["adapter_state"] = "active"
+            row["status"] = "idle"
+            row["provider_status"] = "idle"
+            row["codex_host_generation"] = client.generation
+            row["last_operation_id"] = operation_id
+            write_incarnation(live)
+            save_registry(registry)
+    except BaseException:
+        # The new journal and the fenced claim are retained for a separately
+        # reviewed exact-evidence settlement. Never replay thread/resume.
+        raise
+    print("native Codex supervisor reattached on the same thread and incarnation "
+          "with exact recorded accept policy; no turn was created")
+    return 0
+
+
+def _codex_cancel_record_digest(binding, request_id):
+    from fleet_codex import _digest
+
+    records = [record for record in _codex_cancel_approval_store(
+        binding.host_generation).records()
+        if str(record.get("request_id")) == str(request_id)
+        and record.get("generation") == binding.host_generation]
+    if len(records) != 1:
+        raise FleetCliError("cancelled approval record changed or disappeared")
+    return _digest("resolved-approval", records[0])
+
+
 def cmd_sup_reconcile(args) -> int:
     """Explicitly resume one exact native holder after a host-process restart.
 
@@ -22125,6 +23881,14 @@ def cmd_sup_reconcile(args) -> int:
                      or getattr(args, "reattach_restored_continuation", False))):
         raise FleetCliError(
             "preserved-history evidence applies only to explicit continuation")
+    if getattr(args, "cancel_pending_approval", False):
+        return _cancel_codex_supervisor_approval(args)
+    if getattr(args, "prepare_cancelled_approval_resume", False):
+        return _prepare_codex_cancelled_approval_resume(args)
+    if getattr(args, "shutdown_cancelled_approval", False):
+        return _shutdown_codex_cancelled_approval(args)
+    if getattr(args, "resume_cancelled_approval", False):
+        return _resume_codex_cancelled_approval(args)
     if getattr(args, "prepare_recorded_policy_restore", False):
         return _prepare_codex_supervisor_policy(args)
     if getattr(args, "restore_recorded_policy", False):
@@ -22547,7 +24311,8 @@ def cmd_sup_status(args) -> int:
     for entry in info["incarnation"].get(HANDOFF_PENDING_KEY, []) if info["incarnation"] else []:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry['successor_inc']}")
-        recipe = (f"abort with `fleet sup-handoff-abort {handle} --nonce <value>`")
+        recipe = (f"abort with `fleet sup-handoff-abort {handle} --nonce` "
+                  "followed by the holder body's most recent `NONCE:` value")
         if entry.get("state") == HANDOFF_JOINING and not entry.get("successor_sid"):
             try:
                 minted = _parse_iso(entry.get("minted_at"))
@@ -22557,13 +24322,14 @@ def cmd_sup_status(args) -> int:
                 recipe = (f"NOT retirable by age -- its minted_at "
                           f"({entry.get('minted_at')!r}) cannot be read, so it will "
                           f"never age out: `fleet sup-handoff-abort {handle} --force "
-                          f"--nonce <value>`")
+                          "--nonce` followed by the holder body's most recent `NONCE:` value")
             else:
                 when = (minted + timedelta(
                     seconds=SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS)
                         ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 recipe = (f"still joining -- retirable at {when}, then `fleet "
-                          f"sup-handoff-abort {handle} --nonce <value>` "
+                          f"sup-handoff-abort {handle} --nonce` followed by the holder body's "
+                          f"most recent `NONCE:` value "
                           f"(before that the abort is refused: a join in progress is "
                           f"not a dead successor)")
         print(f"pending successor: {entry.get('successor_inc')} [{entry.get('state')}]"
@@ -23166,6 +24932,43 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
 
 def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
                   process_tree_fn=None) -> int:
+    if getattr(args, "do", False):
+        return _sup_guard_action(args, snapshot_fn=snapshot_fn,
+                                 roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+    return _sup_guard_view(args, snapshot_fn=snapshot_fn,
+                           roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+
+
+def _sup_guard_view(args, *, snapshot_fn=None, roster_fn=None,
+                    process_tree_fn=None) -> int:
+    """Observe and render once; never sweep, wake or send."""
+    claim = read_incarnation()
+    if isinstance(claim, dict) and claim.get("provider") == "codex":
+        observation = _codex_sup_guard_observe()
+        verdict = observation.get("verdict", "PAGE")
+        reason = observation.get("reason", "native observation unavailable")
+        line = _sup_guard_line(verdict, reason, observation.get("body_name"))
+        if getattr(args, "json", False):
+            print(json.dumps({**observation, "verdict": line, "sent": False,
+                              "lane_done_sent": []}, separators=(",", ":"), sort_keys=True))
+        else:
+            print(line)
+        return 0
+    observation = _sup_guard_observe(
+        snapshot_fn=snapshot_fn, roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+    verdict, reason, detail = _sup_guard_decide(observation)
+    line = _sup_guard_line(verdict, reason, detail.get("body_name"))
+    if getattr(args, "json", False):
+        print(json.dumps({"verdict": line, "reason": reason, **detail,
+                          "sent": False, "lane_done_sent": []},
+                         separators=(",", ":"), sort_keys=True))
+    else:
+        print(line)
+    return 0
+
+
+def _sup_guard_action(args, *, snapshot_fn=None, roster_fn=None,
+                  process_tree_fn=None) -> int:
     """Observe twice before action; only WAKE acts, and never spawns.
 
     JSON includes explicit sent/quiet flags so the keeper does not derive
@@ -23672,8 +25475,9 @@ Do exactly this, in order:
      SUP-BOOT-FROZEN <reason>
 5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
    content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
-   value from step 2, then begin the campaign brief below. The flag is not optional: every
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "<note>" --nonce
+   Append the exact NONCE value printed in step 2 after the final `--nonce`, then begin the campaign
+   brief below. The flag is not optional: every
    `sup-*` holder verb is refused without it.
 
 --- CAMPAIGN BRIEF ---
@@ -24255,8 +26059,8 @@ Do exactly this, in order:
 4. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
 5. Poll every ~30s (up to 10 minutes): "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
-     substituting the NONCE value step 2 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
+     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce
+     Append the exact NONCE value printed in step 2 after the final `--nonce`. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
      is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
      files a false second-body row in `fleet doctor` -- a permanently-red row trains the
      operator to ignore the row that will one day be real.
@@ -25129,13 +26933,15 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 proof_snap=handoff_proof_snapshot,
                 token=handoff_token, holder_inc=holder_inc,
                 run=run, which=which)
-    # Both recipes present --nonce because both verbs require continuity.
+    # Keep recipes free of credential placeholders; the holder supplies the
+    # exact most recent NONCE value after the bare --nonce flag.
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
           f"  fleet sup-handoff-complete --expect-inc {successor_inc} "
-          f"--expect-sid {successor_sid} --nonce <value>\n"
+          f"--expect-sid {successor_sid} --nonce\n"
           f"On timeout/failure instead run:\n"
-          f"  fleet sup-handoff-abort --successor-sid {successor_sid} --nonce <value>")
+          f"  fleet sup-handoff-abort --successor-sid {successor_sid} --nonce\n"
+          "Append the holder body's most recent NONCE value after the final `--nonce`.")
     return 0
 
 
@@ -25254,12 +27060,23 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
             verb="sup-handoff-abort --retire-all")
         hs = read_handshake()
         if hs is not None:
+            successor_handle = (f"--successor-sid {hs.get('session_id')}"
+                                if hs.get("session_id")
+                                else f"--successor-inc {hs.get('incarnation_id')}")
             raise FleetCliError(
                 f"supervisor/HANDSHAKE is present (inc={hs.get('incarnation_id')} "
                 f"sid={hs.get('session_id')}) -- a successor got far enough to write "
-                f"one, so this succession is still live. Complete it "
-                f"(`sup-handoff-complete --expect-inc {hs.get('incarnation_id')} "
-                f"--nonce <value>`) or abort it by handle first; --retire-all is for "
+                f"one, so this succession is still live. Complete it (`fleet "
+                f"sup-handoff-complete --expect-inc {hs.get('incarnation_id')} "
+                f"--nonce` followed by that holder body's own `sup-boot` output). "
+                f"To abort instead, end this turn. Once the holder row is idle, "
+                  "run exactly:\n  " + _wake_cmd()
+                + "\nThat wakes the same incarnation. The nonce comes from the woken "
+                  "body's own `sup-boot` output and is intentionally not repeated "
+                  "here. Then run:\n  "
+                + f"fleet sup-handoff-abort {successor_handle} --nonce followed "
+                  "by that output's generation"
+                + ". --retire-all is for "
                 f"attempts no session answers for")
         now = datetime.now(timezone.utc)
         torn = handoff_pending_torn(claim)
@@ -25281,7 +27098,7 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
                 for e, s in standing) or "none recorded"
             raise FleetCliError(
                 f"nothing to retire: {detail}. An entry bearing a sid is stopped by "
-                f"handle (`--successor-sid <sid>`); one still inside the join window "
+                f"its exact handle from status; one still inside the join window "
                 f"becomes retirable when it ages out. --force adds only entries whose "
                 f"minted_at cannot be read at all -- it is not a way out of the join "
                 f"window, and forcing one would unlink a still-joining successor's "
@@ -25320,7 +27137,8 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry.get('successor_inc')}")
         print(f"STILL STANDING: {entry.get('successor_inc')} [{state}] -- "
-              f"`fleet sup-handoff-abort {handle} --nonce <value>`")
+              f"`fleet sup-handoff-abort {handle} --nonce` followed by the holder "
+              "body's most recent NONCE value")
     _deliver_notices(notices)
     return 0
 
@@ -25776,11 +27594,12 @@ def _doctor_check_supervisor_handoff():
         torn = handoff_pending_torn(claim)
         # Retirement needs a holder; after release, tell the operator to boot
         # before presenting a generation to --retire-all.
-        recipe = ("`fleet sup-handoff-abort --retire-all --nonce <value>`"
+        recipe = ("`fleet sup-handoff-abort --retire-all --nonce` followed by the "
+                  "holder body's most recent NONCE value"
                   if not (isinstance(claim, dict) and claim.get("state") == "released")
                   else "`fleet sup-boot` (the claim is RELEASED -- there is no holder to "
                        "present a nonce to), then `fleet sup-handoff-abort --retire-all "
-                       "--nonce <value>`")
+                       "--nonce` followed by the newly printed NONCE value")
         if stranded:
             ok = False
             parts.append(
@@ -25834,7 +27653,7 @@ def _doctor_check_supervisor_handoff():
                 f"({', '.join(sorted(orphans))}) -- residue from a handoff that "
                 f"crashed before unlinking. Each carries a handoff token that is still "
                 f"LIVE if the claim still holds its hash; delete them (claim-nonce §5.9), "
-                f"and prefer `fleet sup-handoff-abort --successor-inc <inc>`, which "
+                f"and prefer aborting by the exact successor-inc handle, which "
                 f"retires the pending entry and the token hash with the file")
     except OSError:
         pass
@@ -25869,10 +27688,73 @@ def _watch_timeout_arg(value: str) -> float:
     return timeout
 
 
+class _FleetHelpFormatter(argparse.HelpFormatter):
+    """Hide suppressed subcommands instead of printing argparse's sentinel."""
+
+    def _format_action(self, action):
+        if action.help == argparse.SUPPRESS:
+            return ""
+        return super()._format_action(action)
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        """Wrap usage text with one stable policy across argparse versions."""
+        # ``argparse.add_subparsers()`` formats a prefix-free usage line to
+        # derive each child parser's ``prog``. Preserve its explicit empty
+        # prefix; turning it into ``usage: `` compounds at every nesting
+        # level (for example, ``usage: usage: fleet mail verify``).
+        if prefix is None:
+            prefix = "usage: "
+        rendered = super()._format_usage(usage, actions, groups, prefix)
+        flat = " ".join(rendered.split())
+        if not flat.startswith(prefix):
+            return rendered
+
+        body = flat[len(prefix):].strip()
+        continuation = " " * len(prefix)
+        lines = []
+        current = prefix
+        for word in body.split():
+            separator = "" if current == prefix else " "
+            if (current != prefix
+                    and len(current) + len(separator) + len(word) > self._width):
+                lines.append(current.rstrip())
+                current = continuation + word
+            else:
+                current += separator + word
+        lines.append(current.rstrip())
+        return "\n".join(lines) + "\n\n"
+
+    def _format_action_invocation(self, action):
+        """Render every option alias with its metavar on all Python versions.
+
+        Python 3.14 changed argparse's multi-option rendering: earlier
+        versions print e.g. ``-n LINES, --lines LINES`` while 3.14 prints
+        ``-n, --lines LINES``. The CLI reference is generated from this
+        formatter, so keep the user-facing synopsis stable across our
+        supported Python versions.
+        """
+        if not action.option_strings:
+            return super()._format_action_invocation(action)
+        if action.nargs == 0:
+            return ", ".join(action.option_strings)
+        default = self._get_default_metavar_for_optional(action)
+        args = self._format_args(action, default)
+        return ", ".join(
+            f"{option} {args}" for option in action.option_strings)
+
+
+class _FleetArgumentParser(argparse.ArgumentParser):
+    """Use Fleet's version-stable formatter for every nested command parser."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", _FleetHelpFormatter)
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
-    parser = argparse.ArgumentParser(
+    parser = _FleetArgumentParser(
         prog="fleet", description="claude-fleet manager CLI",
         epilog="global: --fleet-home <PATH> selects which fleet home to act on "
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
@@ -25922,7 +27804,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
-                         help="Codex reasoning effort when --model is codex:<model>")
+                         help="legacy mcx reasoning effort; ignored by the native "
+                              "Codex adapter")
     p_spawn.add_argument(
         "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
@@ -26047,6 +27930,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_codex_reobserve.add_argument("--expect-generation", required=True)
     p_codex_reobserve.add_argument("--expect-last-op", required=True)
 
+    p_sup_interrupt = sub.add_parser(
+        "codex-sup-interrupt-current",
+        help="interrupt one exact held native Codex supervisor turn without "
+             "answering its callback")
+    p_sup_interrupt.add_argument("request_id")
+    p_sup_interrupt.add_argument("--preflight", action="store_true",
+                                 help="verify current turn without reservation or interrupt")
+    p_sup_interrupt.add_argument("--request-id-type", required=True,
+                                 choices=("int", "string"))
+    for field in ("inc", "thread", "turn", "host-generation", "item-id",
+                  "request-key", "request-sha256", "old-host-sha256",
+                  "host-process-identity", "app-server-process-identity"):
+        p_sup_interrupt.add_argument(f"--expect-{field}", required=True)
+    p_sup_interrupt.add_argument("--expect-host-pid", required=True, type=int)
+    p_sup_interrupt.add_argument("--expect-app-server-pid", required=True,
+                                 type=int)
+    p_sup_interrupt.add_argument("--expect-app-server-started-at",
+                                 required=True, type=float)
+
     p_preaccept = sub.add_parser(
         "codex-settle-preaccept",
         help="settle one reviewed native worker thread/start authentication rejection")
@@ -26058,6 +27960,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_preaccept.add_argument("--expect-evidence-sha256", required=True,
                              help="reviewed SHA-256 of the evidence JSON bytes")
 
+    p_failed_client = sub.add_parser(
+        "codex-recover-failed-client",
+        help="stage exact-home native Codex recovery after a failed host client")
+    p_failed_client.add_argument(
+        "recovery_action", choices=("prepare", "decision", "shutdown",
+                                    "verify-exit", "boot", "adopt-boot", "rebind",
+                                    "settle-rebind", "finish",
+                                    "status"))
+    p_failed_client.add_argument("--generation")
+    p_failed_client.add_argument("--host-pid", type=int)
+    p_failed_client.add_argument("--host-start")
+    p_failed_client.add_argument("--child-pid", type=int)
+    p_failed_client.add_argument("--child-start")
+    p_failed_client.add_argument("--incarnation")
+    p_failed_client.add_argument("--thread")
+    p_failed_client.add_argument("--turn")
+    p_failed_client.add_argument("--codex-executable")
+    p_failed_client.add_argument("--decision-file")
+    p_failed_client.add_argument("--name")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -26065,7 +27987,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
-    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach = sub.add_parser("attach", help=argparse.SUPPRESS)
     p_attach.add_argument("name")
     p_attach.add_argument("--force", action="store_true")
 
@@ -26078,7 +28000,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("--task", default=None)
     p_respawn.add_argument("--force", action="store_true")
     p_respawn.add_argument("--force-band", action="store_true",
-                           help="override the supervisor soft context-band refusal; never the hard ceiling")
+                           help="with --task: override the supervisor soft context-band "
+                                "refusal; never the hard ceiling")
     p_respawn.add_argument("--yes", action="store_true",
                            help="confirm respawning a worker this session did not spawn")
     p_respawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
@@ -26092,6 +28015,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume = sub.add_parser("resume-limited",
                               help="relaunch limited workers whose reset horizon has passed")
     p_resume.add_argument("name", nargs="?", default=None)
+    p_resume.add_argument("--terminal-quota", action="store_true",
+                          help="validate one local quota/SystemError row; source-HOLD before host RPC")
     p_resume.add_argument("--force-now", action="store_true", dest="force_now",
                           help="resume a named worker even before its horizon / with an unknown horizon")
     p_resume.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
@@ -26264,6 +28189,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
+    p_mailman = sub.add_parser(
+        "mailman", help="sort the home inbox; wake only for mail needing the interface")
+    mailman_sub = p_mailman.add_subparsers(dest="mailman_command", required=True)
+    mailman_sub.add_parser("init", help="seed mailman.json in the home").add_argument(
+        "--force", action="store_true", help="overwrite an existing mailman.json")
+    p_mm_run = mailman_sub.add_parser(
+        "run", help="block until a mail needs the interface (exit 0) or timeout (3)")
+    p_mm_run.add_argument("--timeout", type=_watch_timeout_arg, default=None)
+    p_mm_run.add_argument("--interval", type=_watch_interval_arg,
+                          default=fleet_mailman.DEFAULT_INTERVAL)
+    p_mm_run.add_argument("--dry-run", action="store_true",
+                          help="print verdicts; mutate nothing")
+    p_mm_run.add_argument("--include-reported", action="store_true",
+                          help="also print wake mails already reported")
+    mailman_sub.add_parser("digest", help="rollup of filed mail").add_argument(
+        "--since", default=fleet_mailman.DIGEST_DEFAULT_SINCE, metavar="WHEN",
+        help="<n>m|h|d or ISO UTC timestamp (default 24h)")
+
     p_relay = sub.add_parser(
         "relay-ack", help="append an interface relay and acknowledge one mail file")
     p_relay.add_argument("--mail", required=True, metavar="FILE")
@@ -26323,7 +28266,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile = sub.add_parser(
         "sup-reconcile",
         help="explicitly reconcile a native Codex supervisor after host restart; "
-             "never creates a thread or turn")
+             "never creates a thread or turn",
+        description=("Choose at most one reconciliation action. Evidence and "
+                     "expectation options may accompany that action."))
     policy_restore = p_supreconcile.add_mutually_exclusive_group()
     policy_restore.add_argument(
         "--prepare-recorded-policy-restore", action="store_true",
@@ -26352,6 +28297,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile.add_argument(
         "--expect-history-sha256", metavar="SHA256",
         help="exact raw SHA-256 of the explicit owner-only history evidence")
+    policy_restore.add_argument(
+        "--cancel-pending-approval", action="store_true",
+        help="interrupt one exact pending native supervisor approval turn "
+             "on its existing host; retain an uncertain claim until cold resume")
+    policy_restore.add_argument(
+        "--prepare-cancelled-approval-resume", action="store_true",
+        help="pin fresh terminal callback, host, claim, row, and mail evidence "
+             "before exact-host shutdown")
+    policy_restore.add_argument(
+        "--resume-cancelled-approval", action="store_true",
+        help="cold resume the same cancelled supervisor thread under its "
+             "recorded accept policy after exact-host shutdown")
+    policy_restore.add_argument(
+        "--shutdown-cancelled-approval", action="store_true",
+        help="recheck all public worker/callback evidence in the exact host "
+             "and fence shutdown before publishing its receipt")
+    p_supreconcile.add_argument("--expect-host-generation")
+    p_supreconcile.add_argument("--expect-cancel-op")
+    p_supreconcile.add_argument("--expect-request-id")
+    p_supreconcile.add_argument("--expect-item-id")
+    p_supreconcile.add_argument("--expect-method")
+    p_supreconcile.add_argument("--expect-command")
+    p_supreconcile.add_argument("--expect-request-cwd")
     p_supreconcile.add_argument("--expect-inc")
     p_supreconcile.add_argument("--expect-thread")
     p_supreconcile.add_argument("--expect-turn")
@@ -26469,6 +28437,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+    hidden_commands = {
+        choice.dest for choice in sub._choices_actions
+        if choice.help == argparse.SUPPRESS
+    }
+    sub.metavar = "{" + ",".join(
+        name for name in sub.choices if name not in hidden_commands) + "}"
+
     return parser
 
 
@@ -26549,6 +28524,16 @@ def main(argv=None) -> int:
         if args.command == "land" or args.command == "brief":
             return (fleet_land.cmd_land(args) if args.command == "land"
                     else fleet_brief.cmd_brief(args))
+        if args.command != "watch" and (
+                _is_ph(getattr(args, "nonce", None))
+                or _is_ph(getattr(args, "handoff_token", None))):
+            # Resolve only to print a usable recovery target. The lookup is
+            # read-only; refuse before any command-specific state can change.
+            try:
+                recovery_home = resolve_home(flag=home_flag).get("home")
+            except FleetCliError:
+                recovery_home = None
+            _refuse_ph(args, home=recovery_home or args._fleet_home or FLEET_HOME)
         # Bare init creates in cwd; explicit selectors and statusline setup use the
         # normal resolver. Do not synthesize args.home, which also appends the
         # machine-list entry and invokes the destructive tier.
@@ -26595,10 +28580,16 @@ def main(argv=None) -> int:
             parser.error(f"unknown mail command {args.mail_command!r}")
         if args.command == "codex-respond":
             return cmd_codex_respond(args)
+        if args.command == "codex-sup-interrupt-current":
+            return cmd_codex_sup_interrupt_current(args)
         if args.command == "codex-decline-fixed":
             return cmd_codex_decline_fixed(args)
         if args.command == "codex-reobserve-active":
             return cmd_codex_reobserve_active(args)
+        if args.command == "codex-recover-failed-client":
+            import fleet_codex_failed_client_recovery
+            return fleet_codex_failed_client_recovery.cmd_recover(
+                sys.modules[__name__], args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":
@@ -26637,6 +28628,8 @@ def main(argv=None) -> int:
             return cmd_interface_register(args)
         if args.command == "relay-ack":
             return cmd_relay_ack(args)
+        if args.command == "mailman":
+            return cmd_mailman(args)
         if args.command == "wave-close":
             return cmd_wave_close(args)
         if args.command == "sup-heartbeat":
@@ -26904,11 +28897,6 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
             status = recompute_worker_native(n, rec, entries).get("status")
         elif _is_codex_record(rec):
             if _codex_record_route(rec) == "mcx":
-                # Probe mcx completion.
-
-
-
-
                 expected_mcx_id = rec.get("mcx_id")
                 expected_status = rec.get("status")
                 expected_last_dispatch_at = rec.get("last_dispatch_at")
@@ -27053,6 +29041,30 @@ def _format_process_age(seconds):
     if seconds >= 60:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def _mailman_prims():
+    return fleet_mailman.Prims(
+        append=lambda path, data: _atomic_append_bytes(path, data),
+        write_json=lambda path, obj: _write_json_atomic(path, obj),
+        replace=lambda a, b: _replace_with_retry(a, b),
+        read_cursor=lambda home: _watch_read_cursor(home),
+        write_cursor=lambda home, cursor: _watch_write_cursor(home, cursor),
+        now=now_iso)
+
+
+def cmd_mailman(args) -> int:
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("mailman requires an explicit --fleet-home")
+    home = Path(FLEET_HOME)
+    sub = args.mailman_command
+    if sub == "init":
+        return fleet_mailman.cmd_init(home, _mailman_prims(), force=args.force)
+    if sub == "digest":
+        return fleet_mailman.cmd_digest(home, since=args.since)
+    return fleet_mailman.cmd_run(
+        home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
+        dry_run=args.dry_run, include_reported=args.include_reported)
 
 
 if __name__ == "__main__":

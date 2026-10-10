@@ -8,6 +8,8 @@ all of its ancestors (including merged lanes); the remaining window is the last
 Runtime tasks are gitignored: their explicit mtime cutoff is separate from the
 git cutoff. Check FLEET_HOME at dispatch, since a fresh clone has no live tasks.
 """
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -25,6 +27,11 @@ WINDOW = 20
 # This target ancestor refreshed only executable self-citation prose. Its
 # missing trailer cannot be repaired without rewriting the shared merge base.
 HISTORICAL_METADATA_EXEMPTIONS = {
+    # 7f405164 changed the parser's top-level help formatting without the
+    # docs-currency surface in the same commit. The follow-up docs/reference
+    # repair is intentionally a new commit, so keep this immutable history
+    # violation explicit rather than pretending a later docs edit repairs it.
+    "7f405164fc1c20d5eca3d9a9b81e21d063ed0942",
     "ffd1197836ef2f5a586f35434d58b97ab5c3f892",
 }
 
@@ -33,6 +40,60 @@ def git(repo, *args):
     return subprocess.check_output(
         ["git", "-C", str(repo), *args], text=True, encoding="utf-8"
     ).strip()
+
+
+def _forward_documentation_receipt(repo, commit, code_paths):
+    """Verify an immutable descendant documentation repair, never a SHA waiver.
+
+    The receipt's introducing commit must change the live docs it pins. Both
+    committed and working document bytes must still match; archive/untracked
+    documents, changed receipts, unrelated ancestry and incomplete scope refuse.
+    Semantic coverage still requires independent review of that repair commit.
+    """
+    path = f"docs/currency-remediations/{commit}.json"
+    try:
+        raw = (Path(repo) / path).read_bytes()
+        receipt = json.loads(raw)
+        if (not isinstance(receipt, dict)
+                or set(receipt) != {"schema", "code_commit", "code_paths", "documents"}
+                or type(receipt["schema"]) is not int or receipt["schema"] != 1
+                or receipt["code_commit"] != commit
+                or receipt["code_paths"] != sorted(code_paths)
+                or not isinstance(receipt["documents"], dict)
+                or not receipt["documents"]):
+            return False
+        introduced = git(repo, "log", "--diff-filter=A", "--format=%H", "--", path).splitlines()
+        if len(introduced) != 1:
+            return False
+        repair = introduced[0]
+        if repair == commit or git(repo, "merge-base", commit, repair) != commit:
+            return False
+        if git(repo, "merge-base", repair, "HEAD") != repair:
+            return False
+        if any(subprocess.check_output([
+                "git", "-C", str(repo), "show", f"{revision}:{path}"]) != raw
+               for revision in (repair, "HEAD")):
+            return False
+        changed = git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only",
+                      "--no-renames", "-r", repair).splitlines()
+        for document, digest in receipt["documents"].items():
+            parts = PurePosixPath(document).parts
+            if (not parts or parts[0] != "docs" or len(parts) < 2
+                    or parts[1] in {"archive", "currency-remediations"}
+                    or ".." in parts or document not in changed
+                    or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                return False
+            committed = subprocess.check_output(
+                ["git", "-C", str(repo), "show", f"HEAD:{document}"])
+            repaired = subprocess.check_output(
+                ["git", "-C", str(repo), "show", f"{repair}:{document}"])
+            working = (Path(repo) / document).read_bytes()
+            if any(hashlib.sha256(data).hexdigest() != digest
+                   for data in (committed, repaired, working)):
+                return False
+        return True
+    except (OSError, ValueError, TypeError, subprocess.CalledProcessError):
+        return False
 
 
 def currency_violations(repo, cutoff=ADOPTION_BASE):
@@ -60,7 +121,11 @@ def currency_violations(repo, cutoff=ADOPTION_BASE):
         message = git(repo, "show", "-s", "--format=%B", commit)
         exempt = (commit in HISTORICAL_METADATA_EXEMPTIONS
                   or re.search(r"^Docs: n/a(?:\s*--\s*\S.*)?$", message, re.M))
-        if code and not docs and not exempt:
+        code_paths = sorted(p for p in names if PurePosixPath(p).parent == PurePosixPath("bin")
+                            and p.endswith(".py"))
+        repaired = code and not docs and not exempt and _forward_documentation_receipt(
+            repo, commit, code_paths)
+        if code and not docs and not exempt and not repaired:
             violations.append(f"{commit}: bin/*.py changed without docs/ or Docs: n/a")
     return violations
 
@@ -242,6 +307,63 @@ def test_docs_in_later_commit_do_not_repair_earlier_code_commit(tmp_path):
     assert bad in currency_violations(tmp_path, cutoff)[0]
 
 
+def _receipt_fixture(repo, *, document="docs/repaired.md", wrong=None):
+    cutoff = init_repo(repo)
+    bad = commit_file(repo, "bin/example.py", "bad", "missing documentation")
+    content = "Reviewed description of the original behavior.\n"
+    receipt = {"schema": 1, "code_commit": bad, "code_paths": ["bin/example.py"],
+               "documents": {document: hashlib.sha256(content.encode()).hexdigest()}}
+    if wrong == "scope":
+        receipt["code_paths"] = ["bin/unrelated.py"]
+    if wrong == "code":
+        receipt["code_commit"] = cutoff
+    if wrong == "hash":
+        receipt["documents"][document] = "0" * 64
+    path = Path(repo) / "docs/currency-remediations" / (bad + ".json")
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(receipt))
+    commit_file(repo, document, content, "Forward documentation repair")
+    return cutoff, bad, path, document
+
+
+def test_forward_receipt_repairs_only_exact_historical_omission(tmp_path):
+    cutoff, bad, _path, _doc = _receipt_fixture(tmp_path)
+    assert_currency(tmp_path, cutoff)
+    new_bad = commit_file(tmp_path, "bin/example.py", "new behavior", "new omission")
+    violations = currency_violations(tmp_path, cutoff)
+    assert any(new_bad in failure for failure in violations)
+    assert not any(bad in failure for failure in violations)
+
+
+def test_forward_receipt_rejects_changed_document_or_receipt(tmp_path):
+    cutoff, bad, path, document = _receipt_fixture(tmp_path)
+    (tmp_path / document).write_text("changed documentation")
+    assert any(bad in failure for failure in currency_violations(tmp_path, cutoff))
+    git(tmp_path, "checkout", "--", document)
+    path.write_text(path.read_text() + " ")
+    assert any(bad in failure for failure in currency_violations(tmp_path, cutoff))
+
+
+def test_forward_receipt_rejects_incomplete_or_wrong_binding(tmp_path):
+    for wrong in ("scope", "code", "hash"):
+        repo = tmp_path / wrong
+        repo.mkdir()
+        cutoff, bad, _path, _doc = _receipt_fixture(repo, wrong=wrong)
+        assert any(bad in failure for failure in currency_violations(repo, cutoff))
+
+
+def test_forward_receipt_rejects_archived_or_untracked_document(tmp_path):
+    cutoff, bad, path, document = _receipt_fixture(
+        tmp_path, document="docs/archive/repaired.md")
+    assert any(bad in failure for failure in currency_violations(tmp_path, cutoff))
+    receipt = json.loads(path.read_text())
+    document = "docs/untracked.md"
+    (tmp_path / document).write_text("untracked")
+    receipt["documents"] = {document: hashlib.sha256(b"untracked").hexdigest()}
+    commit_file(tmp_path, str(path.relative_to(tmp_path)), json.dumps(receipt), "receipt edit")
+    assert any(bad in failure for failure in currency_violations(tmp_path, cutoff))
+
+
 def test_done_detector_rejects_absent_empty_or_late_line():
     assert has_done_after_title("# Task\n\nDONE means: visible outcome.\n")
     assert not has_done_after_title("# Task\nNo done line\n")
@@ -321,3 +443,57 @@ if __name__ == "__main__":
             errors.append(str(exc))
     print("\n".join(errors) if errors else "PASS: docs currency (last 20 non-merge commits after cutoff)")
     raise SystemExit(bool(errors))
+
+
+def test_forward_receipt_requires_document_change_in_introducing_commit(tmp_path):
+    cutoff = init_repo(tmp_path)
+    bad = commit_file(tmp_path, "bin/example.py", "bad", "missing docs")
+    commit_file(tmp_path, "docs/repaired.md", "late", "ordinary late docs")
+    record = {"schema": 1, "code_commit": bad, "code_paths": ["bin/example.py"],
+              "documents": {"docs/repaired.md": hashlib.sha256(b"late").hexdigest()}}
+    commit_file(tmp_path, f"docs/currency-remediations/{bad}.json", json.dumps(record), "receipt only")
+    assert any(bad in error for error in currency_violations(tmp_path, cutoff))
+
+
+def test_forward_receipt_requires_repair_descendant_of_original_source(tmp_path):
+    cutoff = init_repo(tmp_path)
+    main = git(tmp_path, "branch", "--show-current")
+    bad = commit_file(tmp_path, "bin/example.py", "bad", "missing docs")
+    git(tmp_path, "checkout", "-qb", "unrelated-repair", cutoff)
+    document = "docs/repaired.md"
+    record = {"schema": 1, "code_commit": bad, "code_paths": ["bin/example.py"],
+              "documents": {document: hashlib.sha256(b"coverage").hexdigest()}}
+    receipt_path = tmp_path / f"docs/currency-remediations/{bad}.json"
+    receipt_path.parent.mkdir(parents=True)
+    receipt_path.write_text(json.dumps(record))
+    commit_file(tmp_path, document, "coverage", "unrelated source repair")
+    git(tmp_path, "checkout", "-q", main)
+    git(tmp_path, "merge", "--no-ff", "-qm", "merge unrelated docs", "unrelated-repair")
+    assert any(bad in error for error in currency_violations(tmp_path, cutoff))
+
+
+def test_forward_receipt_cannot_use_working_only_document(tmp_path):
+    cutoff = init_repo(tmp_path)
+    bad = commit_file(tmp_path, "bin/example.py", "bad", "missing docs")
+    document = "docs/untracked.md"
+    (tmp_path / "docs").mkdir()
+    (tmp_path / document).write_text("working only")
+    record = {"schema": 1, "code_commit": bad, "code_paths": ["bin/example.py"],
+              "documents": {document: hashlib.sha256(b"working only").hexdigest()}}
+    receipt = f"docs/currency-remediations/{bad}.json"
+    (tmp_path / receipt).parent.mkdir()
+    (tmp_path / receipt).write_text(json.dumps(record))
+    git(tmp_path, "add", receipt)
+    git(tmp_path, "-c", "commit.gpgsign=false", "commit", "-qm", "untracked docs receipt")
+    assert git(tmp_path, "ls-files", "--", document) == ""
+    assert any(bad in error for error in currency_violations(tmp_path, cutoff))
+
+
+def test_forward_receipt_requires_head_even_when_working_copy_is_reverted(tmp_path):
+    cutoff, bad, path, document = _receipt_fixture(tmp_path)
+    original = path.read_bytes()
+    edited = json.loads(original)
+    edited["code_paths"] = ["bin/unrelated.py"]
+    commit_file(tmp_path, str(path.relative_to(tmp_path)), json.dumps(edited), "alter receipt")
+    path.write_bytes(original)
+    assert any(bad in failure for failure in currency_violations(tmp_path, cutoff))

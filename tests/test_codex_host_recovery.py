@@ -625,8 +625,12 @@ def test_checked_shutdown_stops_only_after_serialized_authenticated_boundary(
     view = SimpleNamespace(generation=host.generation)
     monkeypatch.setattr(fleet_codex.CodexHostClient, "_existing", lambda home: view)
     monkeypatch.setattr(module.os, "urandom", lambda size: b"c" * size)
-    request = {"method": "host/shutdown-restored", "operation_timeout": 30,
-               "payload": {"proof_digest": "proof"}}
+    request = {
+        "operation_id": "restored-stop",
+        "method": "host/shutdown-restored",
+        "operation_timeout": 30,
+        "payload": {"proof_digest": "proof"},
+    }
     frames = iter([hmac.digest(host.authkey, b"c" * 32, hashlib.sha256),
                    json.dumps(request).encode()])
     monkeypatch.setattr(module, "_recv_frame", lambda *args: next(frames))
@@ -653,6 +657,78 @@ def test_checked_shutdown_stops_only_after_serialized_authenticated_boundary(
         return {"checked": True}
 
     monkeypatch.setattr(fleet, "_checked_restored_shutdown", checked)
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    connection = SimpleNamespace(close=lambda: None)
+    assert host._serve_connection(connection) is (case in {"checked", "publication-error"})
+    response = json.loads(sent[-1])
+    assert response["ok"] is (case == "checked")
+    assert bool(calls) is (case != "wrong-interface")
+    if calls:
+        assert calls == [("proof", {"kind": "codex", **claim})]
+    if case == "publication-error":
+        assert json.loads((tmp_path / "receipt.json").read_text()) == {"checked": True}
+
+
+@pytest.mark.parametrize("case", ["checked", "historical-drift", "wrong-interface", "publication-error"])
+def test_cancelled_shutdown_stops_only_after_serialized_authenticated_boundary(
+        tmp_path, monkeypatch, case):
+    import hashlib
+    import hmac
+    from types import SimpleNamespace
+
+    import fleet
+    import fleet_codex
+    import fleet_codex_host as module
+
+    host = module.Host.__new__(module.Host)
+    host.home = tmp_path
+    host.generation = "test-generation"
+    host.authkey = b"test-only-key"
+    host._validate = lambda request: None
+    host.approvals = SimpleNamespace(unresolved=lambda **kwargs: [])
+    claim = {"claim_id": "claim", "thread_id": "thread", "ancestor_pid": 123,
+             "ancestor_start_identity": "start", "uid": os.getuid()}
+    source = {"uid": os.getuid()}
+    monkeypatch.setattr(module, "read_interface_claim", lambda home: claim)
+    monkeypatch.setattr(module, "_ipc_peer_credentials", lambda conn: (123, os.getuid()))
+    monkeypatch.setattr(module, "codex_process_source", lambda pid: source)
+    monkeypatch.setattr(module, "interface_source_matches",
+                        lambda registration, observed: case != "wrong-interface")
+    view = SimpleNamespace(generation=host.generation)
+    monkeypatch.setattr(fleet_codex.CodexHostClient, "_existing", lambda home: view)
+    monkeypatch.setattr(module.os, "urandom", lambda size: b"c" * size)
+    request = {
+        "operation_id": "cancelled-stop",
+        "method": "host/shutdown-cancelled-approval",
+        "operation_timeout": 30,
+        "payload": {"proof_digest": "proof"},
+    }
+    frames = iter([hmac.digest(host.authkey, b"c" * 32, hashlib.sha256),
+                   json.dumps(request).encode()])
+    monkeypatch.setattr(module, "_recv_frame", lambda *args: next(frames))
+    sent = []
+    monkeypatch.setattr(module, "_send_frame", lambda conn, data, deadline: sent.append(data))
+    calls = []
+
+    def checked(client, digest, registered, *, before_publish=lambda: None):
+        calls.append((digest, registered))
+        if case == "historical-drift":
+            raise fleet.FleetCliError("historical thread became active")
+        if case == "publication-error":
+            # Exercise real publication: rename succeeds before directory fsync fails.
+            before_publish()
+            fsync = os.fsync
+
+            def fail_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("injected post-rename directory fsync failure")
+                return fsync(fd)
+
+            monkeypatch.setattr(os, "fsync", fail_directory_fsync)
+            fleet_codex._atomic_json(tmp_path / "receipt.json", {"checked": True})
+        return {"checked": True}
+
+    monkeypatch.setattr(fleet, "_checked_cancelled_approval_shutdown", checked)
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
     connection = SimpleNamespace(close=lambda: None)
     assert host._serve_connection(connection) is (case in {"checked", "publication-error"})

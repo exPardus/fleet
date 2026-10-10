@@ -115,7 +115,7 @@ the selected fleet home:
 
 ## Codex lanes
 
-Dispatch a Codex lane with `fleet spawn --model codex:<model> [--effort low|medium|high|xhigh]`; new rows use the native app-server adapter. Use explicit `--codex-adapter mcx` only for the legacy compatibility route; persisted rows always keep their recorded adapter.
+Dispatch a native Codex lane with `fleet spawn --model codex:<model>`; new rows use the native app-server adapter. `--effort low|medium|high|xhigh` applies only with explicit `--codex-adapter mcx` and is ignored by the native adapter. Persisted rows always keep their recorded adapter.
 Fleet routes `status`, `peek`, `result`, `send`, `interrupt`, `kill`, `respawn`,
 and wave accounting through that recorded adapter. Do not drive app-server or
 mcx by hand for a lane Fleet dispatched. On the explicit mcx route, Fleet maps
@@ -147,7 +147,6 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet wait NAME... [--any|--all] [--timeout SECONDS]`: wait for one or more turns to finish.
 - `fleet send NAME MESSAGE [--force-band]`: deliver a worker message or start its next turn.
 - `fleet interrupt NAME`: stop the worker's current turn.
-- `fleet attach NAME [--force]`: attach an interactive terminal to a worker.
 - `fleet release NAME`: release an attached worker to idle.
 - `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
@@ -170,6 +169,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
 - `fleet watch [--fleet-home PATH ...] [--mcx-dir DIR ...] [--mem-floor-mb MB] [--disk-floor-gb GB] [--interval S] [--timeout S]`: wait for the first mail, fleet/mcx lane transition, low-memory, or low-disk event; exits 3 on timeout.
+- `fleet mailman init|run|digest --fleet-home PATH`: seed wake rules, classify inbox mail, file low-signal messages, and wait for interface mail. The seed catches `READY:` and both `do-not-merge` and `do not merge`; missing or invalid config wakes on every mail. Filing checks the same inode and content through the link/unlink boundary. The command remains fail-safe destructive pending an effect-tier ruling.
 - `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
@@ -193,7 +193,7 @@ reconcile every required nested review before accepting the parent. An allowed w
 collaboration, `send_message` only queues delivery; use `followup_task` to wake
 an idle or completed agent. This differs from `fleet send supervisor`.
 
-- Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. Omitting it on one of these is refused as a continuity failure naming a second body, which reads like an incident and is not one.
+- Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. A placeholder-looking `--nonce` or `--handoff-token` is refused before command dispatch changes state. After a continuity refusal, end that body's turn and follow the exact Interface wake and successor-handle steps printed in the refusal.
 - Treat `sup-boot` exit 0 as a held or transferred claim, exit 2 as refusal, exit 3 as freeze, exit 4=continuity refusal, and exit 5 as handoff refusal.
 - Reconcile `fleet status` outcomes before dispatching; do not treat a limited worker as dead.
 - Context bands are supervisor 350–400k and worker 250–300k; the supervisor enters its band at **350k** and reaches its hard ceiling at **400k**, while the worker enters its band at **250k** and reaches **300k**. Entering the supervisor band REFUSES `spawn`, `send`, `respawn` and `sup-spawn` with a one-line reason; `--force-band` overrides that soft refusal for one call and **cannot** override the 400k hard ceiling. The handoff verbs are never refused.
@@ -233,7 +233,7 @@ home's own checks.
 
 ## Handoff
 
-When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin --complete-timeout 300 --nonce <value>`; it dispatches the successor, waits lock-free for its token-backed handshake, and completes or aborts in one process using that single nonce presentation. Every pre-transfer exception aborts; a changed claim refuses completion but still stops the token/incarnation-proven successor without writing the new claim. The separate `sup-handoff-begin` then `sup-handoff-complete` sequence remains available. Run `sup-release` only when the handoff is stillborn, then stop.
+When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin --complete-timeout 300 --nonce` followed by the exact most recent `NONCE:` value; it dispatches the successor, waits lock-free for its token-backed handshake, and completes or aborts in one process using that single nonce presentation. Every pre-transfer exception aborts; a changed claim refuses completion but still stops the token/incarnation-proven successor without writing the new claim. The separate `sup-handoff-begin` then `sup-handoff-complete` sequence remains available. Run `sup-release` only when the handoff is stillborn, then stop.
 
 ## Safety
 

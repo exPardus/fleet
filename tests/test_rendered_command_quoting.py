@@ -417,7 +417,7 @@ def census_code_plane():
     return sorted(sites, key=lambda s: (s[0], s[1]))
 
 
-# The census, pinned by COUNT and by identity. A fifth render moves both, and
+# The census, pinned by COUNT and by identity. New renders move both, and
 # moving them is a deliberate edit with a driver attached (see below).
 EXPECTED_RENDERS = (
     ("bin/fleet.py", "_steer_supervisor_release"),
@@ -425,6 +425,8 @@ EXPECTED_RENDERS = (
     ("bin/fleet.py", "_render_sup_spawn_task"),
     ("bin/fleet.py", "_render_successor_task"),
     ("bin/fleet.py", "_render_supervisor_wake_task"),
+    ("bin/fleet.py", "_render_supervisor_wake_task"),
+    ("bin/fleet.py", "_wake_cmd"),
 )
 
 
@@ -638,7 +640,13 @@ def _drive_render_successor_task(tmp_path, monkeypatch):
 
 
 def _drive_render_supervisor_wake_task(tmp_path, monkeypatch):
-    return fleet._render_supervisor_wake_task("sup|inc-l1|boot", "inc-l1", "tok", "wake up")
+    return fleet._render_supervisor_wake_task(
+        "sup|inc-l1|boot", "inc-l1", "tok", "wake up",
+        pending_handles=["--successor-sid sid-l1"])
+
+
+def _drive_wake_cmd(tmp_path, monkeypatch):
+    return fleet._wake_cmd()
 
 
 RENDER_DRIVERS = {
@@ -647,6 +655,7 @@ RENDER_DRIVERS = {
     "_render_sup_spawn_task": _drive_render_sup_spawn_task,
     "_render_successor_task": _drive_render_successor_task,
     "_render_supervisor_wake_task": _drive_render_supervisor_wake_task,
+    "_wake_cmd": _drive_wake_cmd,
 }
 
 

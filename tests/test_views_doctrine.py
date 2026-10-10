@@ -182,7 +182,7 @@ def _view_calls():
     """The bare verbs the read-only commands expose, as callables."""
     return {
         "fleet status": lambda: fleet.cmd_status(
-            argparse.Namespace(name=None, all=False, stale_ok=False, json=False)),
+            argparse.Namespace(name=None, all=False, stale_ok=True, json=False)),
         "fleet peek": lambda: fleet.cmd_peek(
             argparse.Namespace(name="w", lines=20)),
         "fleet result": lambda: fleet.cmd_result(
@@ -238,38 +238,62 @@ def test_the_statusline_read_path_does_not_quarantine(tmp_path, monkeypatch):
         "operator's evidence in a loop.")
 
 
-def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
-    """Views consume committed files; live host work belongs to explicit verbs."""
-    forbidden = {"CodexHostClient", "reconcile_home", "OperationJournal"}
-    source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(fleet.__file__))
-    functions = {
-        node.name: node for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    reachable = set()
-    pending = ["status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
-               "cmd_sup_guard", "cmd_mail_verify"]
+def _view_execution_names(source, roots, *, do=False):
+    """Original conservative graph: every statement and branch is inspected.
+
+    do is accepted for old probe compatibility; it never prunes the graph.
+    Source separates the view roots from the explicitly mutating CLI variants.
+    """
+    tree = ast.parse(source)
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    reachable, pending = set(), list(roots)
     while pending:
         name = pending.pop()
         if name in reachable or name not in functions:
             continue
         reachable.add(name)
-        for call in (node for node in ast.walk(functions[name])
-                     if isinstance(node, ast.Call)):
-            if isinstance(call.func, ast.Name) and call.func.id in functions:
+        for call in ast.walk(functions[name]):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in functions):
                 pending.append(call.func.id)
-
-    live_names = {
-        node.id for name in reachable for node in ast.walk(functions[name])
-        if isinstance(node, ast.Name)
-    } | {
+    return {node.id for name in reachable for node in ast.walk(functions[name])
+            if isinstance(node, ast.Name)} | {
         node.attr for name in reachable for node in ast.walk(functions[name])
-        if isinstance(node, ast.Attribute)
-    }
+        if isinstance(node, ast.Attribute)}
+
+
+def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
+    forbidden = {"CodexHostClient", "reconcile_home", "OperationJournal"}
+    source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
+    live_names = _view_execution_names(source, [
+        "status_snapshot", "_cmd_status_view", "cmd_peek", "cmd_result",
+        "_sup_guard_view", "cmd_mail_verify"])
     assert forbidden.isdisjoint(live_names), (
-        f"read-only view call graph reaches live Codex host helpers: "
-        f"{sorted(forbidden & live_names)}")
+        "read-only view execution reaches live Codex helpers: "
+        + str(sorted(forbidden & live_names)))
+
+
+@pytest.mark.parametrize("call", ["OperationJournal", "CodexHostClient", "reconcile_home"])
+def test_view_detector_sees_unguarded_and_unknown_branch_mutations(call):
+    assert call in _view_execution_names(
+        f"def view(args):\n    {call}()\n", ["view"])
+    assert call in _view_execution_names(
+        f"def view(args):\n    if unknown_condition():\n        {call}()\n", ["view"])
+
+
+def test_view_detector_preserves_mutating_control_and_forwarded_do():
+    source = """def view(args):
+    return helper(args)
+def helper(args):
+    do = getattr(args, 'do', False)
+    if do and awake():
+        OperationJournal()
+"""
+    assert "OperationJournal" in _view_execution_names(source, ["view"], do=False)
+    assert "OperationJournal" in _view_execution_names(source, ["view"], do=True)
+    assert "OperationJournal" in _view_execution_names(
+        source.replace("return helper(args)", "return helper(unknown_args())"), ["view"])
 
 
 # ---------------------------------------------------------------------------
@@ -663,3 +687,142 @@ def test_the_receipt_section_is_present_and_cited():
            "tests/test_views_doctrine.py" in CLAUDE_MD.read_text(encoding="utf-8"), (
         "the documents no longer name this pin, so a reader correcting D4 has "
         "no way to know a test is holding them to it.")
+
+
+def test_view_detector_does_not_reuse_rebound_argument_or_branch_facts():
+    assert "OperationJournal" in _view_execution_names("""def view(args):
+    args = unknown_args()
+    return helper(args)
+def helper(args):
+    if getattr(args, 'do', False):
+        OperationJournal()
+""", ["view"])
+    for condition in ("True", "unknown_condition()"):
+        assert "OperationJournal" in _view_execution_names(f"""def view(args):
+    do = getattr(args, 'do', False)
+    if {condition}:
+        do = True
+    if do:
+        OperationJournal()
+""", ["view"])
+
+
+def test_native_guard_readonly_branch_never_constructs_mutating_journal(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import fleet_codex
+    import test_codex_supervisor as fixtures
+
+    home = fixtures.supervisor_home.__wrapped__(tmp_path, monkeypatch)
+    fixtures._seed_native_supervisor(home, stale=True)
+    client = fixtures.FakeLifecycleClient(home, thread_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda selected: client)
+    before = {str(p.relative_to(home)): p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    calls = []
+
+    def prohibited(*args, **kwargs):
+        calls.append(True)
+        raise RuntimeError("mutating journal construction reached")
+
+    monkeypatch.setattr(fleet_codex, "OperationJournal", prohibited)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+    assert not calls
+    assert before == {str(p.relative_to(home)): p.read_bytes()
+                      for p in home.rglob("*") if p.is_file()}
+    with pytest.raises(RuntimeError, match="mutating journal"):
+        fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True))
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("mutation", [
+    "args.do = True",
+    "do = getattr(args, 'do', False)\n    do |= True",
+    "setattr(args, 'do', True)",
+    "change(args)",
+])
+def test_view_detector_never_hides_mutated_argument_or_local_fact(mutation):
+    condition = "do" if "do |=" in mutation else "args.do"
+    source = f"""def view(args):
+    {mutation}
+    if {condition}:
+        OperationJournal()
+def change(args):
+    args.do = True
+"""
+    assert "OperationJournal" in _view_execution_names(source, ["view"])
+
+
+def test_view_detector_invalidates_alias_and_dictionary_mutation():
+    for mutation in ("alias = args\n    alias.do = True", "args.__dict__['do'] = True"):
+        assert "OperationJournal" in _view_execution_names(f"""def view(args):
+    {mutation}
+    if args.do:
+        OperationJournal()
+""", ["view"])
+
+
+def test_view_detector_keeps_zero_iteration_path_and_assignment_expression():
+    source = """def view(args):
+    do = True
+    for unused in unknown_items():
+        do = False
+    if do:
+        OperationJournal()
+"""
+    assert "OperationJournal" in _view_execution_names(source, ["view"])
+    assert "OperationJournal" in _view_execution_names("""def view(args):
+    do = False
+    (do := True)
+    if do:
+        OperationJournal()
+""", ["view"])
+
+
+def _readonly_routers_are_direct(source):
+    expected = ast.parse('''def cmd_status(args, run=subprocess.run, which=shutil.which) -> int:
+    if getattr(args, "stale_ok", False):
+        return _cmd_status_view(args)
+    return _cmd_status_refresh(args, run=run, which=which)
+def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None, process_tree_fn=None) -> int:
+    if getattr(args, "do", False):
+        return _sup_guard_action(args, snapshot_fn=snapshot_fn,
+                                 roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+    return _sup_guard_view(args, snapshot_fn=snapshot_fn,
+                           roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+''')
+    functions = {node.name: node for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef)}
+    return all(node.name in functions and ast.dump(node) == ast.dump(functions[node.name])
+               for node in expected.body)
+
+
+def test_readonly_public_routers_have_no_prelude_or_extra_mutation_edges():
+    source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
+    assert _readonly_routers_are_direct(source)
+    assert not _readonly_routers_are_direct(source.replace(
+        'if getattr(args, "do", False):',
+        'OperationJournal()\n    if getattr(args, "do", False):', 1))
+    assert not _readonly_routers_are_direct(source.replace(
+        'return _cmd_status_view(args)', 'return _cmd_status_refresh(args)', 1))
+
+
+@pytest.mark.parametrize("stale", [True, False])
+def test_status_public_router_selects_exact_readonly_or_mutation_root(monkeypatch, stale):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(fleet, "_cmd_status_view", lambda args: calls.append("view") or 0)
+    monkeypatch.setattr(fleet, "_cmd_status_refresh",
+                        lambda args, **kwargs: calls.append("refresh") or 0)
+    assert fleet.cmd_status(SimpleNamespace(stale_ok=stale)) == 0
+    assert calls == ["view" if stale else "refresh"]
+
+
+@pytest.mark.parametrize("do", [False, True])
+def test_guard_public_router_selects_exact_readonly_or_action_root(monkeypatch, do):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(fleet, "_sup_guard_view",
+                        lambda args, **kwargs: calls.append("view") or 0)
+    monkeypatch.setattr(fleet, "_sup_guard_action",
+                        lambda args, **kwargs: calls.append("action") or 0)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=do)) == 0
+    assert calls == ["action" if do else "view"]
