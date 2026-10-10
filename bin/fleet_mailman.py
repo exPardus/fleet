@@ -348,10 +348,15 @@ def _recover_stale_claims(home, *, now=None) -> int:
         claim = entry / "mail"
         try:
             claim_stat = os.lstat(claim)
-        except OSError:
-            _remove_private_claim(claim, entry)
+        except FileNotFoundError:
+            # Age cannot establish that the owner stopped between creating
+            # its private directory and renaming the published file into it.
+            # Leave this ambiguous state alone; cleanup could delete a rename
+            # that completes immediately after this lstat.
             continue
-        if not (stat.S_ISREG(claim_stat.st_mode) or stat.S_ISLNK(claim_stat.st_mode)):
+        except OSError:
+            continue
+        if not stat.S_ISREG(claim_stat.st_mode):
             continue
         try:
             original_name = os.fsdecode((entry / "origin").read_bytes())

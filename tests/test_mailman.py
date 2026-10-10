@@ -224,6 +224,31 @@ def test_replacement_at_atomic_rename_boundary_is_recovered_visibly(home, capsys
         for p in (home / "mailbox" / "to-fleet").glob("*.recovered-*.mail"))
 
 
+def test_stale_claim_without_mail_is_left_for_paused_owner(home, monkeypatch):
+    source = put(home, "a.md", mail())
+    claim_dir = mm.claims_dir(home) / "claim-paused-owner"
+    claim_dir.mkdir(parents=True)
+    (claim_dir / "origin").write_bytes(b"a.md")
+    old = time.time() - mm.CLAIM_STALE_SECONDS - 1
+    os.utime(claim_dir, (old, old))
+    claim = claim_dir / "mail"
+    real_unlink = mm.os.unlink
+    injected = False
+
+    def finish_owner_rename_before_cleanup(path, *args, **kwargs):
+        nonlocal injected
+        if Path(path) == claim and not injected:
+            injected = True
+            os.rename(source, claim)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(mm.os, "unlink", finish_owner_rename_before_cleanup)
+    assert mm._recover_stale_claims(home) == 0
+    assert not injected
+    assert source.read_text() == mail()
+    assert not claim.exists()
+
+
 def test_done_collision_skips_an_occupied_suffixed_name(home, capsys):
     seed(home)
     done_dir = home / "mailbox" / "done"
