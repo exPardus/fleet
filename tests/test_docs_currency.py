@@ -65,7 +65,9 @@ def _forward_documentation_receipt(repo, commit, code_paths):
             return False
         if git(repo, "merge-base", repair, "HEAD") != repair:
             return False
-        if subprocess.check_output(["git", "-C", str(repo), "show", f"{repair}:{path}"]) != raw:
+        if any(subprocess.check_output([
+                "git", "-C", str(repo), "show", f"{revision}:{path}"]) != raw
+               for revision in (repair, "HEAD")):
             return False
         changed = git(repo, "diff-tree", "--root", "--no-commit-id", "--name-only",
                       "--no-renames", "-r", repair).splitlines()
@@ -480,3 +482,13 @@ def test_forward_receipt_cannot_use_working_only_document(tmp_path):
     git(tmp_path, "-c", "commit.gpgsign=false", "commit", "-qm", "untracked docs receipt")
     assert git(tmp_path, "ls-files", "--", document) == ""
     assert any(bad in error for error in currency_violations(tmp_path, cutoff))
+
+
+def test_forward_receipt_requires_head_even_when_working_copy_is_reverted(tmp_path):
+    cutoff, bad, path, document = _receipt_fixture(tmp_path)
+    original = path.read_bytes()
+    edited = json.loads(original)
+    edited["code_paths"] = ["bin/unrelated.py"]
+    commit_file(tmp_path, str(path.relative_to(tmp_path)), json.dumps(edited), "alter receipt")
+    path.write_bytes(original)
+    assert any(bad in failure for failure in currency_violations(tmp_path, cutoff))

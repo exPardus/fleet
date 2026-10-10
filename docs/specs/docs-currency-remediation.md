@@ -13,7 +13,7 @@ their exact bytes. The introducing commit is derived from Git's addition
 history, avoiding a circular self-commit reference.
 
 The gate verifies that original code is an ancestor of the introducing repair,
-that the repair is an ancestor of HEAD, that the receipt remains byte-identical
+that the repair is an ancestor of HEAD, that the receipt in both HEAD and the working copy remains byte-identical
 to its introduction, and that each pinned doc was changed in that introducing
 commit. Docs must be tracked and live, outside archive and receipt directories;
 HEAD, introducing commit and working bytes must all match the digest. Missing,
@@ -30,6 +30,8 @@ reviewed design rather than silently updating its frozen receipt.
 The views-doctrine detector specializes the read-only CLI variants:
 `status --stale-ok` and `sup-guard` without `--do`. It propagates only known
 argument fields and constants; unknown/rebound arguments and unknown branches
-stay conservative. Mutating journal construction, host startup and host
+stay conservative. Direct stores, augmented assignment, setter/helper/method
+calls and aliases invalidate or update cached facts before later branches.
+Mutating journal construction, host startup and host
 reconciliation remain forbidden on the read-only execution paths. Tests retain
 unguarded-call, unknown-branch, rebinding and mutating-variant controls.

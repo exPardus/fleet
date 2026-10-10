@@ -260,7 +260,8 @@ def _view_execution_names(source, roots, *, do=False):
                 and node.attr in {"do", "stale_ok"}):
             return env.get(node.value.id + "." + node.attr, unknown)
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr" and len(node.args) >= 2
+                and node.func.id == "getattr" and "getattr" not in env
+                and "getattr" not in functions and len(node.args) >= 2
                 and isinstance(node.args[0], ast.Name)
                 and isinstance(node.args[1], ast.Constant)
                 and node.args[1].value in {"do", "stale_ok"}):
@@ -308,6 +309,22 @@ def _view_execution_names(source, roots, *, do=False):
                         if branch_env.get(key, unknown) != env[key]:
                             env[key] = unknown
             return all(endings)
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.Try)):
+            # Iteration/exception paths may not execute a store seen by the
+            # walk. Inspect all paths, then invalidate changed facts at the join.
+            branch_env = dict(env)
+            for child in ast.iter_child_nodes(node):
+                visit(child, branch_env)
+            for key in set(env) | set(branch_env):
+                if env.get(key, unknown) != branch_env.get(key, unknown):
+                    env[key] = unknown
+            return False
+        if isinstance(node, ast.NamedExpr):
+            visit(node.value, env)
+            visit(node.target, env)
+            if isinstance(node.target, ast.Name):
+                env[node.target.id] = value(node.value, env)
+            return False
         if isinstance(node, ast.IfExp):
             visit(node.test, env)
             result = value(node.test, env)
@@ -316,12 +333,36 @@ def _view_execution_names(source, roots, *, do=False):
                 visit(child, dict(env))
             return
         if isinstance(node, ast.Assign):
+            # RHS calls can mutate the object before its field is read.
+            visit(node.value, env)
             evaluated = value(node.value, env)
             for target in node.targets:
+                visit(target, env)
                 if isinstance(target, ast.Name):
                     env[target.id] = evaluated
                     for field in ("do", "stale_ok"):
                         env.pop(target.id + "." + field, None)
+                elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                    env[target.value.id + "." + target.attr] = evaluated
+                else:
+                    for reference in ast.walk(target):
+                        if isinstance(reference, ast.Name):
+                            env[reference.id] = unknown
+                            for field in ("do", "stale_ok"):
+                                env.pop(reference.id + "." + field, None)
+            # Creating an alias lets later stores/calls mutate the original.
+            if isinstance(node.value, ast.Name):
+                for field in ("do", "stale_ok"):
+                    env.pop(node.value.id + "." + field, None)
+            return False
+        if isinstance(node, ast.AugAssign):
+            visit(node.value, env)
+            visit(node.target, env)
+            if isinstance(node.target, ast.Name):
+                env[node.target.id] = unknown
+            elif isinstance(node.target, ast.Attribute) and isinstance(node.target.value, ast.Name):
+                env[node.target.value.id + "." + node.target.attr] = unknown
+            return False
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id in functions):
             # Preserve the do specialization only for a directly forwarded
@@ -333,6 +374,19 @@ def _view_execution_names(source, roots, *, do=False):
             pending.append((node.func.id, passed))
         for child in ast.iter_child_nodes(node):
             visit(child, env)
+        if isinstance(node, ast.Call):
+            pure_getter = (isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                           and "getattr" not in env and "getattr" not in functions)
+            if not pure_getter:
+                # Any unknown or helper call may mutate passed objects, including
+                # setattr and method receivers. Do not retain their cached fields.
+                arguments = list(node.args) + [kw.value for kw in node.keywords]
+                if isinstance(node.func, ast.Attribute):
+                    arguments.append(node.func.value)
+                for argument in arguments:
+                    if isinstance(argument, ast.Name):
+                        for field in ("do", "stale_ok"):
+                            env.pop(argument.id + "." + field, None)
         return isinstance(node, ast.Return)
 
     while pending:
@@ -820,3 +874,47 @@ def test_native_guard_readonly_branch_never_constructs_mutating_journal(tmp_path
     with pytest.raises(RuntimeError, match="mutating journal"):
         fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True))
     assert calls == [True]
+
+
+@pytest.mark.parametrize("mutation", [
+    "args.do = True",
+    "do = getattr(args, 'do', False)\n    do |= True",
+    "setattr(args, 'do', True)",
+    "change(args)",
+])
+def test_view_detector_never_hides_mutated_argument_or_local_fact(mutation):
+    condition = "do" if "do |=" in mutation else "args.do"
+    source = f"""def view(args):
+    {mutation}
+    if {condition}:
+        OperationJournal()
+def change(args):
+    args.do = True
+"""
+    assert "OperationJournal" in _view_execution_names(source, ["view"])
+
+
+def test_view_detector_invalidates_alias_and_dictionary_mutation():
+    for mutation in ("alias = args\n    alias.do = True", "args.__dict__['do'] = True"):
+        assert "OperationJournal" in _view_execution_names(f"""def view(args):
+    {mutation}
+    if args.do:
+        OperationJournal()
+""", ["view"])
+
+
+def test_view_detector_keeps_zero_iteration_path_and_assignment_expression():
+    source = """def view(args):
+    do = True
+    for unused in unknown_items():
+        do = False
+    if do:
+        OperationJournal()
+"""
+    assert "OperationJournal" in _view_execution_names(source, ["view"])
+    assert "OperationJournal" in _view_execution_names("""def view(args):
+    do = False
+    (do := True)
+    if do:
+        OperationJournal()
+""", ["view"])
