@@ -1,6 +1,5 @@
 """fleet mailman (docs/specs/mailman.md): sorting, lossless filing, fail-safe wake."""
 import hashlib
-import fcntl
 import json
 import os
 import sys
@@ -11,6 +10,7 @@ import pytest
 
 import fleet
 import fleet_mailman as mm
+from fleet_errors import FleetCliError
 
 
 def mail(kind="status", body="all done", frm="lane-a", extra=""):
@@ -125,6 +125,20 @@ def test_filing_helper_refuses_wake(home):
         mm.file_mail(home, "a.md", v, fleet._mailman_prims())
 
 
+def test_missing_platform_lock_backend_fails_closed_before_claims(home, monkeypatch):
+    seed(home)
+    source = put(home, "a.md", mail())
+    raw, problem, inode = mm.read_mail_snapshot(source)
+    cfg, _ = mm.load_config(home)
+    verdict = mm.classify(raw, problem, cfg, inode=inode)
+    monkeypatch.setattr(mm, "_fcntl", None)
+    monkeypatch.setattr(mm, "_msvcrt", None)
+    with pytest.raises(FleetCliError, match="OS-supported claim lock"):
+        mm.file_mail(home, "a.md", verdict, fleet._mailman_prims())
+    assert source.read_text() == mail()
+    assert not mm.claims_dir(home).exists()
+
+
 # ---------------------------------------------------- T3/T4 crash safety
 def _boom(*a, **k):
     raise OSError("injected crash")
@@ -231,8 +245,8 @@ def test_stale_claim_without_mail_is_left_for_paused_owner(home, monkeypatch):
     claim_dir = mm.claims_dir(home) / "claim-paused-owner"
     claim_dir.mkdir(parents=True)
     (claim_dir / "origin").write_bytes(b"a.md")
-    owner_fd = os.open(claim_dir / "owner.lock", os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    owner_fd = os.open(mm._owner_lock_path(claim_dir), os.O_CREAT | os.O_RDWR, 0o600)
+    mm._acquire_owner_lock(owner_fd, initialize=True)
     old = time.time() - mm.CLAIM_STALE_SECONDS - 1
     os.utime(claim_dir, (old, old))
     claim = claim_dir / "mail"
@@ -263,7 +277,8 @@ def test_stale_recovery_uses_alias_before_removing_claim(home, monkeypatch):
     claim = claim_dir / "mail"
     claim.write_text(old_mail)
     (claim_dir / "origin").write_bytes(b"a.md")
-    lock_fd = os.open(claim_dir / "owner.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    lock_fd = os.open(mm._owner_lock_path(claim_dir), os.O_CREAT | os.O_RDWR, 0o600)
+    mm._acquire_owner_lock(lock_fd, initialize=True)
     os.close(lock_fd)
     old = time.time() - mm.CLAIM_STALE_SECONDS - 1
     os.utime(claim_dir, (old, old))

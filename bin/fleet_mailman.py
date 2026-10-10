@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import fcntl
 import os
 import re
 import stat
@@ -16,6 +15,15 @@ from pathlib import Path
 from typing import Callable
 
 from fleet_errors import FleetCliError
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows uses msvcrt below.
+    _fcntl = None
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - POSIX uses fcntl above.
+    _msvcrt = None
 
 CONFIG_NAME = "mailman.json"
 MAIL_MAX_BYTES = 1024 * 1024
@@ -242,6 +250,26 @@ def claims_dir(home) -> Path:
     return inbox_dir(home) / CLAIMS_DIR_NAME
 
 
+def _owner_lock_path(claim_dir: Path) -> Path:
+    return claim_dir.with_name(claim_dir.name + ".lock")
+
+
+def _acquire_owner_lock(fd: int, *, initialize=False) -> None:
+    """Acquire an exclusive nonblocking lock; close(fd) releases it."""
+    if _fcntl is not None:
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        return
+    if _msvcrt is not None:
+        if initialize and os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        elif os.fstat(fd).st_size == 0:
+            raise OSError("empty Windows claim lock")
+        os.lseek(fd, 0, os.SEEK_SET)
+        _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+        return
+    raise OSError("mailman filing requires an OS-supported claim lock")
+
+
 def _ensure_claims_dir(home) -> Path:
     root = claims_dir(home)
     try:
@@ -257,20 +285,26 @@ def _ensure_claims_dir(home) -> Path:
 
 
 def _new_claim_dir(home) -> tuple[Path, int]:
+    # Fail before creating claim state on platforms without a safe lock API.
+    if _fcntl is None and _msvcrt is None:
+        raise FleetCliError("mailman filing requires an OS-supported claim lock")
     root = _ensure_claims_dir(home)
     while True:
         path = root / f"claim-{uuid.uuid4().hex}"
         try:
             os.mkdir(path, 0o700)
+            owner_fd = None
             try:
-                owner_fd = os.open(path / "owner.lock",
+                owner_fd = os.open(_owner_lock_path(path),
                                    os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
-                fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _acquire_owner_lock(owner_fd, initialize=True)
             except OSError:
-                try:
-                    os.unlink(path / "owner.lock")
-                except OSError:
-                    pass
+                if owner_fd is not None:
+                    os.close(owner_fd)
+                    try:
+                        os.unlink(_owner_lock_path(path))
+                    except OSError:
+                        pass
                 path.rmdir()
                 raise
             return path, owner_fd
@@ -289,13 +323,35 @@ def _remove_private_claim(claim: Path, claim_dir: Path) -> None:
     except FileNotFoundError:
         pass
     try:
-        os.unlink(claim_dir / "owner.lock")
-    except FileNotFoundError:
-        pass
-    try:
         claim_dir.rmdir()
     except OSError:
         pass
+
+
+def _release_owner_lock(claim_dir: Path, owner_fd: int) -> None:
+    """Close the OS lock before removing its sibling lockfile (Windows-safe)."""
+    try:
+        opened = os.fstat(owner_fd)
+        opened_id = (opened.st_dev, opened.st_ino)
+    except OSError:
+        opened_id = None
+    os.close(owner_fd)
+    # A surviving claim directory represents an interrupted filing attempt;
+    # its released lockfile is the proof recovery needs on the next pass.
+    if claim_dir.exists():
+        return
+    try:
+        lock_path = _owner_lock_path(claim_dir)
+        current = os.lstat(lock_path)
+    except FileNotFoundError:
+        pass
+    else:
+        if (opened_id is not None and stat.S_ISREG(current.st_mode)
+                and (current.st_dev, current.st_ino) == opened_id):
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                pass
 
 
 def _recovered_name(original_name: str | None) -> str:
@@ -345,12 +401,20 @@ def _recover_stale_claims(home, *, now=None) -> int:
                 or current - entry_stat.st_mtime < CLAIM_STALE_SECONDS):
             continue
         try:
-            owner_fd = os.open(entry / "owner.lock", os.O_RDONLY)
+            lock_path = _owner_lock_path(entry)
+            lock_stat = os.lstat(lock_path)
+            if not stat.S_ISREG(lock_stat.st_mode):
+                continue
+            owner_fd = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
         except OSError:
             continue
         try:
+            opened_stat = os.fstat(owner_fd)
+            if ((opened_stat.st_dev, opened_stat.st_ino)
+                    != (lock_stat.st_dev, lock_stat.st_ino)):
+                continue
             try:
-                fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _acquire_owner_lock(owner_fd)
             except OSError:
                 continue
             # Recheck after acquiring the owner's kernel-released lock.
@@ -378,7 +442,7 @@ def _recover_stale_claims(home, *, now=None) -> int:
             if _publish_claim(home, claim, entry, original_name):
                 recovered += 1
         finally:
-            os.close(owner_fd)
+            _release_owner_lock(entry, owner_fd)
     return recovered
 
 
@@ -398,17 +462,17 @@ def _claim_source(home, name: str, v: Verdict):
         os.rename(src, claim)
     except FileNotFoundError:
         _remove_private_claim(claim, claim_dir)
-        os.close(owner_fd)
+        _release_owner_lock(claim_dir, owner_fd)
         return None
     except OSError:
         _remove_private_claim(claim, claim_dir)
-        os.close(owner_fd)
+        _release_owner_lock(claim_dir, owner_fd)
         return None
     claimed, claimed_problem, claimed_inode = read_mail_snapshot(claim)
     if (claimed_problem is not None or claimed_inode != v.inode
             or hashlib.sha256(claimed).hexdigest() != v.sha):
         _publish_claim(home, claim, claim_dir, name)
-        os.close(owner_fd)
+        _release_owner_lock(claim_dir, owner_fd)
         return None
     return claim, claim_dir, owner_fd
 
@@ -625,7 +689,7 @@ def file_mail(home, name, v: Verdict, prims: Prims) -> bool:
     except _Changed:
         return False
     finally:
-        os.close(owner_fd)
+        _release_owner_lock(claim_dir, owner_fd)
     return True
 
 

@@ -260,9 +260,11 @@ or in `done/` (complete); there is no state in which the mail exists nowhere.
   claimed inode into `done/`. It never unlinks a published inbox pathname after a userspace check.
   If a producer replaces the original path before the rename, the captured entry is rechecked and
   preserved under a fresh `.recovered-<nonce>.mail` name when it does not match the verdict. Each
-  claim holds an OS-released exclusive lock from before rename through completion. A non-dry pass
-  recovers only stale claims whose lock it can acquire, by hardlinking to a fresh visible name before
-  removing the private claim. Producers must publish only at their original inbox names and must not
+  claim holds an OS-released exclusive lock from before rename through completion (`flock` on POSIX,
+  `msvcrt.locking` on Windows). A non-dry pass recovers only stale claims whose lock it can acquire,
+  by hardlinking to a fresh visible name before removing the private claim. Platforms without a
+  supported lock backend fail closed before claim state is created. Producers must publish only at
+  their original inbox names and must not
   modify claim directories or mailman's nonce-suffixed recovery names. A missing or ambiguous `mail`
   entry is left untouched because its owner may be paused before rename. Recovered names preserve the
   original name for digest, log, and cursor idempotency markers.
