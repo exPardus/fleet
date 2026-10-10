@@ -39,7 +39,9 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet codex-respond`](#fleet-codex-respond) — answer one current native Codex approval/input request exactly once
 - [`fleet codex-decline-fixed`](#fleet-codex-decline-fixed) — decline one fully pinned native supervisor command request on the reviewed old host
 - [`fleet codex-reobserve-active`](#fleet-codex-reobserve-active) — settle one cached native Codex active-read failure from exact public evidence
+- [`fleet codex-sup-interrupt-current`](#fleet-codex-sup-interrupt-current) — interrupt one exact held native Codex supervisor turn without answering its callback
 - [`fleet codex-settle-preaccept`](#fleet-codex-settle-preaccept) — settle one reviewed native worker thread/start authentication rejection
+- [`fleet codex-recover-failed-client`](#fleet-codex-recover-failed-client) — stage exact-home native Codex recovery after a failed host client
 - [`fleet interrupt`](#fleet-interrupt) — kill a worker's running turn
 - [`fleet release`](#fleet-release) — release an attached worker back to idle
 - [`fleet respawn`](#fleet-respawn) — fresh session for a worker (context-reset lever)
@@ -63,6 +65,10 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet journal-roll`](#fleet-journal-roll) — roll older supervisor journal entries into history
 - [`fleet interface-register`](#fleet-interface-register) — register this tmux pane or Claude session as the interface
 - [`fleet watch`](#fleet-watch) — wait for mail, lane, mcx, memory, or disk events
+- [`fleet mailman`](#fleet-mailman) — sort the home inbox; wake only for mail needing the interface
+  - [`fleet mailman init`](#fleet-mailman-init) — seed mailman.json in the home
+  - [`fleet mailman run`](#fleet-mailman-run) — block until a mail needs the interface (exit 0) or timeout (3)
+  - [`fleet mailman digest`](#fleet-mailman-digest) — rollup of filed mail
 - [`fleet relay-ack`](#fleet-relay-ack) — append an interface relay and acknowledge one mail file
 - [`fleet wave-close`](#fleet-wave-close) — reap, floor, account, land, push, and notify one wave boundary
 - [`fleet sup-heartbeat`](#fleet-sup-heartbeat) — refresh the supervisor claim heartbeat (no journal write)
@@ -101,7 +107,7 @@ options:
 ### fleet homes
 
 ```text
-usage: fleet homes [-h] [--add PATH | --retire PATH]
+usage: fleet homes [-h] [--add PATH] [--retire PATH]
 
 options:
   -h, --help     show this help message and exit
@@ -217,7 +223,7 @@ options:
 ### fleet pr-poll
 
 ```text
-usage: fleet pr-poll [-h] (--since SINCE | --since-file PATH) [--repo REPO]
+usage: fleet pr-poll [-h] [--since SINCE] [--since-file PATH] [--repo REPO]
        [--json] pr
 
 positional arguments:
@@ -248,7 +254,7 @@ options:
 ### fleet wait
 
 ```text
-usage: fleet wait [-h] [--any | --all] [--timeout TIMEOUT] names [names ...]
+usage: fleet wait [-h] [--any] [--all] [--timeout TIMEOUT] names [names ...]
 
 positional arguments:
   names
@@ -347,7 +353,7 @@ usage: fleet codex-decline-fixed [-h] --request-id-type {int,string}
        EXPECT_APP_SERVER_PROCESS_IDENTITY --expect-host-pid EXPECT_HOST_PID
        --expect-app-server-pid EXPECT_APP_SERVER_PID
        --expect-app-server-started-at EXPECT_APP_SERVER_STARTED_AT
-       (--expect-request-cwd EXPECT_REQUEST_CWD | --expect-cwd-absent)
+       [--expect-request-cwd EXPECT_REQUEST_CWD] [--expect-cwd-absent]
        request_id {decline}
 
 positional arguments:
@@ -394,6 +400,43 @@ options:
   --expect-last-op EXPECT_LAST_OP
 ```
 
+### fleet codex-sup-interrupt-current
+
+```text
+usage: fleet codex-sup-interrupt-current [-h] [--preflight] --request-id-type
+       {int,string} --expect-inc EXPECT_INC --expect-thread EXPECT_THREAD
+       --expect-turn EXPECT_TURN --expect-host-generation
+       EXPECT_HOST_GENERATION --expect-item-id EXPECT_ITEM_ID
+       --expect-request-key EXPECT_REQUEST_KEY --expect-request-sha256
+       EXPECT_REQUEST_SHA256 --expect-old-host-sha256 EXPECT_OLD_HOST_SHA256
+       --expect-host-process-identity EXPECT_HOST_PROCESS_IDENTITY
+       --expect-app-server-process-identity EXPECT_APP_SERVER_PROCESS_IDENTITY
+       --expect-host-pid EXPECT_HOST_PID --expect-app-server-pid
+       EXPECT_APP_SERVER_PID --expect-app-server-started-at
+       EXPECT_APP_SERVER_STARTED_AT request_id
+
+positional arguments:
+  request_id
+
+options:
+  -h, --help            show this help message and exit
+  --preflight           verify current turn without reservation or interrupt
+  --request-id-type {int,string}
+  --expect-inc EXPECT_INC
+  --expect-thread EXPECT_THREAD
+  --expect-turn EXPECT_TURN
+  --expect-host-generation EXPECT_HOST_GENERATION
+  --expect-item-id EXPECT_ITEM_ID
+  --expect-request-key EXPECT_REQUEST_KEY
+  --expect-request-sha256 EXPECT_REQUEST_SHA256
+  --expect-old-host-sha256 EXPECT_OLD_HOST_SHA256
+  --expect-host-process-identity EXPECT_HOST_PROCESS_IDENTITY
+  --expect-app-server-process-identity EXPECT_APP_SERVER_PROCESS_IDENTITY
+  --expect-host-pid EXPECT_HOST_PID
+  --expect-app-server-pid EXPECT_APP_SERVER_PID
+  --expect-app-server-started-at EXPECT_APP_SERVER_STARTED_AT
+```
+
 ### fleet codex-settle-preaccept
 
 ```text
@@ -411,6 +454,34 @@ options:
   --evidence EVIDENCE   owner-only exact preaccept classification JSON
   --expect-evidence-sha256 EXPECT_EVIDENCE_SHA256
                         reviewed SHA-256 of the evidence JSON bytes
+```
+
+### fleet codex-recover-failed-client
+
+```text
+usage: fleet codex-recover-failed-client [-h] [--generation GENERATION]
+       [--host-pid HOST_PID] [--host-start HOST_START] [--child-pid CHILD_PID]
+       [--child-start CHILD_START] [--incarnation INCARNATION] [--thread
+       THREAD] [--turn TURN] [--codex-executable CODEX_EXECUTABLE]
+       [--decision-file DECISION_FILE] [--name NAME]
+       {prepare,decision,shutdown,verify-exit,boot,adopt-boot,rebind,settle-rebind,finish,status}
+
+positional arguments:
+  {prepare,decision,shutdown,verify-exit,boot,adopt-boot,rebind,settle-rebind,finish,status}
+
+options:
+  -h, --help            show this help message and exit
+  --generation GENERATION
+  --host-pid HOST_PID
+  --host-start HOST_START
+  --child-pid CHILD_PID
+  --child-start CHILD_START
+  --incarnation INCARNATION
+  --thread THREAD
+  --turn TURN
+  --codex-executable CODEX_EXECUTABLE
+  --decision-file DECISION_FILE
+  --name NAME
 ```
 
 ### fleet interrupt
@@ -474,19 +545,22 @@ options:
 ### fleet resume-limited
 
 ```text
-usage: fleet resume-limited [-h] [--force-now] [--nonce NONCE] [name]
+usage: fleet resume-limited [-h] [--terminal-quota] [--force-now] [--nonce
+       NONCE] [name]
 
 positional arguments:
   name
 
 options:
-  -h, --help     show this help message and exit
-  --force-now    resume a named worker even before its horizon / with an
-                 unknown horizon
-  --nonce NONCE  the current supervisor generation (claim-nonce §5.3): clears
-                 §7's claim gate for a mutating verb while a fresh claim is
-                 held, and proves the lineage that owns a rotated body's
-                 workers (§6.2)
+  -h, --help        show this help message and exit
+  --terminal-quota  validate one local quota/SystemError row; source-HOLD
+                    before host RPC
+  --force-now       resume a named worker even before its horizon / with an
+                    unknown horizon
+  --nonce NONCE     the current supervisor generation (claim-nonce §5.3):
+                    clears §7's claim gate for a mutating verb while a fresh
+                    claim is held, and proves the lineage that owns a rotated
+                    body's workers (§6.2)
 ```
 
 ### fleet kill
@@ -509,7 +583,7 @@ options:
 ### fleet clean
 
 ```text
-usage: fleet clean [-h] [--yes] [--nonce NONCE] [--dead-only | --tombstones]
+usage: fleet clean [-h] [--yes] [--nonce NONCE] [--dead-only] [--tombstones]
 
 options:
   -h, --help     show this help message and exit
@@ -796,6 +870,56 @@ options:
   --timeout TIMEOUT
 ```
 
+### fleet mailman
+
+```text
+usage: fleet mailman [-h] {init,run,digest} ...
+
+positional arguments:
+  {init,run,digest}
+    init             seed mailman.json in the home
+    run              block until a mail needs the interface (exit 0) or
+                     timeout (3)
+    digest           rollup of filed mail
+
+options:
+  -h, --help         show this help message and exit
+```
+
+#### fleet mailman init
+
+```text
+usage: fleet mailman init [-h] [--force]
+
+options:
+  -h, --help  show this help message and exit
+  --force     overwrite an existing mailman.json
+```
+
+#### fleet mailman run
+
+```text
+usage: fleet mailman run [-h] [--timeout TIMEOUT] [--interval INTERVAL]
+       [--dry-run] [--include-reported]
+
+options:
+  -h, --help           show this help message and exit
+  --timeout TIMEOUT
+  --interval INTERVAL
+  --dry-run            print verdicts; mutate nothing
+  --include-reported   also print wake mails already reported
+```
+
+#### fleet mailman digest
+
+```text
+usage: fleet mailman digest [-h] [--since WHEN]
+
+options:
+  -h, --help    show this help message and exit
+  --since WHEN  <n>m|h|d or ISO UTC timestamp (default 24h)
+```
+
 ### fleet relay-ack
 
 ```text
@@ -895,14 +1019,23 @@ options:
 ### fleet sup-reconcile
 
 ```text
-usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore |
-       --restore-recorded-policy | --prepare-restored-continuation |
-       --shutdown-restored-continuation | --reattach-restored-continuation]
+usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore]
+       [--restore-recorded-policy] [--prepare-restored-continuation]
+       [--shutdown-restored-continuation] [--reattach-restored-continuation]
        [--preserve-retired-history-evidence OWNER_ONLY_JSON]
-       [--expect-history-sha256 SHA256] [--expect-inc EXPECT_INC]
-       [--expect-thread EXPECT_THREAD] [--expect-turn EXPECT_TURN]
+       [--expect-history-sha256 SHA256] [--cancel-pending-approval]
+       [--prepare-cancelled-approval-resume] [--resume-cancelled-approval]
+       [--shutdown-cancelled-approval] [--expect-host-generation
+       EXPECT_HOST_GENERATION] [--expect-cancel-op EXPECT_CANCEL_OP]
+       [--expect-request-id EXPECT_REQUEST_ID] [--expect-item-id
+       EXPECT_ITEM_ID] [--expect-method EXPECT_METHOD] [--expect-command
+       EXPECT_COMMAND] [--expect-request-cwd EXPECT_REQUEST_CWD] [--expect-inc
+       EXPECT_INC] [--expect-thread EXPECT_THREAD] [--expect-turn EXPECT_TURN]
        [--expect-resume-op EXPECT_RESUME_OP] [--expect-restore-op
        EXPECT_RESTORE_OP] [--expect-observed-generation EXPECT_NEW_GENERATION]
+
+Choose at most one reconciliation action. Evidence and expectation options may
+accompany that action.
 
 options:
   -h, --help            show this help message and exit
@@ -931,6 +1064,27 @@ options:
   --expect-history-sha256 SHA256
                         exact raw SHA-256 of the explicit owner-only history
                         evidence
+  --cancel-pending-approval
+                        interrupt one exact pending native supervisor approval
+                        turn on its existing host; retain an uncertain claim
+                        until cold resume
+  --prepare-cancelled-approval-resume
+                        pin fresh terminal callback, host, claim, row, and
+                        mail evidence before exact-host shutdown
+  --resume-cancelled-approval
+                        cold resume the same cancelled supervisor thread under
+                        its recorded accept policy after exact-host shutdown
+  --shutdown-cancelled-approval
+                        recheck all public worker/callback evidence in the
+                        exact host and fence shutdown before publishing its
+                        receipt
+  --expect-host-generation EXPECT_HOST_GENERATION
+  --expect-cancel-op EXPECT_CANCEL_OP
+  --expect-request-id EXPECT_REQUEST_ID
+  --expect-item-id EXPECT_ITEM_ID
+  --expect-method EXPECT_METHOD
+  --expect-command EXPECT_COMMAND
+  --expect-request-cwd EXPECT_REQUEST_CWD
   --expect-inc EXPECT_INC
   --expect-thread EXPECT_THREAD
   --expect-turn EXPECT_TURN

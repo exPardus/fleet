@@ -119,7 +119,7 @@ def render(fleet_module=None) -> str:
             command = " ".join(path)
             heading = "#" * min(2 + len(path), 6)
             out.append(f"{heading} fleet {command}\n")
-            out.append(_block(subparser.format_help()))
+            out.append(_block(_stable_help(subparser)))
         return "\n".join(out).rstrip("\n") + "\n"
     finally:
         if previous is None:
@@ -130,6 +130,21 @@ def render(fleet_module=None) -> str:
 
 def _block(help_text: str) -> str:
     return "```text\n" + help_text.rstrip("\n") + "\n```\n"
+
+
+def _stable_help(parser: argparse.ArgumentParser) -> str:
+    """Normalize argparse's Python-version-specific exclusive-group usage.
+
+    Python 3.14 renders a mutually exclusive group with pipe separators while
+    3.10/3.12 list the same switches independently. The reference documents
+    every option; parser validation still enforces the group at runtime.
+    """
+    groups = parser._mutually_exclusive_groups
+    parser._mutually_exclusive_groups = []
+    try:
+        return parser.format_help()
+    finally:
+        parser._mutually_exclusive_groups = groups
 
 
 def main(argv: list[str] | None = None) -> int:

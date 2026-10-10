@@ -28266,7 +28266,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile = sub.add_parser(
         "sup-reconcile",
         help="explicitly reconcile a native Codex supervisor after host restart; "
-             "never creates a thread or turn")
+             "never creates a thread or turn",
+        description=("Choose at most one reconciliation action. Evidence and "
+                     "expectation options may accompany that action."))
     policy_restore = p_supreconcile.add_mutually_exclusive_group()
     policy_restore.add_argument(
         "--prepare-recorded-policy-restore", action="store_true",

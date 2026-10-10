@@ -130,6 +130,13 @@ UNENFORCED = {
     # Proposed native Codex architecture; implementation and receipt-bearing
     # behavior are gated by its companion plan and have not started.
     "codex-native-integration.md",
+    # Source-only recovery boundaries and detector process notes. These
+    # documents deliberately contain no reproducible transcript: execution
+    # remains held for failed-client recovery and fixed-decline, while the
+    # currency-remediation spec describes the gate itself.
+    "codex-failed-client-recovery.md",
+    "codex-fixed-decline.md",
+    "docs-currency-remediation.md",
     # Spike of the vendor cross-session messaging surface: live-session
     # evidence outside the repo that a later run cannot reproduce.
     "peer-messaging.md",

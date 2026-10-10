@@ -2290,7 +2290,7 @@ $ sed -n '172p;175p' docs/SPEC.md | cut -c1-200
 ```
 # at 091d5fa
 $ grep -n "authoritative" docs/specs/terminal-surface.md | head -2 | cut -c1-170
-51:**D2 — the statusline never asserts liveness it did not probe for.** `--stale-ok` returns each worker's **last-committed** status plus `stale_seconds` derived from `
+51:**D2 — the statusline never asserts liveness it did not probe for.** `--stale-ok` returns each worker's **last-committed** status plus `stale_seconds` derived from `la
 118:`--json` prints `status_snapshot()` as JSON to stdout. `--stale-ok` selects the probe-free path (no recompute, no lock, no write). Without `--stale-ok`, `--json` prin
 ```
 

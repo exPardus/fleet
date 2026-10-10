@@ -117,6 +117,21 @@ def test_option_aliases_repeat_their_metavar_in_the_reference():
         assert invocation in rendered, invocation
 
 
+def test_sup_reconcile_reference_states_action_exclusivity():
+    parser = _shipped_visible_commands()["sup-reconcile"]
+    groups = parser._mutually_exclusive_groups
+    help_text = gen.render(fleet)
+    gen._stable_help(parser)
+    assert parser._mutually_exclusive_groups is groups
+    section = help_text.split("### fleet sup-reconcile\n", 1)[1].split("\n### ", 1)[0]
+    assert "Choose at most one reconciliation action." in section
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "--prepare-recorded-policy-restore",
+            "--restore-recorded-policy",
+        ])
+
+
 def _documented_verbs() -> list[str]:
     text = REFERENCE.read_text(encoding="utf-8")
     return re.findall(r"^### fleet (\S+)$", text, flags=re.MULTILINE)

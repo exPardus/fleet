@@ -194,7 +194,12 @@ ALLOWED = {
     "_reserve_codex_worker_operation", "_clear_codex_worker_operation",
     "_freeze_codex_worker_operation", "_cmd_send_codex_native",
     "_reserve_codex_initial_turn_start", "_resume_codex_worker_on_current_host",
-    "_resume_one_limited_codex", "_cmd_respawn_codex_native",
+    "_resume_one_limited_codex",
+    # PR43 terminal-quota recovery reserves first, dispatches one pinned
+    # successor, then reloads only inside fleet_lock() for full-row CAS
+    # settlement; this is a mutating recovery path, never a view.
+    "_resume_terminal_quota_codex",
+    "_cmd_respawn_codex_native",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
     "_cmd_kill_codex_native",
     # w105: the native Codex worker and supervisor paths (codex-native-
