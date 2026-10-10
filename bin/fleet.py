@@ -2472,10 +2472,12 @@ def _codex_error_code(turn: dict) -> str | None:
 
 
 def _codex_paged_thread_read(client, thread_id: str, generation: str,
-                             prefix: str, *, hydrate_turn: str | None = None):
+                             prefix: str, *, hydrate_turn: str | None = None,
+                             hydrate_active: bool = False):
     """Read thread metadata and the newest two turns without a rollout frame.
 
-    Item pages are assembled locally only for the exact bound turn.  A page
+    Item pages are assembled locally only for the exact bound turn. Active
+    observation skips hydration unless a lifecycle proof explicitly requests it. A page
     whose single item exceeds IPC remains an explicit, closed failure.
     """
     def call(method, params):
@@ -2513,7 +2515,7 @@ def _codex_paged_thread_read(client, thread_id: str, generation: str,
     active_turn = (isinstance(thread.get("status"), dict)
                    and thread["status"].get("type") == "active"
                    and data and data[0].get("status") == "inProgress")
-    if (data and not active_turn
+    if (data and (not active_turn or hydrate_active)
             and (hydrate_turn == "*" or hydrate_turn == data[0].get("id"))):
         turn = dict(data[0])
         hydrate_turn = _provider_codex_id(turn.get("id"), "paged turn")
@@ -19279,7 +19281,7 @@ def _codex_activation_observe(client, binding):
     """Return one complete first turn, or refuse ambiguous adoption."""
     observation = _codex_paged_thread_read(
         client, binding.authority.value, client.generation,
-        "supervisor-activation-read", hydrate_turn="*")
+        "supervisor-activation-read", hydrate_turn="*", hydrate_active=True)
     if observation.generation != client.generation:
         raise FleetCliError("native Codex activation host generation changed")
     result = observation.result
@@ -23888,7 +23890,7 @@ def _codex_handoff_thread_read(
     """Prove an empty successor, or its exact single first turn, publicly."""
     observation = _codex_paged_thread_read(
         client, thread_id, generation, "supervisor-handoff-read",
-        hydrate_turn=expected_turn_id)
+        hydrate_turn=expected_turn_id, hydrate_active=True)
     if observation.generation != generation:
         raise FleetCliError("native Codex successor host generation changed")
     result = observation.result

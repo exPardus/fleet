@@ -438,6 +438,9 @@ approval or blind retry.
 For an active Codex turn, Fleet validates the newest turn through public paged
 metadata without requiring its durable item pages, which can lag the running
 turn snapshot. Terminal result paths still require complete paged items.
+Supervisor handoff and activating-successor adoption explicitly request full
+item hydration even for active turns, preserving their complete first-turn proof.
+Unavailable or inconsistent item evidence keeps those lifecycle paths fenced.
 Ordinary status preserves an already `dead-suspected`/`uncertain` native row:
 that cache alone cannot distinguish a failed read from an accepted mutation.
 `codex-reobserve-active NAME` with an explicit home and expected thread, turn,

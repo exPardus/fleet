@@ -3924,3 +3924,50 @@ def test_native_reconcile_finalizes_release_only_after_terminal_public_proof(
     assert output["verdict"] == "DISPATCH"
     assert output["sent"] is False
     assert client.operations == []
+
+
+@pytest.mark.parametrize("reader", ["handoff", "activation"])
+def test_active_successor_full_read_hydrates_not_loaded_items(
+        supervisor_home, reader):
+    """Handoff proof must request items even when active metadata omits them."""
+    class PagedSuccessor:
+        generation = "host-generation-1"
+
+        def __init__(self):
+            self.calls = []
+
+        def call(self, operation, timeout):
+            method = operation["payload"]["method"]
+            self.calls.append(method)
+            if method == "thread/read":
+                result = {"thread": {
+                    "id": SUCCESSOR_HANDOFF_THREAD_ID,
+                    "cwd": str(supervisor_home.resolve()),
+                    "status": {"type": "active", "activeFlags": []}}}
+            elif method == "thread/turns/list":
+                result = {"data": [{"id": SUCCESSOR_TURN_ID,
+                          "status": "inProgress", "itemsView": "notLoaded"}],
+                          "nextCursor": None}
+            elif method == "thread/items/list":
+                assert operation["payload"]["params"]["turnId"] == SUCCESSOR_TURN_ID
+                result = {"data": [{"turnId": SUCCESSOR_TURN_ID,
+                          "item": {"id": "successor-item-1", "type": "reasoning"}}],
+                          "nextCursor": None}
+            else:
+                pytest.fail("unexpected provider mutation: " + method)
+            return SimpleNamespace(generation=self.generation, result=result)
+
+    client = PagedSuccessor()
+    if reader == "handoff":
+        observation = fleet._codex_handoff_thread_read(
+            client, SUCCESSOR_HANDOFF_THREAD_ID, client.generation,
+            expected_turn_id=SUCCESSOR_TURN_ID)
+        assert observation.result["thread"]["turns"][0]["itemsView"] == "full"
+    else:
+        binding = SimpleNamespace(authority=SimpleNamespace(
+            value=SUCCESSOR_HANDOFF_THREAD_ID))
+        assert fleet._codex_activation_observe(client, binding) == {
+            "turn_id": SUCCESSOR_TURN_ID, "turn_status": "inProgress",
+            "provider_status": "active"}
+    assert client.calls == ["thread/read", "thread/turns/list",
+                            "thread/items/list", "thread/turns/list"]
