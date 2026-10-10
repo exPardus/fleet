@@ -21147,6 +21147,96 @@ def _restored_continuation_expectations(args, binding, link):
         raise FleetCliError("restored continuation expectations changed")
 
 
+def _restored_shutdown_receipt_path(proof):
+    from fleet_codex import _digest
+    return state_dir() / "codex" / (
+        "restored-shutdown-" + _digest("restored-shutdown-host", proof["host"]) + ".json")
+
+
+def _checked_restored_shutdown(client, expected_proof_digest, source, *, before_publish):
+    """Run inside the serialized host immediately before stopping its provider."""
+    from fleet_codex import _atomic_json, _digest
+
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    proof = claim.get("restored_continuation_preflight")
+    if (not isinstance(proof, dict) or _digest("restored-shutdown-proof", proof)
+            != expected_proof_digest):
+        raise FleetCliError("restored shutdown preflight changed")
+    if (source is None or source != proof.get("source")
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("restored shutdown Interface changed")
+    history_ref = proof.get("preserved_history")
+    history = _restored_history_from_ref(history_ref)
+    binding, link = _restored_continuation_context(
+        claim, registry, history_ref=history_ref, old_host=proof["host"])
+    _restored_continuation_preflight(
+        claim, registry, binding, link, source, selected_history=history_ref)
+    if (client.generation != binding.host_generation
+            or _codex_restore_host_identity(client) != proof["host"]):
+        raise FleetCliError("restored shutdown host changed")
+    _codex_idle_restoration_header(binding, client)
+    inventory = _restored_continuation_inventory(
+        registry, binding, history=history, current_host=proof["host"])
+    public = _restored_continuation_public_inventory(client, binding, inventory)
+    if public != proof["other_native_public"]:
+        raise FleetCliError("restored shutdown historical turn changed")
+    if history is not None or public:
+        _restored_history_loaded(client, {binding.authority.value})
+    receipt = {"schema": 1, "host": proof["host"],
+               "proof_digest": expected_proof_digest, "public": public}
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim or not _mail_source_is_current(source)
+                or data.get("workers", {}).get(binding.name) != binding.record):
+            raise FleetCliError("restored shutdown claim, row or Interface changed")
+        current_binding, current_link = _restored_continuation_context(
+            live, data, history_ref=history_ref, old_host=proof["host"])
+        if current_link != link or current_binding != binding:
+            raise FleetCliError("restored shutdown binding or journal link changed")
+        _restored_continuation_preflight(
+            live, data, current_binding, current_link, source,
+            selected_history=history_ref)
+        # The host serves no further IPC request between this receipt and exit.
+        path = _restored_shutdown_receipt_path(proof)
+        if path.exists() or path.is_symlink():
+            raise FleetCliError("restored shutdown already has a receipt; do not replay")
+        # Publication can fail after rename. The host must irrevocably stop
+        # accepting IPC before any usable receipt can appear, even on errors.
+        before_publish()
+        _atomic_json(path, receipt)
+    return receipt
+
+
+def _shutdown_restored_continuation(args) -> int:
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("restored continuation requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    history_ref = _restored_history_ref(args)
+    binding, link = _restored_continuation_context(
+        claim, registry, history_ref=history_ref)
+    _restored_continuation_expectations(args, binding, link)
+    proof = _restored_continuation_preflight(
+        claim, registry, binding, link, source, selected_history=history_ref)
+    client = _codex_existing_client(FLEET_HOME)
+    digest = _digest("restored-shutdown-proof", proof)
+    result = client.call({
+        "operation_id": f"restored-shutdown-{uuid.uuid4()}",
+        "method": "host/shutdown-restored",
+        "payload": {"proof_digest": digest}}, timeout=60)
+    if (result.generation != binding.host_generation or result.result != {
+            "schema": 1, "host": proof["host"],
+            "proof_digest": digest, "public": proof["other_native_public"]}):
+        raise FleetCliError("restored shutdown acknowledgement is ambiguous")
+    print("restored shutdown checked; wait for exact host and child exit")
+    return 0
+
+
 def _reconcile_restored_continuation(claim) -> int:
     """Settle an observed policy-bound reattach without replaying the RPC."""
     from fleet_codex import OperationJournal, _digest
@@ -21304,6 +21394,14 @@ def _reattach_restored_continuation(args) -> int:
             or not old_client._metadata_stale()):
         raise FleetCliError(
             "exact old host and app-server must exit with stale heartbeat")
+    if history is not None or proof["other_native_public"]:
+        from fleet_codex import _digest
+        receipt, _raw_sha = _restored_history_owned_record(
+            _restored_shutdown_receipt_path(proof))
+        if receipt != {"schema": 1, "host": proof["host"],
+                       "proof_digest": _digest("restored-shutdown-proof", proof),
+                       "public": proof["other_native_public"]}:
+            raise FleetCliError("restored continuation lacks exact checked shutdown")
     with fleet_lock():
         live = read_incarnation()
         data = read_registry_no_repair()
@@ -21455,6 +21553,7 @@ def cmd_sup_reconcile(args) -> int:
     """
     if (_restored_history_ref(args) is not None
             and not (getattr(args, "prepare_restored_continuation", False)
+                     or getattr(args, "shutdown_restored_continuation", False)
                      or getattr(args, "reattach_restored_continuation", False))):
         raise FleetCliError(
             "preserved-history evidence applies only to explicit continuation")
@@ -21464,6 +21563,8 @@ def cmd_sup_reconcile(args) -> int:
         return _restore_codex_supervisor_policy(args)
     if getattr(args, "prepare_restored_continuation", False):
         return _prepare_restored_continuation(args)
+    if getattr(args, "shutdown_restored_continuation", False):
+        return _shutdown_restored_continuation(args)
     if getattr(args, "reattach_restored_continuation", False):
         return _reattach_restored_continuation(args)
     claim = read_incarnation()
@@ -25630,6 +25731,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--prepare-restored-continuation", action="store_true",
         help="pin the linked committed restoration, exact idle Platform "
              "host, claim, row, inventory, journal, and mail before shutdown")
+    policy_restore.add_argument(
+        "--shutdown-restored-continuation", action="store_true",
+        help="repeat public historical-thread checks inside the exact host "
+             "and stop it without another IPC dispatch")
     policy_restore.add_argument(
         "--reattach-restored-continuation", action="store_true",
         help="after exact host and child exit, cold resume the restored "

@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from fleet_codex import (
@@ -746,6 +747,45 @@ class Host:
                         "turn_id": current.get("turn_id"),
                         "state": current.get("state"),
                     }
+                elif method == "host/shutdown-restored":
+                    claim = read_interface_claim(self.home)
+                    peer_pid, peer_uid = _ipc_peer_credentials(connection)
+                    source = codex_process_source(peer_pid)
+                    if (claim is None or peer_uid != os.getuid()
+                            or source.get("uid") != peer_uid
+                            or not interface_source_matches(claim, source)):
+                        raise HostRejected("checked shutdown requires the exact Interface")
+                    if not isinstance(payload, dict) or set(payload) != {"proof_digest"}:
+                        raise HostRejected("checked shutdown payload is malformed")
+                    import fleet
+                    from fleet_codex import CodexHostClient
+                    fleet.FLEET_HOME = self.home
+                    view = CodexHostClient._existing(self.home)
+                    if view is None or view.generation != self.generation:
+                        raise HostRejected("checked shutdown host metadata changed")
+
+                    def public_read(operation, timeout):
+                        assert self.client is not None
+                        rpc = operation["payload"]
+                        observed = self.client.request(
+                            rpc["method"], rpc["params"],
+                            timeout=min(timeout, _remaining(deadline)))
+                        self._drain_notifications()
+                        return SimpleNamespace(generation=self.generation, result=observed)
+
+                    view.call = public_read
+                    registered = {"kind": "codex", **{key: claim[key] for key in (
+                        "claim_id", "thread_id", "ancestor_pid",
+                        "ancestor_start_identity", "uid")}}
+
+                    def fence_publication():
+                        nonlocal should_stop
+                        should_stop = True
+
+                    result = fleet._checked_restored_shutdown(
+                        view, payload["proof_digest"], registered,
+                        before_publish=fence_publication)
+                    should_stop = True
                 elif method == "host/shutdown":
                     result = {"stopping": True}
                     should_stop = True

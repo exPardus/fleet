@@ -728,8 +728,25 @@ no unresolved callback, and a fresh public
 Missing, loaded, active, idle, or ambiguous native evidence refuses. The full
 registry, current and owner-only retired operation journals, and callback
 evidence are pinned and rechecked before
-host creation, dispatch, and settlement. Immediately before shutdown the old
-host must repeat the public `notLoaded` proof for each historical bound thread.
+host creation, dispatch, and settlement. Use
+`sup-reconcile --shutdown-restored-continuation` with the same exact pins and
+history selection for the shutdown boundary. The current registered Interface
+must authenticate to the old host. Inside its serialized request handler, the
+host repeats the public `notLoaded` and terminal newest-turn proof for every
+historical bound thread, checks the current idle holder and complete loaded
+list, and re-resolves the fresh holder binding, full row, journal link, local
+preflight and Interface continuity under the final lock. Before publishing any
+receipt bytes it irrevocably commits to stop serving IPC, including when rename
+has succeeded but directory fsync later raises. It writes one
+owner-only `state/codex/restored-shutdown-<host-identity-digest>.json` receipt bound to the complete
+preflight, then exits without serving another IPC operation. Historical public
+drift refuses shutdown and leaves the claim, rows, journals and mail intact.
+An existing receipt refuses a second shutdown; a lost acknowledgement requires
+inspection of the exact receipt and original host exit, never a replay.
+Reattachment involving historical threads requires this exact receipt in
+addition to host and child exit. An external kill or ordinary shutdown cannot
+substitute for the final checks. An older loaded host lacking this supported
+method remains held; changing CLI source does not upgrade that host.
 Retiring a journal does not settle an accepted or observed intent; a retired
 unresolved record refuses preparation without editing the archive.
 After exact host and child exit with stale heartbeat,
