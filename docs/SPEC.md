@@ -379,7 +379,14 @@ After an explicit recorded-policy restoration has settled, an idle native
 supervisor may be cold-reattached on its **same current thread** through
 `sup-reconcile --prepare-restored-continuation` followed, within five minutes
 and after the exact host and app-server child have exited, by
-`--reattach-restored-continuation`. Both calls require the exact incarnation,
+`--reattach-restored-continuation`. For historical threads, shutdown must use
+`--shutdown-restored-continuation`: the authenticated host repeats their public
+terminal/notLoaded proofs and complete loaded list in its serialized handler,
+writes a preflight-bound receipt, and stops without another IPC dispatch.
+The final lock revalidates the fresh holder row and binding; receipt publication
+errors after rename still stop IPC service, preserving the checked boundary.
+Reattach refuses an unchecked external exit or missing/mismatched receipt.
+All three calls require the exact incarnation,
 thread, completed turn, original observed resume, committed restoration, and
 old host generation. The prepare proof pins the current claim, row, journals,
 target mail, all other native rows and operations, callback records, source,
@@ -614,11 +621,14 @@ writes a new registration.
 - **Nag predicate is file-only** (views never probe): GOALS active AND (no claim OR heartbeat older than S) — `supervisor_goals_active`/`supervisor_status_line` @7037/@7049, surfaced by `_doctor_check_supervisor_claim`/`_doctor_check_supervisor_handoff` @7079/@7088. The keeper can wake an existing idle supervisor through the guard; spawning a supervisor remains the interface's action.
 
 The shared tmux notification sender used by both the keeper and `sup-notify`
-waits `INTERFACE_PASTE_SETTLE_SECONDS` (0.5 seconds) after a successful literal
-send before sending its single Enter. This bounded settle is required by
-Codex's paste-burst composer behavior; a failed literal never sends Enter, and
-an Enter failure is reported as a failed delivery. Unit tests inject the clock
-sleep, so they do not incur the wall delay.
+sanitizes and bounds one line, writes it to a uniquely named tmux buffer, then
+uses `paste-buffer -p -d` and sends one Enter after a bounded 0.5-second settle.
+Codex handles the bracketed frame as a `Paste` event, separate from Enter;
+without bracketed mode, tmux sends raw characters and the settle preserves that
+fallback for other CLI panes. The 0.5-second bound exceeds Codex's pinned 120 ms
+plain-character burst window. Failed buffer creation or paste never sends
+Enter; failed paste deletes its temporary buffer. Failed submission remains
+undelivered, so callers do not record the page as delivered.
 
 Heartbeat primitive: in-session `ScheduleWakeup` self-rearm, confirmed real (G7); `claude stop` permanently kills a scheduled wake — a stopped supervisor never self-resumes.
 

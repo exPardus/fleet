@@ -11,6 +11,11 @@ import fleet_keeper as k
 NOW = 1_800_000_000.0
 
 
+@pytest.fixture(autouse=True)
+def no_interface_settle(monkeypatch):
+    monkeypatch.setattr(fleet.time, "sleep", lambda _seconds: None)
+
+
 def _cp(argv, rc=0, out=""):
     return subprocess.CompletedProcess(argv, rc, stdout=out, stderr="")
 
@@ -24,11 +29,13 @@ class Runner:
     process exited with `remain-on-exit` set."""
 
     def __init__(self, *, pane_cmd="claude", pane_dead=False, tmux_rc=0,
+                 paste_rc=None,
                  agents_rc=0, decision=None, guard=None, guard_rc=0):
         self.calls = []
         self.pane_cmd = pane_cmd
         self.pane_dead = pane_dead
         self.tmux_rc = tmux_rc
+        self.paste_rc = paste_rc
         self.agents_rc = agents_rc
         self.decision = decision
         self.guard = guard if guard is not None else {
@@ -45,6 +52,8 @@ class Runner:
                 if not self.pane_cmd:
                     return _cp(argv, 1, "")
                 return _cp(argv, 0, f"{self.pane_cmd} {1 if self.pane_dead else 0}\n")
+            if argv[1] == "paste-buffer" and self.paste_rc is not None:
+                return _cp(argv, self.paste_rc)
             return _cp(argv, self.tmux_rc)
         if "sup-guard" in argv:
             self.guard_kwargs.append(kw)
@@ -72,6 +81,12 @@ class Runner:
 
     def tmux(self, verb):
         return [a for a in self.calls if a[:2] == ["tmux", verb]]
+
+    def typed(self):
+        return [a[-1] for a in self.tmux("set-buffer")]
+
+    def paste_targets(self):
+        return [a[a.index("-t") + 1] for a in self.tmux("paste-buffer")]
 
 
 def _snapshot():
@@ -114,11 +129,12 @@ def test_a_stalled_supervisor_is_paged_into_the_window(home):
     r = Runner()
     rc, out = _main(home, r)
     assert rc == 0
-    sends = r.tmux("send-keys")
-    assert len(sends) == 2
-    assert sends[0][2:] == ["-t", "work:fleet", "-l", sends[0][-1]]
-    assert sends[0][-1].startswith(f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
-    assert sends[1][-1] == "Enter"
+    assert len(r.typed()) == len(r.tmux("paste-buffer")) == 1
+    assert r.typed()[0].startswith(
+        f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
+    assert r.paste_targets() == ["work:fleet"]
+    assert r.tmux("send-keys") == [
+        ["tmux", "send-keys", "-t", "work:fleet", "Enter"]]
     state = _state(home)
     assert "supervisor-stalled" in state and state["_hook_error_lines"] == 0
 
@@ -137,7 +153,7 @@ def test_one_home_tick_tags_page_and_uses_that_homes_dedup_state(home):
     tag = fleet.home_tag(home)
     assert rc == 0
     assert f"[{tag}] keeper: paged supervisor-stalled" in out
-    assert runner.tmux("send-keys")[0][-1].startswith(
+    assert runner.typed()[0].startswith(
         f"[{tag}] KEEPER: supervisor stalled")
     assert (home / "state" / "keeper" / "last-page.json").exists()
 
@@ -155,10 +171,14 @@ def test_two_home_tick_pages_both_and_keeps_dedup_state_separate(
                  "--fleet-home", str(other)], run=runner,
                 now_fn=lambda: NOW, snapshot_fn=_snapshot, out=out)
     assert rc == 0
-    sends = [a[-1] for a in runner.tmux("send-keys") if a[-1] != "Enter"]
+    sends = runner.typed()
     assert len(sends) == 2
     assert sends[0].startswith(f"[{fleet.home_tag(home)}] KEEPER: ")
     assert sends[1].startswith(f"[{fleet.home_tag(other)}] KEEPER: ")
+    buffers = runner.tmux("set-buffer")
+    assert len({argv[3] for argv in buffers}) == 2
+    assert len(runner.tmux("paste-buffer")) == len(runner.tmux("send-keys")) == 2
+    assert runner.paste_targets() == ["work:fleet", "work:fleet"]
     assert (home / "state" / "keeper" / "last-page.json").exists()
     assert (other / "state" / "keeper" / "last-page.json").exists()
 
@@ -220,8 +240,8 @@ def test_the_tick_after_a_creation_pages(home):
     live = Runner()          # the window it created is now running claude
     _main(home, live)
     assert live.tmux("new-window") == []
-    sends = live.tmux("send-keys")
-    assert len(sends) == 2 and sends[0][-1].startswith(
+    assert len(live.typed()) == len(live.tmux("paste-buffer")) == 1
+    assert live.typed()[0].startswith(
         f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
     assert "supervisor-stalled" in _state(home)
 
@@ -249,13 +269,13 @@ def test_a_busy_window_is_left_alone_and_still_paged(home):
     assert rc == 0
     assert r.tmux("kill-window") == [] and r.tmux("new-window") == []
     assert "busy with node; not recycling" in out
-    assert len(r.tmux("send-keys")) == 2
+    assert len(r.tmux("paste-buffer")) == 1
 
 
 # --- C3: a page tmux refused is not a page ---------------------------------
 
 def test_a_failed_delivery_is_not_recorded_as_sent(home):
-    r = Runner(tmux_rc=1)
+    r = Runner(paste_rc=1)
     rc, out = _main(home, r)
     assert rc == 0
     assert "keeper: tmux failed" in out
@@ -266,11 +286,11 @@ def test_a_failed_delivery_is_not_recorded_as_sent(home):
 
 
 def test_the_next_tick_retries_a_failed_delivery(home):
-    _main(home, Runner(tmux_rc=1))
+    _main(home, Runner(paste_rc=1))
     r = Runner()
     _main(home, r)
-    sends = r.tmux("send-keys")
-    assert len(sends) == 2 and sends[0][-1].startswith(
+    assert len(r.tmux("paste-buffer")) == 1 and len(r.tmux("send-keys")) == 1
+    assert r.typed()[0].startswith(
         f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled")
 
 
@@ -284,20 +304,18 @@ def test_a_failed_delivery_keeps_the_previous_record_for_that_rule(home):
     before = _state(home)["supervisor-stalled"]
     assert before["at"] == NOW
     later = NOW + k.REPAGE_SECONDS + 1
-    r = Runner(tmux_rc=1)
+    r = Runner(paste_rc=1)
     _, out = _main(home, r, now=later)
     assert "page NOT delivered: supervisor-stalled" in out
     assert _state(home)["supervisor-stalled"] == before
 
 
-def test_enter_is_not_sent_when_the_literal_send_failed(home):
+def test_enter_is_not_sent_when_the_bracketed_paste_failed(home):
     """`Enter` alone submits whatever the interface session had half-typed
     in its prompt box."""
-    r = Runner(tmux_rc=1)
+    r = Runner(paste_rc=1)
     _main(home, r)
-    assert [a[-1] for a in r.tmux("send-keys")] == [f"[{fleet.home_tag(home)}] KEEPER: supervisor stalled (claim none). "
-                                                        "Report state, then relaunch with "
-                                                        "sup-spawn; do not await the operator."]
+    assert r.tmux("send-keys") == []
 
 
 # --- C4: what actually reaches the bypass session --------------------------
@@ -307,7 +325,7 @@ def test_a_hostile_decision_question_is_typed_as_one_line(home):
                "answer": None}
     r = Runner(decision=hostile)
     _main(home, r)
-    typed = [a[-1] for a in r.tmux("send-keys") if a[-1] != "Enter"]
+    typed = r.typed()
     assert typed, "nothing was typed"
     for line in typed:
         assert "\n" not in line and "\r" not in line and "\x1b" not in line
@@ -354,7 +372,7 @@ def test_tmux_failure_is_reported_and_exit_stays_zero(home):
 def test_window_and_session_flags(home):
     r = Runner()
     _main(home, r, "--tmux-session", "s2", "--window", "ops")
-    assert r.tmux("send-keys")[0][3] == "s2:ops"
+    assert r.paste_targets() == ["s2:ops"]
 
 
 # --- G-K8 C: the guard owns every wake decision ----------------------------
@@ -417,17 +435,17 @@ def test_failed_or_invalid_guard_reply_still_pages(home, guard, guard_rc):
     runner = Runner(guard=guard, guard_rc=guard_rc)
     rc, _ = _main(home, runner)
     assert rc == 0
-    sends = runner.tmux("send-keys")
-    assert len(sends) == 2
-    assert "guard unavailable" in sends[0][-1]
-    assert "Report state" in sends[0][-1]
-    assert "sup-spawn" not in sends[0][-1]
+    assert len(runner.tmux("paste-buffer")) == 1
+    assert len(runner.typed()) == 1
+    assert "guard unavailable" in runner.typed()[0]
+    assert "Report state" in runner.typed()[0]
+    assert "sup-spawn" not in runner.typed()[0]
 
 
 def test_guard_wake_without_send_confirmation_still_pages(home):
     runner = Runner(guard={"verdict": "WAKE sup|inc-test|boot", "reason": "idle"})
     _main(home, runner)
-    assert len(runner.tmux("send-keys")) == 2
+    assert len(runner.tmux("paste-buffer")) == 1
 
 
 def test_limited_main_pages_once_before_a_distant_reset_horizon(home):
@@ -436,7 +454,7 @@ def test_limited_main_pages_once_before_a_distant_reset_horizon(home):
         "body_name": "sup|inc-test|boot", "state": "held",
         "limit_reset_at": NOW + 2 * k.REPAGE_SECONDS})
     _main(home, runner)
-    assert len(runner.tmux("send-keys")) == 2
-    assert "supervisor limited" in runner.tmux("send-keys")[0][-1]
+    assert len(runner.tmux("paste-buffer")) == 1
+    assert "supervisor limited" in runner.typed()[0]
     _main(home, runner, now=NOW + k.REPAGE_SECONDS + 1)
-    assert len(runner.tmux("send-keys")) == 2
+    assert len(runner.tmux("paste-buffer")) == 1
