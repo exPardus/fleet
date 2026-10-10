@@ -115,9 +115,9 @@ def frozen(native_home, monkeypatch, *, kind="turn/start", state="committed", re
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda home: client)
     calls = []
 
-    def observe(binding, client=None, *, metadata_only=False):
+    def observe(binding, client=None, *, hydrate_items=True):
         calls.append(binding.turn_id)
-        assert metadata_only is True
+        assert hydrate_items is False
         return dict(provider_status="active", turn_status="inProgress", active_flags=[])
     monkeypatch.setattr(fleet, "_codex_worker_observe", observe)
     return home, lane, row, journal, claim, client, calls
@@ -286,3 +286,47 @@ def test_exact_observed_api_rejects_payload_drift(native_home):
     with pytest.raises(HostRejected, match="durable intent"):
         journal.observed_operation(operation)
     assert journal.path(OP).read_bytes() == before
+
+
+@pytest.mark.parametrize('shape',['valid','thread','cwd','turn','duplicate','changed','payload-drift'])
+def test_repair_uses_real_paged_observer_and_refuses_public_drift(native_home,monkeypatch,shape):
+    real_observe=fleet._codex_worker_observe
+    home,lane,row,journal,claim,_client,_calls=frozen(native_home,monkeypatch,state='observed')
+    before=journal.path('worker-send-proof').read_bytes()
+    class Public:
+        generation=GEN
+        def __init__(self):self.calls=[];self.pages=0
+        def call(self,op,timeout):
+            method=op['payload']['method'];self.calls.append(method)
+            if method=='thread/read':
+                result={'thread':{'id':TURN_ID if shape=='thread' else THREAD_ID,
+                    'cwd':str(home if shape=='cwd' else lane),
+                    'status':{'type':'active','activeFlags':[]}}}
+            elif method=='thread/turns/list':
+                self.pages+=1
+                turn=TURN_ID if shape=='turn' or (shape=='changed' and self.pages==2) else NEXT_TURN_ID
+                turns=[{'id':turn,'status':'inProgress','itemsView':'notLoaded'}]
+                if shape=='duplicate':turns.append(dict(turns[0]))
+                result={'data':turns,'nextCursor':None}
+                if shape=='payload-drift' and self.pages==2:
+                    record=journal.load('worker-send-proof');record['payload_digest']='changed'
+                    from fleet_codex import _atomic_json
+                    _atomic_json(journal.path('worker-send-proof'),record)
+            else:pytest.fail('unexpected provider call '+method)
+            return SimpleNamespace(generation=GEN,result=result)
+    client=Public()
+    monkeypatch.setattr(fleet,'_codex_existing_client',lambda _home:client)
+    monkeypatch.setattr(fleet,'_codex_worker_observe',real_observe)
+    result=fleet._reconcile_frozen_codex_worker_operations()
+    if shape=='valid':
+        assert result==['cx-native']
+        assert not claim.exists()
+        after=fleet.load_registry()['workers']['cx-native']
+        assert after['codex_turn_id']==NEXT_TURN_ID and 'pending_operation' not in after
+        assert journal.load('worker-send-proof')['state']=='committed'
+    else:
+        assert result==[]
+        assert fleet.load_registry()['workers']['cx-native']==row
+        assert claim.read_text()=='retained dispatch'
+        if shape!='payload-drift':assert journal.path('worker-send-proof').read_bytes()==before
+    assert all(method in ['thread/read','thread/turns/list'] for method in client.calls)

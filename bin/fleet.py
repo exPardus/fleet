@@ -13977,7 +13977,7 @@ def _reconcile_frozen_codex_worker_operations() -> list[str]:
             _require_no_codex_current_waits(name, before)
             target = dict(before, codex_turn_id=turn_id)
             _require_no_codex_current_waits(name, target)
-            observed = _codex_worker_observe(rebound, client=client, metadata_only=True)
+            observed = _codex_worker_observe(rebound, client=client, hydrate_items=False)
             if observed["provider_status"] not in {"active", "idle"}:
                 continue
             status, adapter_state = _codex_worker_status(observed)
