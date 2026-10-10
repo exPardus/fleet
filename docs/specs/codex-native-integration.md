@@ -807,6 +807,16 @@ same idle completed turn before local settlement. An accepted, uncertain,
 or mismatched result stays fenced, preserving journals and mail without a
 second resume. A plain held-claim `sup-reconcile` refuses this linked state.
 
+The authenticated `host/shutdown-restored` handler has one bounded lazy
+CLI-reader seam for the checked-shutdown helper. Import itself performs no
+filesystem, process or network action. The reachable helper chain does not
+write registry, claim, event or operation records, repair state, or dispatch
+provider mutations. It reads the existing Codex stores (their constructors may
+ensure owner-only store directories), takes the shared owner-safe lock, and
+publishes only the exact shutdown receipt after the irrevocable stop fence.
+Other host paths retain the writer-free module boundary. Structural closure
+and fresh-interpreter import audits enforce this exception.
+
 ### 10.4 Retiring an absent legacy Claude claim
 
 From the **current registered native Codex Interface process**, use

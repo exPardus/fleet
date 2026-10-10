@@ -1,3 +1,4 @@
+import ast
 import base64
 import hashlib
 import json
@@ -6,6 +7,7 @@ import os
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -1316,10 +1318,118 @@ def test_oversized_mutation_reply_is_not_classified_as_rejection(
 def test_host_modules_do_not_import_registry_or_claim_writer():
     root = Path(__file__).resolve().parents[1] / "bin"
     for name in ("fleet_codex.py", "fleet_codex_host.py", "fleet_lock.py"):
-        path = root / name
-        if not path.exists():
-            pytest.fail(f"{name} is not implemented")
-        text = path.read_text(encoding="utf-8")
-        assert "from fleet import" not in text
-        assert "import fleet\n" not in text
-        assert "fleet_lock(" not in text
+        tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        imports = [node for node in ast.walk(tree)
+                   if isinstance(node, ast.Import)
+                   and any(alias.name == "fleet" for alias in node.names)]
+        assert not any(isinstance(node, ast.ImportFrom) and node.module == "fleet"
+                       for node in ast.walk(tree))
+        accesses = [node for node in ast.walk(tree)
+                    if isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "fleet"]
+        if name != "fleet_codex_host.py":
+            assert imports == [] and accesses == []
+            continue
+        arms = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == "method == 'host/shutdown-restored'"]
+        assert len(arms) == 1
+        allowed = {id(node) for statement in arms[0].body
+                   for node in ast.walk(statement)}
+        assert len(imports) == 1 and id(imports[0]) in allowed
+        assert imports[0].names[0].name == "fleet"
+        assert imports[0].names[0].asname is None
+        assert len(imports[0].names) == 1
+        assert {node.attr for node in accesses} == {
+            "FLEET_HOME", "_checked_restored_shutdown"}
+        assert all(id(node) in allowed for node in accesses)
+        parents = {id(child): node for node in ast.walk(tree)
+                   for child in ast.iter_child_nodes(node)}
+        assert all(isinstance(parents[id(node)], ast.Attribute)
+                   and parents[id(node)].value is node
+                   for node in ast.walk(tree)
+                   if isinstance(node, ast.Name) and node.id == "fleet")
+
+
+def test_checked_shutdown_reachable_cli_helpers_exclude_state_writers():
+    root = Path(__file__).resolve().parents[1] / "bin"
+    tree = ast.parse((root / "fleet.py").read_text(encoding="utf-8"))
+    definitions = {node.name: node for node in tree.body
+                   if isinstance(node, ast.FunctionDef)}
+    pending = ["_checked_restored_shutdown"]
+    reachable = set()
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(node.func.id for node in ast.walk(definitions[name])
+                       if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name)
+                       and node.func.id in definitions)
+    # The reviewed read-side closure may not grow silently. Its sole durable
+    # data publication is the fenced shutdown receipt in the root helper.
+    assert reachable == {
+        "_checked_restored_shutdown", "_codex_existing_client",
+        "_codex_idle_restoration_header", "_codex_model_slug",
+        "_codex_paged_thread_read", "_codex_record_route",
+        "_codex_rejected_send_public_header", "_codex_restore_host_identity",
+        "_codex_restore_mail_snapshot", "_codex_supervisor_binding",
+        "_is_codex_record", "_is_supervisor_shaped",
+        "_mail_provider_registration_is_exclusive", "_mail_source_is_current",
+        "_provider_codex_id", "_registration_path_present", "_registration_token",
+        "_registry_corrupt_reason", "_restored_continuation_context",
+        "_restored_continuation_inventory", "_restored_continuation_preflight",
+        "_restored_continuation_public_inventory", "_restored_history_evidence",
+        "_restored_history_from_ref", "_restored_history_loaded",
+        "_restored_history_owned_record", "_restored_history_present_nonliveness",
+        "_restored_resolved_callback", "_restored_shutdown_receipt_path",
+        "fleet_lock", "incarnation_path", "lock_path", "mailbox_dir",
+        "read_incarnation", "read_registry_no_repair", "registry_path",
+        "state_dir", "supervisor_dir"}
+    forbidden = {"save_registry", "write_incarnation", "load_registry",
+                 "append_event", "dispatch_bg", "dispatch_codex",
+                 "commit", "accept", "fail", "prepare", "respond",
+                 "write_text", "write_bytes", "unlink", "replace",
+                 "rename", "remove", "Popen", "run", "system"}
+    publishers = []
+    for name in reachable:
+        for node in ast.walk(definitions[name]):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = (node.func.id if isinstance(node.func, ast.Name)
+                      else node.func.attr if isinstance(node.func, ast.Attribute)
+                      else None)
+            assert callee not in forbidden, (name, callee)
+            if callee == "_atomic_json":
+                publishers.append(name)
+    assert publishers == ["_checked_restored_shutdown"]
+
+
+def test_lazy_cli_import_has_no_filesystem_process_or_network_effects(tmp_path):
+    root = Path(__file__).resolve().parents[1] / "bin"
+    script = r'''import sys, os
+sys.path.insert(0, sys.argv[1])
+blocked = {"os.mkdir", "os.remove", "os.rename", "os.rmdir", "os.chmod",
+           "os.chown", "os.link", "os.symlink", "os.truncate", "os.utime",
+           "os.chdir", "subprocess.Popen", "os.system", "os.posix_spawn",
+           "os.exec", "socket.connect", "socket.bind", "socket.getaddrinfo"}
+def hook(event, args):
+    if event in blocked:
+        raise AssertionError(("import mutation", event))
+    if event == "open":
+        path, mode, flags = args
+        if ((isinstance(mode, str) and any(c in mode for c in "wax+"))
+                or flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT
+                            | os.O_TRUNC | os.O_APPEND)):
+            raise AssertionError(("import writable-open", str(path)))
+sys.addaudithook(hook)
+import fleet
+print("import is inert")
+'''
+    env = dict(os.environ, FLEET_HOME=str(tmp_path), HOME=str(tmp_path))
+    completed = subprocess.run([sys.executable, "-B", "-c", script, str(root)],
+                               env=env, cwd=tmp_path, capture_output=True,
+                               text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "import is inert"
