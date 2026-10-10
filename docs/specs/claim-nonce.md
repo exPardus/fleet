@@ -1529,6 +1529,28 @@ reading a runbook and an agent reading stderr are different audiences with
 different capabilities; this is the one place where the absence of a privilege boundary is worked
 around by an **audience** boundary, and it is a convention, not a mechanism.
 
+**FOUNDER OVERRIDE (2026-10-08) of the audience rule above.** A handoff stalled when a holder copied
+the literal `value` from a printed nonce recipe; the refusal named no way out and the claim went
+unowned until an operator recovered it by hand. The founder overrode the audience boundary for this
+path. Binding from 2026-10-08:
+
+- A continuity refusal (`_continuity_refusal`) appends exact recovery steps: end this turn; once the
+  holder row is idle, the Interface or operator runs the exact `send supervisor` command printed,
+  which wakes the same incarnation with a fresh nonce; and the woken body aborts each pending
+  successor by its exact `--successor-sid` or `--successor-inc` handle. Refusal and status text never
+  repeat a live generation. The woken body takes its nonce from its own most recent `NONCE:` output
+  and uses that value with the printed abort handles.
+- Fleet output, bootstrap templates, and command help contain no identity placeholders. Recipes
+  end at a bare `--nonce`; adjacent prose tells the holder to append the most recent `NONCE:` value.
+  This avoids printing a token that has already been superseded by a later mint.
+- Placeholder-looking `--nonce` and `--handoff-token` values (empty strings, angle-bracket text,
+  or bare words such as `value`, `nonce`, and `token`) are refused before command dispatch can write,
+  log, rotate, or launch. Minted URL-safe values cannot match these forms. The regression suite
+  scans output strings and help, checks that invalid credentials leave temporary home state bytes
+  unchanged, and verifies that recovery text does not expose either the rejected or live nonce.
+
+The earlier audience-boundary paragraph remains history; this override governs current behavior.
+
 **Accepted cost, stated plainly:** without a registered Interface, or while its holder remains busy, a
 supervisor that loses its nonce catastrophically is locked out of `sup-*` for up to an hour. §5.4(b)
 removes the common causes; compaction remains. Shortening
@@ -1988,7 +2010,8 @@ abort-flag arm @7456, §4.13(a)) are genuinely sid questions: they choose which 
 
 ### 6.5 D5 — no environment-variable channel
 
-`--nonce <value>` is the only presentation channel. **There is no `FLEET_SUP_NONCE`.**
+`--nonce` with the exact current minted value is the only presentation channel. **There is no
+`FLEET_SUP_NONCE`.**
 
 §4.10's receipt is the reason: `_worker_env` copies the entire parent environment and strips exactly
 one key, so any env-var channel is inherited by every worker fleet spawns and by every subagent those
@@ -2794,7 +2817,7 @@ round-trip, and a record without it reads as `null` ⇒ today's ownership answer
 ## 11. Command surface (delta only)
 
 - `fleet sup-boot [--sid S] [--nonce N] [--handoff-inc I] [--handoff-token T]` — verdicts gain
-  `resume` (§6.1); prints `NONCE: <value>` whenever it mints one.
+  `resume` (§6.1); prints the minted credential after the `NONCE:` label.
 - `fleet sup-checkpoint | sup-heartbeat | sup-handoff-begin | sup-handoff-complete | sup-handoff-abort
   [--nonce N]` — no env-var fallback (§6.5); each prints the newly minted generation, or
   `NONCE: unchanged` when one is already outstanding.
@@ -3162,7 +3185,7 @@ benign so far only because this daemon happened to be started by a supervisor di
 
 ### 16.3 What §6.5 D5 keeps, and what it loses
 
-**Keeps — the whole of D5's actual subject.** `--nonce <value>` remains the only presentation channel;
+**Keeps — the whole of D5's actual subject.** `--nonce` with the minted value remains the only presentation channel;
 there is still no `FLEET_SUP_NONCE`; §4.10's reasoning (the whole parent environment is copied and
 exactly one key is stripped) is untouched and is now doubly supported, since the daemon donation
 means the environment is not even reliably *this dispatch's* environment. D5's belt-and-braces
