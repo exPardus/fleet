@@ -25879,7 +25879,12 @@ class _FleetHelpFormatter(argparse.HelpFormatter):
 
     def _format_usage(self, usage, actions, groups, prefix):
         """Wrap usage text with one stable policy across argparse versions."""
-        prefix = prefix or "usage: "
+        # ``argparse.add_subparsers()`` formats a prefix-free usage line to
+        # derive each child parser's ``prog``. Preserve its explicit empty
+        # prefix; turning it into ``usage: `` compounds at every nesting
+        # level (for example, ``usage: usage: fleet mail verify``).
+        if prefix is None:
+            prefix = "usage: "
         rendered = super()._format_usage(usage, actions, groups, prefix)
         flat = " ".join(rendered.split())
         if not flat.startswith(prefix):

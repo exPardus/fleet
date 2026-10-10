@@ -81,7 +81,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 ### fleet home
 
 ```text
-usage: usage: fleet home [-h] [--tag]
+usage: fleet home [-h] [--tag]
 
 options:
   -h, --help  show this help message and exit
@@ -92,7 +92,7 @@ options:
 ### fleet knowledge
 
 ```text
-usage: usage: fleet knowledge [-h]
+usage: fleet knowledge [-h]
 
 options:
   -h, --help  show this help message and exit
@@ -101,7 +101,7 @@ options:
 ### fleet homes
 
 ```text
-usage: usage: fleet homes [-h] [--add PATH | --retire PATH]
+usage: fleet homes [-h] [--add PATH | --retire PATH]
 
 options:
   -h, --help     show this help message and exit
@@ -114,8 +114,8 @@ options:
 ### fleet init
 
 ```text
-usage: usage: fleet init [-h] [--nonce NONCE] [--home PATH] [--statusline]
-       [--chain] [--force]
+usage: fleet init [-h] [--nonce NONCE] [--home PATH] [--statusline] [--chain]
+       [--force]
 
 options:
   -h, --help     show this help message and exit
@@ -136,7 +136,7 @@ options:
 ### fleet spawn
 
 ```text
-usage: usage: fleet spawn [-h] --dir DIR --task TASK [--mode
+usage: fleet spawn [-h] --dir DIR --task TASK [--mode
        {bypass,accept,dontask,plan,omit}] [--model MODEL] [--effort
        {low,medium,high,xhigh}] [--codex-adapter {native,mcx}]
        [--max-budget-usd MAX_BUDGET_USD] [--setting-sources SETTING_SOURCES]
@@ -176,7 +176,7 @@ options:
 ### fleet status
 
 ```text
-usage: usage: fleet status [-h] [--json] [--stale-ok] [--all] [name]
+usage: fleet status [-h] [--json] [--stale-ok] [--all] [name]
 
 positional arguments:
   name
@@ -192,7 +192,7 @@ options:
 ### fleet peek
 
 ```text
-usage: usage: fleet peek [-h] [-n LINES] name
+usage: fleet peek [-h] [-n LINES] name
 
 positional arguments:
   name
@@ -205,7 +205,7 @@ options:
 ### fleet result
 
 ```text
-usage: usage: fleet result [-h] name
+usage: fleet result [-h] name
 
 positional arguments:
   name
@@ -217,8 +217,8 @@ options:
 ### fleet pr-poll
 
 ```text
-usage: usage: fleet pr-poll [-h] (--since SINCE | --since-file PATH) [--repo
-       REPO] [--json] pr
+usage: fleet pr-poll [-h] (--since SINCE | --since-file PATH) [--repo REPO]
+       [--json] pr
 
 positional arguments:
   pr                    pull request number, URL, or gh PR selector
@@ -235,7 +235,7 @@ options:
 ### fleet address
 
 ```text
-usage: usage: fleet address [-h] [--json] name
+usage: fleet address [-h] [--json] name
 
 positional arguments:
   name
@@ -248,8 +248,7 @@ options:
 ### fleet wait
 
 ```text
-usage: usage: fleet wait [-h] [--any | --all] [--timeout TIMEOUT] names [names
-       ...]
+usage: fleet wait [-h] [--any | --all] [--timeout TIMEOUT] names [names ...]
 
 positional arguments:
   names
@@ -264,7 +263,7 @@ options:
 ### fleet send
 
 ```text
-usage: usage: fleet send [-h] [--nonce NONCE] [--force-band] name message
+usage: fleet send [-h] [--nonce NONCE] [--force-band] name message
 
 positional arguments:
   name
@@ -283,7 +282,7 @@ options:
 ### fleet mail
 
 ```text
-usage: usage: fleet mail [-h] {verify} ...
+usage: fleet mail [-h] {verify} ...
 
 positional arguments:
   {verify}
@@ -296,7 +295,7 @@ options:
 #### fleet mail verify
 
 ```text
-usage: usage: usage: fleet mail verify [-h] mail_id
+usage: fleet mail verify [-h] mail_id
 
 positional arguments:
   mail_id
@@ -308,8 +307,8 @@ options:
 ### fleet codex-respond
 
 ```text
-usage: usage: fleet codex-respond [-h] [--nonce NONCE] [--expect-inc
-       EXPECT_INC] [--expect-thread EXPECT_THREAD] [--expect-turn EXPECT_TURN]
+usage: fleet codex-respond [-h] [--nonce NONCE] [--expect-inc EXPECT_INC]
+       [--expect-thread EXPECT_THREAD] [--expect-turn EXPECT_TURN]
        [--expect-host-generation EXPECT_HOST_GENERATION] [--expect-method
        EXPECT_METHOD] [--expect-command EXPECT_COMMAND] [--expect-request-cwd
        EXPECT_REQUEST_CWD] name request_id decision
@@ -337,7 +336,7 @@ options:
 ### fleet codex-decline-fixed
 
 ```text
-usage: usage: fleet codex-decline-fixed [-h] --request-id-type {int,string}
+usage: fleet codex-decline-fixed [-h] --request-id-type {int,string}
        --expect-inc EXPECT_INC --expect-thread EXPECT_THREAD --expect-turn
        EXPECT_TURN --expect-host-generation EXPECT_HOST_GENERATION
        --expect-method EXPECT_METHOD --expect-item-id EXPECT_ITEM_ID
@@ -380,7 +379,7 @@ options:
 ### fleet codex-reobserve-active
 
 ```text
-usage: usage: fleet codex-reobserve-active [-h] --expect-thread EXPECT_THREAD
+usage: fleet codex-reobserve-active [-h] --expect-thread EXPECT_THREAD
        --expect-turn EXPECT_TURN --expect-generation EXPECT_GENERATION
        --expect-last-op EXPECT_LAST_OP name
 
@@ -398,7 +397,7 @@ options:
 ### fleet codex-settle-preaccept
 
 ```text
-usage: usage: fleet codex-settle-preaccept [-h] --evidence EVIDENCE
+usage: fleet codex-settle-preaccept [-h] --evidence EVIDENCE
        --expect-evidence-sha256 EXPECT_EVIDENCE_SHA256 name operation_id
        generation
 
@@ -417,7 +416,7 @@ options:
 ### fleet interrupt
 
 ```text
-usage: usage: fleet interrupt [-h] [--nonce NONCE] name
+usage: fleet interrupt [-h] [--nonce NONCE] name
 
 positional arguments:
   name
@@ -433,7 +432,7 @@ options:
 ### fleet release
 
 ```text
-usage: usage: fleet release [-h] [--nonce NONCE] name
+usage: fleet release [-h] [--nonce NONCE] name
 
 positional arguments:
   name
@@ -449,10 +448,9 @@ options:
 ### fleet respawn
 
 ```text
-usage: usage: fleet respawn [-h] [--task TASK] [--force] [--force-band]
-       [--yes] [--nonce NONCE] [--max-budget-usd MAX_BUDGET_USD]
-       [--setting-sources SETTING_SOURCES] [--token-ceiling TOKEN_CEILING]
-       name
+usage: fleet respawn [-h] [--task TASK] [--force] [--force-band] [--yes]
+       [--nonce NONCE] [--max-budget-usd MAX_BUDGET_USD] [--setting-sources
+       SETTING_SOURCES] [--token-ceiling TOKEN_CEILING] name
 
 positional arguments:
   name
@@ -476,7 +474,7 @@ options:
 ### fleet resume-limited
 
 ```text
-usage: usage: fleet resume-limited [-h] [--force-now] [--nonce NONCE] [name]
+usage: fleet resume-limited [-h] [--force-now] [--nonce NONCE] [name]
 
 positional arguments:
   name
@@ -494,7 +492,7 @@ options:
 ### fleet kill
 
 ```text
-usage: usage: fleet kill [-h] [--yes] [--nonce NONCE] name
+usage: fleet kill [-h] [--yes] [--nonce NONCE] name
 
 positional arguments:
   name
@@ -511,8 +509,7 @@ options:
 ### fleet clean
 
 ```text
-usage: usage: fleet clean [-h] [--yes] [--nonce NONCE] [--dead-only |
-       --tombstones]
+usage: fleet clean [-h] [--yes] [--nonce NONCE] [--dead-only | --tombstones]
 
 options:
   -h, --help     show this help message and exit
@@ -528,8 +525,8 @@ options:
 ### fleet archive
 
 ```text
-usage: usage: fleet archive [-h] [--ttl-hours TTL_HOURS] [--dry-run] [--nonce
-       NONCE] [name]
+usage: fleet archive [-h] [--ttl-hours TTL_HOURS] [--dry-run] [--nonce NONCE]
+       [name]
 
 positional arguments:
   name
@@ -547,9 +544,8 @@ options:
 ### fleet autoclean
 
 ```text
-usage: usage: fleet autoclean [-h] [--ttl-hours TTL_HOURS]
-       [--expire-tombstones-hours EXPIRE_TOMBSTONES_HOURS] [--dry-run]
-       [--fleet-home FLEET_HOME]
+usage: fleet autoclean [-h] [--ttl-hours TTL_HOURS] [--expire-tombstones-hours
+       EXPIRE_TOMBSTONES_HOURS] [--dry-run] [--fleet-home FLEET_HOME]
 
 options:
   -h, --help            show this help message and exit
@@ -567,7 +563,7 @@ options:
 ### fleet index
 
 ```text
-usage: usage: fleet index [-h] {init,build,update,status} ...
+usage: fleet index [-h] {init,build,update,status} ...
 
 positional arguments:
   {init,build,update,status}
@@ -583,7 +579,7 @@ options:
 #### fleet index init
 
 ```text
-usage: usage: usage: fleet index init [-h] [--path PATH]
+usage: fleet index init [-h] [--path PATH]
 
 options:
   -h, --help   show this help message and exit
@@ -593,7 +589,7 @@ options:
 #### fleet index build
 
 ```text
-usage: usage: usage: fleet index build [-h] [--force] [--path PATH]
+usage: fleet index build [-h] [--force] [--path PATH]
 
 options:
   -h, --help   show this help message and exit
@@ -604,7 +600,7 @@ options:
 #### fleet index update
 
 ```text
-usage: usage: usage: fleet index update [-h] --files FILES [--path PATH]
+usage: fleet index update [-h] --files FILES [--path PATH]
 
 options:
   -h, --help     show this help message and exit
@@ -615,7 +611,7 @@ options:
 #### fleet index status
 
 ```text
-usage: usage: usage: fleet index status [-h] [--path PATH]
+usage: fleet index status [-h] [--path PATH]
 
 options:
   -h, --help   show this help message and exit
@@ -625,7 +621,7 @@ options:
 ### fleet land
 
 ```text
-usage: usage: fleet land [-h] lane
+usage: fleet land [-h] lane
 
 positional arguments:
   lane        lane name, such as w78
@@ -637,7 +633,7 @@ options:
 ### fleet brief
 
 ```text
-usage: usage: fleet brief [-h] item
+usage: fleet brief [-h] item
 
 positional arguments:
   item        task file path or task item name
@@ -649,7 +645,7 @@ options:
 ### fleet q
 
 ```text
-usage: usage: fleet q [-h] [--outline PATH] [--src] [--path GLOB] [--kind
+usage: fleet q [-h] [--outline PATH] [--src] [--path GLOB] [--kind
        {func,class,method,const,section}] [--limit N] [--no-refresh] [query]
 
 positional arguments:
@@ -674,7 +670,7 @@ options:
 ### fleet doctor
 
 ```text
-usage: usage: fleet doctor [-h] [--repair]
+usage: fleet doctor [-h] [--repair]
 
 options:
   -h, --help  show this help message and exit
@@ -687,7 +683,7 @@ options:
 ### fleet sup-boot
 
 ```text
-usage: usage: fleet sup-boot [-h] [--sid SID] [--nonce NONCE] [--handoff-inc
+usage: fleet sup-boot [-h] [--sid SID] [--nonce NONCE] [--handoff-inc
        HANDOFF_INC] [--handoff-token HANDOFF_TOKEN]
 
 options:
@@ -710,10 +706,9 @@ options:
 ### fleet sup-spawn
 
 ```text
-usage: usage: fleet sup-spawn [-h] --task TASK [--model MODEL]
-       [--codex-adapter {native}] [--permission-mode
-       {bypass,accept,dontask,plan,omit}] [--nonce NONCE] [--force-band]
-       [--setting-sources SETTING_SOURCES]
+usage: fleet sup-spawn [-h] --task TASK [--model MODEL] [--codex-adapter
+       {native}] [--permission-mode {bypass,accept,dontask,plan,omit}]
+       [--nonce NONCE] [--force-band] [--setting-sources SETTING_SOURCES]
 
 options:
   -h, --help            show this help message and exit
@@ -741,7 +736,7 @@ options:
 ### fleet sup-checkpoint
 
 ```text
-usage: usage: fleet sup-checkpoint [-h] [--kind {CHECKPOINT,PROPOSAL,PARKED}]
+usage: fleet sup-checkpoint [-h] [--kind {CHECKPOINT,PROPOSAL,PARKED}]
        [--wake-when WAKE_CONDITION] [--sid SID] [--nonce NONCE] body
 
 positional arguments:
@@ -761,7 +756,7 @@ options:
 ### fleet journal-roll
 
 ```text
-usage: usage: fleet journal-roll [-h]
+usage: fleet journal-roll [-h]
 
 options:
   -h, --help  show this help message and exit
@@ -770,8 +765,8 @@ options:
 ### fleet interface-register
 
 ```text
-usage: usage: fleet interface-register [-h] [--session-id SESSION_ID]
-       [--codex-thread CODEX_THREAD]
+usage: fleet interface-register [-h] [--session-id SESSION_ID] [--codex-thread
+       CODEX_THREAD]
 
 options:
   -h, --help            show this help message and exit
@@ -787,9 +782,9 @@ options:
 ### fleet watch
 
 ```text
-usage: usage: fleet watch [-h] [--fleet-home PATH] [--mcx-dir DIR]
-       [--mem-floor-mb MEM_FLOOR_MB] [--disk-floor-gb DISK_FLOOR_GB]
-       [--interval INTERVAL] [--timeout TIMEOUT]
+usage: fleet watch [-h] [--fleet-home PATH] [--mcx-dir DIR] [--mem-floor-mb
+       MEM_FLOOR_MB] [--disk-floor-gb DISK_FLOOR_GB] [--interval INTERVAL]
+       [--timeout TIMEOUT]
 
 options:
   -h, --help            show this help message and exit
@@ -804,7 +799,7 @@ options:
 ### fleet relay-ack
 
 ```text
-usage: usage: fleet relay-ack [-h] --mail FILE --line TEXT [--mirror-log PATH]
+usage: fleet relay-ack [-h] --mail FILE --line TEXT [--mirror-log PATH]
 
 options:
   -h, --help         show this help message and exit
@@ -816,8 +811,8 @@ options:
 ### fleet wave-close
 
 ```text
-usage: usage: fleet wave-close [-h] [--base BASE] --changelog CHANGELOG
-       [--alias MERGE_LANE=WORKER] [--sid SID] [--nonce NONCE]
+usage: fleet wave-close [-h] [--base BASE] --changelog CHANGELOG [--alias
+       MERGE_LANE=WORKER] [--sid SID] [--nonce NONCE]
 
 options:
   -h, --help            show this help message and exit
@@ -839,7 +834,7 @@ options:
 ### fleet sup-heartbeat
 
 ```text
-usage: usage: fleet sup-heartbeat [-h] [--sid SID] [--nonce NONCE]
+usage: fleet sup-heartbeat [-h] [--sid SID] [--nonce NONCE]
 
 options:
   -h, --help     show this help message and exit
@@ -851,8 +846,7 @@ options:
 ### fleet sup-release
 
 ```text
-usage: usage: fleet sup-release [-h] [--reason REASON] [--sid SID] [--nonce
-       NONCE]
+usage: fleet sup-release [-h] [--reason REASON] [--sid SID] [--nonce NONCE]
 
 options:
   -h, --help       show this help message and exit
@@ -866,8 +860,8 @@ options:
 ### fleet sup-retire-legacy
 
 ```text
-usage: usage: fleet sup-retire-legacy [-h] --expect-inc EXPECT_INC
-       --expect-sid EXPECT_SID
+usage: fleet sup-retire-legacy [-h] --expect-inc EXPECT_INC --expect-sid
+       EXPECT_SID
 
 options:
   -h, --help            show this help message and exit
@@ -879,7 +873,7 @@ options:
 ### fleet sup-status
 
 ```text
-usage: usage: fleet sup-status [-h] [--json]
+usage: fleet sup-status [-h] [--json]
 
 options:
   -h, --help  show this help message and exit
@@ -889,7 +883,7 @@ options:
 ### fleet sup-guard
 
 ```text
-usage: usage: fleet sup-guard [-h] [--do] [--json]
+usage: fleet sup-guard [-h] [--do] [--json]
 
 options:
   -h, --help  show this help message and exit
@@ -901,7 +895,7 @@ options:
 ### fleet sup-reconcile
 
 ```text
-usage: usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore |
+usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore |
        --restore-recorded-policy | --prepare-restored-continuation |
        --shutdown-restored-continuation | --reattach-restored-continuation]
        [--preserve-retired-history-evidence OWNER_ONLY_JSON]
@@ -950,7 +944,7 @@ options:
 ### fleet sup-context
 
 ```text
-usage: usage: fleet sup-context [-h] [--sid SID] [--json]
+usage: fleet sup-context [-h] [--sid SID] [--json]
 
 options:
   -h, --help  show this help message and exit
@@ -961,9 +955,8 @@ options:
 ### fleet sup-decision
 
 ```text
-usage: usage: fleet sup-decision [-h] [--raise QUESTION] [--context-ref
-       CONTEXT_REF] [--answer TEXT] [--clear] [--json] [--sid SID] [--nonce
-       NONCE]
+usage: fleet sup-decision [-h] [--raise QUESTION] [--context-ref CONTEXT_REF]
+       [--answer TEXT] [--clear] [--json] [--sid SID] [--nonce NONCE]
 
 options:
   -h, --help            show this help message and exit
@@ -984,8 +977,8 @@ options:
 ### fleet sup-notify
 
 ```text
-usage: usage: fleet sup-notify [-h] [--tmux-session TMUX_SESSION] [--window
-       WINDOW] [--dry-run] [--sid SID] [--nonce NONCE] text
+usage: fleet sup-notify [-h] [--tmux-session TMUX_SESSION] [--window WINDOW]
+       [--dry-run] [--sid SID] [--nonce NONCE] text
 
 positional arguments:
   text                  the line's text -- prefixed with `SUPERVISOR: ` and
@@ -1008,7 +1001,7 @@ options:
 ### fleet sup-handoff-begin
 
 ```text
-usage: usage: fleet sup-handoff-begin [-h] [--model MODEL] [--permission-mode
+usage: fleet sup-handoff-begin [-h] [--model MODEL] [--permission-mode
        {bypass,accept,dontask,plan,omit}] [--setting-sources SETTING_SOURCES]
        [--sid SID] [--nonce NONCE] [--complete-timeout COMPLETE_TIMEOUT]
 
@@ -1037,8 +1030,8 @@ options:
 ### fleet sup-handoff-complete
 
 ```text
-usage: usage: fleet sup-handoff-complete [-h] --expect-inc EXPECT_INC
-       [--expect-sid EXPECT_SID] [--sid SID] [--nonce NONCE]
+usage: fleet sup-handoff-complete [-h] --expect-inc EXPECT_INC [--expect-sid
+       EXPECT_SID] [--sid SID] [--nonce NONCE]
 
 options:
   -h, --help            show this help message and exit
@@ -1055,7 +1048,7 @@ options:
 ### fleet sup-handoff-abort
 
 ```text
-usage: usage: fleet sup-handoff-abort [-h] [--successor-sid SUCCESSOR_SID]
+usage: fleet sup-handoff-abort [-h] [--successor-sid SUCCESSOR_SID]
        [--successor-inc SUCCESSOR_INC] [--retire-all] [--force] [--sid SID]
        [--nonce NONCE]
 

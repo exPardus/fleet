@@ -190,3 +190,13 @@ def test_spawn_effort_help_names_legacy_mcx_and_native_ignored():
 def test_each_command_section_carries_its_own_usage_line(command):
     text = REFERENCE.read_text(encoding="utf-8")
     assert f"usage: fleet {command}" in text
+
+
+@pytest.mark.parametrize("command", sorted(_shipped_visible_commands()))
+def test_actual_nested_help_has_one_usage_prefix(command):
+    help_text = _shipped_visible_commands()[command].format_help()
+    usage_lines = [line for line in help_text.splitlines()
+                   if line.startswith("usage:")]
+    assert usage_lines, help_text
+    assert usage_lines[0].startswith(f"usage: fleet {command}"), help_text
+    assert help_text.count("usage:") == 1, help_text
