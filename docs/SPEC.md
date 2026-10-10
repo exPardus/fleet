@@ -378,7 +378,12 @@ After an explicit recorded-policy restoration has settled, an idle native
 supervisor may be cold-reattached on its **same current thread** through
 `sup-reconcile --prepare-restored-continuation` followed, within five minutes
 and after the exact host and app-server child have exited, by
-`--reattach-restored-continuation`. Both calls require the exact incarnation,
+`--reattach-restored-continuation`. For historical threads, shutdown must use
+`--shutdown-restored-continuation`: the authenticated host repeats their public
+terminal/notLoaded proofs and complete loaded list in its serialized handler,
+writes a preflight-bound receipt, and stops without another IPC dispatch.
+Reattach refuses an unchecked external exit or missing/mismatched receipt.
+All three calls require the exact incarnation,
 thread, completed turn, original observed resume, committed restoration, and
 old host generation. The prepare proof pins the current claim, row, journals,
 target mail, all other native rows and operations, callback records, source,
