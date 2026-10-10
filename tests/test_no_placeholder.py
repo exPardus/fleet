@@ -133,6 +133,22 @@ PLACEHOLDERS = ["<value>", "<nonce>", "<YOUR-NONCE>", "", "   ", "value", "VALUE
 
 
 class TestPlaceholderNonceIsRefusedBeforeAnyStateChange:
+    def test_placeholder_refuses_cleanly_without_a_resolvable_home(
+            self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("FLEET_HOME", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path / "uninitialized-home")
+
+        rc = fleet.main([
+            "sup-checkpoint", "body", "--sid", "sid-placeholder", "--nonce", "<nonce>"])
+
+        error = capsys.readouterr().err
+        assert rc == 1
+        assert "placeholder" in error and "before any state change" in error
+        assert "AttributeError" not in error
+        assert not (tmp_path / "uninitialized-home").exists()
+
     @pytest.mark.parametrize("bad", PLACEHOLDERS)
     def test_holder_verb(self, held, capsys, bad):
         home, _live = held

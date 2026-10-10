@@ -583,6 +583,66 @@ def test_real_host_barrier_rejects_before_provider_write(tmp_path):
         _shutdown(client)
 
 
+@pytest.mark.parametrize("initial_state", ["fresh", "prepared", "accepted", "uncertain"])
+def test_barrier_arrival_between_client_prepare_and_host_dispatch_preserves_journal(
+        tmp_path, monkeypatch, initial_state):
+    _, client, log = _ensure(tmp_path)
+    barrier = client.home / "state" / "codex" / recovery.BARRIER
+    operation = {
+        "operation_id": f"barrier-race-{initial_state}",
+        "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": "thread-1", "input": []}},
+        "recovery": {"kind": "turn/start", "thread_id": "thread-1",
+                     "canonical_cwd": str(client.home), "history_watermark": 0},
+    }
+    journal = fleet_codex.OperationJournal(client.home, client.generation)
+    if initial_state != "fresh":
+        journal.prepare(operation)
+        if initial_state in {"accepted", "uncertain"}:
+            journal.accept(operation["operation_id"])
+        if initial_state == "uncertain":
+            journal.uncertain(operation["operation_id"], "prior unknown outcome")
+    real_connect = fleet_codex._connect_authenticated
+    armed = False
+
+    def install_barrier_then_connect(*args, **kwargs):
+        nonlocal armed
+        if not armed:
+            armed = True
+            fleet_codex._atomic_json(barrier, {
+                "schema": 1, "home": str(client.home), "state": "prepared",
+                "old_host": {"generation": "old-generation"},
+            })
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_codex, "_connect_authenticated",
+                        install_barrier_then_connect)
+    try:
+        if initial_state in {"fresh", "prepared"}:
+            with pytest.raises(fleet_codex.HostRejected, match="recovery barrier"):
+                client.call(operation, timeout=2)
+        else:
+            with pytest.raises(fleet_codex.HostUnavailable,
+                               match="mutation outcome is uncertain"):
+                client.call(operation, timeout=2)
+        record = journal.load(operation["operation_id"])
+        if initial_state in {"fresh", "prepared"}:
+            assert record["state"] == "failed"
+            assert "before provider acceptance" in record["reason"]
+            assert not journal.has_unresolved()
+        else:
+            assert record["state"] in {"accepted", "uncertain"}
+            assert record["state"] != "failed"
+            assert journal.has_unresolved()
+        requests = [json.loads(line) for line in log.read_text().splitlines()
+                    if json.loads(line).get("event") == "request"]
+        assert not any(row.get("method") == "turn/start" for row in requests)
+    finally:
+        barrier.unlink(missing_ok=True)
+        _shutdown(client)
+
+
 @pytest.mark.parametrize("stage", ["prepared", "rebind", "complete"])
 def test_real_host_fences_unclassified_public_mutations_and_shutdown(tmp_path, stage):
     _, client, log = _ensure(tmp_path)

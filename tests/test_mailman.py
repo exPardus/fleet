@@ -514,6 +514,24 @@ def test_bad_or_missing_config_wakes_on_everything(home, capsys, cfg):
     assert inbox(home) == ["a.md"] and done(home) == []
 
 
+@pytest.mark.parametrize(("table", "key"), [
+    ("bridge", "timeout_s"),
+    ("bridge", "max_failures"),
+    ("digest", "summary_max"),
+])
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e999", "-1e999"])
+def test_nonfinite_numeric_config_fails_safe(home, capsys, table, key, value):
+    put(home, "a.md", mail(body="harmless"))
+    raw = f'{{"wake": {{}}, "{table}": {{"{key}": {value}}}}}'
+    (home / "mailman.json").write_text(raw, encoding="utf-8")
+
+    rc, out, err = run(home, capsys)
+
+    assert rc == 0 and out.strip().endswith("a.md")
+    assert "FAIL-SAFE" in err and "mailman.json invalid" in err
+    assert inbox(home) == ["a.md"] and done(home) == []
+
+
 def test_body_only_patterns_and_negatives(home, capsys):
     seed(home, wake={"kinds": [], "patterns": [
         {"pattern": "blocker", "unless": ["blocker: none"]}, "P0"]})

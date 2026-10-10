@@ -577,13 +577,35 @@ class Host:
                 elif method == "rpc":
                     if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
                         raise ValueError("rpc payload is malformed")
-                    authorize_failed_client_recovery_rpc(
-                        self.home, self.generation, request["operation_id"],
-                        payload, request["payload_digest"])
+                    public_method = _public_method("rpc", payload)
+                    if public_method is not None:
+                        # The client durably prepares a public mutation before
+                        # sending it. A recovery barrier can appear between the
+                        # client's local check and this host check, so a proved
+                        # pre-dispatch refusal must terminalize only that exact
+                        # prepared intent. Accepted/uncertain intents stay held.
+                        mutating_operation_id = request["operation_id"]
+                    try:
+                        authorize_failed_client_recovery_rpc(
+                            self.home, self.generation, request["operation_id"],
+                            payload, request["payload_digest"])
+                    except HostRejected as exc:
+                        if public_method is not None:
+                            try:
+                                prepared = self.journal.load(
+                                    request["operation_id"])
+                            except HostRejected:
+                                prepared = None
+                            if (prepared is not None
+                                    and prepared.get("state") == "prepared"):
+                                self.journal.fail(
+                                    request["operation_id"],
+                                    "failed-client recovery barrier refused before "
+                                    f"provider acceptance: {exc}")
+                        raise
                     rpc_timeout = _bounded_rpc_timeout(
                         payload, float(request["operation_timeout"]), deadline)
                     assert self.client is not None
-                    public_method = _public_method("rpc", payload)
                     if public_method is None:
                         try:
                             result = self.client.request(

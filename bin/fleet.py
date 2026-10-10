@@ -28533,7 +28533,9 @@ def main(argv=None) -> int:
                 recovery_home = resolve_home(flag=home_flag).get("home")
             except FleetCliError:
                 recovery_home = None
-            _refuse_ph(args, home=recovery_home or args._fleet_home or FLEET_HOME)
+            _refuse_ph(args, home=(recovery_home
+                                   or getattr(args, "_fleet_home", None)
+                                   or FLEET_HOME))
         # Bare init creates in cwd; explicit selectors and statusline setup use the
         # normal resolver. Do not synthesize args.home, which also appends the
         # machine-list entry and invokes the destructive tier.

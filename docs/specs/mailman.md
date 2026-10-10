@@ -187,8 +187,10 @@ fail-safe mode (§4.1 step 1): it wakes on everything and says why.
 }
 ```
 
-- **Format.** JSON (stdlib `json`; Python 3.10 has no `tomllib`). Unknown tables or keys and wrong
-  types are config errors, which means fail-safe mode.
+- **Format.** JSON (stdlib `json`; Python 3.10 has no `tomllib`). Unknown tables or keys, wrong
+  types, and non-positive or non-finite numeric settings are config errors, which means fail-safe
+  mode. In particular, `NaN`, `Infinity`, and values that overflow a finite timeout are rejected
+  before they can disable a deadline or raise during integer conversion.
 - **`patterns`** are Python `re` expressions matched per line with `re.search` over the **body only**
   (everything after the header block). Header fields are ruled separately (`kind`, `needs-answer`),
   so a `subject:` header cannot wake. An entry is a string or

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -175,7 +176,14 @@ def parse_config(text: str) -> Config:
     smax = digest.get("summary_max", 160)
     for name, val in (("bridge.timeout_s", timeout), ("bridge.max_failures", maxf),
                       ("digest.summary_max", smax)):
-        if isinstance(val, bool) or not isinstance(val, (int, float)) or val <= 0:
+        numeric = not isinstance(val, bool) and isinstance(val, (int, float))
+        finite = numeric and (not isinstance(val, float) or math.isfinite(val))
+        if name == "bridge.timeout_s" and numeric and finite:
+            try:
+                finite = math.isfinite(float(val))
+            except OverflowError:
+                finite = False
+        if not numeric or not finite or val <= 0:
             raise ConfigError(f"{name} must be a positive number")
     return Config(kinds, needs, rules, command, float(timeout), int(maxf), int(smax))
 
