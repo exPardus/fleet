@@ -115,7 +115,7 @@ the selected fleet home:
 
 ## Codex lanes
 
-Dispatch a Codex lane with `fleet spawn --model codex:<model> [--effort low|medium|high|xhigh]`; new rows use the native app-server adapter. Use explicit `--codex-adapter mcx` only for the legacy compatibility route; persisted rows always keep their recorded adapter.
+Dispatch a native Codex lane with `fleet spawn --model codex:<model>`; new rows use the native app-server adapter. `--effort low|medium|high|xhigh` applies only with explicit `--codex-adapter mcx` and is ignored by the native adapter. Persisted rows always keep their recorded adapter.
 Fleet routes `status`, `peek`, `result`, `send`, `interrupt`, `kill`, `respawn`,
 and wave accounting through that recorded adapter. Do not drive app-server or
 mcx by hand for a lane Fleet dispatched. On the explicit mcx route, Fleet maps
@@ -147,7 +147,6 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet wait NAME... [--any|--all] [--timeout SECONDS]`: wait for one or more turns to finish.
 - `fleet send NAME MESSAGE [--force-band]`: deliver a worker message or start its next turn.
 - `fleet interrupt NAME`: stop the worker's current turn.
-- `fleet attach NAME [--force]`: attach an interactive terminal to a worker.
 - `fleet release NAME`: release an attached worker to idle.
 - `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
