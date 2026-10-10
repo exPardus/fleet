@@ -2414,9 +2414,21 @@ class CodexHostClient:
             raise HostUnavailable("Codex host response was lost") from exc
         finally:
             connection.close()
+        def response_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("duplicate IPC response key")
+                value[key] = item
+            return value
+
+        def invalid_constant(_value):
+            raise ValueError("non-finite IPC response constant")
+
         try:
-            response = json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
+            response = json.loads(raw.decode("utf-8"), object_pairs_hook=response_object,
+                                  parse_constant=invalid_constant)
+        except (UnicodeError, ValueError) as exc:
             raise HostUnavailable("Codex host returned invalid JSON") from exc
         if not isinstance(response, dict):
             raise HostUnavailable("Codex host response is not an object")
@@ -2428,8 +2440,18 @@ class CodexHostClient:
         }
         if any(response.get(key) != value for key, value in expected.items()):
             raise HostUnavailable("Codex host response correlation mismatch")
-        if response.get("ok") is not True:
-            error = str(response.get("error") or "Codex host rejected operation")
+        if (set(response) != {*expected, "ok", "result", "error"}
+                or type(response.get("ok")) is not bool
+                or (response["ok"] and response["error"] is not None)
+                or (not response["ok"] and (
+                    response["result"] is not None
+                    or not isinstance(response["error"], str)
+                    or not response["error"]
+                    or len(response["error"]) > 300))):
+            raise HostUnavailable("Codex host response envelope is malformed" + (
+                "; mutation outcome is uncertain" if public_method is not None else ""))
+        if response["ok"] is False:
+            error = response["error"]
             if public_method is not None:
                 if error == "host response exceeds MAX_IPC_BYTES; page the request":
                     raise HostUnavailable(error + "; mutation outcome is uncertain")

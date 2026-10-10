@@ -9702,6 +9702,10 @@ def _sup_interrupt_record(args, binding, typed_id, *, state, original=None):
             or params.get("itemId") != args.expect_item_id
             or (state is not None and record.get("state") != state)):
         raise FleetCliError("supervisor interrupt callback identity or state changed")
+    if (any(field in record for field in (
+            "response", "responding_at", "responded_at", "uncertain_at"))
+            or (record.get("state") == "pending" and "resolved_at" in record)):
+        raise FleetCliError("supervisor interrupt callback has response or consumption evidence")
     if original is None:
         if hashlib.sha256(raw).hexdigest() != args.expect_request_sha256:
             raise FleetCliError("supervisor interrupt callback bytes changed")
@@ -9744,6 +9748,15 @@ def _sup_interrupt_durable_inventory(binding, original):
         current_generation=binding.host_generation)
     if len(durable) != 1 or {**original, "stale": False} != durable[0]:
         raise FleetCliError("supervisor interrupt durable callback is ambiguous")
+
+
+def _sup_interrupt_no_unresolved(binding):
+    """A fresh public empty list cannot replace the durable turn inventory."""
+    from fleet_codex import read_pending_requests
+    if read_pending_requests(
+            FLEET_HOME, binding.authority.value, binding.current_turn_id,
+            current_generation=binding.host_generation):
+        raise FleetCliError("supervisor interrupt has a new unresolved turn callback")
 
 
 def _sup_interrupt_pending(args, binding, typed_id, client, original):
@@ -9924,6 +9937,7 @@ def cmd_codex_sup_interrupt_current(args) -> int:
                     "supervisor interrupt lacks terminal and resolved proof")
             time.sleep(0.25)
         _sup_interrupt_fresh_processes(args, binding.host_generation)
+        _sup_interrupt_no_unresolved(binding)
         fresh.commit(operation_id)
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -9942,9 +9956,23 @@ def cmd_codex_sup_interrupt_current(args) -> int:
             raise FleetCliError(
                 "supervisor interrupt accepted but claim/row settlement changed; "
                 "reservation retained")
-        _sup_interrupt_record(args, binding, typed_id,
-                              state="resolved", original=original)
-        _sup_interrupt_fresh_processes(args, binding.host_generation)
+        try:
+            _sup_interrupt_fresh_processes(args, binding.host_generation)
+            terminal = _codex_supervisor_observe(binding, client=fresh, require_full=True)
+            if (terminal["provider_status"] != "idle"
+                    or terminal["turn_id"] != binding.current_turn_id
+                    or terminal["turn_status"] not in {"completed", "failed", "interrupted"}
+                    or terminal["active_flags"]
+                    or fresh.pending_approvals(binding.authority.value,
+                                               binding.current_turn_id) != []):
+                raise FleetCliError("terminal turn or public callback inventory changed")
+            _sup_interrupt_record(args, binding, typed_id,
+                                  state="resolved", original=original)
+            _sup_interrupt_no_unresolved(binding)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor interrupt final terminal/callback proof changed; "
+                "reservation retained; never replay") from exc
         settled_claim = dict(old_claim)
         settled_claim.update({"provider_status": "idle",
                               "last_operation_id": operation_id,

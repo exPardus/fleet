@@ -537,3 +537,161 @@ def test_preflight_checks_original_child_after_public_reads(case, monkeypatch):
         fleet.cmd_codex_sup_interrupt_current(case.args)
     assert _reservation(case)[0] is None
     assert case.client.interrupt_calls == 0
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing-ok",
+        "missing-result",
+        "missing-error",
+        "missing-operation_id",
+        "missing-host_generation",
+        "missing-fleet_home",
+        "missing-payload_digest",
+        "ok-null",
+        "ok-zero",
+        "ok-string",
+        "contradictory-result",
+        "error-object",
+        "error-empty",
+        "error-oversized",
+        "success-with-error",
+        "extra-key",
+        "duplicate-ok",
+        "non-finite-result",
+    ],
+)
+def test_real_client_malformed_capability_envelope_never_proves_old_host(
+    tmp_path, monkeypatch, defect
+):
+    import fleet_codex
+
+    client = object.__new__(fleet_codex.CodexHostClient)
+    client.home = tmp_path
+    client.generation = "synthetic-generation"
+    client._endpoint = "synthetic-endpoint"
+    client._authkey = b"synthetic-key"
+    client._encoded_key = "synthetic-encoded-key"
+    captured = {}
+    monkeypatch.setattr(
+        fleet_codex,
+        "_connect_authenticated",
+        lambda *_: SimpleNamespace(close=lambda: None),
+    )
+    monkeypatch.setattr(
+        fleet_codex,
+        "_send_frame",
+        lambda _c, encoded, _d: captured.update(json.loads(encoded)),
+    )
+
+    def receive(*_):
+        envelope = {
+            key: captured[key]
+            for key in (
+                "operation_id",
+                "host_generation",
+                "fleet_home",
+                "payload_digest",
+            )
+        }
+        envelope.update(ok=False, result=None, error="unknown host method")
+        if defect.startswith("missing-"):
+            envelope.pop(defect.removeprefix("missing-"))
+        elif defect in {"ok-null", "ok-zero", "ok-string"}:
+            envelope["ok"] = {"ok-null": None, "ok-zero": 0, "ok-string": "false"}[
+                defect
+            ]
+        elif defect == "contradictory-result":
+            envelope["result"] = {"version": 1}
+        elif defect == "error-object":
+            envelope["error"] = {"message": "unknown host method"}
+        elif defect == "error-empty":
+            envelope["error"] = ""
+        elif defect == "error-oversized":
+            envelope["error"] = "x" * 301
+        elif defect == "success-with-error":
+            envelope["ok"] = True
+        elif defect == "extra-key":
+            envelope["unreviewed"] = True
+        elif defect == "non-finite-result":
+            envelope["result"] = float("nan")
+        raw = json.dumps(envelope)
+        if defect == "duplicate-ok":
+            raw = raw.replace('"ok": false', '"ok": true, "ok": false')
+        return raw.encode()
+
+    monkeypatch.setattr(fleet_codex, "_recv_frame", receive)
+    with pytest.raises((fleet.FleetCliError, fleet_codex.HostUnavailable)):
+        fleet._sup_interrupt_old_host(client)
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    ["response", "responding_at", "responded_at", "uncertain_at", "resolved_at"],
+)
+def test_pending_callback_with_consumption_evidence_refuses_before_reservation(
+    case, evidence
+):
+    record = json.loads(case.callback_path.read_text())
+    record[evidence] = {"decision": "decline"} if evidence == "response" else 1.0
+    case.callback_path.write_text(json.dumps(record))
+    case.callback_path.chmod(0o600)
+    # Match the supplied byte pin so the test measures contradictory state,
+    # rather than being satisfied by a hash mismatch.
+    case.args.expect_request_sha256 = hashlib.sha256(
+        case.callback_path.read_bytes()
+    ).hexdigest()
+    with pytest.raises(fleet.FleetCliError, match="consumption evidence"):
+        fleet.cmd_codex_sup_interrupt_current(case.args)
+    assert _reservation(case)[0] is None
+    assert case.client.interrupt_calls == 0
+
+
+@pytest.mark.parametrize(
+    "drift", ["public-callback", "durable-only", "active-turn", "new-turn"]
+)
+def test_callback_or_turn_drift_after_commit_retains_reservation(
+    case, monkeypatch, drift
+):
+    original = case.client.commit
+
+    def commit(operation_id):
+        original(operation_id)
+        if drift in {"public-callback", "durable-only"}:
+            case.client.store.record_request(
+                {
+                    "id": 195,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {
+                        "threadId": THREAD_ID,
+                        "turnId": TURN_ID,
+                        "itemId": "late-item",
+                        "startedAtMs": 2,
+                    },
+                }
+            )
+            if drift == "durable-only":
+                monkeypatch.setattr(case.client, "pending_approvals", lambda *_: [])
+        elif drift == "active-turn":
+            case.client.interrupted = False
+            case.client.thread_status = "active"
+            case.client.turn_status = "inProgress"
+            case.client.active_flags = ["waitingOnApproval"]
+        else:
+            from test_codex_supervisor import SUCCESSOR_TURN_ID
+
+            case.client.newer_turn = SUCCESSOR_TURN_ID
+
+    monkeypatch.setattr(case.client, "commit", commit)
+    with pytest.raises(fleet.FleetCliError, match="reservation retained; never replay"):
+        fleet.cmd_codex_sup_interrupt_current(case.args)
+    pending, claim, row = _reservation(case)
+    assert pending is not None
+    assert row["adapter_state"] == "mutating"
+    assert claim["pending_operation"] == pending
+    assert case.client.interrupt_calls == 1
+    assert case.client.journal.records()[0]["state"] == "committed"
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_codex_sup_interrupt_current(case.args)
+    assert case.client.interrupt_calls == 1

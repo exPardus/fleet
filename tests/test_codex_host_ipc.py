@@ -1295,6 +1295,7 @@ def test_oversized_mutation_reply_is_not_classified_as_rejection(
         "fleet_home": str(client.home),
         "payload_digest": module._digest("rpc", operation["payload"]),
         "error": "host response exceeds MAX_IPC_BYTES; page the request",
+        "result": None,
     }
 
     class Connection:

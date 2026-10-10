@@ -96,7 +96,14 @@ journaled `turn/interrupt`, and then reads the public thread to drain old-host
 notifications. It settles only after the same turn is terminal and idle, the
 exact callback is durably resolved without a response, and no unresolved
 callback remains. Any missing or contradictory proof retains the reservation;
-the interrupt must never be replayed. After settlement, a separate verified
+the interrupt must never be replayed. After journal commit, settlement re-reads
+the terminal public turn and both public and durable callback inventories;
+a new wait or changed turn retains the reservation. Pending callbacks carrying
+response/consumption evidence refuse before reservation. Host IPC envelopes
+must carry an exact boolean `ok`, all correlation/result/error fields, and
+consistent success/error shapes; malformed, duplicate-key and non-finite JSON
+replies are unavailable evidence, never a typed old-host rejection.
+After settlement, a separate verified
 `fleet send supervisor` can deliver existing queued mail with one distinct wake
 direction. That send is a separate decision and must not be repeated after an
 uncertain result.
