@@ -244,23 +244,30 @@ or in `done/` (complete); there is no state in which the mail exists nowhere.
   present. Step 3 is naturally idempotent (the cursor is a set by name). Re-running after a crash
   between any two steps therefore completes the remaining ones without duplicating the earlier ones.
 - **Done-collision.** If `done/N` already exists: identical sha256 ⇒ the earlier run finished the move
-  and crashed before returning; the inbox copy is removed without replacing the completed destination.
+  and crashed before returning; the private claim is removed without replacing the completed destination.
   Different sha256 ⇒ never overwrite: the incoming file moves to the first free name in
   `done/<stem>.<sha12><suffix>`, `done/<stem>.<sha12>.1<suffix>`, … and a log line records the rename.
 - **Appends vs rewrites.** `digest.md` and the log are append-only (`_atomic_append_bytes`, one
   syscall; a torn tail is at worst one marker-less line, which the reader ignores). The state file
   (§6.4) and the cursor are whole-file rewrites through `_write_json_atomic` (write temp, then rename).
-  The move is an exclusive link plus unlink. Nothing is truncated in place.
+  The move is an exclusive link from a private claim followed by removal of that private claim.
+  Nothing is truncated in place.
 - **Bind the move to the classified file.** Classification lstat's a regular file, opens with
   `O_NOFOLLOW` where available, confirms the opened descriptor has the same `(device, inode)`, and
-  records that identity with its SHA-256. Before linking, mailman re-reads and compares both identity
-  and digest. After the exclusive link it checks that `done/` names that same identity and digest.
-  Before unlinking the inbox path, it re-reads and compares them again; if another writer replaced the
-  pathname, the replacement stays in the inbox for a fresh classification. A mail that classified
-  WAKE is never passed to step 1–4 at all (§6.5).
+  records that identity with its SHA-256. Mailman re-reads and compares both before atomically
+  renaming the published inbox name into a fresh, exclusively-created directory under
+  `to-fleet/.mailman-claims/`. It verifies the claimed identity and digest, then links only that
+  claimed inode into `done/`. It never unlinks a published inbox pathname after a userspace check.
+  If a producer replaces the original path before the rename, the captured entry is rechecked and
+  preserved under a fresh `.recovered-<nonce>.mail` name when it does not match the verdict. A crash
+  leaves the claim private for five minutes; the next non-dry pass recovers stale claims to fresh
+  visible names. Producers must publish only at their original inbox names and must not modify claim
+  directories or mailman's nonce-suffixed recovery names. A mail that classified WAKE is never passed
+  to step 1–4 at all (§6.5).
 - **Lock-free.** Mailman takes no `fleet.lock` (like `relay-ack` and `watch`). Two concurrent runs are
-  safe: the second exclusive link finds the source gone (`FileNotFoundError`) and treats it as filed;
-  the worst case is one duplicate digest line, which `digest` collapses by marker.
+  safe: the exclusive rename allows only one run to claim a published inbox name. A competing run
+  sees that name gone and leaves the private claim to its owner; stale claims are recovered after
+  five minutes if that owner crashes.
 
 ### 6.4 State: "already reported" wake mails
 

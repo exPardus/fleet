@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,8 @@ from fleet_errors import FleetCliError
 
 CONFIG_NAME = "mailman.json"
 MAIL_MAX_BYTES = 1024 * 1024
+CLAIMS_DIR_NAME = ".mailman-claims"
+CLAIM_STALE_SECONDS = 300
 WAKE, FILE = "WAKE", "FILE"
 DEFAULT_INTERVAL = 30.0
 DIGEST_DEFAULT_SINCE = "24h"
@@ -234,6 +237,159 @@ def file_identity(path: Path):
     return st.st_dev, st.st_ino
 
 
+def claims_dir(home) -> Path:
+    return inbox_dir(home) / CLAIMS_DIR_NAME
+
+
+def _ensure_claims_dir(home) -> Path:
+    root = claims_dir(home)
+    try:
+        os.mkdir(root, 0o700)
+    except FileExistsError:
+        try:
+            st = os.lstat(root)
+        except OSError:
+            raise
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError("mailman claims path is not a directory")
+    return root
+
+
+def _new_claim_dir(home) -> Path:
+    root = _ensure_claims_dir(home)
+    while True:
+        path = root / f"claim-{uuid.uuid4().hex}"
+        try:
+            os.mkdir(path, 0o700)
+            return path
+        except FileExistsError:
+            continue
+
+
+def _remove_private_claim(claim: Path, claim_dir: Path) -> None:
+    """Remove only a claim path inside our exclusive private claim directory."""
+    try:
+        os.unlink(claim)
+    except FileNotFoundError:
+        pass
+    try:
+        os.unlink(claim_dir / "origin")
+    except FileNotFoundError:
+        pass
+    try:
+        claim_dir.rmdir()
+    except OSError:
+        pass
+
+
+def _recovered_name(original_name: str | None) -> str:
+    stem = clean_name(original_name or "mail")
+    return f"{stem}.recovered-{uuid.uuid4().hex}.mail"
+
+
+def _publish_claim(home, claim: Path, claim_dir: Path,
+                   original_name: str | None = None) -> bool:
+    """Expose a private claim under a fresh name without replacing an arrival."""
+    inbox = inbox_dir(home)
+    for _ in range(8):
+        target = inbox / _recovered_name(original_name)
+        try:
+            os.link(claim, target, follow_symlinks=False)
+        except FileExistsError:
+            continue
+        except OSError:
+            return False
+        claim_id = file_identity(claim)
+        if claim_id is None or file_identity(target) != claim_id:
+            return False
+        # Producers write only their original inbox publication names; this
+        # random path is private to mailman and cannot replace a new arrival.
+        _remove_private_claim(claim, claim_dir)
+        return True
+    return False
+
+
+def _restore_stale_claim(home, claim: Path, claim_dir: Path,
+                         original_name: str | None) -> bool:
+    """Restore the published name exclusively, or expose a fresh recovery name."""
+    if original_name and Path(original_name).name == original_name:
+        target = inbox_dir(home) / original_name
+        try:
+            os.link(claim, target, follow_symlinks=False)
+        except FileExistsError:
+            pass
+        except OSError:
+            return False
+        else:
+            _remove_private_claim(claim, claim_dir)
+            return True
+    return _publish_claim(home, claim, claim_dir, original_name)
+
+
+def _recover_stale_claims(home, *, now=None) -> int:
+    """Make crash-left claims visible again; active (<5 min) claims stay private."""
+    root = claims_dir(home)
+    try:
+        st = os.lstat(root)
+    except OSError:
+        return 0
+    if not stat.S_ISDIR(st.st_mode):
+        return 0
+    current = time.time() if now is None else now
+    recovered = 0
+    for entry in list(root.iterdir()):
+        try:
+            entry_stat = os.lstat(entry)
+        except OSError:
+            continue
+        if (not stat.S_ISDIR(entry_stat.st_mode)
+                or current - entry_stat.st_mtime < CLAIM_STALE_SECONDS):
+            continue
+        claim = entry / "mail"
+        try:
+            claim_stat = os.lstat(claim)
+        except OSError:
+            _remove_private_claim(claim, entry)
+            continue
+        if not (stat.S_ISREG(claim_stat.st_mode) or stat.S_ISLNK(claim_stat.st_mode)):
+            continue
+        try:
+            original_name = os.fsdecode((entry / "origin").read_bytes())
+        except OSError:
+            original_name = None
+        if _restore_stale_claim(home, claim, entry, original_name):
+            recovered += 1
+    return recovered
+
+
+def _claim_source(home, name: str, v: Verdict):
+    """Atomically move the exact classified inbox entry into a private claim."""
+    src = inbox_dir(home) / name
+    raw, problem, inode = read_mail_snapshot(src)
+    if (problem is not None or inode != v.inode
+            or hashlib.sha256(raw).hexdigest() != v.sha):
+        return None
+    claim_dir = _new_claim_dir(home)
+    claim = claim_dir / "mail"
+    try:
+        (claim_dir / "origin").write_bytes(os.fsencode(name))
+        # The fresh, exclusive directory means this target cannot overwrite
+        # an existing claim or another home-inbox file.
+        os.rename(src, claim)
+    except FileNotFoundError:
+        _remove_private_claim(claim, claim_dir)
+        return None
+    except OSError:
+        _remove_private_claim(claim, claim_dir)
+        return None
+    claimed, claimed_problem, claimed_inode = read_mail_snapshot(claim)
+    if (claimed_problem is not None or claimed_inode != v.inode
+            or hashlib.sha256(claimed).hexdigest() != v.sha):
+        _publish_claim(home, claim, claim_dir, name)
+        return None
+    return claim, claim_dir
+
+
 def read_mail_snapshot(path: Path):
     try:
         st = os.lstat(path)
@@ -365,11 +521,12 @@ def _step_cursor(home, name, v: Verdict, prims: Prims):
         prims.write_cursor(home, cursor)
 
 
-def _step_move(home, name, v: Verdict, prims: Prims):
-    src = inbox_dir(home) / name
-    raw, problem, inode = read_mail_snapshot(src)
+def _step_move(home, name, v: Verdict, prims: Prims,
+               claim: Path, claim_dir: Path):
+    raw, problem, inode = read_mail_snapshot(claim)
     if (problem is not None or inode != v.inode
             or hashlib.sha256(raw).hexdigest() != v.sha):
+        _publish_claim(home, claim, claim_dir, name)
         raise _Changed(name)
     target_dir = done_dir(home)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -385,20 +542,18 @@ def _step_move(home, name, v: Verdict, prims: Prims):
             dest = target_dir / f"{stem}.{v.sha[:12]}.{attempt - 1}{suffix}"
 
         try:
-            os.link(src, dest)
+            os.link(claim, dest)
         except FileExistsError:
             old, old_problem, _ = read_mail_snapshot(dest)
             if (old_problem is None
                     and hashlib.sha256(old).hexdigest() == v.sha):
-                source, source_problem, source_inode = read_mail_snapshot(src)
-                if (source_problem is None and source_inode == v.inode
-                        and hashlib.sha256(source).hexdigest() == v.sha):
-                    os.unlink(src)
+                _remove_private_claim(claim, claim_dir)
                 return
             collision = True
             attempt += 1
             continue
         except FileNotFoundError:
+            _publish_claim(home, claim, claim_dir, name)
             return
 
         # The pathname can be replaced between the pre-link read and link(2).
@@ -406,22 +561,19 @@ def _step_move(home, name, v: Verdict, prims: Prims):
         linked_raw, linked_problem, linked_inode = read_mail_snapshot(dest)
         if (linked_problem is not None or linked_inode != v.inode
                 or hashlib.sha256(linked_raw).hexdigest() != v.sha):
-            created_inode = file_identity(dest)
-            if created_inode is not None and file_identity(dest) == created_inode:
-                os.unlink(dest)
+            # Leave an unexpected destination in place for inspection; a
+            # check-then-unlink would recreate the same replacement race.
+            _publish_claim(home, claim, claim_dir, name)
             raise _Changed(name)
 
         if collision:
             prims.append(log_path(home), (
                 f"{prims.now()} mailman done-collision {clean_name(name)} -> "
                 f"{clean_name(dest.name)}\n").encode("utf-8", "replace"))
-        # A replacement after link(2) remains in the inbox for a fresh pass.
-        # Never unlink a pathname whose current inode differs from the one
-        # that produced this FILE verdict.
-        source, source_problem, source_inode = read_mail_snapshot(src)
-        if (source_problem is None and source_inode == v.inode
-                and hashlib.sha256(source).hexdigest() == v.sha):
-            os.unlink(src)
+        # The only removable source is inside our private exclusive claim
+        # directory. A producer's replacement at the published inbox name is
+        # never unlinked after a check.
+        _remove_private_claim(claim, claim_dir)
         return
 
 
@@ -432,9 +584,15 @@ class _Changed(Exception):
 def file_mail(home, name, v: Verdict, prims: Prims) -> bool:
     if v.kind != FILE:
         raise AssertionError(f"refusing to file a {v.kind} mail: {name}")
+    claimed = _claim_source(home, name, v)
+    if claimed is None:
+        return False
+    claim, claim_dir = claimed
     try:
-        for step in (_step_digest, _step_log, _step_cursor, _step_move):
-            step(home, name, v, prims)
+        _step_digest(home, name, v, prims)
+        _step_log(home, name, v, prims)
+        _step_cursor(home, name, v, prims)
+        _step_move(home, name, v, prims, claim, claim_dir)
     except _Changed:
         return False
     return True
@@ -485,6 +643,7 @@ def run_bridge(home, cfg: Config, state: dict, prims: Prims, run=subprocess.run)
 
 
 def _sort_pass(home, cfg, failsafe, prims):
+    _recover_stale_claims(home)
     wakes, filed = [], 0
     for name in list_inbox(home):
         raw, problem, inode = read_mail_snapshot(inbox_dir(home) / name)

@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,8 @@ def run(home, capsys, *argv):
 
 
 def inbox(home):
-    return sorted(p.name for p in (home / "mailbox" / "to-fleet").iterdir())
+    return sorted(p.name for p in (home / "mailbox" / "to-fleet").iterdir()
+                  if p.name != mm.CLAIMS_DIR_NAME)
 
 
 def done(home):
@@ -136,12 +138,14 @@ def test_crash_mid_sort_never_loses_a_mail(home, capsys, monkeypatch, step):
         with pytest.raises(OSError):
             mailman(home, "run", "--timeout", "0")
     capsys.readouterr()
-    present = inbox(home) + done(home)
-    assert present == ["a.md"]
+    claims = list(mm.claims_dir(home).glob("claim-*/mail"))
+    assert len(claims) == 1 and claims[0].read_text() == text
+    old = time.time() - mm.CLAIM_STALE_SECONDS - 1
+    os.utime(claims[0].parent, (old, old))
     rc, out, err = run(home, capsys)  # idempotent re-run completes
     assert rc == 3
-    assert inbox(home) == [] and done(home) == ["a.md"]
-    assert (home / "mailbox" / "done" / "a.md").read_text() == text
+    assert inbox(home) == [] and len(done(home)) == 1
+    assert (home / "mailbox" / "done" / done(home)[0]).read_text() == text
     assert len(lines(DIGEST(home))) == 1
     assert len([l for l in lines(LOG(home)) if "mailman filed" in l]) == 1
 
@@ -166,6 +170,58 @@ def test_done_collision_never_overwrites(home, capsys):
     assert (home / "mailbox" / "done" / "a.md").read_text() == "OLD"
     other = [n for n in names if n != "a.md"][0]
     assert (home / "mailbox" / "done" / other).read_text() == text
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_atomic_claim_preserves_arrival_at_original_path(home, capsys, monkeypatch,
+                                                         duplicate):
+    seed(home)
+    text = mail()
+    source = put(home, "a.md", text)
+    if duplicate:
+        target = home / "mailbox" / "done" / "a.md"
+        target.parent.mkdir(parents=True)
+        target.write_text(text)
+    original_unlink = mm.os.unlink
+    injected = False
+
+    def replace_original_before_claim_unlink(path, *args, **kwargs):
+        nonlocal injected
+        path = Path(path)
+        if (not injected and path.name == "mail"
+                and path.parent.parent == mm.claims_dir(home)):
+            injected = True
+            source.write_text("kind: question\nneeds-answer: yes\n\nnew arrival\n")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(mm.os, "unlink", replace_original_before_claim_unlink)
+    run(home, capsys)
+    assert injected
+    assert source.read_text() == "kind: question\nneeds-answer: yes\n\nnew arrival\n"
+    assert any(p.read_text() == text for p in (home / "mailbox" / "done").iterdir())
+
+
+def test_replacement_at_atomic_rename_boundary_is_recovered_visibly(home, capsys,
+                                                                   monkeypatch):
+    seed(home)
+    text = mail()
+    source = put(home, "a.md", text)
+    original_rename = mm.os.rename
+    injected = False
+
+    def replace_before_claim_rename(src, dst, *args, **kwargs):
+        nonlocal injected
+        if not injected and Path(src) == source:
+            injected = True
+            source.write_text("kind: question\nneeds-answer: yes\n\nnew arrival\n")
+        return original_rename(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(mm.os, "rename", replace_before_claim_rename)
+    run(home, capsys)
+    assert injected
+    assert source.exists() or any(
+        p.read_text() == "kind: question\nneeds-answer: yes\n\nnew arrival\n"
+        for p in (home / "mailbox" / "to-fleet").glob("*.recovered-*.mail"))
 
 
 def test_done_collision_skips_an_occupied_suffixed_name(home, capsys):
@@ -198,7 +254,7 @@ def test_changed_mail_not_filed(home, monkeypatch):
     assert inbox(home) == ["a.md"] and done(home) == []
 
 
-def test_replacement_before_link_is_not_archived(home, monkeypatch):
+def test_replacement_after_claim_before_link_is_preserved(home, monkeypatch):
     seed(home)
     p = put(home, "a.md", mail())
     prims = fleet._mailman_prims()
@@ -211,16 +267,14 @@ def test_replacement_before_link_is_not_archived(home, monkeypatch):
 
     def replace_before_link(src, dest, *args, **kwargs):
         nonlocal replaced
-        if not replaced and Path(src) == p:
-            temp = p.with_name("a.replacement")
-            temp.write_text(replacement, encoding="utf-8")
-            os.replace(temp, p)
+        if not replaced and Path(src).name == "mail":
+            p.write_text(replacement, encoding="utf-8")
             replaced = True
         return real_link(src, dest, *args, **kwargs)
 
     monkeypatch.setattr(mm.os, "link", replace_before_link)
-    assert mm.file_mail(home, "a.md", verdict, prims) is False
-    assert inbox(home) == ["a.md"] and done(home) == []
+    assert mm.file_mail(home, "a.md", verdict, prims) is True
+    assert inbox(home) == ["a.md"] and done(home) == ["a.md"]
     assert p.read_text(encoding="utf-8") == replacement
 
 
@@ -239,10 +293,8 @@ def test_replacement_after_link_is_preserved_in_inbox(home, monkeypatch):
     def replace_after_link(src, dest, *args, **kwargs):
         nonlocal replaced
         result = real_link(src, dest, *args, **kwargs)
-        if not replaced and Path(src) == p:
-            temp = p.with_name("a.replacement")
-            temp.write_text(replacement, encoding="utf-8")
-            os.replace(temp, p)
+        if not replaced and Path(src).name == "mail":
+            p.write_text(replacement, encoding="utf-8")
             replaced = True
         return result
 
