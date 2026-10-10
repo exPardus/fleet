@@ -302,6 +302,41 @@ def test_stale_recovery_uses_alias_before_removing_claim(home, monkeypatch):
     assert not claim_dir.exists()
 
 
+def test_repeated_recovery_crashes_keep_original_idempotency_marker(home, capsys,
+                                                                    monkeypatch):
+    seed(home)
+    text = mail()
+    claim_dir = mm.claims_dir(home) / "claim-abandoned"
+    claim_dir.mkdir(parents=True)
+    (claim_dir / "mail").write_text(text)
+    (claim_dir / "origin").write_bytes(b"a.md")
+    lock_fd = os.open(mm._owner_lock_path(claim_dir), os.O_CREAT | os.O_RDWR, 0o600)
+    mm._acquire_owner_lock(lock_fd, initialize=True)
+    os.close(lock_fd)
+    old = time.time() - mm.CLAIM_STALE_SECONDS - 1
+    os.utime(claim_dir, (old, old))
+
+    assert mm._recover_stale_claims(home) == 1
+    alias1 = next((home / "mailbox" / "to-fleet").glob("a.md.recovered-*.mail"))
+    assert mm._canonical_mail_name(alias1.name) == "a.md"
+    with monkeypatch.context() as patching:
+        patching.setattr(mm, "_step_log", _boom)
+        with pytest.raises(OSError):
+            mailman(home, "run", "--timeout", "0")
+    assert len(lines(DIGEST(home))) == 1
+    crashed_claim = next(mm.claims_dir(home).glob("claim-*/mail"))
+    old = time.time() - mm.CLAIM_STALE_SECONDS - 1
+    os.utime(crashed_claim.parent, (old, old))
+
+    rc, out, err = run(home, capsys)
+    assert rc == 3
+    assert len(lines(DIGEST(home))) == 1
+    assert len([line for line in lines(LOG(home)) if "mailman filed a.md" in line]) == 1
+    assert "a.md" in json.loads(
+        (home / "state" / "interface" / "watch-cursor.json").read_text())["mail"]
+    assert mm._canonical_mail_name(mm._recovered_name(alias1.name)) == "a.md"
+
+
 def test_done_collision_skips_an_occupied_suffixed_name(home, capsys):
     seed(home)
     done_dir = home / "mailbox" / "done"

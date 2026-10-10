@@ -355,7 +355,7 @@ def _release_owner_lock(claim_dir: Path, owner_fd: int) -> None:
 
 
 def _recovered_name(original_name: str | None) -> str:
-    stem = clean_name(original_name or "mail")
+    stem = clean_name(_canonical_mail_name(original_name or "mail"))
     return f"{stem}.recovered-{uuid.uuid4().hex}.mail"
 
 
@@ -610,8 +610,11 @@ def _step_cursor(home, name, v: Verdict, prims: Prims):
 
 
 def _canonical_mail_name(name: str) -> str:
-    match = re.fullmatch(r"(.+)\.recovered-[0-9a-f]{32}\.mail", name)
-    return match.group(1) if match else name
+    while True:
+        match = re.fullmatch(r"(.+)\.recovered-[0-9a-f]{32}\.mail", name)
+        if match is None:
+            return name
+        name = match.group(1)
 
 
 def _step_move(home, name, v: Verdict, prims: Prims,
