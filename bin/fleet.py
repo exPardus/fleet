@@ -2192,6 +2192,18 @@ def _codex_wait_summaries(record: dict) -> list[dict]:
     } for wait in waits]
 
 
+def _codex_current_waits(record: dict) -> list[dict]:
+    """Treat every nonstale unresolved or unreadable callback as a wait."""
+    return [wait for wait in _codex_wait_summaries(record)
+            if wait.get("stale") is not True]
+
+
+def _require_no_codex_current_waits(name: str, record: dict) -> None:
+    if _codex_current_waits(record):
+        raise FleetCliError(
+            f"{name}: unresolved native Codex callback wait; refusing send")
+
+
 def _provider_codex_id(value, label):
     """Validate a UUIDv7 returned by the provider; shape never grants authority."""
     if not isinstance(value, str):
@@ -2287,6 +2299,29 @@ def _codex_worker_has_completed_evidence(binding: CodexWorkerBinding) -> bool:
     evidence = _codex_public_evidence_file(binding)
     return (isinstance(evidence, dict)
             and evidence.get("turn_status") == "completed")
+
+
+def _codex_worker_has_complete_result_evidence(
+        binding: CodexWorkerBinding) -> bool:
+    """Require the full exact result before skipping public item hydration."""
+    if binding.record.get("pending_operation") is not None:
+        return False
+    evidence = _codex_public_evidence_file(binding)
+    if evidence is None:
+        return False
+    if type(evidence.get("schema")) is not int or evidence["schema"] != 1:
+        raise FleetCliError(f"{binding.name}: durable result schema is malformed")
+    if evidence.get("turn_status") != "completed":
+        if evidence.get("turn_status") in {"failed", "interrupted"}:
+            return False
+        raise FleetCliError(f"{binding.name}: durable turn status is malformed")
+    _validate_codex_worker_result_evidence(binding, evidence)
+    if (not isinstance(evidence.get("result_text"), str)
+            or not isinstance(evidence.get("result_item_id"), str)
+            or evidence.get("result_truncated") is not False):
+        raise FleetCliError(
+            f"{binding.name}: completed durable result item is incomplete")
+    return True
 
 
 def _codex_error_code(turn: dict) -> str | None:
@@ -2416,12 +2451,12 @@ def _codex_paged_thread_read(client, thread_id: str, generation: str,
 
 
 def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
-                          *, require_full=False) -> dict:
+                          *, require_full=False, hydrate_items=True) -> dict:
     """Read one exact worker thread/turn through the existing home host."""
     client = client or _codex_existing_client(FLEET_HOME)
     observation = _codex_paged_thread_read(
         client, binding.thread_id, binding.host_generation, "worker-read",
-        hydrate_turn=binding.turn_id)
+        hydrate_turn=binding.turn_id if hydrate_items else None)
     if observation.generation != binding.host_generation:
         raise FleetCliError(
             f"{binding.name}: native Codex host generation changed; "
@@ -4302,7 +4337,8 @@ def recompute_worker_native(name: str, record: dict, roster_entries: list) -> di
 
 def recompute_worker_codex(name: str, record: dict,
                            run=subprocess.run, which=shutil.which,
-                           *, _allow_uncertain_completion=False) -> dict:
+                           *, _allow_uncertain_completion=False,
+                           metadata_only=False) -> dict:
     """Derive a Codex verdict through its record-local adapter."""
     updated = dict(record)
     updated.pop("waiting_for_permission", None)
@@ -4325,7 +4361,8 @@ def recompute_worker_codex(name: str, record: dict,
         try:
             binding = _codex_worker_binding(name, record)
             completed_evidence = _codex_worker_has_completed_evidence(binding)
-            observed = _codex_worker_observe(binding)
+            observed = _codex_worker_observe(
+                binding, hydrate_items=not metadata_only)
         except (FleetCliError, OSError, ValueError):
             updated["status"] = "dead-suspected"
             updated["adapter_state"] = "uncertain"
@@ -4333,10 +4370,11 @@ def recompute_worker_codex(name: str, record: dict,
         status, adapter_state = _codex_worker_status(observed)
         if status == "dead-suspected" and completed_evidence and observed["turn_status"] == "completed":
             status, adapter_state = "idle", "idle"
-        waits = _codex_wait_summaries(record)
-        current_waits = [wait for wait in waits if not wait.get("stale")]
-        if any(wait.get("state") in {"unknown", "unreadable"}
-               for wait in current_waits):
+        current_waits = _codex_current_waits(record)
+        if metadata_only and (observed["active_flags"] or current_waits):
+            status, adapter_state = "dead-suspected", "uncertain"
+        elif any(wait.get("state") in {"unknown", "unreadable"}
+                 for wait in current_waits):
             status, adapter_state = "dead-suspected", "uncertain"
         elif observed["provider_status"] == "active" and current_waits:
             status, adapter_state = "working", "waiting"
@@ -9738,6 +9776,7 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
         rec.get("pending_operation") is None
         and rec.get("status") == "dead-suspected"
         and rec.get("adapter_state") == "uncertain")
+    completed_idle = False
     if not restart_candidate:
         _guard_codex_worker_operation(
             name, rec, "send", allowed_statuses=allowed_statuses,
@@ -9752,8 +9791,24 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
             _guard_codex_worker_operation(
                 name, rec, "send", allowed_statuses=allowed_statuses,
                 allowed_adapter_states=allowed_adapter_states)
-        observed = _codex_worker_observe(
-            binding, client=client, require_full=True)
+        completed_idle = (
+            not allow_limited
+            and rec.get("status") == "idle"
+            and rec.get("adapter_state") == "idle"
+            and rec.get("provider_status") == "idle"
+            and _codex_worker_has_complete_result_evidence(binding))
+        if completed_idle:
+            # Starting a successor turn needs the exact current turn's
+            # completed status, not its possibly oversized item history.
+            observed = _codex_worker_observe(
+                binding, client=client, hydrate_items=False)
+            if (observed["provider_status"] != "idle"
+                    or observed["turn_status"] != "completed"):
+                observed = _codex_worker_observe(
+                    binding, client=client, require_full=True)
+        else:
+            observed = _codex_worker_observe(
+                binding, client=client, require_full=True)
     _guard_codex_worker_operation(
         name, rec, "send", allowed_statuses=allowed_statuses,
         allowed_adapter_states=allowed_adapter_states)
@@ -9773,13 +9828,20 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
             and observed.get("error_code") in _CODEX_LIMIT_ERRORS):
         raise FleetCliError(
             f"{name}: worker is limited -- use `fleet resume-limited {name}`")
+    _require_no_codex_current_waits(name, rec)
 
     operation_id = f"worker-send-{uuid.uuid4()}"
     method = "turn/steer" if provider == "active" else "turn/start"
     _reserve_codex_worker_operation(
         binding, operation_id, method,
         allowed_statuses=allowed_statuses,
-        allowed_adapter_states=allowed_adapter_states)
+        allowed_adapter_states=allowed_adapter_states,
+        expected_record=rec if completed_idle else None)
+    try:
+        _require_no_codex_current_waits(name, rec)
+    except BaseException:
+        _clear_codex_worker_operation(binding, operation_id)
+        raise
     try:
         append_mailbox(binding.thread_id, message)
     except BaseException as exc:
@@ -13789,16 +13851,18 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
     for name, before in candidates.items():
         try:
             binding = _codex_worker_binding(name, before)
-            if not _codex_worker_has_completed_evidence(binding):
+            if not _codex_worker_has_complete_result_evidence(binding):
                 continue
+            # Exact completed evidence permits metadata-only observation even
+            # when ordinary status must retain the uncertainty fence.
             updated = recompute_worker_codex(
-                name, before, _allow_uncertain_completion=True)
+                name, before, _allow_uncertain_completion=True,
+                metadata_only=True)
         except (FleetCliError, OSError, ValueError):
             continue
-        if updated.get("status") != "idle":
+        if (updated.get("status") != "idle"
+                or updated.get("waiting_for_permission")):
             continue
-        updated = dict(updated)
-        updated.pop("waiting_for_permission", None)
         prepared[name] = (before, updated)
 
     if not prepared:
