@@ -31,11 +31,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-if os.name != "nt":
-    import fcntl
-else:
-    fcntl = None
-
 import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
@@ -837,185 +832,24 @@ from fleet_platform import PLATFORM, _WindowsPlatform, _PosixPlatform, Unsupport
 # Registry lock (SPEC §4): atomic-create lock file, retry, stale-break.
 # ---------------------------------------------------------------------------
 
-LOCK_TIMEOUT_SECONDS = 5.0
-LOCK_STALE_SECONDS = 30.0
-LOCK_RETRY_INTERVAL_SECONDS = 0.05
-
-
-class FleetLockTimeout(Exception):
-    """Raised when state/fleet.lock could not be acquired within the timeout."""
-
-
-def _fleet_lock_live_owner(path: Path) -> bool:
-    """A delayed live owner must not be mistaken for a stale crashed owner."""
-    try:
-        raw = path.read_text(encoding="ascii")
-        modern = "|" in raw
-        parts = raw.split("|", 2) if modern else raw.split(":", 1)
-        pid = int(parts[0])
-        if pid <= 0:
-            return False
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, ValueError, UnicodeError, IndexError):
-        return False
-    # The original token format contained only PID and nonce. Treat a live
-    # PID as ambiguous rather than unlinking a lock that might still be held.
-    if not modern or len(parts) != 3:
-        return True
-    if parts[1] == "unknown":
-        return True
-    try:
-        from fleet_codex import _process_identities_match, _process_identity
-        observed = _process_identity(pid)
-        if not isinstance(observed, str):
-            return True
-        matches = _process_identities_match(parts[1], observed)
-        return matches is not False
-    except Exception:  # noqa: BLE001 -- unknown liveness cannot authorize unlink
-        return True
-
-
-def _fleet_lock_same_file(fd: int, path: Path) -> bool:
-    """A pathname may have changed while a contender waited for its inode."""
-    try:
-        opened = os.fstat(fd)
-        named = path.lstat()
-    except FileNotFoundError:
-        return False
-    return (stat.S_ISREG(opened.st_mode) and stat.S_ISREG(named.st_mode)
-            and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino))
+from fleet_lock import (
+    LOCK_TIMEOUT_SECONDS, LOCK_STALE_SECONDS, LOCK_RETRY_INTERVAL_SECONDS,
+    FleetLockTimeout, _fleet_lock_live_owner, _fleet_lock_same_file,
+    registry_lock, fcntl,
+)
 
 
 @contextmanager
 def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
-    """Lock one home's registry; ``home`` avoids changing global selection."""
+    """Use the shared lock while preserving the CLI's patchable facade."""
     path = (lock_path() if home is None
             else Path(home) / "state" / "fleet.lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + timeout
-    fd = None
-    from fleet_codex import _process_identity
-    identity = _process_identity(os.getpid()) or "unknown"
-    token = f"{os.getpid()}|{identity}|{uuid.uuid4().hex}"
-
-    def retry_or_timeout() -> None:
-        if time.monotonic() >= deadline:
-            raise FleetLockTimeout(f"timed out waiting for lock: {path}")
-
-    while fd is None:
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            if fcntl is not None:
-                # Keep a kernel lock on this inode through the whole registry
-                # transaction. A stale breaker must acquire the same lock
-                # before it may unlink the name. This closes the race between
-                # two contenders that both inspected an old stale pathname.
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                if not _fleet_lock_same_file(fd, path):
-                    os.close(fd)
-                    fd = None
-                    retry_or_timeout()
-                    continue
-        except FileExistsError:
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                retry_or_timeout()
-                continue  # someone else already broke/released it; retry immediately
-            if not stat.S_ISREG(info.st_mode):
-                raise FleetCliError(f"unsafe non-regular lock path: {path}")
-            age = time.time() - info.st_mtime
-            if age > LOCK_STALE_SECONDS and fcntl is not None:
-                try:
-                    stale_fd = os.open(str(path), os.O_RDONLY
-                                       | getattr(os, "O_NOFOLLOW", 0)
-                                       | getattr(os, "O_NONBLOCK", 0))
-                except FileNotFoundError:
-                    retry_or_timeout()
-                    continue
-                try:
-                    try:
-                        fcntl.flock(stale_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        pass
-                    else:
-                        if _fleet_lock_same_file(stale_fd, path):
-                            try:
-                                current = path.lstat()
-                            except FileNotFoundError:
-                                current = None
-                            if (current is not None
-                                    and time.time() - current.st_mtime > LOCK_STALE_SECONDS
-                                    and not _fleet_lock_live_owner(path)):
-                                try:
-                                    path.unlink()
-                                except FileNotFoundError:
-                                    pass
-                                retry_or_timeout()
-                                continue
-                finally:
-                    os.close(stale_fd)
-            elif age > LOCK_STALE_SECONDS and not _fleet_lock_live_owner(path):
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-                retry_or_timeout()
-                continue
-            retry_or_timeout()
-            time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
-        except PermissionError as denied:
-            # Windows delete-pending lock names can raise PermissionError instead of EEXIST.
-            # A present name is contention: poll under the deadline without stale-breaking,
-            # because unlink can also be denied. An absent name means directory access failed;
-            # re-raise that error instead of reporting a misleading lock timeout.
-            try:
-                info = path.lstat()
-            except FileNotFoundError:
-                raise denied
-            if not stat.S_ISREG(info.st_mode):
-                raise FleetCliError(f"unsafe non-regular lock path: {path}")
-            retry_or_timeout()
-            time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
-    try:
-        os.write(fd, token.encode("utf-8"))
-    except OSError:
-        # O_EXCL proves this file is ours. On token-write failure, close and remove it
-        # so other acquirers are not stranded; cleanup must preserve the original error.
-        try:
-            if _fleet_lock_same_file(fd, path):
-                path.unlink()
-        except OSError:
-            pass
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    try:
-        if fcntl is None:
-            os.close(fd)
+    with registry_lock(
+            path, timeout=timeout, stale_seconds=LOCK_STALE_SECONDS,
+            retry_interval=LOCK_RETRY_INTERVAL_SECONDS,
+            live_owner=_fleet_lock_live_owner, same_file=_fleet_lock_same_file,
+            kernel_lock=fcntl):
         yield
-    finally:
-        # Compare-and-delete: only unlink if the lock file still holds our
-        # token. A successor may have broken our (apparently stale) lock and
-        # now owns it -- deleting blindly here would cascade (F1).
-        try:
-            current = path.read_bytes()
-        except (FileNotFoundError, OSError):
-            current = None
-        if current == token.encode("utf-8"):
-            try:
-                if fcntl is None or _fleet_lock_same_file(fd, path):
-                    path.unlink()
-            except (FileNotFoundError, OSError):
-                pass
-        if fcntl is not None:
-            os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -9222,8 +9056,527 @@ def _parse_codex_response_decision(raw: str):
     return parsed
 
 
+def _settle_codex_supervisor_approval(
+        binding, operation_id, old_claim, old_row,
+        reserved_claim, reserved_row) -> bool:
+    """Clear only our complete reservation; preserve independent product rows."""
+    with fleet_lock():
+        status, claim = read_incarnation_status()
+        registry = read_registry_no_repair()
+        workers = registry.get("workers")
+        row = workers.get(binding.name) if isinstance(workers, dict) else None
+        if (status != "ok" or claim != reserved_claim or row != reserved_row
+                or claim.get("pending_operation", {}).get("operation_id") != operation_id):
+            return False
+        registry["workers"][binding.name] = old_row
+        save_registry(registry)
+        # Keep the blocking claim reservation until the row is durable.
+        write_incarnation(old_claim)
+        return True
+
+
+# This pin identifies the already loaded PR31/32 dispatcher reviewed for the
+# fixed, non-granting denial contract. Host metadata cannot attest Python code
+# bytes after process start; the operator procedure must separately prove the
+# loaded process provenance before invoking this compatibility command.
+FIXED_DECLINE_OLD_HOST_SHA256 = (
+    "ef4516e021043984f7aee4d408d6c9292393def4696353bf3a01d71b3aa2036b")
+
+
+def _fixed_decline_request_id(raw, kind):
+    """Keep JSON string and integer request IDs distinct end to end."""
+    if not isinstance(raw, str) or not raw or len(raw) > 160:
+        raise FleetCliError("fixed decline requires one bounded request ID")
+    if kind == "int":
+        if not raw.isascii() or not raw.isdecimal() or str(int(raw)) != raw:
+            raise FleetCliError("fixed decline integer request ID is not canonical")
+        return int(raw)
+    if kind == "string":
+        return raw
+    raise FleetCliError("fixed decline request ID type is required")
+
+
+def _fixed_decline_request_matches(request, args, binding, typed_id):
+    """Compare the entire immutable target, including the typed store key."""
+    from fleet_codex import (HostRejected, _approval_decision, _approval_key,
+                             _fleet_state_digest)
+    if not isinstance(request, dict):
+        return False
+    params = request.get("params")
+    if not isinstance(params, dict):
+        return False
+    offered = request.get("offered_decisions")
+    cwd_present = "cwd" in params
+    if args.expect_cwd_absent:
+        cwd_matches = not cwd_present
+    else:
+        cwd_matches = (cwd_present and isinstance(params["cwd"], str)
+                       and bool(params["cwd"])
+                       and params["cwd"] == args.expect_request_cwd)
+    if (request.get("schema") != 1
+            or type(request.get("request_id")) is not type(typed_id)
+            or request.get("request_id") != typed_id
+            or request.get("home") != str(FLEET_HOME.resolve())
+            or request.get("generation") != binding.host_generation
+            or request.get("key") != _approval_key(binding.host_generation, typed_id)
+            or request.get("key") != args.expect_request_key
+            or _fleet_state_digest(request) != args.expect_request_digest
+            or request.get("state") != "pending"
+            or request.get("method") != "item/commandExecution/requestApproval"
+            or request.get("method") != args.expect_method
+            or request.get("thread_id") != binding.authority.value
+            or request.get("turn_id") != binding.current_turn_id
+            or request.get("item_id") != args.expect_item_id
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or params.get("command") != args.expect_command
+            or not cwd_matches
+            or not isinstance(offered, list)
+            or any(not isinstance(choice, str) for choice in offered)
+            or "decline" not in offered):
+        return False
+    try:
+        return _approval_decision(request["method"], "decline", params) == {
+            "decision": "decline"}
+    except (ValueError, HostRejected):
+        return False
+
+
+def _fixed_decline_durable_request(args, binding, typed_id):
+    """Read only the host's owner-only durable store, with typed ambiguity."""
+    from fleet_codex import read_pending_requests
+    rows = read_pending_requests(
+        FLEET_HOME, binding.authority.value, binding.current_turn_id,
+        current_generation=binding.host_generation)
+    # The old host compares IDs as text after filtering thread and turn. If
+    # both JSON 6 and "6" exist, it refuses; the CLI must do the same.
+    matches = [row for row in rows
+               if str(row.get("request_id")) == str(typed_id)
+               and row.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        return None
+    current = dict(matches[0])
+    current.pop("stale", None)
+    return current if _fixed_decline_request_matches(
+        current, args, binding, typed_id) else None
+
+
+def _fixed_decline_host_matches(client, args, generation):
+    """Bind the old process, not only a reusable PID or metadata snapshot."""
+    from fleet_codex import _process_identity, _process_identities_match
+    if (type(args.expect_host_pid) is not int or args.expect_host_pid <= 0
+            or client.generation != generation
+            or client.host_pid != args.expect_host_pid
+            or client.host_process_identity != args.expect_host_process_identity):
+        return False
+    observed = _process_identity(args.expect_host_pid)
+    return (isinstance(observed, str) and
+            _process_identities_match(args.expect_host_process_identity,
+                                      observed) is True)
+
+
+def _fixed_decline_fresh_processes_match(args, generation):
+    """Reopen supported host metadata after reads; bind the original child."""
+    from fleet_codex import (CodexHostClient, _process_identity,
+                             _process_identities_match)
+    if (type(args.expect_app_server_pid) is not int
+            or args.expect_app_server_pid <= 0
+            or not isinstance(args.expect_app_server_process_identity, str)
+            or not args.expect_app_server_process_identity
+            or type(args.expect_app_server_started_at) is not float
+            or args.expect_app_server_started_at <= 0):
+        return False
+    fresh = CodexHostClient.connect_existing(FLEET_HOME)
+    if (not _fixed_decline_host_matches(fresh, args, generation)
+            or fresh.app_server_pid != args.expect_app_server_pid
+            or fresh.app_server_process_identity
+            != args.expect_app_server_process_identity
+            or fresh.app_server_started_at
+            != args.expect_app_server_started_at):
+        return False
+    observed = _process_identity(args.expect_app_server_pid)
+    return (isinstance(observed, str) and
+            _process_identities_match(
+                args.expect_app_server_process_identity, observed) is True)
+
+
+def _settle_fixed_decline_rejection(
+        binding, operation_id, old_claim, old_row, reserved_claim,
+        reserved_row, args, typed_id) -> bool:
+    """Release only a returned rejection with exact still-pending evidence."""
+    with fleet_lock():
+        status, claim = read_incarnation_status()
+        registry = read_registry_no_repair()
+        workers = registry.get("workers")
+        row = workers.get(binding.name) if isinstance(workers, dict) else None
+        if (status != "ok" or claim != reserved_claim or row != reserved_row
+                or claim.get("pending_operation", {}).get("operation_id")
+                != operation_id
+                or _fixed_decline_durable_request(args, binding, typed_id) is None):
+            return False
+        registry["workers"][binding.name] = old_row
+        save_registry(registry)
+        write_incarnation(old_claim)
+        return True
+
+
+def cmd_codex_decline_fixed(args) -> int:
+    """Decline one typed, fully pinned supervisor callback on the old host."""
+    from fleet_codex import HostRejected, _fleet_state_digest
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("fixed decline requires explicit --fleet-home")
+    if args.decision != "decline" or args.expect_method != (
+            "item/commandExecution/requestApproval"):
+        raise FleetCliError("fixed decline permits only command approval decline")
+    typed_id = _fixed_decline_request_id(args.request_id, args.request_id_type)
+    if (args.expect_old_host_sha256 != FIXED_DECLINE_OLD_HOST_SHA256
+            or not isinstance(args.expect_host_generation, str)
+            or not args.expect_host_generation
+            or not isinstance(args.expect_host_process_identity, str)
+            or not args.expect_host_process_identity
+            or type(args.expect_app_server_pid) is not int
+            or args.expect_app_server_pid <= 0
+            or not isinstance(args.expect_app_server_process_identity, str)
+            or not args.expect_app_server_process_identity
+            or type(args.expect_app_server_started_at) is not float
+            or args.expect_app_server_started_at <= 0
+            or not isinstance(args.expect_request_key, str)
+            or len(args.expect_request_key) != 64
+            or not isinstance(args.expect_request_digest, str)
+            or len(args.expect_request_digest) != 64
+            or not isinstance(args.expect_item_id, str)
+            or not args.expect_item_id
+            or (not args.expect_cwd_absent
+                and (not isinstance(args.expect_request_cwd, str)
+                     or not args.expect_request_cwd))):
+        raise FleetCliError("fixed decline source or exact target pins are incomplete")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("fixed decline requires the current registered Codex Interface")
+    status, claim = read_incarnation_status()
+    if status != "ok":
+        raise FleetCliError("fixed decline supervisor claim is absent or corrupt")
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    if (binding.incarnation_id != args.expect_inc
+            or binding.authority.value != args.expect_thread
+            or binding.current_turn_id != args.expect_turn
+            or binding.host_generation != args.expect_host_generation
+            or claim.get("pending_operation") is not None
+            or binding.record.get("pending_operation") is not None):
+        raise FleetCliError("fixed decline exact held binding disagrees")
+    client = _codex_existing_client(FLEET_HOME)
+    if not _fixed_decline_host_matches(
+            client, args, binding.host_generation):
+        raise FleetCliError("fixed decline old host identity changed")
+    # A capable host retains its reviewed accept-only reservation route. This
+    # typed denial applies only to the exact old unknown-method dispatcher.
+    try:
+        capability = client.supervisor_approval_reservation_supported()
+    except HostRejected as exc:
+        if str(exc) != "unknown host method":
+            raise FleetCliError("fixed decline host capability is ambiguous") from exc
+    else:
+        raise FleetCliError(
+            "fixed decline old-host compatibility requires absent reservation method"
+            if capability is False else
+            "fixed decline does not alter the capable-host approval route")
+    observed = _codex_supervisor_observe(binding, client=client)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"
+            or "waitingOnApproval" not in observed["active_flags"]):
+        raise FleetCliError("fixed decline current turn is not awaiting approval")
+    waits = client.pending_approvals(
+        binding.authority.value, binding.current_turn_id)
+    if not isinstance(waits, list) or any(not isinstance(row, dict) for row in waits):
+        raise FleetCliError("fixed decline pending request list is malformed")
+    matches = [row for row in waits
+               if str(row.get("request_id")) == str(typed_id)]
+    if (len(matches) != 1
+            or not _fixed_decline_request_matches(
+                matches[0], args, binding, typed_id)):
+        raise FleetCliError("fixed decline exact pending request disagrees")
+    request = matches[0]
+    operation_id = f"supervisor-fixed-decline-{uuid.uuid4().hex}"
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        current = _codex_supervisor_binding(
+            current_claim, current_registry, expected_name=binding.name,
+            allowed_states={"held"}) if current_status == "ok" else None
+        durable = _fixed_decline_durable_request(args, binding, typed_id)
+        if (current_claim != claim or current != binding
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)
+                or not _fixed_decline_host_matches(
+                    client, args, binding.host_generation)
+                or durable != request):
+            raise FleetCliError("fixed decline binding, Interface, or request changed")
+        try:
+            child_unchanged = _fixed_decline_fresh_processes_match(
+                args, binding.host_generation)
+        except Exception as exc:
+            raise FleetCliError(
+                "fixed decline fresh host/child identity is unavailable") from exc
+        if not child_unchanged:
+            raise FleetCliError(
+                "fixed decline original app-server child changed before reservation")
+        old_claim = dict(current_claim)
+        old_row = dict(current.record)
+        reservation = {
+            "operation_id": operation_id, "kind": "approval-response",
+            "name": binding.name, "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "host_generation": binding.host_generation,
+            "request_id": typed_id, "request_key": request["key"],
+            "request_digest": _fleet_state_digest(request),
+            "method": request["method"], "command": args.expect_command,
+            "cwd": request["params"].get("cwd"),
+            "item_id": request["item_id"],
+            "claim_digest": _fleet_state_digest(old_claim),
+            "row_digest": _fleet_state_digest(old_row),
+            "previous_claim_operation_id": old_claim.get("last_operation_id"),
+            "previous_record_operation_id": old_row.get("last_operation_id"),
+            "previous_adapter_state": old_row.get("adapter_state"),
+        }
+        current_claim["pending_operation"] = reservation
+        current_claim["last_operation_id"] = operation_id
+        row = current_registry["workers"][binding.name]
+        row["adapter_state"] = "mutating"
+        row["last_operation_id"] = operation_id
+        reserved_claim = dict(current_claim)
+        reserved_row = dict(row)
+        try:
+            write_incarnation(current_claim)
+            save_registry(current_registry)
+        except Exception as exc:
+            raise FleetCliError(
+                "fixed decline reservation write incomplete; request was not sent") from exc
+    try:
+        result = client.respond_approval(
+            typed_id, binding.authority.value, binding.current_turn_id,
+            "decline", timeout=10,
+            supervisor_reservation={key: reservation[key] for key in (
+                "operation_id", "name", "incarnation_id", "thread_id",
+                "turn_id", "host_generation", "request_id", "request_key",
+                "request_digest", "method", "command", "cwd", "item_id")})
+    except Exception as exc:
+        if isinstance(exc, HostRejected):
+            try:
+                _settle_fixed_decline_rejection(
+                    binding, operation_id, old_claim, old_row,
+                    reserved_claim, reserved_row, args, typed_id)
+            except Exception:
+                pass
+        raise FleetCliError(
+            "fixed decline outcome uncertain; inspect exact durable request "
+            "and reservation; never replay") from exc
+    if (not isinstance(result, dict)
+            or result.get("state") not in {"responded", "resolved"}
+            or type(result.get("request_id")) is not type(typed_id)
+            or result.get("request_id") != typed_id
+            or result.get("thread_id") != binding.authority.value
+            or result.get("turn_id") != binding.current_turn_id):
+        raise FleetCliError(
+            "fixed decline result mismatch; preserve reservation and never replay")
+    if not _settle_codex_supervisor_approval(
+            binding, operation_id, old_claim, old_row,
+            reserved_claim, reserved_row):
+        raise FleetCliError(
+            "fixed decline consumed request but reservation settlement needs review")
+    print(f"{binding.name}: fixed request {typed_id!r} declined once")
+    return 0
+
+
+def _cmd_codex_supervisor_respond(args) -> int:
+    """Answer one exact held supervisor command request from its Interface."""
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("supervisor codex-respond requires explicit --fleet-home")
+    if getattr(args, "nonce", None) is not None:
+        raise FleetCliError("supervisor codex-respond uses Interface registration, not a nonce")
+    if not isinstance(args.request_id, str) or not args.request_id:
+        raise FleetCliError("supervisor codex-respond requires one exact request ID")
+    expected = {key: getattr(args, key, None) for key in (
+        "expect_inc", "expect_thread", "expect_turn",
+        "expect_host_generation", "expect_method", "expect_command")}
+    if any(not isinstance(value, str) or not value for value in expected.values()):
+        raise FleetCliError("supervisor codex-respond requires exact claim and request expectations")
+    if (expected["expect_method"] != "item/commandExecution/requestApproval"
+            or args.decision != "accept"):
+        raise FleetCliError("supervisor codex-respond supports one command accept only")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError(
+            "supervisor codex-respond requires the current registered Codex Interface")
+    status, claim = read_incarnation_status()
+    if status != "ok":
+        raise FleetCliError("supervisor codex-respond claim absent or corrupt")
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    if (binding.incarnation_id != expected["expect_inc"]
+            or binding.authority.value != expected["expect_thread"]
+            or binding.current_turn_id != expected["expect_turn"]
+            or binding.host_generation != expected["expect_host_generation"]
+            or claim.get("pending_operation") is not None
+            or binding.record.get("pending_operation") is not None):
+        raise FleetCliError("supervisor codex-respond exact held binding disagrees")
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("supervisor codex-respond host generation changed")
+    try:
+        if not client.supervisor_approval_reservation_supported():
+            raise FleetCliError("supervisor codex-respond host lacks the reservation fence")
+    except Exception as exc:
+        raise FleetCliError(
+            "supervisor codex-respond running host lacks the reviewed reservation "
+            "fence; preserve the request and coordinate host upgrade") from exc
+    observed = _codex_supervisor_observe(binding, client=client)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"
+            or "waitingOnApproval" not in observed["active_flags"]):
+        raise FleetCliError("supervisor codex-respond current turn is not awaiting approval")
+    waits = client.pending_approvals(
+        binding.authority.value, binding.current_turn_id)
+    if not isinstance(waits, list) or any(not isinstance(row, dict) for row in waits):
+        raise FleetCliError("supervisor codex-respond pending request list is malformed")
+    matches = [row for row in waits if str(row.get("request_id")) == args.request_id]
+    if len(matches) != 1:
+        raise FleetCliError("supervisor codex-respond request missing or ambiguous")
+    request = matches[0]
+    params = request.get("params")
+    request_cwd = params.get("cwd") if isinstance(params, dict) else None
+    if (request.get("state") != "pending"
+            or request.get("home") != str(FLEET_HOME.resolve())
+            or request.get("generation") != binding.host_generation
+            or request.get("thread_id") != binding.authority.value
+            or request.get("turn_id") != binding.current_turn_id
+            or request.get("method") != expected["expect_method"]
+            or not isinstance(params, dict)
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or not isinstance(request.get("item_id"), str)
+            or not request["item_id"]
+            or params.get("itemId") != request["item_id"]
+            or params.get("command") != expected["expect_command"]
+            or ("cwd" in params and
+                (not isinstance(request_cwd, str) or not request_cwd))
+            or request_cwd != getattr(args, "expect_request_cwd", None)
+            or not isinstance(request.get("offered_decisions"), list)
+            or any(not isinstance(choice, str)
+                   for choice in request["offered_decisions"])
+            or "accept" not in request["offered_decisions"]):
+        raise FleetCliError("supervisor codex-respond exact pending request disagrees")
+    from fleet_codex import _approval_decision, _fleet_state_digest
+    _approval_decision(request["method"], "accept", params)
+    # Recheck the process-bound Interface and complete claim/row identity after
+    # provider reads. Unrelated product rows may progress independently.
+    operation_id = f"supervisor-approval-{uuid.uuid4().hex}"
+    with fleet_lock():
+        current_status, current_claim = read_incarnation_status()
+        current_registry = read_registry_no_repair()
+        current = _codex_supervisor_binding(
+            current_claim, current_registry, expected_name=binding.name,
+            allowed_states={"held"}) if current_status == "ok" else None
+        if (current_claim != claim or current != binding
+                or _registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)
+                or client.generation != binding.host_generation):
+            raise FleetCliError("supervisor codex-respond binding or Interface changed")
+        old_claim = dict(current_claim)
+        old_row = dict(current.record)
+        reservation = {
+            "operation_id": operation_id, "kind": "approval-response",
+            "name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "host_generation": binding.host_generation,
+            "request_id": args.request_id,
+            "request_key": request["key"],
+            "request_digest": _fleet_state_digest(request),
+            "method": request["method"],
+            "command": expected["expect_command"],
+            "cwd": request_cwd,
+            "item_id": request["item_id"],
+            "claim_digest": _fleet_state_digest(old_claim),
+            "row_digest": _fleet_state_digest(old_row),
+            "previous_claim_operation_id": old_claim.get("last_operation_id"),
+            "previous_record_operation_id": old_row.get("last_operation_id"),
+            "previous_adapter_state": old_row.get("adapter_state"),
+        }
+        current_claim["pending_operation"] = reservation
+        current_claim["last_operation_id"] = operation_id
+        row = current_registry["workers"][binding.name]
+        row["adapter_state"] = "mutating"
+        row["last_operation_id"] = operation_id
+        reserved_claim = dict(current_claim)
+        reserved_row = dict(row)
+        # A failed second write leaves a visible, blocking claim reservation.
+        # No host call occurs until both durable files are written.
+        try:
+            write_incarnation(current_claim)
+            save_registry(current_registry)
+        except Exception as exc:
+            raise FleetCliError(
+                "supervisor codex-respond reservation write incomplete; "
+                "request was not sent; inspect the claim and row before settlement") from exc
+    try:
+        result = client.respond_approval(
+            args.request_id, binding.authority.value,
+            binding.current_turn_id, "accept", timeout=10,
+            supervisor_reservation={key: reservation[key] for key in (
+                "operation_id", "name", "incarnation_id", "thread_id",
+                "turn_id", "host_generation", "request_id", "request_key",
+                "request_digest",
+                "method", "command", "cwd", "item_id")})
+    except Exception as exc:
+        # A returned pre-consumption rejection may be settled only when the
+        # durable request still says pending. Transport ambiguity stays fenced.
+        from fleet_codex import HostRejected
+        if isinstance(exc, HostRejected):
+            try:
+                pending = [row for row in client.pending_approvals(
+                    binding.authority.value, binding.current_turn_id)
+                    if row.get("key") == request["key"]]
+                if len(pending) == 1 and pending[0].get("state") == "pending":
+                    _settle_codex_supervisor_approval(
+                        binding, operation_id, old_claim, old_row,
+                        reserved_claim, reserved_row)
+            except Exception:
+                pass
+        raise FleetCliError(
+            "supervisor codex-respond outcome uncertain; inspect the durable "
+            "request and reservation; do not retry blindly") from exc
+    state = result.get("state") if isinstance(result, dict) else None
+    if (state not in {"responded", "resolved"}
+            or str(result.get("request_id")) != args.request_id
+            or result.get("thread_id") != binding.authority.value
+            or result.get("turn_id") != binding.current_turn_id):
+        raise FleetCliError(
+            "supervisor codex-respond outcome uncertain; inspect the durable "
+            "request and do not retry blindly")
+    if not _settle_codex_supervisor_approval(
+            binding, operation_id, old_claim, old_row,
+            reserved_claim, reserved_row):
+        raise FleetCliError(
+            "supervisor codex-respond consumed the request but reservation "
+            "settlement needs review; do not retry")
+    print(f"{binding.name}: Codex request {args.request_id} response consumed once ({state})")
+    return 0
+
+
 def cmd_codex_respond(args) -> int:
     """Explicitly consume one current native-Codex blocking request."""
+    if args.name == SUPERVISOR_BODY_NAME:
+        return _cmd_codex_supervisor_respond(args)
+    if any(getattr(args, key, None) is not None for key in (
+            "expect_inc", "expect_thread", "expect_turn", "expect_host_generation",
+            "expect_method", "expect_command", "expect_request_cwd")):
+        raise FleetCliError("supervisor response expectations require target 'supervisor'")
     _supervisor_gate("send", nonce=getattr(args, "nonce", None))
     name = _resolve_worker_target(args.name)
     data = read_registry_no_repair()
@@ -25591,6 +25944,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_codex_respond.add_argument(
         "decision", help="literal offered choice, JSON object, or @file")
     p_codex_respond.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+    p_codex_respond.add_argument("--expect-inc")
+    p_codex_respond.add_argument("--expect-thread")
+    p_codex_respond.add_argument("--expect-turn")
+    p_codex_respond.add_argument("--expect-host-generation")
+    p_codex_respond.add_argument("--expect-method")
+    p_codex_respond.add_argument("--expect-command")
+    p_codex_respond.add_argument("--expect-request-cwd")
+
+    p_fixed_decline = sub.add_parser(
+        "codex-decline-fixed",
+        help="decline one fully pinned native supervisor command request on "
+             "the reviewed old host")
+    p_fixed_decline.add_argument("request_id")
+    p_fixed_decline.add_argument("decision", choices=("decline",))
+    p_fixed_decline.add_argument("--request-id-type", required=True,
+                                 choices=("int", "string"))
+    for field in ("inc", "thread", "turn", "host-generation", "method",
+                  "item-id", "command", "request-key", "request-digest",
+                  "old-host-sha256", "host-process-identity",
+                  "app-server-process-identity"):
+        p_fixed_decline.add_argument(f"--expect-{field}", required=True)
+    p_fixed_decline.add_argument("--expect-host-pid", required=True, type=int)
+    p_fixed_decline.add_argument("--expect-app-server-pid", required=True,
+                                 type=int)
+    p_fixed_decline.add_argument("--expect-app-server-started-at", required=True,
+                                 type=float)
+    cwd_group = p_fixed_decline.add_mutually_exclusive_group(required=True)
+    cwd_group.add_argument("--expect-request-cwd")
+    cwd_group.add_argument("--expect-cwd-absent", action="store_true")
 
     p_codex_reobserve = sub.add_parser(
         "codex-reobserve-active",
@@ -26149,6 +26531,8 @@ def main(argv=None) -> int:
             parser.error(f"unknown mail command {args.mail_command!r}")
         if args.command == "codex-respond":
             return cmd_codex_respond(args)
+        if args.command == "codex-decline-fixed":
+            return cmd_codex_decline_fixed(args)
         if args.command == "codex-reobserve-active":
             return cmd_codex_reobserve_active(args)
         if args.command == "lane-done":

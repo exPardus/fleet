@@ -1,0 +1,53 @@
+{
+  "created_at": 1700000000.0,
+  "generation": "host-generation-1",
+  "home": "/fixture/apps",
+  "item_id": "exec-00000000-0000-4000-8000-000000000001",
+  "key": "0000000000000000000000000000000000000000000000000000000000000000",
+  "method": "item/commandExecution/requestApproval",
+  "offered_decisions": [
+    "accept",
+    "acceptForSession",
+    "decline",
+    "cancel",
+    "acceptWithExecpolicyAmendment"
+  ],
+  "params": {
+    "availableDecisions": [
+      "accept",
+      {
+        "acceptWithExecpolicyAmendment": {
+          "execpolicy_amendment": [
+            "fleet",
+            "status"
+          ]
+        }
+      },
+      "cancel"
+    ],
+    "command": "fleet status --json",
+    "commandActions": [
+      {
+        "command": "fleet status --json",
+        "type": "unknown"
+      }
+    ],
+    "cwd": "/fixture/apps/example",
+    "environmentId": "synthetic",
+    "itemId": "exec-00000000-0000-4000-8000-000000000001",
+    "kind": "command",
+    "proposedExecpolicyAmendment": [
+      "fleet",
+      "status"
+    ],
+    "reason": "May I inspect a synthetic command request?",
+    "startedAtMs": 1700000000000,
+    "threadId": "00000000-0000-4000-8000-000000000002",
+    "turnId": "00000000-0000-4000-8000-000000000003"
+  },
+  "request_id": 1,
+  "schema": 1,
+  "state": "pending",
+  "thread_id": "00000000-0000-4000-8000-000000000002",
+  "turn_id": "00000000-0000-4000-8000-000000000003"
+}

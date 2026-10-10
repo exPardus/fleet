@@ -574,7 +574,8 @@ turn/item identity plus host generation before status exposes them. They survive
 restart as visible generation-bound waits; a request from a replaced
 generation is stale and cannot be answered on the new connection.
 
-`fleet codex-respond NAME REQUEST_ID DECISION` is the only response path.
+For ordinary workers, `fleet codex-respond NAME REQUEST_ID DECISION` is the
+response path.
 `DECISION` is an offered literal, an explicit JSON response object, or `@file`;
 the host validates it against the stored request, marks the request consumed
 before writing the JSON-RPC response, and never retries an uncertain write.
@@ -582,6 +583,52 @@ Repeated, resolved, wrong-home, wrong-thread, wrong-turn, stale-generation,
 and unknown-kind responses refuse. `serverRequest/resolved` closes the durable
 wait; user-input and elicitation values are not retained in response evidence.
 No mode supplies `acceptForSession` or user input implicitly.
+
+For a held native supervisor, `codex-respond supervisor` has a separate
+Interface-only command-approval path. It requires explicit `--fleet-home`,
+`--expect-inc`, `--expect-thread`, `--expect-turn`,
+`--expect-host-generation`, `--expect-method`, and `--expect-command`;
+`--expect-request-cwd` must match if the durable request carries a cwd.
+The current process-bound Codex Interface, exact held claim and registry row,
+existing host generation, newest active turn awaiting approval, and one
+pending request must agree before the one-shot response. This path accepts
+only literal `accept` for `item/commandExecution/requestApproval`; it does not
+change the supervisor mode or grant a session-wide policy. The host records
+consumption before the provider write. Any transport ambiguity requires
+inspection of that durable record and never triggers a replay. Other targets
+continue through the ordinary worker guard.
+
+The running host must advertise the supervisor approval reservation capability;
+an older host refuses this route before any request or Fleet state mutation.
+The host and CLI share the same owner-safe `fleet.lock` implementation: an
+aged live owner stays protected, stale handoff checks the locked inode, and
+unsafe paths refuse without removal.
+The CLI reserves the complete current claim and unique supervisor row under
+`fleet.lock`, and the host revalidates the current Interface peer, reservation,
+full claim and row, and exact command request under the same lock immediately
+before changing the request to `responding`. The reservation blocks competing
+supervisor operations through the provider response and is cleared by exact
+claim/row comparison after an acknowledged result. A partial reservation write
+or ambiguous transport result stays visible and blocks further supervisor
+mutation. Reconciliation must inspect the durable approval state and current
+claim/row first; `responding`, `responded`, `resolved`, or `uncertain` never
+authorize replay. A reviewed exact compare-and-swap may clear a stranded
+reservation after classifying the request, without changing unrelated workers.
+
+The separate `codex-decline-fixed` verb handles one fully pinned native
+supervisor command approval on a reviewed older host that lacks the supervisor
+reservation method. It requires the genuine current Codex Interface and
+explicit home, exact held claim and supervisor row with no pending operation,
+typed request ID, request generation/thread/turn/key/digest/item/command/cwd,
+and the pinned old host source and process identity. It permits only literal
+`decline` for `item/commandExecution/requestApproval`; other decisions and
+methods refuse. After public and durable request reads, and immediately before
+reserving the claim and row, the CLI reopens supported host metadata and
+checks both the host and the original app-server child's PID, OS start identity,
+and startup time. A replacement child refuses before reservation or provider
+response. The CLI keeps the exact reservation through the one response and
+clears it only after acknowledged, exact settlement. A lost reply or process
+death after the final check remains uncertain and never authorizes replay.
 
 | Fleet mode | Codex approval | Codex sandbox | Behavior |
 | --- | --- | --- | --- |
@@ -759,6 +806,16 @@ The new result must report the recorded effective bypass policy and the
 same idle completed turn before local settlement. An accepted, uncertain,
 or mismatched result stays fenced, preserving journals and mail without a
 second resume. A plain held-claim `sup-reconcile` refuses this linked state.
+
+The authenticated `host/shutdown-restored` handler has one bounded lazy
+CLI-reader seam for the checked-shutdown helper. Import itself performs no
+filesystem mutations or process/network actions. The reachable helper chain does not
+write registry, claim, event or operation records, repair state, or dispatch
+provider mutations. It reads the existing Codex stores (their constructors may
+ensure owner-only store directories), takes the shared owner-safe lock, and
+publishes only the exact shutdown receipt after the irrevocable stop fence.
+Other host paths retain the writer-free module boundary. Structural closure
+and fresh-interpreter import audits enforce this exception.
 
 ### 10.4 Retiring an absent legacy Claude claim
 
