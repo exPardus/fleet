@@ -222,7 +222,9 @@ class TestIdleSupervisorWake:
             sleep=lambda s: None) == 0
         task = fleet.task_file_path(NAME).read_text(encoding="utf-8")
         assert "sup-status --json" in task
-        assert "sup-handoff-abort --successor-inc <inc>" in task
+        assert "sup-handoff-abort --successor-sid pending-sid --nonce " in task
+        assert "<inc>" not in task
+        assert "<CURRENT-NONCE>" not in task
         assert f'--fleet-home "{wake_home.as_posix()}"' in task
         assert "Run each nonce-minting\n   verb directly: never pipe or filter" in task
         assert "record every newly printed NONCE" in task
