@@ -238,38 +238,151 @@ def test_the_statusline_read_path_does_not_quarantine(tmp_path, monkeypatch):
         "operator's evidence in a loop.")
 
 
+def _view_execution_names(source, roots, *, do=False):
+    """Conservative call graph specialized to the explicit view's args.do.
+
+    Only constants and the propagated do field are known. Unknown conditions
+    explore both branches; unguarded calls are never excluded by helper name.
+    """
+    tree = ast.parse(source)
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    unknown = object()
+    names, visited = set(), set()
+    pending = [(name, (do, True)) for name in roots]
+
+    def value(node, env):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Name):
+            return env.get(node.id, unknown)
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.attr in {"do", "stale_ok"}):
+            return env.get(node.value.id + "." + node.attr, unknown)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value in {"do", "stale_ok"}):
+            return env.get(node.args[0].id + "." + node.args[1].value, unknown)
+        if isinstance(node, ast.BoolOp):
+            parts = [value(part, env) for part in node.values]
+            known = [bool(part) for part in parts if part is not unknown]
+            if isinstance(node.op, ast.And) and False in known:
+                return False
+            if isinstance(node.op, ast.Or) and True in known:
+                return True
+            if len(known) == len(parts):
+                return all(known) if isinstance(node.op, ast.And) else any(known)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            result = value(node.operand, env)
+            return not result if result is not unknown else unknown
+        return unknown
+
+    def visit(node, env):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        if isinstance(node, ast.If):
+            visit(node.test, env)
+            result = value(node.test, env)
+            branches = ([node.body, node.orelse] if result is unknown else
+                        [node.body if result else node.orelse])
+            endings = []
+            for branch in branches:
+                branch_env = dict(env)
+                ended = False
+                for child in branch:
+                    if visit(child, branch_env):
+                        ended = True
+                        break
+                endings.append(ended)
+                if result is not unknown:
+                    env.clear()
+                    env.update(branch_env)
+                else:
+                    # Unknown branch assignments must not leave a stale false
+                    # fact that hides a later mutation.
+                    for key in list(env):
+                        if branch_env.get(key, unknown) != env[key]:
+                            env[key] = unknown
+            return all(endings)
+        if isinstance(node, ast.IfExp):
+            visit(node.test, env)
+            result = value(node.test, env)
+            for child in ([node.body, node.orelse] if result is unknown else
+                          [node.body if result else node.orelse]):
+                visit(child, dict(env))
+            return
+        if isinstance(node, ast.Assign):
+            evaluated = value(node.value, env)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    env[target.id] = evaluated
+                    for field in ("do", "stale_ok"):
+                        env.pop(target.id + "." + field, None)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in functions):
+            # Preserve the do specialization only for a directly forwarded
+            # argument. Constructed/rebound/unknown arguments explore actions.
+            passed = (unknown, unknown)
+            if node.args and isinstance(node.args[0], ast.Name):
+                passed = tuple(env.get(node.args[0].id + "." + field, unknown)
+                               for field in ("do", "stale_ok"))
+            pending.append((node.func.id, passed))
+        for child in ast.iter_child_nodes(node):
+            visit(child, env)
+        return isinstance(node, ast.Return)
+
+    while pending:
+        name, bound_do = pending.pop()
+        key = (name, bound_do)
+        if key in visited or name not in functions:
+            continue
+        visited.add(key)
+        function = functions[name]
+        env = {}
+        if function.args.args:
+            for field, bound in zip(("do", "stale_ok"), bound_do):
+                env[function.args.args[0].arg + "." + field] = bound
+        for statement in function.body:
+            if visit(statement, env):
+                break
+    return names
+
+
 def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
-    """Views consume committed files; live host work belongs to explicit verbs."""
     forbidden = {"CodexHostClient", "reconcile_home", "OperationJournal"}
     source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(fleet.__file__))
-    functions = {
-        node.name: node for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    reachable = set()
-    pending = ["status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
-               "cmd_sup_guard", "cmd_mail_verify"]
-    while pending:
-        name = pending.pop()
-        if name in reachable or name not in functions:
-            continue
-        reachable.add(name)
-        for call in (node for node in ast.walk(functions[name])
-                     if isinstance(node, ast.Call)):
-            if isinstance(call.func, ast.Name) and call.func.id in functions:
-                pending.append(call.func.id)
-
-    live_names = {
-        node.id for name in reachable for node in ast.walk(functions[name])
-        if isinstance(node, ast.Name)
-    } | {
-        node.attr for name in reachable for node in ast.walk(functions[name])
-        if isinstance(node, ast.Attribute)
-    }
+    live_names = _view_execution_names(source, [
+        "status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
+        "cmd_sup_guard", "cmd_mail_verify"])
     assert forbidden.isdisjoint(live_names), (
-        f"read-only view call graph reaches live Codex host helpers: "
-        f"{sorted(forbidden & live_names)}")
+        "read-only view execution reaches live Codex helpers: "
+        + str(sorted(forbidden & live_names)))
+
+
+@pytest.mark.parametrize("call", ["OperationJournal", "CodexHostClient", "reconcile_home"])
+def test_view_detector_sees_unguarded_and_unknown_branch_mutations(call):
+    assert call in _view_execution_names(
+        f"def view(args):\n    {call}()\n", ["view"])
+    assert call in _view_execution_names(
+        f"def view(args):\n    if unknown_condition():\n        {call}()\n", ["view"])
+
+
+def test_view_detector_preserves_mutating_control_and_forwarded_do():
+    source = """def view(args):
+    return helper(args)
+def helper(args):
+    do = getattr(args, 'do', False)
+    if do and awake():
+        OperationJournal()
+"""
+    assert "OperationJournal" not in _view_execution_names(source, ["view"], do=False)
+    assert "OperationJournal" in _view_execution_names(source, ["view"], do=True)
+    assert "OperationJournal" in _view_execution_names(
+        source.replace("return helper(args)", "return helper(unknown_args())"), ["view"])
 
 
 # ---------------------------------------------------------------------------
@@ -663,3 +776,47 @@ def test_the_receipt_section_is_present_and_cited():
            "tests/test_views_doctrine.py" in CLAUDE_MD.read_text(encoding="utf-8"), (
         "the documents no longer name this pin, so a reader correcting D4 has "
         "no way to know a test is holding them to it.")
+
+
+def test_view_detector_does_not_reuse_rebound_argument_or_branch_facts():
+    assert "OperationJournal" in _view_execution_names("""def view(args):
+    args = unknown_args()
+    return helper(args)
+def helper(args):
+    if getattr(args, 'do', False):
+        OperationJournal()
+""", ["view"])
+    for condition in ("True", "unknown_condition()"):
+        assert "OperationJournal" in _view_execution_names(f"""def view(args):
+    do = getattr(args, 'do', False)
+    if {condition}:
+        do = True
+    if do:
+        OperationJournal()
+""", ["view"])
+
+
+def test_native_guard_readonly_branch_never_constructs_mutating_journal(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import fleet_codex
+    import test_codex_supervisor as fixtures
+
+    home = fixtures.supervisor_home.__wrapped__(tmp_path, monkeypatch)
+    fixtures._seed_native_supervisor(home, stale=True)
+    client = fixtures.FakeLifecycleClient(home, thread_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda selected: client)
+    before = {str(p.relative_to(home)): p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    calls = []
+
+    def prohibited(*args, **kwargs):
+        calls.append(True)
+        raise RuntimeError("mutating journal construction reached")
+
+    monkeypatch.setattr(fleet_codex, "OperationJournal", prohibited)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=False, json=True)) == 0
+    assert not calls
+    assert before == {str(p.relative_to(home)): p.read_bytes()
+                      for p in home.rglob("*") if p.is_file()}
+    with pytest.raises(RuntimeError, match="mutating journal"):
+        fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True))
+    assert calls == [True]
