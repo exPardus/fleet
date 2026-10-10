@@ -695,3 +695,50 @@ def test_callback_or_turn_drift_after_commit_retains_reservation(
     with pytest.raises(fleet.FleetCliError):
         fleet.cmd_codex_sup_interrupt_current(case.args)
     assert case.client.interrupt_calls == 1
+
+
+@pytest.mark.parametrize("replacement_read", ["thread", "approval-list"])
+def test_final_public_read_process_replacement_retains_reservation(
+    case, monkeypatch, replacement_read
+):
+    observed = fleet._codex_supervisor_observe
+    pending = case.client.pending_approvals
+    committed = {"done": False, "replaced": False}
+    commit = case.client.commit
+
+    def mark_commit(operation_id):
+        commit(operation_id)
+        committed["done"] = True
+
+    def observe(*args, **kwargs):
+        result = observed(*args, **kwargs)
+        if committed["done"] and replacement_read == "thread":
+            committed["replaced"] = True
+        return result
+
+    def list_pending(*args):
+        result = pending(*args)
+        if committed["done"] and replacement_read == "approval-list":
+            committed["replaced"] = True
+        return result
+
+    def fresh(*_):
+        if committed["replaced"]:
+            raise fleet.FleetCliError("original process replaced by final public read")
+        return case.client
+
+    monkeypatch.setattr(case.client, "commit", mark_commit)
+    monkeypatch.setattr(case.client, "pending_approvals", list_pending)
+    monkeypatch.setattr(fleet, "_codex_supervisor_observe", observe)
+    monkeypatch.setattr(fleet, "_sup_interrupt_fresh_processes", fresh)
+    with pytest.raises(fleet.FleetCliError, match="reservation retained; never replay"):
+        fleet.cmd_codex_sup_interrupt_current(case.args)
+    reservation, claim, row = _reservation(case)
+    assert committed["replaced"]
+    assert reservation is not None and claim["pending_operation"] == reservation
+    assert row["adapter_state"] == "mutating"
+    assert case.client.interrupt_calls == 1
+    assert case.client.journal.records()[0]["state"] == "committed"
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_codex_sup_interrupt_current(case.args)
+    assert case.client.interrupt_calls == 1

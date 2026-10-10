@@ -9969,6 +9969,9 @@ def cmd_codex_sup_interrupt_current(args) -> int:
             _sup_interrupt_record(args, binding, typed_id,
                                   state="resolved", original=original)
             _sup_interrupt_no_unresolved(binding)
+            # Public reads may replace a stale app-server child. Rebind both
+            # original OS starts after the last read, before publishing idle.
+            _sup_interrupt_fresh_processes(args, binding.host_generation)
         except Exception as exc:
             raise FleetCliError(
                 "supervisor interrupt final terminal/callback proof changed; "
