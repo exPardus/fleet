@@ -68,6 +68,52 @@ ID, real turn ID where applicable, and canonical cwd match the Fleet preclaim.
 
 ## 3. Current adapter and public protocol
 
+### Exact worker preaccept authentication rejection
+
+`fleet --fleet-home <exact-home> codex-settle-preaccept <worker> <operation-id>
+<host-generation> --evidence <owner-only-json> --expect-evidence-sha256 <sha>`
+settles one independently classified native worker `thread/start` whose
+original IPC call was rejected by host caller authentication before journal
+acceptance. The current process must be the registered, process-bound Codex
+Interface for that explicit home, and the home must have no supervisor claim.
+The evidence JSON pins the original row and prepared journal digests, exact
+payload, host generation and both live OS process identities, the original
+source provenance file bytes, and the correlated rejection report bytes. An
+operator-written description alone does not
+establish preacceptance; the versioned evidence and prior independent source
+classification must be reviewed before use.
+
+The command reconstructs the original `thread/start` payload and recovery
+metadata from the frozen row, then refuses any changed row, accepted or
+uncertain journal, provider ID, other unresolved operation, unresolved
+callback, host/source drift, or evidence mismatch. It makes no host or provider
+call. Its sole durable transition records the exact authentication rejection
+as a failed-before-acceptance disposition in the original operation journal.
+The registry is never written: the frozen original row remains
+`dead-suspected` / `uncertain`, with its operation link and launch inputs but
+without provider thread, turn, or generation IDs. A lost reply is recoverable
+by the same exact invocation and evidence hash. No new worker,
+thread, turn, task, brief, mail, or callback is created or consumed. A future
+ordinary dispatch requires a separate decision and a new name or reviewed
+cleanup; this command does not replay the failed spawn.
+The bounded operation inventory requires an explicit, current or archived
+registry owner for every unrelated terminal journal; malformed or ownerless
+entries refuse. Any target inbox or claimed target mail refuses before the
+journal transition and is checked again afterward. The target row is checked
+again before and after the journal write; unrelated registry progress may
+continue without a whole-registry rewrite. The registry,
+operation, callback, and mailbox scans have explicit size or entry bounds.
+The registry lock retains a live process owner past its age threshold. On
+POSIX, it also holds a kernel lock on the exact lock-file inode through the
+journal transition; stale-break contenders lock and recheck that inode before
+unlinking. This prevents a slow or suspended settlement writer from being
+replaced by another current Fleet CLI writer. A concurrent old CLI targeting
+the same worker or journal remains an act-time STOP condition; unrelated old
+CLI registry writes cannot be overwritten by this journal-only command.
+The lock path itself must be a regular file if present; a dangling symlink or
+other non-regular entry refuses without unlinking it, and a concurrent unlink
+retry remains bounded by the monotonic lock deadline.
+
 ### 3.1 Current mcx adapter
 
 At `6fa06c9`, `--model codex:<model>` sets `substrate=codex`,
@@ -652,6 +698,94 @@ codex:<model>`.
 Host restart never transfers/seizes. It reinitializes app-server, resumes the
 real holder thread, pages history, and recomputes guard. Unknown freezes and
 never creates a second supervisor body.
+The effective policy in a successful public `thread/resume` response is checked
+against the supervisor row's requested Fleet mode before generation adoption.
+For example, `workspaceWrite` under a recorded `bypass`/`dangerFullAccess`
+holder is a mismatch even if the thread and newest turn still match. Fleet
+keeps the original generation and uncertain claim, preserves the accepted or
+observed new-generation journal and all mail, and never repeats that resume
+or starts a turn. The normal resume builder supplies only the existing thread
+ID and `excludeTurns=true`.
+For an original `bypass` holder with an exact observed `workspaceWrite` resume,
+the current registered Codex Interface first runs
+`sup-reconcile --prepare-recorded-policy-restore` with explicit `--fleet-home`
+and exact expected incarnation, thread, turn, original resume operation, and
+observed host generation. This records a five-minute claim-bound proof of the
+original journal, current managed requirements, and bounded public
+idle/completed/no-new-turn evidence. It durably pins the exact prepared
+supervisor claim and row plus the thread inbox and claimed-mail identities and
+digests. Any later supervisor or target-mail change refuses before host
+creation, before provider dispatch, and before settlement; unrelated product
+worker rows may change. A loaded thread may be idle, and pinned
+0.155.1 ignores resume policy overrides for a loaded thread; `thread/unsubscribe`
+does not unload it. The exact observed Platform host and app-server child must
+exit and its heartbeat become stale. Then `--restore-recorded-policy` with the
+same pins creates only a fresh Platform host, validates the preflight and cold
+boundary, and reserves a new auditable resume intent. The pinned public
+`thread/resume` request supplies `threadId`,
+`excludeTurns=true`, canonical `cwd`, recorded `model`, `approvalPolicy=never`,
+`approvalsReviewer=user`, and `sandbox=danger-full-access`. A narrow host
+journal gate permits this linked request behind only the matching observed
+original intent from the prior generation. The original journal stays observed.
+Fleet adopts the fresh generation only after an exact effective bypass response,
+repeat public header, and locked claim/row/mail/source/host/journal comparison. An
+accepted but unverified new response remains uncertain; read-only reconcile can
+settle only its exact observed new operation. No turn is replayed or newly
+started.
+
+An exact committed policy restoration can coexist with the intentionally
+observed original resume. A later ordinary supervisor send carries a digest
+link to both journals. The committed restoration remains the durable anchor
+even if the original observed journal is missing or its state changes: the CLI
+refuses before mail is claimed, and the host refuses an unlinked mutation on
+that restored thread before provider acceptance, even when no unresolved
+journal remains. The host permits `turn/start` or `turn/steer` only when the
+original operation, generation, home, incarnation, thread, result policy,
+committed restoration, and bound turn agree; another unresolved operation
+still blocks the mutation. After a successful turn, the next normal send uses
+the genuine latest committed turn ID as its bound turn. The normal send remains
+the sole creator of a new turn. A failed pre-acceptance send from an older loaded host can be settled by
+the authenticated `sup-reconcile` path only when its exact failed journal,
+claimed-mail payload digest, unchanged original and restoration journals,
+idle newest bound turn, claim, row, and Interface source agree. It restores
+the claimed mail and the row's active adapter state without replaying a turn.
+Every public mutation requires object-shaped `params` before the host checks
+restoration history or accepts the journal. A malformed authenticated request
+becomes a correlated pre-acceptance failed journal; it cannot exit the shared
+host, reach the provider, or block a later valid operation as prepared intent.
+
+The older loaded host does not gain the new guard when CLI source changes.
+For the restored holder before its first successful normal send, use
+`sup-reconcile --prepare-restored-continuation` with explicit home and exact
+`--expect-inc`, `--expect-thread`, `--expect-turn`, `--expect-resume-op`,
+`--expect-restore-op`, and `--expect-new-generation`. It pins the complete
+worker inventory, claim, row, linked journals, target mail, registered
+Interface, public idle/completed header, and host and app-server identities
+for five minutes. The inventory distinguishes explicit mcx and daemon-hosted
+external-session rows from native app-server ownership; model text, an archived
+timestamp, or an old generation alone never proves that a row is external.
+Unknown provenance refuses. An old native preclaim needs an exact
+failed-before-acceptance journal. An old bound native thread needs a committed
+last-operation journal whose method, kind, and result bind its recorded turn,
+no unresolved callback, and a fresh public
+`thread/read` status of `notLoaded` with its recorded terminal newest turn.
+Missing, loaded, active, idle, or ambiguous native evidence refuses. The full
+registry, current and owner-only retired operation journals, and callback
+evidence are pinned and rechecked before
+host creation, dispatch, and settlement. Immediately before shutdown the old
+host must repeat the public `notLoaded` proof for each historical bound thread.
+Retiring a journal does not settle an accepted or observed intent; a retired
+unresolved record refuses preparation without editing the archive.
+After exact host and child exit with stale heartbeat,
+`--reattach-restored-continuation` with the same pins starts a fresh host
+generation and sends one distinct policy-bound `thread/resume` with
+`threadId`, `excludeTurns=true`, canonical `cwd`, recorded `model`,
+`approvalPolicy=never`, `approvalsReviewer=user`, and
+`sandbox=danger-full-access`. The host requires the same committed link.
+The new result must report the recorded effective bypass policy and the
+same idle completed turn before local settlement. An accepted, uncertain,
+or mismatched result stays fenced, preserving journals and mail without a
+second resume. A plain held-claim `sup-reconcile` refuses this linked state.
 
 ### 10.4 Retiring an absent legacy Claude claim
 

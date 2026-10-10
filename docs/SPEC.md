@@ -151,7 +151,7 @@ Receipt: path helpers `state_dir/mail_receipts_dir/logs_dir/mailbox_dir/journals
 
 - **Native discriminator:** `is_native(record)` ⇔ `dispatch_kind == "bg"` (@146). Every worker dispatched today is native. The deleted PID fields (`turn_pid`, `turn_pid_ctime`, `turn_pid_boot_id`) no longer exist in the schema; **tolerate-and-ignore**: a pre-pivot record carrying them loads fine (readers `.get()` what they need, `save_registry` round-trips unknown keys) and they decide nothing.
 - **Additive-schema rule (carried from v2.1 M1, still binding):** fields are added, never renamed/removed; readers default missing fields; the single writer preserves unknown fields on round-trip. No migration step, no format-version gate.
-- **Single-writer discipline:** only `fleet.py` writes `fleet.json`, under `state\fleet.lock` (`fleet_lock` @402 — atomic-rename lock, 5 s timeout, 30 s stale takeover). A JSON-unparseable registry is **quarantined** aside (`_quarantine_registry` @510 → `fleet.json.corrupt.<ts>`), a `registry_corrupt` event appended, exit 1 loud — never silently reset to empty.
+- **Single-writer discipline:** only `fleet.py` writes `fleet.json`, under `state\fleet.lock` (`fleet_lock` @402 — atomic-create lock, 5 s timeout). After 30 s, a stale lock can be taken over only when its recorded owner is dead or its PID start identity differs; an ambiguous live owner keeps the lock until it releases or an operator reviews it. On POSIX, the owner holds a kernel lock on the lock-file inode through its registry transaction; a stale breaker must lock and recheck that same inode before unlinking, so two breakers cannot unlink a successor's lock. A present symlink, directory, or other non-regular lock path refuses without removal; a genuinely vanished path retries only within the monotonic deadline. A pre-install CLI writer without this kernel protocol must be absent during a protected whole-registry transaction. The journal-only `codex-settle-preaccept` operation never writes `fleet.json`; it requires positive continuous exclusion only of an old or new command capable of writing its exact target row or operation journal through postcheck. Unrelated CLI activity may progress when it cannot write that target; a clear process snapshot alone does not establish the exclusion. A JSON-unparseable registry is **quarantined** aside (`_quarantine_registry` @510 → `fleet.json.corrupt.<ts>`), a `registry_corrupt` event appended, exit 1 loud — never silently reset to empty.
 - **Names:** human-chosen, `[a-z0-9-]+` (`NAME_RE` @472), and **never uuid-shaped** (`_SID_SHAPE_RE` @478, autoclean F6: a name-keyed archive filename must not be able to impersonate a session id).
 - **Spawn-immutable fields:** `mode`/`cwd`/`model`/`setting_sources`/`token_ceiling`/`spawned_by`/`spawned_by_lineage` are recorded at spawn and re-passed by every later launch path (steer, resume-limited, respawn carry-forward). `spawned_by_lineage` (claim-nonce §6.2) is the spawning supervisor claim's `lineage_id`; a later body of that lineage that proves continuity owns the workers it spawned even after a sid rotation, and a seize (which re-mints the lineage) deliberately breaks that. `max_budget_usd` survives in the schema for legacy tolerance but is **refused at dispatch time** under native (G3, §9).
 - **Cost fields (`cost_usd`/`cost_baseline`) are legacy-tolerated, not native-fed:** no sanctioned native source carries a dollar figure (contract: USD REFUTED-for-contract), so native accounting is **token-based** — `_native_cumulative_tokens` (@1060) sums `input+output` tokens across the worker's outcome records for the ceiling check, and `status` renders a token summary (`_native_token_summary` @2519).
@@ -350,6 +350,66 @@ clearing uncertainty; accepted or ambiguous effects remain frozen. A failed
 initial supervisor thread preclaim with no thread may be retired to a released
 claim and dead row by the same authenticated, exact-intent check. Neither path
 replays a provider mutation.
+An accepted `thread/resume` can return an effective sandbox different from
+the recorded supervisor mode after a host restart. Fleet treats that response
+as authoritative: a `bypass` holder recorded with `dangerFullAccess` cannot
+adopt a `workspaceWrite` resume. The claim and old host generation stay
+uncertain and the observed operation remains in its new-generation journal.
+The current registered Codex Interface may first use
+`sup-reconcile --prepare-recorded-policy-restore` with an explicit home and exact
+incarnation/thread/turn/original operation/observed host generation pins. This
+records a fresh bounded proof that the bound turn is uniquely newest, completed,
+and idle; it also checks the original observed journal and managed requirements,
+then durably pins the exact supervisor claim, row, and target inbox/claimed-mail
+contents and identities. Any later change to those targets refuses before host
+creation and provider dispatch; unrelated product rows may progress.
+Idle alone does not mean the thread is unloaded. The exact observed host and
+its app-server child must then exit, with a stale heartbeat, before
+`--restore-recorded-policy` can create a fresh host generation. The latter
+requires the same pins and a five-minute preflight, and sends one distinct
+policy-bound cold `thread/resume` for the original recorded `bypass` tuple.
+The original observed journal remains unchanged. Fleet adopts only an exact
+matching effective response after another public header and locked
+claim/row/mail/source/host/journal check. Rejection or ambiguity stays uncertain.
+No turn or original resume is replayed, and recorded policy is never changed
+implicitly.
+
+After an explicit recorded-policy restoration has settled, an idle native
+supervisor may be cold-reattached on its **same current thread** through
+`sup-reconcile --prepare-restored-continuation` followed, within five minutes
+and after the exact host and app-server child have exited, by
+`--reattach-restored-continuation`. Both calls require the exact incarnation,
+thread, completed turn, original observed resume, committed restoration, and
+old host generation. The prepare proof pins the current claim, row, journals,
+target mail, all other native rows and operations, callback records, source,
+and old host identity. The reattach creates one new host generation and sends
+one distinct policy-bound `thread/resume` with `excludeTurns`; it creates no
+turn and never retries an ambiguous accepted response. Ordinary continuation
+refuses an accepted unresolved historical operation.
+
+For an exact current-host continuation that must preserve unresolved retired
+history, both calls may additionally select one owner-only, SHA-256-pinned
+evidence manifest with `--preserve-retired-history-evidence` and
+`--expect-history-sha256`. This opt-in path permits exactly one accepted
+retired unbound `thread/start` and one accepted retired narrower-policy
+`thread/resume` whose archived bytes, returned identities, policies, and
+nonexecutable historical rows agree with the manifest and complete Fleet
+inventory. They remain observed and unresolved. Every implicated old host and
+app-server child must be presently absent, all historical bound turns must
+be publicly terminal and not loaded, the current manager's complete loaded
+list must contain only the held target, and the fresh manager's loaded list
+must be empty before the distinct resume. Every resolved callback must retain
+its store-created request dictionary, matching thread/turn/item identity,
+and creation and resolution evidence. Callback and historical mail inventories
+stay pinned
+across the cold boundary. Missing original process
+start identity is recorded as missing; present PID absence does not attest
+historical exit or prove zero historical turns. Only the current held thread
+is resumed. Unknown ownership, a newly live old process, accepted historical
+drift, or a lost reply leaves the current claim frozen. Native supervisor
+husks without the current claim cannot be respawned through the ordinary
+supervisor lifecycle route.
+
 For a stale legacy Claude supervisor claim whose nonce cannot be recovered,
 `sup-retire-legacy --expect-inc ... --expect-sid ...` is a separate explicit
 registered-Codex-Interface transition. It requires the exact home and old
