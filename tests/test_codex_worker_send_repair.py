@@ -330,3 +330,41 @@ def test_repair_uses_real_paged_observer_and_refuses_public_drift(native_home,mo
         assert claim.read_text()=='retained dispatch'
         if shape!='payload-drift':assert journal.path('worker-send-proof').read_bytes()==before
     assert all(method in ['thread/read','thread/turns/list'] for method in client.calls)
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="FIFO requires POSIX")
+def test_fifo_claim_refuses_promptly_without_a_writer(native_home, monkeypatch):
+    """Open the real no-writer FIFO; a subprocess timeout catches blocking open."""
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    home, lane, row, journal, claim, client, calls = frozen(native_home, monkeypatch)
+    claim.unlink()
+    os.mkfifo(claim)
+    inode = claim.lstat().st_ino
+    # Isolate a potential blocking regression so the suite fails instead of hanging.
+    # The child imports source only and never invokes any provider or live Fleet verb.
+    probe = """
+import sys
+from pathlib import Path
+import fleet
+try:
+    fleet._codex_claim_fingerprint(Path(sys.argv[1]))
+except fleet.FleetCliError:
+    pass
+else:
+    raise AssertionError('FIFO accepted as regular claimed mail')
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(claim)],
+        env={**os.environ, "PYTHONPATH": str(Path(fleet.__file__).parent)},
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    # The complete repair path must also refuse this unchanged FIFO before RPC.
+    assert fleet._reconcile_frozen_codex_worker_operations() == []
+    assert fleet.load_registry()["workers"]["cx-native"] == row
+    assert claim.lstat().st_ino == inode
+    assert calls == []

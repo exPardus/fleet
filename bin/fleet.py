@@ -13889,7 +13889,8 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
 
 def _codex_claim_fingerprint(path: Path):
     """Bind retained claimed mail to its regular inode and exact bytes."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
     fd = os.open(path, flags)
     try:
         info = os.fstat(fd)
