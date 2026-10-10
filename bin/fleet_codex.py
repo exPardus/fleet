@@ -1651,6 +1651,91 @@ class OperationJournal:
                 operation_id, {"observed"}, "committed", result=evidence)
         return record
 
+    def observed_operation(self, operation: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a durably observed mutation without sending it again.
+
+        This is the response-loss boundary: the complete immutable intent must
+        match the journal, and only an already observed/committed result is
+        recoverable.  Prepared, accepted, and uncertain intents remain frozen.
+        """
+        operation_id = self._validate_id(operation.get("operation_id"))
+        method = operation.get("method")
+        payload = operation.get("payload", {})
+        recovery = operation.get("recovery", {})
+        record = self.load(operation_id)
+        if (record.get("generation") != self.generation
+                or record.get("method") != method
+                or record.get("payload_digest") != _digest(method, payload)
+                or record.get("recovery") != _public_evidence(recovery)):
+            raise HostRejected(
+                f"operation {operation_id} does not match its durable intent")
+        if record.get("state") not in {"observed", "committed"}:
+            raise HostRejected(
+                f"operation {operation_id} is {record.get('state')}; exact "
+                "provider acceptance is not yet proven")
+        if "result" not in record:
+            raise HostRejected(
+                f"operation {operation_id} has no durable observed result")
+        return record
+
+    def worker_turn_id(
+            self, operation_id: str, *, fleet_name: str, thread_id: str,
+            previous_turn_id: str, canonical_cwd: str) -> str:
+        """Read the exact successful worker send; unresolved acceptance stays fenced."""
+        record = self.load(operation_id)
+        method = record.get("public_method")
+        recovery = record.get("recovery")
+        expected = {
+            "kind": f"worker/{method}", "fleet_name": fleet_name,
+            "thread_id": thread_id, "previous_turn_id": previous_turn_id,
+            "canonical_cwd": canonical_cwd,
+        }
+        if (record.get("generation") != self.generation
+                or record.get("method") != "rpc"
+                or method not in {"turn/start", "turn/steer"}
+                or not isinstance(recovery, dict)
+                or any(recovery.get(key) != value for key, value in expected.items())
+                or record.get("state") not in {"observed", "committed"}):
+            raise HostRejected(
+                f"operation {operation_id} has no exact successful worker turn result")
+        result = record.get("result")
+        if not isinstance(result, dict):
+            raise HostRejected(f"operation {operation_id} has no worker turn result")
+        turn = result.get("turn")
+        returned = (turn.get("id") if isinstance(turn, dict) else None
+                    ) if method == "turn/start" else result.get("turnId")
+        try:
+            returned = _public_uuid7(returned, "returned worker turn")
+        except ValueError as exc:
+            raise HostRejected(f"operation {operation_id} has no genuine returned turn") from exc
+        # Never silently prefer one result identity over a conflicting second one.
+        identities = [result.get("turnId")]
+        if isinstance(turn, dict):
+            identities.append(turn.get("id"))
+        if (any(value is not None and value != returned for value in identities)
+                or (result.get("threadId") is not None
+                    and result["threadId"] != thread_id)
+                or (method == "turn/steer" and returned != previous_turn_id)
+                or (method == "turn/start" and (returned == previous_turn_id
+                    or turn.get("status") != "inProgress"))):
+            raise HostRejected(f"operation {operation_id} worker turn result conflicts")
+        return returned
+
+    def adopt_worker_turn(self, operation_id: str, *, turn_id: str,
+                          **identity: Any) -> dict[str, Any]:
+        """Commit a proven successful send without replacing its original result.
+
+        Provider history cannot prove an accepted/uncertain send was rejected.
+        Only observed/committed success is eligible, and every invocation checks
+        the durable returned turn before clearing Fleet's reservation.
+        """
+        if self.worker_turn_id(operation_id, **identity) != turn_id:
+            raise HostRejected(f"operation {operation_id} adopted turn does not match result")
+        record = self.commit(operation_id)
+        if self.worker_turn_id(operation_id, **identity) != turn_id:
+            raise HostRejected(f"operation {operation_id} result changed during adoption")
+        return record
+
     def adopt_spawn_queue_overflow(
             self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
         """Adopt one spawn mutation from exact post-overflow public evidence.
@@ -2501,6 +2586,14 @@ class CodexHostClient:
 
     def commit(self, operation_id: str) -> None:
         OperationJournal(self.home, self.generation).commit(operation_id)
+
+    def recover_observed(self, operation: Mapping[str, Any]) -> CodexObservation:
+        """Recover one exact durable result; never contact the provider host."""
+        record = OperationJournal(
+            self.home, self.generation).observed_operation(operation)
+        return CodexObservation(
+            record["operation_id"], record["generation"],
+            record["payload_digest"], record["result"])
 
     def commit_handoff_turn_start(self, operation_id: str, **evidence: Any) -> None:
         OperationJournal(self.home, self.generation).commit_handoff_turn_start(

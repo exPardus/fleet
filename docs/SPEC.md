@@ -307,6 +307,12 @@ the validated live read also reports that exact newest turn as `completed`.
 An in-progress, failed, interrupted, missing, or conflicting live turn remains
 non-idle; an unresolved mutation never lets older completion evidence vouch
 for unknown provider work, and a failed live read remains uncertain.
+Ordinary native worker sends can also settle a frozen reservation only from an
+exact observed/committed successful journal result plus current paged provider
+evidence, with full-row, callback and claimed-mail identity checks. Accepted or
+uncertain sends stay fenced; no rejected outcome is inferred from old history
+and no provider mutation is retried (codex-native-integration §8.2).
+
 `doctor --repair` applies that same two-witness rule to `dead-suspected` rows
 committed before the rule shipped. It snapshots only unarchived native worker
 rows under `fleet.lock`, probes unlocked, and changes only rows whose complete

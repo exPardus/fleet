@@ -13887,7 +13887,144 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
     return reconciled
 
 
-def _doctor_check_dead_suspected(workers: dict, reconciled=()):
+def _codex_claim_fingerprint(path: Path):
+    """Bind retained claimed mail to its regular inode and exact bytes."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise FleetCliError("native Codex retained mail is not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            content = stream.read()
+        after = os.fstat(fd)
+        linked = path.lstat()
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if (identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+                or identity != (linked.st_dev, linked.st_ino, linked.st_size, linked.st_mtime_ns)):
+            raise FleetCliError("native Codex retained mail changed during read")
+        return identity, hashlib.sha256(content).hexdigest()
+    finally:
+        os.close(fd)
+
+
+def _reconcile_frozen_codex_worker_operations() -> list[str]:
+    """Settle a successful send only; uncertain acceptance is never released.
+
+    Exact journal success, current paged provider state, callback scope, retained
+    mail and the full registry row must agree. No mutation is replayed, and no
+    terminal predecessor is interpreted as proof of rejection.
+    """
+    from fleet_codex import OperationJournal
+    with fleet_lock():
+        candidates = {
+            name: dict(record)
+            for name, record in load_registry().get("workers", {}).items()
+            if (isinstance(record, dict)
+                and record.get("archived_at") is None
+                and record.get("status") == "dead-suspected"
+                and record.get("adapter_state") == "uncertain"
+                and isinstance(record.get("pending_operation"), dict)
+                and record["pending_operation"].get("kind")
+                in {"turn/start", "turn/steer"}
+                and _codex_record_route(record) == "native"
+                and not _is_supervisor_shaped(name))
+        }
+    reconciled = []
+    for name, before in candidates.items():
+        try:
+            binding = _codex_worker_binding(name, before)
+            operation_id = before["pending_operation"].get("operation_id")
+            if before.get("last_operation_id") != operation_id:
+                continue
+            journal = OperationJournal(FLEET_HOME, binding.host_generation)
+            identity = dict(fleet_name=name, thread_id=binding.thread_id,
+                            previous_turn_id=binding.turn_id, canonical_cwd=binding.cwd)
+            turn_id = journal.worker_turn_id(operation_id, **identity)
+            if journal.load(operation_id).get("public_method") != before["pending_operation"]["kind"]:
+                continue
+            if journal.unresolved_predecessor(operation_id) is not None:
+                continue
+            # A sole claim belongs to this fenced dispatch; multiple old claims
+            # cannot be safely attributed to its success.
+            claims = list(mailbox_dir().glob(f"{binding.thread_id}.md.claimed.*"))
+            if len(claims) != 1:
+                continue
+            claim = claims[0]
+            fingerprint = _codex_claim_fingerprint(claim)
+            queued = claim.read_text(encoding="utf-8", errors="replace").strip()
+            if not queued or _codex_claim_fingerprint(claim) != fingerprint:
+                continue
+            method = before["pending_operation"]["kind"]
+            params = {"threadId": binding.thread_id,
+                      "input": [{"type": "text", "text": queued, "text_elements": []}]}
+            if method == "turn/steer":
+                params["expectedTurnId"] = binding.turn_id
+            operation = {
+                "operation_id": operation_id, "method": "rpc",
+                "payload": {"method": method, "params": params},
+                "recovery": {"kind": f"worker/{method}", **identity},
+            }
+            journal.observed_operation(operation)
+            client = _codex_existing_client(FLEET_HOME)
+            if client.generation != binding.host_generation:
+                continue
+            rebound = CodexWorkerBinding(
+                name=name, thread_id=binding.thread_id, turn_id=turn_id,
+                host_generation=binding.host_generation, cwd=binding.cwd,
+                record=before)
+            _codex_active_reobserve_unknown_callback()
+            _require_no_codex_current_waits(name, before)
+            target = dict(before, codex_turn_id=turn_id)
+            _require_no_codex_current_waits(name, target)
+            observed = _codex_worker_observe(rebound, client=client, metadata_only=True)
+            if observed["provider_status"] not in {"active", "idle"}:
+                continue
+            status, adapter_state = _codex_worker_status(observed)
+            if status == "dead-suspected":
+                continue
+            with fleet_lock():
+                data = load_registry()
+                if data["workers"].get(name) != before:
+                    continue
+                if (list(mailbox_dir().glob(f"{binding.thread_id}.md.claimed.*")) != claims
+                        or _codex_claim_fingerprint(claim) != fingerprint):
+                    continue
+                _codex_active_reobserve_unknown_callback()
+                _require_no_codex_current_waits(name, before)
+                _require_no_codex_current_waits(name, target)
+                if journal.unresolved_predecessor(operation_id) is not None:
+                    continue
+                if (journal.load(operation_id).get("public_method")
+                        != before["pending_operation"]["kind"]
+                        or _codex_existing_client(FLEET_HOME).generation != binding.host_generation):
+                    continue
+                journal.observed_operation(operation)
+                journal.adopt_worker_turn(operation_id, turn_id=turn_id, **identity)
+                updated = dict(before, codex_turn_id=turn_id, status=status,
+                               adapter_state=adapter_state,
+                               provider_status=observed["provider_status"],
+                               last_activity=now_iso())
+                updated.pop("pending_operation", None)
+                updated.pop("uncertain_reason", None)
+                if turn_id != binding.turn_id:
+                    updated["turns"] = before.get("turns", 0) + 1
+                    updated["last_dispatch_at"] = now_iso()
+                data["workers"][name] = updated
+                save_registry(data)
+                # Persist the row before removing proven delivered mail. A crash
+                # retains evidence rather than losing a still-fenced claim.
+                finalize_mailbox_claim(claim)
+                reconciled.append(name)
+                _append_event_quiet("codex_operation_reconciled", name,
+                                    outcome="adopted", codex_thread_id=binding.thread_id,
+                                    codex_turn_id=turn_id)
+        except (FleetCliError, OSError, ValueError):
+            continue
+    return reconciled
+
+
+def _doctor_check_dead_suspected(workers: dict, reconciled=(), sends=()):
     """Note dead-suspected rows in the supplied snapshot without recomputing.
     The verdict is advisory and recomputable, never a sticky respawn trigger.
     """
@@ -13895,6 +14032,8 @@ def _doctor_check_dead_suspected(workers: dict, reconciled=()):
         f"reconciled {len(reconciled)} exact native Codex completion(s): "
         f"{', '.join(sorted(reconciled))}; "
         if reconciled else "")
+    if sends:
+        repaired += f"settled {len(sends)} proven native Codex send(s): {', '.join(sorted(sends))}; "
     names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
     if names:
         return ("dead-suspected", True,
@@ -14522,10 +14661,12 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     registry_quarantined = None
     registry_rename_attempted = False
     reconciled_codex = []
+    reconciled_sends = []
     try:
         if repair:
             with fleet_lock():
                 data = load_registry()          # the ONE quarantine site left
+            reconciled_sends = _reconcile_frozen_codex_worker_operations()
             reconciled_codex = _reconcile_dead_suspected_codex_completions()
             # Refresh the diagnostic snapshot after the conditional repair.
             with fleet_lock():
@@ -14563,7 +14704,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(
-            _doctor_check_dead_suspected, workers, reconciled_codex),
+            _doctor_check_dead_suspected, workers, reconciled_codex, reconciled_sends),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_permission_denials, workers),
