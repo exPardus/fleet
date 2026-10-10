@@ -52,6 +52,7 @@ send({{"id": first["id"], "result": initialize_result}})
 initialized = json.loads(sys.stdin.readline())
 if initialized != {{"method": "initialized"}}:
     raise SystemExit(31)
+turn_number = int(os.environ.get("FAKE_TURN_ID_START", "1"))
 for line in sys.stdin:
     message = json.loads(line)
     with open(log, "a", encoding="utf-8") as stream:
@@ -90,6 +91,16 @@ for line in sys.stdin:
     elif message.get("method") == "thread/start":
         send({{"id": message["id"], "result": {{"thread": {{"id": "thread-1"}},
               "cwd": message.get("params", {{}}).get("cwd")}}}})
+    elif message.get("method") == "thread/resume":
+        params = message.get("params", {{}})
+        send({{"id": message["id"], "result": {{
+            "thread": {{"id": params.get("threadId"),
+                         "cwd": params.get("cwd")}},
+            "cwd": params.get("cwd"), "model": params.get("model"),
+            "approvalPolicy": params.get("approvalPolicy"),
+            "approvalsReviewer": params.get("approvalsReviewer"),
+            "sandbox": {{"type": "dangerFullAccess"}},
+        }}}})
     elif (message.get("method") == "turn/start"
           and os.environ.get("FAKE_OVERSIZE_TURN_RESULT") == "1"):
         send({{"id": message["id"], "result": {{
@@ -97,9 +108,14 @@ for line in sys.stdin:
             "padding": "x" * (70 * 1024)}}}})
     elif message.get("method") in ("turn/start", "turn/steer", "turn/interrupt"):
         if (message.get("method") == "turn/start"
-                and os.environ.get("FAKE_DROP_TURN_RESPONSE") == "1"):
+                and (os.environ.get("FAKE_DROP_TURN_RESPONSE") == "1"
+                     or os.environ.get("FAKE_DROP_TURN_NUMBER") ==
+                     str(turn_number))):
             raise SystemExit(42)
-        send({{"id": message["id"], "result": {{"turn": {{"id": "turn-1",
+        turn_id = "turn-" + str(turn_number) if message.get("method") == "turn/start" else "turn-1"
+        if message.get("method") == "turn/start":
+            turn_number += 1
+        send({{"id": message["id"], "result": {{"turn": {{"id": turn_id,
               "status": "inProgress"}}}}}})
 '''
 
@@ -1299,7 +1315,7 @@ def test_oversized_mutation_reply_is_not_classified_as_rejection(
 
 def test_host_modules_do_not_import_registry_or_claim_writer():
     root = Path(__file__).resolve().parents[1] / "bin"
-    for name in ("fleet_codex.py", "fleet_codex_host.py"):
+    for name in ("fleet_codex.py", "fleet_codex_host.py", "fleet_lock.py"):
         path = root / name
         if not path.exists():
             pytest.fail(f"{name} is not implemented")

@@ -1,13 +1,14 @@
 """Fixed, typed old-host supervisor denial; synthetic homes and provider only."""
 
 import base64
+import ast
 import copy
 import hashlib
 import hmac
+import json
 import os
 from pathlib import Path
 import socket
-import subprocess
 import sys
 import threading
 from types import ModuleType, SimpleNamespace
@@ -21,16 +22,47 @@ from test_codex_supervisor_approval import (
     approval_home, response_args)
 
 
-OLD = "dd693da24733debc5573473ac429136daea53ab3"
+OLD = "a1ee4e66385a6452eb29a1a6371112d309e884b9"
 OLD_HOST_SHA256 = fleet.FIXED_DECLINE_OLD_HOST_SHA256
+OLD_CLIENT_SHA256 = "0a1d334480e908d9a5345713997cd6eb823f2c30b861d3abdb16c9a3534a7704"
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def _source_segment(raw, name):
+    lines = raw.splitlines(keepends=True)
+    node = next(node for node in ast.parse(raw).body
+                if getattr(node, "name", None) == name)
+    return "".join(lines[node.lineno - 1:node.end_lineno])
+
+
+def test_exact_a1ee_store_contract_matches_runtime():
+    code = (FIXTURE_DIR / "w273_a1ee_fleet_codex.py").read_bytes()
+    assert hashlib.sha256(code).hexdigest() == OLD_CLIENT_SHA256
+    current = (Path(fleet_codex.__file__)).read_text()
+    source = code.decode("utf-8")
+    for name in ("CodexApprovalStore", "_approval_decision", "_approval_key",
+                 "read_pending_requests"):
+        assert _source_segment(source, name) == _source_segment(current, name)
+
+
+def test_synthetic_request_record_offers_decline_from_reviewed_a1ee_semantics():
+    # Synthetic approval data exercises the legacy offer semantics without host
+    # paths, command history, or captured request identifiers.
+    record = json.loads((FIXTURE_DIR / "synthetic_request_approval_record.json").read_text())
+    assert record["generation"] == GEN
+    assert type(record["request_id"]) is int and record["request_id"] == 1
+    assert "decline" not in record["params"]["availableDecisions"]
+    assert "decline" in record["offered_decisions"]
+    assert fleet_codex.CodexApprovalStore._offered(
+        record["method"], record["params"]) == record["offered_decisions"]
+    assert fleet_codex._approval_decision(
+        record["method"], "decline", record["params"]) == {"decision": "decline"}
 
 
 def old_dispatcher(source):
-    code = subprocess.check_output(
-        ["git", "show", f"{OLD}:bin/fleet_codex_host.py"],
-        cwd=Path(__file__).resolve().parents[1])
+    code = (FIXTURE_DIR / "w273_a1ee_fleet_codex_host.py").read_bytes()
     assert hashlib.sha256(code).hexdigest() == OLD_HOST_SHA256
-    module = ModuleType("w267_exact_old_host")
+    module = ModuleType("w273_exact_a1ee_host")
     module.__file__ = f"{OLD}:bin/fleet_codex_host.py"
     sys.modules[module.__name__] = module
     exec(compile(code, module.__file__, "exec"), module.__dict__)
@@ -42,11 +74,14 @@ def old_dispatcher(source):
 
 
 class OldBridge:
-    """Reviewed current client envelopes through the real dd693 dispatcher."""
+    """Reviewed current client envelopes through the exact a1ee dispatcher."""
 
     generation = GEN
     host_pid = 1234
     host_process_identity = "synthetic-old-host-start"
+    app_server_pid = 1235
+    app_server_process_identity = "synthetic-original-child-start"
+    app_server_started_at = 1.0
 
     def __init__(self, home, store, public, source, monkeypatch):
         self.home = home
@@ -59,6 +94,10 @@ class OldBridge:
         self.provider_writes = []
         self.lose_reply = False
         self.on_respond = None
+        self.fresh_child_pid = self.app_server_pid
+        self.fresh_child_identity = self.app_server_process_identity
+        self.fresh_child_started_at = self.app_server_started_at
+        self.fresh_child_os_identity = self.app_server_process_identity
         self.host = self.old.Host.__new__(self.old.Host)
         self.host.home = home
         self.host.generation = GEN
@@ -73,12 +112,20 @@ class OldBridge:
             "codex_protocol_version": 2, "endpoint": "synthetic-socketpair",
             "transport": "AF_UNIX", "pid": self.host_pid,
             "process_identity": self.host_process_identity, "started_at": 1.0,
-            "app_server_pid": 1235,
-            "app_server_process_identity": "synthetic-child-start",
-            "app_server_started_at": 1.0,
+            "app_server_pid": self.app_server_pid,
+            "app_server_process_identity": self.app_server_process_identity,
+            "app_server_started_at": self.app_server_started_at,
         }
         self.transport = fleet_codex.CodexHostClient(
             home, metadata, self.encoded, self.authkey)
+
+    def fresh_process_snapshot(self):
+        return SimpleNamespace(
+            generation=self.generation, host_pid=self.host_pid,
+            host_process_identity=self.host_process_identity,
+            app_server_pid=self.fresh_child_pid,
+            app_server_process_identity=self.fresh_child_identity,
+            app_server_started_at=self.fresh_child_started_at)
 
     def _old_call(self, function):
         server, client = socket.socketpair()
@@ -147,7 +194,12 @@ def fixed_home(approval_home, monkeypatch):
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: bridge)
     monkeypatch.setattr(
         fleet_codex, "_process_identity",
-        lambda pid: bridge.host_process_identity if pid == bridge.host_pid else None)
+        lambda pid: (bridge.host_process_identity if pid == bridge.host_pid
+                     else bridge.fresh_child_os_identity
+                     if pid == bridge.app_server_pid else None))
+    monkeypatch.setattr(
+        fleet_codex.CodexHostClient, "connect_existing",
+        classmethod(lambda _cls, _home: bridge.fresh_process_snapshot()))
     return home, store, bridge, source, cwd
 
 
@@ -165,6 +217,9 @@ def decline_args(store, cwd, **updates):
         "expect_old_host_sha256": OLD_HOST_SHA256,
         "expect_host_pid": OldBridge.host_pid,
         "expect_host_process_identity": OldBridge.host_process_identity,
+        "expect_app_server_pid": OldBridge.app_server_pid,
+        "expect_app_server_process_identity": OldBridge.app_server_process_identity,
+        "expect_app_server_started_at": OldBridge.app_server_started_at,
     }
     values.update(updates)
     return SimpleNamespace(**values)
@@ -220,6 +275,10 @@ def test_unrelated_row_and_mail_progress_survive_exact_settlement(fixed_home):
     {"expect_old_host_sha256": "0" * 64},
     {"expect_host_generation": "different"},
     {"expect_host_pid": 9999},
+    {"expect_app_server_pid": 9999},
+    {"expect_app_server_process_identity": "wrong-child"},
+    {"expect_app_server_started_at": 2.0},
+    {"expect_app_server_pid": False},
     {"_fleet_home_explicit": False},
 ])
 def test_exact_pins_and_every_other_decision_refuse_before_response(
@@ -259,6 +318,42 @@ def test_request_drift_after_public_list_refuses_before_reservation(fixed_home):
     bridge.public.on_pending = drift
     with pytest.raises(fleet.FleetCliError, match="pending request disagrees"):
         fleet.cmd_codex_decline_fixed(original)
+    assert bridge.provider_writes == []
+    assert fleet.read_incarnation().get("pending_operation") is None
+
+
+def test_exact_a1ee_public_read_replaces_child_before_reservation(fixed_home):
+    home, store, bridge, _source, cwd = fixed_home
+    original = decline_args(store, cwd)
+    claim = copy.deepcopy(fleet.read_incarnation())
+    registry = copy.deepcopy(fleet.read_registry_no_repair())
+    mail = (home / "mailbox" / "pending.md").read_bytes()
+
+    def restart_child_during_read():
+        # The a1ee dispatcher may restart its app-server child while replaying
+        # this public read. The first client retains the old metadata snapshot.
+        bridge.fresh_child_pid = 5678
+        bridge.fresh_child_identity = "synthetic-replacement-child-start"
+        bridge.fresh_child_started_at = 2.0
+
+    bridge.public.on_pending = restart_child_during_read
+    with pytest.raises(fleet.FleetCliError,
+                       match="original app-server child changed before reservation"):
+        fleet.cmd_codex_decline_fixed(original)
+    assert bridge.provider_writes == []
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert fleet.read_incarnation() == claim
+    assert fleet.read_registry_no_repair() == registry
+    assert (home / "mailbox" / "pending.md").read_bytes() == mail
+
+
+def test_same_pid_new_child_os_identity_refuses_before_reservation(fixed_home):
+    _home, store, bridge, _source, cwd = fixed_home
+    bridge.public.on_pending = lambda: setattr(
+        bridge, "fresh_child_os_identity", "synthetic-reused-pid-new-start")
+    with pytest.raises(fleet.FleetCliError,
+                       match="original app-server child changed before reservation"):
+        fleet.cmd_codex_decline_fixed(decline_args(store, cwd))
     assert bridge.provider_writes == []
     assert fleet.read_incarnation().get("pending_operation") is None
 
@@ -382,6 +477,21 @@ def test_lost_ack_keeps_reservation_and_never_replays(fixed_home):
     assert len(bridge.provider_writes) == 1
 
 
+def test_child_death_after_final_check_and_lost_ack_never_replays(fixed_home):
+    _home, store, bridge, _source, cwd = fixed_home
+    bridge.lose_reply = True
+    bridge.on_respond = lambda: setattr(bridge, "fresh_child_os_identity", None)
+    with pytest.raises(fleet.FleetCliError, match="never replay"):
+        fleet.cmd_codex_decline_fixed(decline_args(store, cwd))
+    assert bridge.provider_writes == [(6, {"decision": "decline"})]
+    assert store._load_path(store.path(6))["state"] == "responded"
+    assert fleet.read_incarnation()["pending_operation"]["kind"] == (
+        "approval-response")
+    with pytest.raises(fleet.FleetCliError):
+        fleet.cmd_codex_decline_fixed(decline_args(store, cwd))
+    assert len(bridge.provider_writes) == 1
+
+
 def test_capable_host_decline_refuses_and_existing_accept_still_works(
         fixed_home, monkeypatch):
     _home, store, bridge, _source, cwd = fixed_home
@@ -413,6 +523,9 @@ def test_parser_exposes_separate_typed_verb_and_rejects_missing_cwd_mode():
         "old-host-sha256": OLD_HOST_SHA256,
         "host-process-identity": OldBridge.host_process_identity,
         "host-pid": str(OldBridge.host_pid),
+        "app-server-process-identity": OldBridge.app_server_process_identity,
+        "app-server-pid": str(OldBridge.app_server_pid),
+        "app-server-started-at": str(OldBridge.app_server_started_at),
         "request-cwd": "/synthetic/cwd",
     }
     argv = base + [piece for key, value in flags.items()

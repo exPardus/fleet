@@ -18,7 +18,6 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -33,7 +32,6 @@ from fleet_codex import (
     _atomic_json,
     _canonical_home,
     _digest,
-    _fleet_state_digest,
     _recv_frame,
     _public_evidence,
     _public_method,
@@ -69,21 +67,6 @@ def _response(request: Mapping[str, Any] | None, *, ok: bool,
         "result": result if ok else None,
         "error": error if not ok else None,
     }
-
-
-@contextmanager
-def _approval_claim_lock(home: Path, *, timeout: float = 5.0):
-    """Use the CLI's owner-safe lock for approval claim/row validation."""
-    from fleet_errors import FleetCliError
-    from fleet_lock import FleetLockTimeout, registry_lock
-
-    try:
-        with registry_lock(home / "state" / "fleet.lock", timeout=timeout):
-            yield
-    except FleetLockTimeout as exc:
-        raise HostRejected("supervisor approval Fleet lock is busy") from exc
-    except FleetCliError as exc:
-        raise HostRejected("supervisor approval Fleet lock is unsafe") from exc
 
 
 def _bounded_rpc_timeout(payload: Mapping[str, Any], operation_timeout: float,
@@ -531,7 +514,6 @@ class Host:
         should_stop = False
         accepted_at = time.monotonic()
         deadline = accepted_at + 1.0
-        mutating_operation_id = None
         try:
             challenge = os.urandom(32)
             _send_frame(connection, challenge, deadline)
@@ -589,27 +571,9 @@ class Host:
                                     deadline))
                         self._drain_notifications()
                     else:
-                        params = payload.get("params")
+                        self._authorize_public_mutation(
+                            connection, public_method, payload)
                         operation_id = request["operation_id"]
-                        mutating_operation_id = operation_id
-                        try:
-                            if not isinstance(params, dict):
-                                raise HostRejected(
-                                    "public mutation params must be an object")
-                            self._authorize_public_mutation(
-                                connection, public_method, payload)
-                        except HostRejected as exc:
-                            # Shape and authentication checks precede acceptance.
-                            # A proved rejection must not leave prepared intent.
-                            prepared = self.journal.load(operation_id)
-                            if prepared.get("state") == "prepared":
-                                reason = ("malformed public mutation params"
-                                          if not isinstance(params, dict) else
-                                          "authentication rejected")
-                                self.journal.fail(
-                                    operation_id,
-                                    f"{reason} before provider acceptance: {exc}")
-                            raise
                         record = self.journal.load(operation_id)
                         if record.get("generation") != self.generation:
                             if record.get("state") in {"accepted", "uncertain"}:
@@ -632,25 +596,13 @@ class Host:
                         elif state == "prepared":
                             predecessor = self.journal.unresolved_predecessor(
                                 operation_id)
-                            restored_history = self.journal.has_restoration_history_for_thread(
-                                params.get("threadId"))
-                            if ((predecessor is not None or restored_history)
-                                    and not self.journal.permits_observed_resume_policy_restore(
-                                        operation_id, payload,
-                                        request.get("recovery", {}))
-                                    and not self.journal.permits_restored_supervisor_continuation(
-                                        operation_id, payload,
-                                        request.get("recovery", {}))):
-                                if predecessor is not None:
-                                    reason = "blocked by unresolved predecessor operation"
-                                    detail = ("unresolved predecessor operation "
-                                              f"{predecessor.get('operation_id')} "
-                                              "blocks mutation")
-                                else:
-                                    reason = "blocked by missing restored predecessor evidence"
-                                    detail = reason
-                                self.journal.fail(operation_id, reason)
-                                raise HostRejected(detail)
+                            if predecessor is not None:
+                                self.journal.fail(
+                                    operation_id,
+                                    "blocked by unresolved predecessor operation")
+                                raise HostRejected(
+                                    "unresolved predecessor operation "
+                                    f"{predecessor.get('operation_id')} blocks mutation")
                             self.journal.accept(operation_id)
                             recovered = False
                             failure: Exception | None = None
@@ -726,8 +678,6 @@ class Host:
                     turn_id = payload.get("turn_id")
                     result = self.approvals.unresolved(
                         thread_id=thread_id, turn_id=turn_id)
-                elif method == "approval/supervisor-reservation-v1":
-                    result = {"version": 1}
                 elif method == "approval/respond":
                     if not isinstance(payload, dict):
                         raise ValueError("approval response payload is malformed")
@@ -735,28 +685,9 @@ class Host:
                     self._authorize_public_mutation(
                         connection, "approval/respond", {"params": {
                             "threadId": payload.get("thread_id")}})
-                    reservation = payload.get("supervisor_reservation")
-                    if reservation is not None:
-                        # The same Fleet lock protects the exact binding check and
-                        # the durable responding transition. The reservation then
-                        # fences normal supervisor operations during the provider write.
-                        with _approval_claim_lock(self.home):
-                            self._validate_supervisor_approval_reservation(
-                                connection, payload, reservation)
-                            record, public_response = self.approvals.begin_response(
-                                payload.get("request_id"), payload.get("thread_id"),
-                                payload.get("turn_id"), payload.get("decision"))
-                    else:
-                        claim = self._read_fleet_approval_json(
-                            self.home / "supervisor" / "INCARNATION")
-                        holder = claim.get("holder") if isinstance(claim, dict) else None
-                        if (isinstance(holder, dict)
-                                and holder.get("provider") == "codex"
-                                and holder.get("thread_id") == payload.get("thread_id")):
-                            raise HostRejected("supervisor approval requires an exact reservation")
-                        record, public_response = self.approvals.begin_response(
-                            payload.get("request_id"), payload.get("thread_id"),
-                            payload.get("turn_id"), payload.get("decision"))
+                    record, public_response = self.approvals.begin_response(
+                        payload.get("request_id"), payload.get("thread_id"),
+                        payload.get("turn_id"), payload.get("decision"))
                     try:
                         self.client.respond(record["request_id"], public_response)
                     except BaseException as exc:
@@ -793,18 +724,6 @@ class Host:
         except (UnicodeError, json.JSONDecodeError, ValueError, OSError,
                 EOFError, TimeoutError,
                 FleetCliError) as exc:
-            if mutating_operation_id is not None:
-                try:
-                    current = self.journal.load(mutating_operation_id)
-                    if current.get("state") == "accepted":
-                        self.journal.uncertain(
-                            mutating_operation_id,
-                            "post-acceptance host failure: "
-                            f"{type(exc).__name__}")
-                except (OSError, ValueError, FleetCliError):
-                    # The client also reads the journal state. A failed repair
-                    # must never turn an accepted write into a rejection.
-                    pass
             response = _response(request, ok=False, error=str(exc)[:300])
         try:
             encoded = json.dumps(response, separators=(",", ":"),
@@ -820,129 +739,6 @@ class Host:
         finally:
             connection.close()
         return should_stop
-
-    @staticmethod
-    def _read_fleet_approval_json(path: Path) -> dict[str, Any] | None:
-        try:
-            info = path.lstat()
-            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
-                    or info.st_uid != os.getuid() or info.st_size > 4 * 1024 * 1024):
-                raise HostRejected("supervisor approval Fleet state is unsafe")
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return None
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise HostRejected("supervisor approval Fleet state is unreadable") from exc
-        if not isinstance(value, dict):
-            raise HostRejected("supervisor approval Fleet state is malformed")
-        return value
-
-    def _validate_supervisor_approval_reservation(
-            self, connection: socket.socket, payload: Mapping[str, Any],
-            expected: Mapping[str, Any]) -> None:
-        """Fence the current Interface, claim, row and request before consumption."""
-        if not isinstance(expected, dict):
-            raise HostRejected("supervisor approval reservation is malformed")
-        interface_claim = read_interface_claim(self.home)
-        peer_pid, peer_uid = _ipc_peer_credentials(connection)
-        source = codex_process_source(peer_pid)
-        if (interface_claim is None or peer_uid != os.getuid()
-                or source.get("uid") != peer_uid
-                or not interface_source_matches(interface_claim, source)):
-            raise HostRejected("supervisor approval requires the current Interface peer")
-        claim = self._read_fleet_approval_json(
-            self.home / "supervisor" / "INCARNATION")
-        registry = self._read_fleet_approval_json(
-            self.home / "state" / "fleet.json")
-        workers = registry.get("workers") if isinstance(registry, dict) else None
-        pending = claim.get("pending_operation") if isinstance(claim, dict) else None
-        holder = claim.get("holder") if isinstance(claim, dict) else None
-        if (not isinstance(pending, dict) or not isinstance(workers, dict)
-                or not isinstance(holder, dict)
-                or claim.get("state") != "held"
-                or claim.get("provider") != "codex"
-                or holder.get("provider") != "codex"
-                or pending.get("kind") != "approval-response"
-                or not isinstance(expected.get("operation_id"), str)
-                or pending.get("operation_id") != expected.get("operation_id")
-                or claim.get("last_operation_id") != expected.get("operation_id")
-                or claim.get("incarnation_id") != expected.get("incarnation_id")
-                or holder.get("thread_id") != expected.get("thread_id")
-                or claim.get("current_turn_id") != expected.get("turn_id")
-                or claim.get("host_generation") != expected.get("host_generation")
-                or expected.get("host_generation") != self.generation
-                or payload.get("thread_id") != expected.get("thread_id")
-                or payload.get("turn_id") != expected.get("turn_id")
-                or payload.get("decision") != "accept"
-                or str(payload.get("request_id")) != expected.get("request_id")):
-            raise HostRejected("supervisor approval reservation or claim changed")
-        for field in ("name", "incarnation_id", "thread_id", "turn_id",
-                      "host_generation", "request_id", "request_key",
-                      "request_digest", "method",
-                      "command", "cwd", "item_id"):
-            if pending.get(field) != expected.get(field):
-                raise HostRejected("supervisor approval reservation identity changed")
-        name = expected.get("name")
-        matches = [(key, value) for key, value in workers.items()
-                   if isinstance(value, dict)
-                   and value.get("codex_thread_id") == expected.get("thread_id")]
-        if (len(matches) != 1 or matches[0][0] != name
-                or not isinstance(name, str)
-                or not name.startswith(f"sup|{expected.get('incarnation_id')}|")
-                or not isinstance(matches[0][1], dict)):
-            raise HostRejected("supervisor approval registry identity changed")
-        row = matches[0][1]
-        try:
-            row_home = Path(row.get("cwd")).resolve(strict=True)
-        except (TypeError, OSError):
-            row_home = None
-        if (row.get("substrate") != "codex"
-                or row.get("dispatch_kind") != "codex-app-server"
-                or row.get("session_id") is not None
-                or row.get("supervisor_incarnation_id") != expected.get("incarnation_id")
-                or row.get("codex_turn_id") != expected.get("turn_id")
-                or row.get("codex_host_generation") != self.generation
-                or row.get("last_operation_id") != expected.get("operation_id")
-                or row.get("adapter_state") != "mutating"
-                or row_home != self.home):
-            raise HostRejected("supervisor approval registry row changed")
-        old_claim = dict(claim)
-        old_claim.pop("pending_operation", None)
-        if pending.get("previous_claim_operation_id") is None:
-            old_claim.pop("last_operation_id", None)
-        else:
-            old_claim["last_operation_id"] = pending["previous_claim_operation_id"]
-        old_row = dict(row)
-        old_row["adapter_state"] = pending.get("previous_adapter_state")
-        if pending.get("previous_record_operation_id") is None:
-            old_row.pop("last_operation_id", None)
-        else:
-            old_row["last_operation_id"] = pending["previous_record_operation_id"]
-        if (pending.get("claim_digest") != _fleet_state_digest(old_claim)
-                or pending.get("row_digest") != _fleet_state_digest(old_row)):
-            raise HostRejected("supervisor approval full claim or row changed")
-        request = self.approvals._current(
-            payload.get("request_id"), payload.get("thread_id"),
-            payload.get("turn_id"))
-        params = request.get("params")
-        offered = request.get("offered_decisions")
-        if (request.get("state") != "pending"
-                or request.get("home") != str(self.home)
-                or request.get("generation") != self.generation
-                or request.get("key") != expected.get("request_key")
-                or _fleet_state_digest(request) != expected.get("request_digest")
-                or request.get("method") != "item/commandExecution/requestApproval"
-                or request.get("method") != expected.get("method")
-                or request.get("item_id") != expected.get("item_id")
-                or not isinstance(params, dict)
-                or params.get("threadId") != expected.get("thread_id")
-                or params.get("turnId") != expected.get("turn_id")
-                or params.get("itemId") != expected.get("item_id")
-                or params.get("command") != expected.get("command")
-                or params.get("cwd") != expected.get("cwd")
-                or not isinstance(offered, list)
-                or "accept" not in offered):
-            raise HostRejected("supervisor approval request changed")
 
     def _authorize_public_mutation(self, connection: socket.socket,
                                    public_method: str,

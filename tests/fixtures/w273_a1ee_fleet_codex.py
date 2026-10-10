@@ -33,20 +33,13 @@ HOST_LOCK_STALE_SECONDS = 30.0
 HOST_HEARTBEAT_STALE_SECONDS = 3.0
 IPC_AUTH_CHALLENGE_BYTES = 32
 MAX_OPERATION_TIMEOUT_SECONDS = 120.0
-
-
-def _fleet_state_digest(value: Mapping[str, Any]) -> str:
-    """Compare complete JSON claim/row snapshots without copying them to IPC."""
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"),
-                         ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 SCHEMA_FIXTURES = (
     Path(__file__).resolve().parents[1]
     / "tests" / "fixtures" / "codex_app_server"
 )
 REVIEWED_SCHEMA_MANIFESTS = {
     version: SCHEMA_FIXTURES / version / "manifest.json"
-    for version in ("0.155.1", "0.160.0", "0.161.0")
+    for version in ("0.155.1", "0.160.0")
 }
 
 
@@ -1759,365 +1752,6 @@ class OperationJournal:
                 return record
         return None
 
-    def permits_observed_resume_policy_restore(
-            self, operation_id: str, payload: Mapping[str, Any],
-            recovery: Mapping[str, Any]) -> bool:
-        """Allow only an explicit new resume behind its one observed predecessor.
-
-        The original observation stays observed and is never replayed. The
-        caller has already authenticated the mutation; Fleet separately pins
-        the held claim, original policy, and public idle turn before dispatch.
-        """
-        if (not isinstance(payload, dict)
-                or payload.get("method") != "thread/resume"
-                or not isinstance(payload.get("params"), dict)
-                or not isinstance(recovery, dict)
-                or recovery.get("kind") != "supervisor/resume-policy-restore"):
-            return False
-        params = payload["params"]
-        original_id = recovery.get("original_resume_operation_id")
-        observed_generation = recovery.get("observed_resume_generation")
-        if (not isinstance(original_id, str)
-                or not original_id.startswith("supervisor-reconcile-")
-                or not isinstance(observed_generation, str)
-                or observed_generation == self.generation
-                or recovery.get("canonical_cwd") != str(self.home)
-                or not isinstance(recovery.get("turn_id"), str)
-                or params != {
-                    "threadId": recovery.get("thread_id"),
-                    "excludeTurns": True, "cwd": str(self.home),
-                    "model": params.get("model"),
-                    "approvalPolicy": "never", "approvalsReviewer": "user",
-                    "sandbox": "danger-full-access",
-                }
-                or not isinstance(params.get("model"), str)
-                or not params["model"]):
-            return False
-        outstanding = [record for record in self.records()
-                       if record.get("operation_id") != operation_id
-                       and record.get("state") in {
-                           "prepared", "accepted", "observed", "uncertain"}]
-        if len(outstanding) != 1 or outstanding[0].get("operation_id") != original_id:
-            return False
-        original = outstanding[0]
-        expected_recovery = {
-            "kind": "supervisor/thread-resume",
-            "fleet_name": recovery.get("fleet_name"),
-            "incarnation_id": recovery.get("incarnation_id"),
-            "thread_id": recovery.get("thread_id"),
-            "previous_host_generation": recovery.get("previous_host_generation"),
-            "canonical_cwd": str(self.home),
-        }
-        expected_digest = _digest("rpc", {"method": "thread/resume", "params": {
-            "threadId": recovery.get("thread_id"), "excludeTurns": True}})
-        result = original.get("result")
-        thread = result.get("thread") if isinstance(result, dict) else None
-        sandbox = result.get("sandbox") if isinstance(result, dict) else None
-        return (original.get("state") == "observed"
-                and original.get("home") == str(self.home)
-                and original.get("generation") == observed_generation
-                and original.get("method") == "rpc"
-                and original.get("public_method") == "thread/resume"
-                and original.get("payload_digest") == expected_digest
-                and original.get("recovery") == expected_recovery
-                and isinstance(thread, dict)
-                and thread.get("id") == recovery.get("thread_id")
-                and thread.get("cwd") == str(self.home)
-                and result.get("cwd") == str(self.home)
-                and result.get("model") == params["model"]
-                and result.get("approvalPolicy") == "never"
-                and result.get("approvalsReviewer") == "user"
-                and isinstance(sandbox, dict)
-                and sandbox.get("type") == "workspaceWrite")
-
-    def restored_policy_link(
-            self, *, fleet_name: str, incarnation_id: str,
-            thread_id: str, operation_id: str | None = None) -> dict[str, Any] | None:
-        """Prove the committed restoration still has its observed predecessor.
-
-        The committed restoration is the durable anchor. An absent or changed
-        original must never make this holder look like an ordinary supervisor.
-        """
-        records = self.records()
-        history = [item for item in records
-                   if isinstance(item.get("operation_id"), str)
-                   and item["operation_id"].startswith(
-                       "supervisor-restore-policy-")
-                   and ((isinstance(item.get("recovery"), dict)
-                         and item["recovery"].get("thread_id") == thread_id)
-                        or (isinstance(item.get("result"), dict)
-                            and isinstance(item["result"].get("thread"), dict)
-                            and item["result"]["thread"].get("id") ==
-                            thread_id))]
-        restores = [item for item in history if item.get("state") != "failed"]
-        if len(restores) > 1:
-            raise HostRejected("restored supervisor has ambiguous restoration history")
-        outstanding = [item for item in records
-                       if item.get("operation_id") != operation_id
-                       and item.get("state") in {
-                           "prepared", "accepted", "observed", "uncertain"}]
-        if not history and not outstanding:
-            return None
-        if not restores:
-            raise HostRejected("unresolved supervisor intent lacks exact restoration")
-        restored = restores[0]
-        restore_recovery = restored.get("recovery")
-        if not isinstance(restore_recovery, dict):
-            raise HostRejected("restored supervisor recovery link is malformed")
-        original_id = restore_recovery.get("original_resume_operation_id")
-        originals = [item for item in records
-                     if item.get("operation_id") == original_id]
-        if len(originals) != 1:
-            raise HostRejected(
-                "restored supervisor committed restoration lost its original resume")
-        original = originals[0]
-        if len(outstanding) != 1:
-            raise HostRejected("restored supervisor has another unresolved intent")
-        if outstanding[0] != original:
-            raise HostRejected("restored supervisor original is not observed")
-        old_recovery = original.get("recovery")
-        old_result = original.get("result")
-        old_thread = old_result.get("thread") if isinstance(old_result, dict) else None
-        old_sandbox = old_result.get("sandbox") if isinstance(old_result, dict) else None
-        prior_generation = (old_recovery.get("previous_host_generation")
-                            if isinstance(old_recovery, dict) else None)
-        expected_old_recovery = {
-            "kind": "supervisor/thread-resume", "fleet_name": fleet_name,
-            "incarnation_id": incarnation_id, "thread_id": thread_id,
-            "previous_host_generation": prior_generation,
-            "canonical_cwd": str(self.home),
-        }
-        if (not isinstance(original_id, str)
-                or not original_id.startswith("supervisor-reconcile-")
-                or not isinstance(prior_generation, str)
-                or not prior_generation
-                or original.get("state") != "observed"
-                or original.get("home") != str(self.home)
-                or not isinstance(original.get("generation"), str)
-                or original["generation"] == prior_generation
-                or original.get("method") != "rpc"
-                or original.get("public_method") != "thread/resume"
-                or original.get("payload_digest") != _digest("rpc", {
-                    "method": "thread/resume", "params": {
-                        "threadId": thread_id, "excludeTurns": True}})
-                or old_recovery != expected_old_recovery
-                or not isinstance(old_thread, dict)
-                or old_thread.get("id") != thread_id
-                or old_thread.get("cwd") != str(self.home)
-                or old_result.get("cwd") != str(self.home)
-                or not isinstance(old_result.get("model"), str)
-                or not old_result["model"]
-                or old_result.get("approvalPolicy") != "never"
-                or old_result.get("approvalsReviewer") != "user"
-                or not isinstance(old_sandbox, dict)
-                or old_sandbox.get("type") != "workspaceWrite"):
-            raise HostRejected("observed predecessor is not the exact old resume")
-        turn_id = restore_recovery.get("turn_id")
-        model = old_result["model"]
-        expected_restore_recovery = {
-            "kind": "supervisor/resume-policy-restore",
-            "fleet_name": fleet_name, "incarnation_id": incarnation_id,
-            "thread_id": thread_id, "turn_id": turn_id,
-            "previous_host_generation": prior_generation,
-            "observed_resume_generation": original["generation"],
-            "original_resume_operation_id": original_id,
-            "canonical_cwd": str(self.home),
-        }
-        restore_payload = {"method": "thread/resume", "params": {
-            "threadId": thread_id, "excludeTurns": True,
-            "cwd": str(self.home), "model": model,
-            "approvalPolicy": "never", "approvalsReviewer": "user",
-            "sandbox": "danger-full-access"}}
-        restored_result = restored.get("result")
-        restored_thread = (restored_result.get("thread")
-                           if isinstance(restored_result, dict) else None)
-        restored_sandbox = (restored_result.get("sandbox")
-                            if isinstance(restored_result, dict) else None)
-        restored_profile = (restored_result.get("activePermissionProfile")
-                            if isinstance(restored_result, dict) else None)
-        if (not isinstance(restored.get("operation_id"), str)
-                or not restored["operation_id"].startswith(
-                    "supervisor-restore-policy-")
-                or restored.get("state") != "committed"
-                or restored.get("home") != str(self.home)
-                or not isinstance(restored.get("generation"), str)
-                or restored["generation"] == original["generation"]
-                or restored.get("method") != "rpc"
-                or restored.get("public_method") != "thread/resume"
-                or restored.get("payload_digest") != _digest(
-                    "rpc", restore_payload)
-                or restore_recovery != expected_restore_recovery
-                or not isinstance(turn_id, str) or not turn_id
-                or not isinstance(restored_thread, dict)
-                or restored_thread.get("id") != thread_id
-                or restored_thread.get("cwd") != str(self.home)
-                or restored_result.get("cwd") != str(self.home)
-                or restored_result.get("model") != model
-                or restored_result.get("approvalPolicy") != "never"
-                or restored_result.get("approvalsReviewer") != "user"
-                or restored_sandbox != {"type": "dangerFullAccess"}
-                or (isinstance(restored_profile, dict)
-                    and restored_profile.get("id") == ":workspace")):
-            raise HostRejected("committed restoration does not prove exact policy")
-        return {
-            "original_operation_id": original_id,
-            "original_generation": original["generation"],
-            "original_digest": _digest("restored-predecessor", original),
-            "restore_operation_id": restored["operation_id"],
-            "restore_generation": restored["generation"],
-            "restore_digest": _digest("committed-restoration", restored),
-            "turn_id": turn_id,
-            "model": model,
-        }
-
-    def has_restoration_history_for_thread(self, thread_id: str) -> bool:
-        """Find an anchored restore even if its original is now missing."""
-        if not isinstance(thread_id, str) or not thread_id:
-            return False
-        for record in self.records():
-            operation_id = record.get("operation_id")
-            if (not isinstance(operation_id, str)
-                    or not operation_id.startswith(
-                        "supervisor-restore-policy-")):
-                continue
-            recovery = record.get("recovery")
-            result = record.get("result")
-            restored_thread = (result.get("thread")
-                               if isinstance(result, dict) else None)
-            if ((isinstance(recovery, dict)
-                 and recovery.get("thread_id") == thread_id)
-                    or (isinstance(restored_thread, dict)
-                        and restored_thread.get("id") == thread_id)):
-                return True
-        return False
-
-    def permits_restored_supervisor_continuation(
-            self, operation_id: str, payload: Mapping[str, Any],
-            recovery: Mapping[str, Any]) -> bool:
-        """Allow only a linked restored holder's explicit next mutation."""
-        if (not isinstance(payload, dict)
-                or not isinstance(payload.get("params"), dict)
-                or not isinstance(recovery, dict)
-                or not isinstance(recovery.get("restored_predecessor"), dict)
-                or recovery.get("canonical_cwd") != str(self.home)):
-            return False
-        kind = recovery.get("kind")
-        method = payload.get("method")
-        if kind not in {"supervisor/turn/start", "supervisor/turn/steer",
-                        "supervisor/restored-continuation-reattach"}:
-            return False
-        try:
-            link = self.restored_policy_link(
-                fleet_name=recovery.get("fleet_name"),
-                incarnation_id=recovery.get("incarnation_id"),
-                thread_id=recovery.get("thread_id"),
-                operation_id=operation_id)
-        except HostRejected:
-            return False
-        if link is None or recovery["restored_predecessor"] != link:
-            return False
-        params = payload["params"]
-        thread_id = recovery.get("thread_id")
-        if kind == "supervisor/restored-continuation-reattach":
-            return (method == "thread/resume"
-                    and link["restore_generation"] != self.generation
-                    and recovery.get("previous_host_generation") ==
-                    link["restore_generation"]
-                    and recovery.get("turn_id") == link["turn_id"]
-                    and params == {
-                        "threadId": thread_id, "excludeTurns": True,
-                        "cwd": str(self.home), "model": link["model"],
-                        "approvalPolicy": "never", "approvalsReviewer": "user",
-                        "sandbox": "danger-full-access"})
-        if method not in {"turn/start", "turn/steer"} or kind != \
-                f"supervisor/{method}":
-            return False
-        if link["restore_generation"] != self.generation:
-            reattachments = [item for item in self.records()
-                             if item.get("state") == "committed"
-                             and item.get("generation") == self.generation
-                             and isinstance(item.get("recovery"), dict)
-                             and item["recovery"].get("kind") ==
-                             "supervisor/restored-continuation-reattach"
-                             and item["recovery"].get(
-                                 "restored_predecessor") == link]
-            if len(reattachments) != 1:
-                return False
-            reattached = reattachments[0]
-            reattached_result = reattached.get("result")
-            reattached_thread = (reattached_result.get("thread")
-                                 if isinstance(reattached_result, dict) else None)
-            if (reattached.get("public_method") != "thread/resume"
-                    or reattached.get("home") != str(self.home)
-                    or reattached.get("method") != "rpc"
-                    or reattached.get("recovery") != {
-                        "kind": "supervisor/restored-continuation-reattach",
-                        "fleet_name": recovery.get("fleet_name"),
-                        "incarnation_id": recovery.get("incarnation_id"),
-                        "thread_id": thread_id, "turn_id": link["turn_id"],
-                        "previous_host_generation": link["restore_generation"],
-                        "canonical_cwd": str(self.home),
-                        "restored_predecessor": link}
-                    or reattached.get("payload_digest") != _digest(
-                        "rpc", {"method": "thread/resume", "params": {
-                            "threadId": thread_id, "excludeTurns": True,
-                            "cwd": str(self.home), "model": link["model"],
-                            "approvalPolicy": "never",
-                            "approvalsReviewer": "user",
-                            "sandbox": "danger-full-access"}})
-                    or not isinstance(reattached_thread, dict)
-                    or reattached_thread.get("id") != thread_id
-                    or reattached_thread.get("cwd") != str(self.home)
-                    or reattached_result.get("cwd") != str(self.home)
-                    or reattached_result.get("model") != link["model"]
-                    or reattached_result.get("approvalPolicy") != "never"
-                    or reattached_result.get("approvalsReviewer") != "user"
-                    or reattached_result.get("sandbox") !=
-                    {"type": "dangerFullAccess"}
-                    or (isinstance(reattached_result.get(
-                        "activePermissionProfile"), dict)
-                        and reattached_result[
-                            "activePermissionProfile"].get("id") ==
-                        ":workspace")):
-                return False
-        bound_turn = link["turn_id"]
-        later_turns = [item for item in self.records()
-                       if item.get("state") == "committed"
-                       and isinstance(item.get("recovery"), dict)
-                       and item["recovery"].get("kind") ==
-                       "supervisor/turn/start"
-                       and item["recovery"].get("fleet_name") ==
-                       recovery.get("fleet_name")
-                       and item["recovery"].get("incarnation_id") ==
-                       recovery.get("incarnation_id")
-                       and item["recovery"].get("thread_id") == thread_id
-                       and item["recovery"].get("restored_predecessor") == link]
-        if later_turns:
-            if any(isinstance(item.get("committed_at"), bool)
-                   or not isinstance(item.get("committed_at"), (int, float))
-                   for item in later_turns):
-                return False
-            latest = max(later_turns, key=lambda item: item["committed_at"])
-            if sum(item["committed_at"] == latest["committed_at"]
-                   for item in later_turns) != 1:
-                return False
-            latest_result = latest.get("result")
-            latest_turn = (latest_result.get("turn")
-                           if isinstance(latest_result, dict) else None)
-            if (not isinstance(latest_turn, dict)
-                    or not isinstance(latest_turn.get("id"), str)
-                    or not latest_turn["id"]):
-                return False
-            bound_turn = latest_turn["id"]
-        if (params.get("threadId") != thread_id
-                or not isinstance(params.get("input"), list)
-                or not params["input"]
-                or recovery.get("previous_turn_id") != bound_turn):
-            return False
-        if method == "turn/steer":
-            return params.get("expectedTurnId") == recovery["previous_turn_id"]
-        return set(params) == {"threadId", "input"}
-
 
 class CodexHostClient:
     def __init__(self, home: Path, metadata: Mapping[str, Any], encoded_key: str,
@@ -2334,22 +1968,6 @@ class CodexHostClient:
             return True
         return True
 
-    def _app_server_live(self) -> bool:
-        """Conservatively identify the child from the exact host metadata."""
-        current = _process_identity(self.app_server_pid)
-        if current is not None:
-            matches = _process_identities_match(
-                self.app_server_process_identity, current)
-            if matches is not None:
-                return matches
-        try:
-            os.kill(self.app_server_pid, 0)
-        except ProcessLookupError:
-            return False
-        except (PermissionError, OSError):
-            return True
-        return True
-
     def _ping(self, timeout: float) -> bool:
         try:
             observation = self.call({"operation_id": f"ping-{uuid.uuid4()}",
@@ -2430,21 +2048,11 @@ class CodexHostClient:
             raise HostUnavailable("Codex host response correlation mismatch")
         if response.get("ok") is not True:
             error = str(response.get("error") or "Codex host rejected operation")
-            if public_method is not None:
-                if error == "host response exceeds MAX_IPC_BYTES; page the request":
-                    raise HostUnavailable(error + "; mutation outcome is uncertain")
-                try:
-                    state = OperationJournal(self.home, self.generation).load(
-                        operation_id).get("state")
-                except (OSError, ValueError, FleetCliError) as exc:
-                    raise HostUnavailable(
-                        error + "; mutation journal is unreadable") from exc
-                if state not in {"prepared", "failed"}:
-                    # The provider write begins only after accepted is durable.
-                    # Even a generic host error after that boundary is not a
-                    # rejection and must not trigger a handoff rollback.
-                    raise HostUnavailable(
-                        error + "; mutation outcome is uncertain")
+            if (error == "host response exceeds MAX_IPC_BYTES; page the request"
+                    and public_method is not None):
+                # The provider mutation may already be committed in the host
+                # journal. Do not misclassify a large reply as rejection.
+                raise HostUnavailable(error + "; mutation outcome is uncertain")
             raise HostRejected(error)
         return CodexObservation(operation_id, self.generation, digest,
                                 response.get("result"))
@@ -2470,19 +2078,9 @@ class CodexHostClient:
             raise HostUnavailable("Codex host returned malformed approval state")
         return result
 
-    def supervisor_approval_reservation_supported(self) -> bool:
-        """A running host must itself advertise the approval boundary fence."""
-        operation = {
-            "operation_id": f"approval-reservation-capability-{uuid.uuid4()}",
-            "method": "approval/supervisor-reservation-v1", "payload": {},
-        }
-        return self.call(operation, timeout=5).result == {"version": 1}
-
     def respond_approval(self, request_id: str, thread_id: str,
                          turn_id: str, decision: Any,
-                         timeout: float = 10.0,
-                         supervisor_reservation: Mapping[str, Any] | None = None
-                         ) -> dict[str, Any]:
+                         timeout: float = 10.0) -> dict[str, Any]:
         """Consume one current durable request; the host rejects every replay."""
         operation = {
             "operation_id": f"approval-response-{uuid.uuid4()}",
@@ -2492,8 +2090,6 @@ class CodexHostClient:
                 "turn_id": turn_id, "decision": decision,
             },
         }
-        if supervisor_reservation is not None:
-            operation["payload"]["supervisor_reservation"] = dict(supervisor_reservation)
         result = self.call(operation, timeout=timeout).result
         if not isinstance(result, dict):
             raise HostUnavailable("Codex host returned malformed approval response state")

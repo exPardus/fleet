@@ -1,5 +1,7 @@
 """Exact, Interface-authenticated response to one native supervisor request."""
 import copy
+import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -127,11 +129,11 @@ def approval_home(tmp_path, monkeypatch):
     client.host.approvals = store
     monkeypatch.setattr(fleet_codex_host, "read_interface_claim",
                         lambda _home: source)
+    uid = os.getuid()
     monkeypatch.setattr(fleet_codex_host, "_ipc_peer_credentials",
-                        lambda _connection: (1234, 1000))
-    monkeypatch.setattr(fleet_codex_host.os, "getuid", lambda: 1000)
+                        lambda _connection: (1234, uid))
     monkeypatch.setattr(fleet_codex_host, "codex_process_source",
-                        lambda _pid: {"uid": 1000})
+                        lambda _pid: {"uid": uid})
     monkeypatch.setattr(fleet_codex_host, "interface_source_matches",
                         lambda claim, peer: claim == source)
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
@@ -430,3 +432,55 @@ def test_failed_registry_reservation_write_never_reaches_host(
     assert fleet.read_incarnation()["pending_operation"]["kind"] == "approval-response"
     assert store._load_path(store.path(6))["state"] == "pending"
     assert client.provider_writes == []
+
+
+@pytest.mark.parametrize("owner", ["cli", "host"])
+def test_approval_and_cli_lock_preserve_aged_live_owner(tmp_path, owner):
+    home = tmp_path / "home"
+    (home / "state").mkdir(parents=True)
+    path = home / "state" / "fleet.lock"
+    acquire = (fleet.fleet_lock(home=home) if owner == "cli"
+               else fleet_codex_host._approval_claim_lock(home))
+    with acquire:
+        token = path.read_bytes()
+        os.utime(path, (time.time() - 31, time.time() - 31))
+        if owner == "cli":
+            with pytest.raises(fleet_codex.HostRejected, match="lock is busy"):
+                with fleet_codex_host._approval_claim_lock(home, timeout=0.05):
+                    pytest.fail("host entered a live CLI transaction")
+        else:
+            with pytest.raises(fleet.FleetLockTimeout):
+                with fleet.fleet_lock(home=home, timeout=0.05):
+                    pytest.fail("CLI entered a live host transaction")
+        assert path.read_bytes() == token
+    assert not path.exists()
+
+
+def test_approval_lock_retires_only_dead_owner(tmp_path):
+    home = tmp_path / "home"
+    (home / "state").mkdir(parents=True)
+    path = home / "state" / "fleet.lock"
+    path.write_text("999999999|unknown|dead-owner", encoding="ascii")
+    os.utime(path, (time.time() - 31, time.time() - 31))
+    with fleet_codex_host._approval_claim_lock(home, timeout=0.2):
+        assert path.read_text().startswith(f"{os.getpid()}|")
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_approval_lock_refuses_unsafe_path_without_removal(tmp_path, kind):
+    home = tmp_path / "home"
+    (home / "state").mkdir(parents=True)
+    path = home / "state" / "fleet.lock"
+    if kind == "directory":
+        path.mkdir()
+    else:
+        target = home / "owner-data"
+        target.write_text("preserve owner data")
+        path.symlink_to(target)
+    with pytest.raises(fleet_codex.HostRejected, match="lock is unsafe"):
+        with fleet_codex_host._approval_claim_lock(home, timeout=0.05):
+            pytest.fail("host accepted an unsafe lock path")
+    assert path.exists()
+    if kind == "symlink":
+        assert target.read_text() == "preserve owner data"

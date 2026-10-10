@@ -9,7 +9,8 @@ import fleet
 
 
 IMPLEMENTATION_FILES = ("fleet.py", "fleet_index.py", "fleet_errors.py",
-                        "fleet_land.py", "fleet_brief.py", "fleet_platform.py")
+                        "fleet_land.py", "fleet_brief.py", "fleet_platform.py",
+                        "fleet_lock.py")
 
 
 def fleet_implementation_paths():
