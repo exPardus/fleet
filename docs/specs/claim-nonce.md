@@ -3627,6 +3627,22 @@ at all and therefore does not need §18's sound channel: holdership is read from
 INCARNATION`, which §18 neither demotes nor mentions. It is recorded as a recommendation and not
 taken.
 
+### Current source guard — 2026-10-10
+
+The current branch follow-through explicitly selects a source repair for the
+known-holder exemption. `_ceiling_refuses_dispatch` resolves direct claim sid
+and the existing registry sid union before consulting stamp absence. Known
+holders remain subject even when adopted by an interface session, when the
+registry is missing/corrupt but the claim directly names them, or during the
+fork-steer restamp window. Proven nonholders remain exempt. Indeterminate
+unstamped callers retain the human-channel exemption; stamped indeterminate
+callers retain the fail-toward-band rule. This does not turn the speed bump into
+a security boundary or change the supervisor 350k/400k and worker 250k/300k policy;
+`--force-band` can override only the soft band. The historical alternatives and
+July recommendations above are preserved as provenance, not present execution
+instructions or evidence of a recovered historical operator ruling. This source
+repair authorizes no Fleet session, settings, daemon or recovery action.
+
 ### 18.5 Where the code cites this section
 
 The three `RATIFIED DOCTRINE -- claim-nonce §18` markers in `bin/fleet.py` are the identity block

@@ -1730,6 +1730,15 @@ Note (b) and (c) compose safely rather than fighting: (c) exempts the interface 
 fail-toward-the-band default can catch it, so failing closed for the supervisor does not silence the
 human's control channel (ND1).
 
+**Current source rule (2026-10-10):** resolve direct claim identity and the
+registry sid union before applying the stamp-absence exemption. An unstamped
+known holder is subject, including an adopted caller or a fork-steered body;
+proven nonholders remain exempt. An unstamped indeterminate caller retains the
+human-channel exemption, while stamped indeterminate identity fails toward the
+band. Supervisor350k/400k and worker 250k/300k thresholds stay unchanged;
+`--force-band` overrides only the soft band. The following block records the
+historical July collision and is not the current implementation verdict.
+
 > **ND4(c)'s PREMISE IS FALSIFIED — RE-GROUNDING ORDERED 2026-07-30 AND NOT YET DONE. (c) is a LIVE
 > HOLE and the code is unchanged.** The identity clause (c) rests on was replaced by the operator on
 > 2026-07-30 (`the local operator decision record`; the clause is `docs/specs/claim-nonce.md` §18) and the

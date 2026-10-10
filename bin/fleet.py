@@ -3898,7 +3898,7 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 
 # Fleet identity resolves registry sid unions; FLEET_WORKER is a diagnostic witness.
 # The worker-turn claim gate uses registry identity (SPEC.md:204). The ceiling's
-# stamp-absence exemption has a separate limitation documented at its predicate.
+# stamp-absence exemption applies only after known claim holders are excluded.
 #
 # RATIFIED DOCTRINE -- claim-nonce §18:
 # The daemon substitutes the session environment wholesale, therefore no
@@ -4046,14 +4046,13 @@ def _resolve_worker_target(name):
 
 
 def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
-    """Return a dispatch refusal at the supervisor soft or hard band.
-    Exempt absent FLEET_WORKER, absent sid and definite non-holders, in that order.
-    Unknown holder identity remains subject; unknown occupancy refuses. Read the
-    caller's own transcript and compare the supervisor soft and hard thresholds.
-    ``force_band`` override may pass the soft band, but never the hard ceiling.
-    The stamp-absence exemption can also exempt a hosted supervisor because the
-    daemon substitutes its environment; this is a current limitation (§18.4).
-    SPEC.md:204's worker-turn claim prohibition concerns the separate claim gate.
+    """Apply current supervisor bands to known claim holders, regardless of stamp.
+
+    Resolve direct claim identity and the registry sid union before considering
+    stamp absence, including adopted callers and fork-steer claim restamp lag.
+    A proven non-holder remains exempt. An unstamped indeterminate caller retains
+    the human-channel exemption; stamped indeterminate callers fail toward the
+    band. Neither path changes soft/hard thresholds or the force-band contract.
 
     RATIFIED DOCTRINE -- claim-nonce §18:
     The daemon substitutes the session environment wholesale, therefore no
@@ -4063,18 +4062,15 @@ def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
     every other env observation on a hosted body is evidence about the daemon's
     cold-starter, not about the body; the registry sid union is the only sound
     identity channel.
-    The exemption and unknown-identity rule give opposite answers for an absent
-    registry member; this function retains both behaviors pending their resolution.
     """
-    # Stamp absence exempts before sid or registry reads. Hosted bodies can also lack
-    # this stamp; see the predicate's documented limitation.
-    if not (os.environ.get("FLEET_WORKER") or "").strip():
-        return None
     caller = current_caller_session()
     if caller is None:
-        return None                     # no sid -> cannot be the claim-holder body
-    if _caller_holds_supervisor_claim(caller) is False:
-        return None                     # a claim is held, this is not its holder
+        return None                     # no sid -> cannot establish claim holdership
+    holder = _caller_holds_supervisor_claim(caller)
+    if holder is False:
+        return None                     # proven non-holder, regardless of stamp
+    if holder is not True and not (os.environ.get("FLEET_WORKER") or "").strip():
+        return None                     # indeterminate human channel remains exempt
     # holder (True) or indeterminate (None, ND4b fail-toward-band): apply the
     # ceiling. Occupancy is the caller's own transcript (never the claim's sid).
     occupancy = _transcript_occupancy(find_transcript_path(None, caller))
@@ -4092,11 +4088,8 @@ def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
             f"the ceiling, start NO new worker turns: let the in-flight wave finish and "
             f"READ its outcomes (`fleet status`/`result`/`peek`/`wait`), then hand off "
             f"(`fleet sup-handoff-begin`). The handoff verbs are exempt from this refusal. "
-            f"(Fleet-enforced, not discretion. A session with no `FLEET_WORKER` stamp is "
-            f"exempt structurally, three-tier §11.3 ND4c -- so if you believe you are the "
-            f"interface tier and are reading this, the hosting daemon substituted an "
-            f"environment carrying a stamp into a session it never launched: `fleet doctor` "
-            f"names that leak.)")
+            f"(Fleet-enforced, not discretion. A known claim holder remains subject "
+            f"with or without a FLEET_WORKER stamp.)")
     return (
         f"{verb}: refusing -- the supervisor claim-holder's context occupancy ({occ_txt}) "
         f"is at or above the {SUPERVISOR_BAND_SOFT_TOKENS:,}-token soft trigger but below "
@@ -14420,14 +14413,12 @@ DAEMON_ENV_LEAK_REMEDY = (
     "NO OBSERVATION OF THIS VARIABLE IS EVIDENCE ABOUT THIS BODY, IN EITHER "
     "DIRECTION (claim-nonce §18, ratified 2026-07-30) -- it is a WITNESS: "
     "worth reporting when it disagrees with the registry, never worth "
-    "believing over it. EXACTLY ONE GUARD STILL KEYS ON IT AND THAT IS A KNOWN "
-    "LIVE HOLE, not a sound read: three-tier §11.3 ND4c exempts a session with "
-    f"no stamp from the {SUPERVISOR_BAND_HARD_TOKENS:,}-token dispatch ceiling, "
-    "so a body whose daemon was "
-    "cold-started unstamped is exempt from a ceiling that applies to it. The "
-    "re-grounding is ordered and BLOCKED on an operator ruling (it collides "
-    "with ND4b on the same input); the accounting and the three candidates are "
-    "in claim-nonce §18.4. The sid itself is NOT affected -- the vendor stamps "
+    "believing over it. ND4c now resolves direct claim identity and registry "
+    "sid unions before stamp absence: a known holder, including adopted and "
+    "fork-steered bodies, remains subject to the current dispatch bands. "
+    "The residual LIVE HOLE is confined to indeterminate unstamped identity, "
+    "which retains the human-channel exemption (claim-nonce §18.4). "
+    "The sid itself is NOT affected -- the vendor stamps "
     "each hosted session's own sid over the substituted environment (§18.2, "
     "closed by counting), which is what makes the registry union readable at "
     "all")
@@ -14472,14 +14463,12 @@ def _doctor_check_identity_witness(workers: dict):
                     f"hosts, so a daemon cold-started by an unstamped launcher "
                     f"produces exactly this, and no observation of "
                     f"FLEET_WORKER (present, absent or blank) is evidence about "
-                    f"this body (claim-nonce §18). WHAT IT STILL COSTS, and it "
-                    f"is why this row is red rather than a note: three-tier "
-                    f"§11.3 ND4c exempts a stamp-less session from the "
-                    f"{SUPERVISOR_BAND_HARD_TOKENS:,}-token "
-                    f"dispatch ceiling, so until that exemption is re-grounded "
-                    f"this body is exempt from a ceiling the registry says "
-                    f"applies to it. The re-grounding is ordered and BLOCKED on "
-                    f"an operator ruling (claim-nonce §18.4). Remedy for the "
+                    f"this body (claim-nonce §18). Known claim holders remain "
+                    f"subject to the dispatch ceiling without a stamp, including "
+                    f"adopted and fork-steered identities. Indeterminate unstamped "
+                    f"identity retains the human-channel exemption (claim-nonce "
+                    f"§18.4). This witness is red because the channels disagree, "
+                    f"not because a known holder bypasses its band. Remedy for the "
                     f"witness itself: let the daemon idle-exit so the next "
                     f"dispatch starts a fresh one.")
         return ("identity-witness", True,
