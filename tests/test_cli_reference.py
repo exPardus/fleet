@@ -125,11 +125,50 @@ def test_sup_reconcile_reference_states_action_exclusivity():
     assert parser._mutually_exclusive_groups is groups
     section = help_text.split("### fleet sup-reconcile\n", 1)[1].split("\n### ", 1)[0]
     assert "Choose at most one reconciliation action." in section
+    assert "At most one of `--prepare-recorded-policy-restore` or" in section
     with pytest.raises(SystemExit):
         parser.parse_args([
             "--prepare-recorded-policy-restore",
             "--restore-recorded-policy",
         ])
+
+
+def test_reference_describes_every_mutually_exclusive_group():
+    expected = {
+        "homes": "At most one of `--add` or `--retire` may be used.",
+        "pr-poll": (
+            "Exactly one of `--since` (alias `--recorded-sha`) or "
+            "`--since-file` is required."),
+        "wait": "At most one of `--any` or `--all` may be used.",
+        "codex-decline-fixed": (
+            "Exactly one of `--expect-request-cwd` or "
+            "`--expect-cwd-absent` is required."),
+        "clean": "At most one of `--dead-only` or `--tombstones` may be used.",
+    }
+    rendered = gen.render(fleet)
+    for command, constraint in expected.items():
+        section = rendered.split(f"### fleet {command}\n", 1)[1].split(
+            "\n### ", 1)[0]
+        assert f"Constraint: {constraint}" in " ".join(section.split())
+
+
+def test_reference_generation_preserves_groups_and_parser_validation():
+    for _path, _summary, parser in gen._visible_commands(fleet.build_parser()):
+        original = parser._mutually_exclusive_groups
+        snapshots = [tuple(group._group_actions) for group in original]
+        gen._stable_help(parser)
+        assert parser._mutually_exclusive_groups is original
+        assert [tuple(group._group_actions) for group in original] == snapshots
+        for group in original:
+            assert len(group._group_actions) >= 2
+            argv = []
+            for action in group._group_actions[:2]:
+                argv.append(action.option_strings[0])
+                if action.nargs != 0:
+                    argv.append("value")
+            with pytest.raises(SystemExit) as error:
+                parser.parse_args(argv)
+            assert error.value.code == 2
 
 
 def _documented_verbs() -> list[str]:

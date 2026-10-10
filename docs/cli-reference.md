@@ -3,9 +3,10 @@
 <!-- Generated from bin/fleet.py build_parser() by tools/gen_cli_reference.py.
      Do not edit by hand. Regenerate with: python tools/gen_cli_reference.py -->
 
-Every verb and option below is printed by the parser itself. For the workflow
-behind the verbs, read [getting-started.md](getting-started.md); for the
-behavioural contract, read [SPEC.md](SPEC.md).
+Every verb and option below comes from the parser. Constraint notes summarize
+its mutually exclusive option groups. For the workflow behind the verbs, read
+[getting-started.md](getting-started.md); for the behavioural contract, read
+[SPEC.md](SPEC.md).
 
 Verbs marked hidden in the parser are not listed here or in top-level
 `fleet --help` output.
@@ -105,6 +106,8 @@ options:
 ```
 
 ### fleet homes
+
+Constraint: At most one of `--add` or `--retire` may be used.
 
 ```text
 usage: fleet homes [-h] [--add PATH] [--retire PATH]
@@ -222,6 +225,9 @@ options:
 
 ### fleet pr-poll
 
+Constraint: Exactly one of `--since` (alias `--recorded-sha`) or `--since-file` is
+  required.
+
 ```text
 usage: fleet pr-poll [-h] [--since SINCE] [--since-file PATH] [--repo REPO]
        [--json] pr
@@ -252,6 +258,8 @@ options:
 ```
 
 ### fleet wait
+
+Constraint: At most one of `--any` or `--all` may be used.
 
 ```text
 usage: fleet wait [-h] [--any] [--all] [--timeout TIMEOUT] names [names ...]
@@ -340,6 +348,8 @@ options:
 ```
 
 ### fleet codex-decline-fixed
+
+Constraint: Exactly one of `--expect-request-cwd` or `--expect-cwd-absent` is required.
 
 ```text
 usage: fleet codex-decline-fixed [-h] --request-id-type {int,string}
@@ -581,6 +591,8 @@ options:
 ```
 
 ### fleet clean
+
+Constraint: At most one of `--dead-only` or `--tombstones` may be used.
 
 ```text
 usage: fleet clean [-h] [--yes] [--nonce NONCE] [--dead-only] [--tombstones]
@@ -1017,6 +1029,12 @@ options:
 ```
 
 ### fleet sup-reconcile
+
+Constraint: At most one of `--prepare-recorded-policy-restore` or `--restore-recorded-
+  policy` or `--prepare-restored-continuation` or `--shutdown-restored-continuation` or
+  `--reattach-restored-continuation` or `--cancel-pending-approval` or `--prepare-
+  cancelled-approval-resume` or `--resume-cancelled-approval` or `--shutdown-cancelled-
+  approval` may be used.
 
 ```text
 usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore]

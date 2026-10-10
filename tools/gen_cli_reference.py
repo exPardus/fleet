@@ -12,6 +12,7 @@ import argparse
 import importlib.util
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 
@@ -27,9 +28,10 @@ HEADER = """\
 <!-- Generated from bin/fleet.py build_parser() by tools/gen_cli_reference.py.
      Do not edit by hand. Regenerate with: python tools/gen_cli_reference.py -->
 
-Every verb and option below is printed by the parser itself. For the workflow
-behind the verbs, read [getting-started.md](getting-started.md); for the
-behavioural contract, read [SPEC.md](SPEC.md).
+Every verb and option below comes from the parser. Constraint notes summarize
+its mutually exclusive option groups. For the workflow behind the verbs, read
+[getting-started.md](getting-started.md); for the behavioural contract, read
+[SPEC.md](SPEC.md).
 
 Verbs marked hidden in the parser are not listed here or in top-level
 `fleet --help` output.
@@ -119,6 +121,11 @@ def render(fleet_module=None) -> str:
             command = " ".join(path)
             heading = "#" * min(2 + len(path), 6)
             out.append(f"{heading} fleet {command}\n")
+            for constraint in _group_constraints(subparser):
+                note = textwrap.wrap(
+                    f"Constraint: {constraint}", width=88,
+                    subsequent_indent="  ")
+                out.append("\n".join(note) + "\n")
             out.append(_block(_stable_help(subparser)))
         return "\n".join(out).rstrip("\n") + "\n"
     finally:
@@ -137,7 +144,8 @@ def _stable_help(parser: argparse.ArgumentParser) -> str:
 
     Python 3.14 renders a mutually exclusive group with pipe separators while
     3.10/3.12 list the same switches independently. The reference documents
-    every option; parser validation still enforces the group at runtime.
+    every option, and `_group_constraints` records the group's exact constraint
+    immediately above this display. Parser validation still enforces it.
     """
     groups = parser._mutually_exclusive_groups
     parser._mutually_exclusive_groups = []
@@ -145,6 +153,29 @@ def _stable_help(parser: argparse.ArgumentParser) -> str:
         return parser.format_help()
     finally:
         parser._mutually_exclusive_groups = groups
+
+
+def _group_constraints(parser: argparse.ArgumentParser) -> list[str]:
+    """Describe every parser mutex group without depending on argparse text."""
+    constraints = []
+    for group in parser._mutually_exclusive_groups:
+        members = []
+        for action in group._group_actions:
+            if not action.option_strings:
+                continue
+            aliases = action.option_strings[1:]
+            label = f"`{action.option_strings[0]}`"
+            if aliases:
+                label += " (alias " + ", ".join(f"`{item}`" for item in aliases) + ")"
+            members.append(label)
+        if len(members) < 2:
+            continue
+        choices = " or ".join(members)
+        if group.required:
+            constraints.append(f"Exactly one of {choices} is required.")
+        else:
+            constraints.append(f"At most one of {choices} may be used.")
+    return constraints
 
 
 def main(argv: list[str] | None = None) -> int:
