@@ -239,7 +239,7 @@ class TestTheCensus:
             +def _mutant_d_decoy(entries):
             +    return _roster_live_sids(entries)
 
-        Twelve calls now, and `_wedged_release_gate` -- the
+        Fourteen calls now, and `_wedged_release_gate` -- the
         one site the report calls "the trap" -- no longer reads Q1. A count
         assertion is defeated by ANY same-arity rearrangement; a scope
         multiset is not. Same shape as
@@ -257,6 +257,8 @@ class TestTheCensus:
             "cmd_sup_boot": 1,
             "_wedged_release_gate": 1,
             "_doctor_check_supervisor_wedge": 1,
+            "_legacy_retirement_proof": 1,
+            "_dispatch_codex_supervisor_body": 1,
         })
         assert got == expected, (
             f"the Q1 call-site POPULATION moved.\n"
@@ -264,7 +266,7 @@ class TestTheCensus:
             f"A site that disappears from this map has stopped reading Q1 even "
             f"if the total is unchanged -- which is exactly the mutant this "
             f"assertion exists to catch.")
-        assert sum(expected.values()) == 12
+        assert sum(expected.values()) == 14
 
         # COUNT CONTROL, both limbs. A census whose good answer might be zero
         # must be shown to be able to report non-zero AND zero (wave 38).
@@ -365,6 +367,9 @@ class TestTheCensus:
             # display. It produces no liveness verdict of its own, so it is the
             # same shape of false positive as `_wave_roster_claude_tokens`.
             "_supervisor_live_lanes",
+            # The root preclaim lock breaker probes a local kernel PID, not
+            # the Claude roster whose Q1 readers this census enumerates.
+            "_fleet_lock_live_owner",
         }
         shaped = {n.name for n in ast.walk(tree)
                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))

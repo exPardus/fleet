@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -377,6 +378,85 @@ class TestWindowsDeviceNameRefusal:
 
 
 class TestLockContention:
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink lock path")
+    def test_dangling_lock_symlink_refuses_without_retrying_forever(self, isolated_home):
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.symlink_to("missing-target")
+        started = time.monotonic()
+        with pytest.raises(fleet.FleetCliError, match="unsafe non-regular lock path"):
+            with fleet.fleet_lock(timeout=0.15):
+                pytest.fail("dangling lock symlink was accepted")
+        assert time.monotonic() - started < 0.5
+        assert lock_path.is_symlink()
+
+    def test_directory_lock_path_refuses_without_unlink(self, isolated_home):
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.mkdir()
+        with pytest.raises(fleet.FleetCliError, match="unsafe non-regular lock path"):
+            with fleet.fleet_lock(timeout=0.15):
+                pytest.fail("directory lock path was accepted")
+        assert lock_path.is_dir()
+
+    def test_concurrent_unlink_before_stat_retries(self, isolated_home, monkeypatch):
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text("old owner", encoding="ascii")
+        real_open = os.open
+        first = True
+
+        def removed_before_stat(path, flags, *args, **kwargs):
+            nonlocal first
+            if str(path) == str(lock_path) and first:
+                first = False
+                lock_path.unlink()
+                raise FileExistsError(str(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(fleet.os, "open", removed_before_stat)
+        with fleet.fleet_lock(timeout=1):
+            assert lock_path.exists()
+        assert not lock_path.exists()
+
+    def test_absent_name_retries_respect_deadline(self, isolated_home, monkeypatch):
+        lock_path = fleet.state_dir() / "fleet.lock"
+        real_open = os.open
+
+        def vanished_before_stat(path, flags, *args, **kwargs):
+            if str(path) == str(lock_path):
+                raise FileExistsError(str(path))
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(fleet.os, "open", vanished_before_stat)
+        started = time.monotonic()
+        with pytest.raises(fleet.FleetLockTimeout):
+            with fleet.fleet_lock(timeout=0.05):
+                pytest.fail("absent lock name loop ignored deadline")
+        assert time.monotonic() - started < 0.5
+
+    def test_stale_unlink_race_retries(self, isolated_home, monkeypatch):
+        lock_path = fleet.state_dir() / "fleet.lock"
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text("999999999|dead-start|nonce", encoding="ascii")
+        old = time.time() - 60
+        os.utime(lock_path, (old, old))
+        real_unlink = Path.unlink
+        first = True
+
+        def removed_by_other(self, *args, **kwargs):
+            nonlocal first
+            if self == lock_path and first:
+                first = False
+                real_unlink(self, *args, **kwargs)
+                raise FileNotFoundError(str(self))
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", removed_by_other)
+        with fleet.fleet_lock(timeout=1):
+            assert lock_path.exists()
+        assert not lock_path.exists()
+
     def test_second_acquirer_blocks_then_succeeds_after_release(self, isolated_home):
         order = []
         first_acquired = threading.Event()

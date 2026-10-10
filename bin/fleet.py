@@ -31,6 +31,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
+if os.name != "nt":
+    import fcntl
+else:
+    fcntl = None
+
 import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
@@ -841,6 +846,50 @@ class FleetLockTimeout(Exception):
     """Raised when state/fleet.lock could not be acquired within the timeout."""
 
 
+def _fleet_lock_live_owner(path: Path) -> bool:
+    """A delayed live owner must not be mistaken for a stale crashed owner."""
+    try:
+        raw = path.read_text(encoding="ascii")
+        modern = "|" in raw
+        parts = raw.split("|", 2) if modern else raw.split(":", 1)
+        pid = int(parts[0])
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, UnicodeError, IndexError):
+        return False
+    # The original token format contained only PID and nonce. Treat a live
+    # PID as ambiguous rather than unlinking a lock that might still be held.
+    if not modern or len(parts) != 3:
+        return True
+    if parts[1] == "unknown":
+        return True
+    try:
+        from fleet_codex import _process_identities_match, _process_identity
+        observed = _process_identity(pid)
+        if not isinstance(observed, str):
+            return True
+        matches = _process_identities_match(parts[1], observed)
+        return matches is not False
+    except Exception:  # noqa: BLE001 -- unknown liveness cannot authorize unlink
+        return True
+
+
+def _fleet_lock_same_file(fd: int, path: Path) -> bool:
+    """A pathname may have changed while a contender waited for its inode."""
+    try:
+        opened = os.fstat(fd)
+        named = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (stat.S_ISREG(opened.st_mode) and stat.S_ISREG(named.st_mode)
+            and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino))
+
+
 @contextmanager
 def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     """Lock one home's registry; ``home`` avoids changing global selection."""
@@ -849,33 +898,88 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout
     fd = None
-    token = f"{os.getpid()}:{uuid.uuid4().hex}"
+    from fleet_codex import _process_identity
+    identity = _process_identity(os.getpid()) or "unknown"
+    token = f"{os.getpid()}|{identity}|{uuid.uuid4().hex}"
+
+    def retry_or_timeout() -> None:
+        if time.monotonic() >= deadline:
+            raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+
     while fd is None:
         try:
             fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            if fcntl is not None:
+                # Keep a kernel lock on this inode through the whole registry
+                # transaction. A stale breaker must acquire the same lock
+                # before it may unlink the name. This closes the race between
+                # two contenders that both inspected an old stale pathname.
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                if not _fleet_lock_same_file(fd, path):
+                    os.close(fd)
+                    fd = None
+                    retry_or_timeout()
+                    continue
         except FileExistsError:
             try:
-                age = time.time() - path.stat().st_mtime
+                info = path.lstat()
             except FileNotFoundError:
+                retry_or_timeout()
                 continue  # someone else already broke/released it; retry immediately
-            if age > LOCK_STALE_SECONDS:
+            if not stat.S_ISREG(info.st_mode):
+                raise FleetCliError(f"unsafe non-regular lock path: {path}")
+            age = time.time() - info.st_mtime
+            if age > LOCK_STALE_SECONDS and fcntl is not None:
+                try:
+                    stale_fd = os.open(str(path), os.O_RDONLY
+                                       | getattr(os, "O_NOFOLLOW", 0)
+                                       | getattr(os, "O_NONBLOCK", 0))
+                except FileNotFoundError:
+                    retry_or_timeout()
+                    continue
+                try:
+                    try:
+                        fcntl.flock(stale_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        if _fleet_lock_same_file(stale_fd, path):
+                            try:
+                                current = path.lstat()
+                            except FileNotFoundError:
+                                current = None
+                            if (current is not None
+                                    and time.time() - current.st_mtime > LOCK_STALE_SECONDS
+                                    and not _fleet_lock_live_owner(path)):
+                                try:
+                                    path.unlink()
+                                except FileNotFoundError:
+                                    pass
+                                retry_or_timeout()
+                                continue
+                finally:
+                    os.close(stale_fd)
+            elif age > LOCK_STALE_SECONDS and not _fleet_lock_live_owner(path):
                 try:
                     path.unlink()
                 except FileNotFoundError:
                     pass
+                retry_or_timeout()
                 continue
-            if time.monotonic() >= deadline:
-                raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+            retry_or_timeout()
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
-        except PermissionError:
+        except PermissionError as denied:
             # Windows delete-pending lock names can raise PermissionError instead of EEXIST.
             # A present name is contention: poll under the deadline without stale-breaking,
             # because unlink can also be denied. An absent name means directory access failed;
             # re-raise that error instead of reporting a misleading lock timeout.
-            if not path.exists():
-                raise
-            if time.monotonic() >= deadline:
-                raise FleetLockTimeout(f"timed out waiting for lock: {path}")
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                raise denied
+            if not stat.S_ISREG(info.st_mode):
+                raise FleetCliError(f"unsafe non-regular lock path: {path}")
+            retry_or_timeout()
             time.sleep(LOCK_RETRY_INTERVAL_SECONDS)
     try:
         os.write(fd, token.encode("utf-8"))
@@ -883,16 +987,18 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
         # O_EXCL proves this file is ours. On token-write failure, close and remove it
         # so other acquirers are not stranded; cleanup must preserve the original error.
         try:
-            os.close(fd)
+            if _fleet_lock_same_file(fd, path):
+                path.unlink()
         except OSError:
             pass
         try:
-            path.unlink()
+            os.close(fd)
         except OSError:
             pass
         raise
     try:
-        os.close(fd)
+        if fcntl is None:
+            os.close(fd)
         yield
     finally:
         # Compare-and-delete: only unlink if the lock file still holds our
@@ -904,9 +1010,12 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
             current = None
         if current == token.encode("utf-8"):
             try:
-                path.unlink()
+                if fcntl is None or _fleet_lock_same_file(fd, path):
+                    path.unlink()
             except (FileNotFoundError, OSError):
                 pass
+        if fcntl is not None:
+            os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -6779,6 +6888,519 @@ def _rollback_codex_preclaim(name, expected_record, prior_brief, prior_task):
     return removed
 
 
+_CODEX_PREACCEPT_AUTH_ERROR = (
+    "Codex IPC peer does not hold the current Interface or exact-home "
+    "supervisor claim")
+
+
+def _codex_preaccept_digest(value: dict, label: str) -> str:
+    from fleet_codex import _digest
+    return _digest(f"worker-preaccept-{label}", value)
+
+
+def _codex_preaccept_evidence(path: Path) -> tuple[dict, str]:
+    """Read a reviewed, owner-only classification packet, never a provider path."""
+    from fleet_codex import _require_regular
+
+    if not path.is_absolute():
+        raise FleetCliError("worker preaccept evidence path must be absolute")
+    info = _require_regular(path)
+    if info.st_size > 64 * 1024:
+        raise FleetCliError("worker preaccept evidence exceeds 64 KiB")
+    raw = path.read_bytes()
+    if len(raw) != info.st_size:
+        raise FleetCliError("worker preaccept evidence changed during read")
+    try:
+        evidence = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise FleetCliError("worker preaccept evidence is not JSON") from exc
+    if not isinstance(evidence, dict):
+        raise FleetCliError("worker preaccept evidence is missing")
+    required = {"schema", "kind", "home", "worker", "operation_id",
+                "generation", "payload_digest", "row_digest",
+                "journal_digest", "journal_sha256", "source", "rejection",
+                "classification_sha256"}
+    if (set(evidence) != required or evidence.get("schema") != 1
+            or evidence.get("kind") != "worker/thread-start-auth-rejection"
+            or evidence.get("home") != str(FLEET_HOME.resolve())
+            or not isinstance(evidence.get("worker"), str)
+            or not isinstance(evidence.get("operation_id"), str)
+            or not isinstance(evidence.get("generation"), str)):
+        raise FleetCliError("worker preaccept evidence identity is malformed")
+    for key in ("payload_digest", "row_digest", "journal_digest",
+                "journal_sha256", "classification_sha256"):
+        if not isinstance(evidence.get(key), str) or not re.fullmatch(
+                r"[0-9a-f]{64}", evidence[key]):
+            raise FleetCliError(f"worker preaccept evidence {key} is malformed")
+    source = evidence["source"]
+    rejection = evidence["rejection"]
+    if (not isinstance(source, dict)
+            or set(source) != {"commit", "fleet_sha256", "client_sha256",
+                               "host_sha256", "host_pid", "host_identity",
+                               "host_started_at", "app_server_pid",
+                               "app_server_identity", "app_server_started_at",
+                               "codex_version", "schema_digest",
+                               "provenance_path", "provenance_sha256"}
+            or any(not isinstance(source.get(key), str)
+                   or not re.fullmatch(r"[0-9a-f]{64}", source[key])
+                   for key in ("fleet_sha256", "client_sha256",
+                               "host_sha256", "provenance_sha256"))
+            or not isinstance(source.get("commit"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", source["commit"])
+            or not isinstance(source.get("host_pid"), int)
+            or isinstance(source["host_pid"], bool)
+            or source["host_pid"] <= 0
+            or not isinstance(source.get("app_server_pid"), int)
+            or isinstance(source["app_server_pid"], bool)
+            or source["app_server_pid"] <= 0
+            or not isinstance(source.get("host_identity"), str)
+            or not source["host_identity"]
+            or not isinstance(source.get("app_server_identity"), str)
+            or not source["app_server_identity"]
+            or not isinstance(source.get("host_started_at"), (int, float))
+            or isinstance(source["host_started_at"], bool)
+            or not math.isfinite(source["host_started_at"])
+            or not isinstance(source.get("app_server_started_at"), (int, float))
+            or isinstance(source["app_server_started_at"], bool)
+            or not math.isfinite(source["app_server_started_at"])
+            or not isinstance(source.get("codex_version"), str)
+            or not source["codex_version"]
+            or not isinstance(source.get("provenance_path"), str)
+            or not isinstance(source.get("schema_digest"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source["schema_digest"])
+            or not isinstance(rejection, dict)
+            or set(rejection) != {"error", "operation_id", "generation",
+                                  "home", "payload_digest", "report_path",
+                                  "report_sha256"}
+            or rejection.get("error") != _CODEX_PREACCEPT_AUTH_ERROR
+            or not isinstance(rejection.get("report_path"), str)
+            or not isinstance(rejection.get("report_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", rejection["report_sha256"])
+            or any(rejection.get(key) != evidence.get(other)
+                   for key, other in (("operation_id", "operation_id"),
+                                      ("generation", "generation"),
+                                      ("home", "home"),
+                                      ("payload_digest", "payload_digest")))):
+        raise FleetCliError("worker preaccept rejection or source proof is malformed")
+    return evidence, hashlib.sha256(raw).hexdigest()
+
+
+def _codex_preaccept_expected_intent(name: str, row: dict,
+                                     operation_id: str) -> tuple[str, dict]:
+    """Rebuild the one original worker thread/start from immutable row fields."""
+    from fleet_codex import _digest
+
+    try:
+        cwd = str(Path(row["cwd"]).resolve(strict=True))
+        model = _codex_model_slug(row["model"])
+        profile = _codex_permission_profile(row["mode"])
+    except (KeyError, TypeError, OSError) as exc:
+        raise FleetCliError("worker preaccept row has no original launch inputs") from exc
+    if model is None or row["cwd"] != cwd:
+        raise FleetCliError("worker preaccept row launch inputs changed")
+    thread_source = "fleet-spawn-" + hashlib.sha256(
+        operation_id.encode("utf-8")).hexdigest()
+    params = {"cwd": cwd, "model": model, "threadSource": thread_source}
+    params.update({key: value for key, value in profile.items()
+                   if value is not None})
+    recovery = {
+        "kind": "thread/start", "fleet_name": name,
+        "canonical_cwd": cwd, "thread_source": thread_source,
+        "expected_effective": {
+            "model": model,
+            "approval_policies": ([profile["approvalPolicy"]]
+                                  if profile["approvalPolicy"] is not None
+                                  else ["never", "on-request", "untrusted"]),
+            "sandbox_types": ({
+                "danger-full-access": ["dangerFullAccess"],
+                "workspace-write": ["workspaceWrite"],
+                "read-only": ["readOnly"],
+            }.get(profile["sandbox"], [
+                "dangerFullAccess", "workspaceWrite", "readOnly"])),
+        },
+    }
+    return _digest("rpc", {"method": "thread/start", "params": params}), recovery
+
+
+def _codex_preaccept_original_row(name: str, row: dict, evidence: dict,
+                                  settlement: dict) -> bool:
+    """Require the frozen nonexecutable row; settlement never writes it."""
+    if not isinstance(row, dict):
+        return False
+    if "preaccept_settlement" in row:
+        return False
+    if (_codex_preaccept_digest(row, "row") != evidence["row_digest"]
+            or _is_supervisor_shaped(name)
+            or _codex_record_route(row) != "native"
+            or row.get("dispatch_kind") != "codex-app-server"
+            or row.get("adapter_state") != "uncertain"
+            or row.get("status") != "dead-suspected"
+            or row.get("last_operation_id") != evidence["operation_id"]
+            or row.get("pending_operation") is not None
+            or row.get("session_id") is not None
+            or row.get("mcx_id") is not None
+            or any(row.get(key) is not None for key in (
+                "codex_thread_id", "codex_turn_id", "codex_host_generation",
+                "permission_effective", "provider_status"))):
+        return False
+    return True
+
+
+def _codex_preaccept_original_journal(record: dict, evidence: dict,
+                                      settlement: dict) -> bool:
+    if not isinstance(record, dict):
+        return False
+    original = dict(record)
+    if record.get("state") == "failed":
+        if record.get("preaccept_settlement") != settlement:
+            return False
+        if (record.get("reason") !=
+                "authenticated Interface: original IPC rejected before acceptance"
+                or not isinstance(record.get("failed_at"), (int, float))
+                or isinstance(record["failed_at"], bool)):
+            return False
+        for key in ("preaccept_settlement", "reason", "failed_at"):
+            original.pop(key, None)
+        original["state"] = "prepared"
+    elif record.get("state") != "prepared" or any(key in record for key in (
+            "preaccept_settlement", "reason", "failed_at")):
+        return False
+    if (_codex_preaccept_digest(original, "journal") != evidence["journal_digest"]
+            or record.get("schema") != 1
+            or record.get("operation_id") != evidence["operation_id"]
+            or record.get("home") != evidence["home"]
+            or record.get("generation") != evidence["generation"]
+            or record.get("method") != "rpc"
+            or record.get("public_method") != "thread/start"
+            or record.get("payload_digest") != evidence["payload_digest"]
+            or any(key in record for key in (
+                "accepted_at", "observed_at", "uncertain_at", "result"))):
+        return False
+    return True
+
+
+def _codex_preaccept_source_matches(evidence: dict) -> bool:
+    """The live host/client source files must still match the reviewed origin."""
+    root = Path(__file__).resolve().parent
+    source = evidence["source"]
+    for filename, key in (("fleet_codex.py", "client_sha256"),
+                          ("fleet_codex_host.py", "host_sha256")):
+        try:
+            actual = hashlib.sha256((root / filename).read_bytes()).hexdigest()
+        except OSError:
+            return False
+        if actual != source[key]:
+            return False
+    return True
+
+
+def _codex_preaccept_artifact_matches(relative: str, digest: str,
+                                      prefix: tuple[str, str], suffix: str) -> bool:
+    """Pin the reviewed Fleet provenance/report without reaching private state."""
+    path_part = Path(relative)
+    if (path_part.is_absolute() or ".." in path_part.parts
+            or len(path_part.parts) != 3
+            or path_part.parts[:2] != prefix
+            or path_part.suffix != suffix):
+        return False
+    path = FLEET_HOME / path_part
+    try:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) not in {0o600, 0o644}
+                or info.st_size > 128 * 1024):
+            return False
+        raw = path.read_bytes()
+    except OSError:
+        return False
+    return len(raw) == info.st_size and hashlib.sha256(raw).hexdigest() == digest
+
+
+def _codex_preaccept_target_mail_absent(name: str) -> bool:
+    """An old unconsumed or claimed target message needs its own review."""
+    directory = mailbox_dir()
+    try:
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        count = 0
+        for path in directory.iterdir():
+            count += 1
+            if count > 1024:
+                return False
+            if (path.name == f"{name}.md"
+                    or path.name.startswith(f"{name}.md.claimed.")):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _codex_preaccept_write_failed(path: Path, value: dict) -> None:
+    """Replace only the exact journal file; never expose partial JSON."""
+    data = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    if len(data) > 1024 * 1024:
+        raise FleetCliError("worker preaccept disposition is oversized")
+    fd, temporary = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.stem}.preaccept.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(str(path.parent), os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def cmd_codex_settle_preaccept(args) -> int:
+    """Settle one reviewed worker auth rejection without dispatch or replay."""
+    from fleet_codex import (HOST_HEARTBEAT_STALE_SECONDS, OperationJournal,
+                             _process_identities_match, _process_identity,
+                             _read_json, _require_directory)
+
+    def host_processes_match(metadata: dict) -> bool:
+        for pid, expected in (
+                (metadata["pid"], metadata["process_identity"]),
+                (metadata["app_server_pid"],
+                 metadata["app_server_process_identity"])):
+            observed = _process_identity(pid)
+            if (not isinstance(observed, str)
+                    or _process_identities_match(expected, observed) is not True):
+                return False
+        return True
+
+    def heartbeat_fresh(metadata: dict) -> bool:
+        value = metadata.get("heartbeat")
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and 0 <= time.time() - value <= HOST_HEARTBEAT_STALE_SECONDS)
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("worker preaccept settlement requires explicit --fleet-home")
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("worker preaccept settlement requires current exact-home Codex Interface")
+    evidence, evidence_sha = _codex_preaccept_evidence(Path(args.evidence))
+    if (not isinstance(args.expect_evidence_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", args.expect_evidence_sha256)
+            or evidence_sha != args.expect_evidence_sha256):
+        raise FleetCliError("worker preaccept evidence bytes changed")
+    if (args.name != evidence["worker"]
+            or args.operation_id != evidence["operation_id"]
+            or args.generation != evidence["generation"]):
+        raise FleetCliError("worker preaccept invocation differs from reviewed evidence")
+    if not _codex_preaccept_target_mail_absent(args.name):
+        raise FleetCliError("worker preaccept target mail is present or ambiguous")
+    if not _codex_preaccept_source_matches(evidence):
+        raise FleetCliError("worker preaccept reviewed host/client source changed")
+    if (not _codex_preaccept_artifact_matches(
+            evidence["source"]["provenance_path"],
+            evidence["source"]["provenance_sha256"],
+            ("state", "interface"), ".json")
+            or not _codex_preaccept_artifact_matches(
+                evidence["rejection"]["report_path"],
+                evidence["rejection"]["report_sha256"],
+                ("mailbox", "done"), ".md")):
+        raise FleetCliError("worker preaccept original provenance/report changed")
+    host = _read_json(FLEET_HOME / "state" / "codex" / "host.json")
+    provenance = evidence["source"]
+    if (not isinstance(host, dict)
+            or host.get("home") != evidence["home"]
+            or host.get("generation") != evidence["generation"]
+            or host.get("pid") != provenance["host_pid"]
+            or host.get("process_identity") != provenance["host_identity"]
+            or host.get("started_at") != provenance["host_started_at"]
+            or host.get("app_server_pid") != provenance["app_server_pid"]
+            or host.get("app_server_process_identity") !=
+            provenance["app_server_identity"]
+            or host.get("app_server_started_at") !=
+            provenance["app_server_started_at"]
+            or host.get("codex_version") != provenance["codex_version"]
+            or host.get("schema_digest") != provenance["schema_digest"]
+            or host.get("ready") is not True
+            or not heartbeat_fresh(host)
+            or not host_processes_match(host)):
+        raise FleetCliError("worker preaccept exact host provenance changed")
+    settlement_core = {
+        "kind": "worker/thread-start-auth-rejection",
+        "evidence_sha256": evidence_sha,
+        "classification_sha256": evidence["classification_sha256"],
+    }
+    _require_directory(FLEET_HOME / "state" / "codex")
+    _require_directory(FLEET_HOME / "state" / "codex" / "operations")
+    journal = OperationJournal(FLEET_HOME, evidence["generation"])
+    with fleet_lock():
+        if (_registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("worker preaccept Interface authority changed")
+        try:
+            incarnation_path().lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise FleetCliError("worker preaccept requires no supervisor claim")
+        if not _codex_preaccept_source_matches(evidence):
+            raise FleetCliError("worker preaccept source changed during settlement")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared")
+        if (not _codex_preaccept_artifact_matches(
+                evidence["source"]["provenance_path"],
+                evidence["source"]["provenance_sha256"],
+                ("state", "interface"), ".json")
+                or not _codex_preaccept_artifact_matches(
+                    evidence["rejection"]["report_path"],
+                    evidence["rejection"]["report_sha256"],
+                    ("mailbox", "done"), ".md")):
+            raise FleetCliError("worker preaccept original provenance/report drifted")
+        current_host = _read_json(FLEET_HOME / "state" / "codex" / "host.json")
+        if (not isinstance(current_host, dict)
+                or any(current_host.get(key) != host.get(key) for key in (
+                    "home", "generation", "pid", "process_identity",
+                    "started_at", "app_server_pid",
+                    "app_server_process_identity", "app_server_started_at",
+                    "codex_version", "schema_digest", "ready"))
+                or not heartbeat_fresh(current_host)
+                or not host_processes_match(current_host)):
+            raise FleetCliError("worker preaccept host identity changed")
+        registry_info = registry_path().lstat()
+        if (not stat.S_ISREG(registry_info.st_mode)
+                or registry_info.st_uid != os.getuid()
+                or stat.S_IMODE(registry_info.st_mode) != 0o600
+                or registry_info.st_size > 1024 * 1024):
+            raise FleetCliError("worker preaccept registry ownership or size changed")
+        data = read_registry_no_repair()
+        row = data.get("workers", {}).get(args.name)
+        record = journal.load(evidence["operation_id"])
+        if record.get("state") == "prepared":
+            settlement = {**settlement_core,
+                          "interface_claim_id": source["claim_id"]}
+        else:
+            settlement = record.get("preaccept_settlement")
+            if (not isinstance(settlement, dict)
+                    or set(settlement) != set(settlement_core) | {"interface_claim_id"}
+                    or any(settlement.get(key) != value
+                           for key, value in settlement_core.items())
+                    or not isinstance(settlement.get("interface_claim_id"), str)):
+                raise FleetCliError("worker preaccept prior disposition is ambiguous")
+        if not _codex_preaccept_original_row(args.name, row, evidence, settlement):
+            raise FleetCliError("worker preaccept row changed or is actionable")
+        digest, recovery = _codex_preaccept_expected_intent(
+            args.name, row, evidence["operation_id"])
+        if (digest != evidence["payload_digest"]
+                or record.get("recovery") != recovery
+                or not _codex_preaccept_original_journal(
+                    record, evidence, settlement)):
+            raise FleetCliError("worker preaccept immutable journal intent changed")
+        if record["state"] == "prepared" and hashlib.sha256(
+                journal.path(evidence["operation_id"]).read_bytes()
+                ).hexdigest() != evidence["journal_sha256"]:
+            raise FleetCliError("worker preaccept journal bytes changed")
+        operation_paths = []
+        operation_bytes = 0
+        for path in journal.directory.iterdir():
+            operation_paths.append(path)
+            if len(operation_paths) > 128:
+                raise FleetCliError("worker preaccept operation inventory exceeds bound")
+            info = path.lstat()
+            operation_bytes += info.st_size
+            if (path.suffix != ".json" or not path.stem
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_size > 128 * 1024
+                    or operation_bytes > 8 * 1024 * 1024):
+                raise FleetCliError("worker preaccept operation inventory is ambiguous")
+        records = journal.records()
+        if len(records) != len(operation_paths):
+            raise FleetCliError("worker preaccept operation inventory is ambiguous")
+        if (len([item for item in records
+                 if item.get("operation_id") == evidence["operation_id"]]) != 1
+                or any(item.get("operation_id") != evidence["operation_id"]
+                       and (not isinstance(item.get("recovery"), dict)
+                            or not isinstance(item["recovery"].get("fleet_name"), str)
+                            or not NAME_RE.fullmatch(item["recovery"]["fleet_name"])
+                            or item["recovery"]["fleet_name"] not in data["workers"]
+                            or item["recovery"]["fleet_name"] == args.name
+                            or item.get("state") not in {"committed", "failed"}
+                            or (item.get("state") == "failed" and any(
+                                key in item for key in (
+                                    "accepted_at", "observed_at", "uncertain_at"))))
+                       for item in records)):
+            raise FleetCliError("worker preaccept has another unresolved operation")
+        approvals = FLEET_HOME / "state" / "codex" / "approvals"
+        if approvals.exists() or approvals.is_symlink():
+            _require_directory(approvals)
+            approval_count = 0
+            approval_bytes = 0
+            for path in approvals.iterdir():
+                approval_count += 1
+                info = path.lstat()
+                approval_bytes += info.st_size
+                if (approval_count > 128 or approval_bytes > 8 * 1024 * 1024
+                        or path.suffix != ".json" or not path.stem
+                        or not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600
+                        or info.st_size > 128 * 1024
+                        or (_read_json(path) or {}).get("state") != "resolved"):
+                    raise FleetCliError("worker preaccept callback inventory is ambiguous")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared before transition")
+        if (read_registry_no_repair().get("workers", {}).get(args.name) != row
+                or not _codex_preaccept_original_row(
+                    args.name, row, evidence, settlement)):
+            raise FleetCliError("worker preaccept row changed before settlement")
+        if record["state"] == "prepared":
+            # This exact journal disposition is the only permitted write. A
+            # lost reply is recoverable with the same evidence and row.
+            latest = journal.load(evidence["operation_id"])
+            if (latest != record or hashlib.sha256(
+                    journal.path(evidence["operation_id"]).read_bytes()
+                    ).hexdigest() != evidence["journal_sha256"]):
+                raise FleetCliError("worker preaccept journal changed before settlement")
+            failed = dict(record)
+            failed.update({
+                "state": "failed", "failed_at": time.time(),
+                "reason": "authenticated Interface: original IPC rejected before acceptance",
+                "preaccept_settlement": settlement,
+            })
+            _codex_preaccept_write_failed(
+                journal.path(evidence["operation_id"]), failed)
+            record = journal.load(evidence["operation_id"])
+        if not _codex_preaccept_original_journal(record, evidence, settlement):
+            raise FleetCliError("worker preaccept journal changed after settlement")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared after journal")
+        if (_registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("worker preaccept Interface authority changed after journal")
+        final_host = _read_json(FLEET_HOME / "state" / "codex" / "host.json")
+        if (not isinstance(final_host, dict)
+                or any(final_host.get(key) != host.get(key) for key in (
+                    "home", "generation", "pid", "process_identity",
+                    "started_at", "app_server_pid",
+                    "app_server_process_identity", "app_server_started_at",
+                    "codex_version", "schema_digest", "ready"))
+                or not heartbeat_fresh(final_host)
+                or not host_processes_match(final_host)):
+            raise FleetCliError("worker preaccept host changed after journal")
+        if (read_registry_no_repair().get("workers", {}).get(args.name) != row
+                or journal.load(evidence["operation_id"]) != record):
+            raise FleetCliError("worker preaccept settlement changed during commit")
+        if not _codex_preaccept_target_mail_absent(args.name):
+            raise FleetCliError("worker preaccept target mail appeared after settlement")
+    print(f"{args.name}: original preaccept authentication rejection settled "
+          "in journal; original worker row remains nonexecutable; "
+          "no provider mutation was sent")
+    return 0
+
+
 def _validate_codex_thread_effective(
         thread_result, requested_model, profile, *, verb="thread/start"):
     if verb not in {"thread/start", "thread/resume"}:
@@ -8625,7 +9247,23 @@ def cmd_codex_respond(args) -> int:
 
 def _cmd_send_codex_supervisor(name: str, message: str) -> int:
     """Queue once, then steer active or wake idle on the exact claimed thread."""
+    from fleet_codex import OperationJournal
+
     binding = _codex_supervisor_binding(expected_name=name)
+    restored_link = OperationJournal(
+        FLEET_HOME, binding.host_generation).restored_policy_link(
+            fleet_name=binding.name,
+            incarnation_id=binding.incarnation_id,
+            thread_id=binding.authority.value)
+    if restored_link is not None:
+        _codex_recovery_interface_source()
+        if (binding.record.get("mode") != "bypass"
+                or binding.record.get("permission_effective") != {
+                    "approvalPolicy": "never", "approvalsReviewer": "user",
+                    "sandbox": {"type": "dangerFullAccess"}}
+                or binding.record.get("adapter_state") not in {"active", "idle"}):
+            raise FleetCliError(
+                "restored supervisor is not ready for a policy-bound send")
     operation_id = f"supervisor-send-{uuid.uuid4()}"
     _reserve_codex_supervisor_operation(binding, operation_id, "observe-send")
     try:
@@ -8679,6 +9317,8 @@ def _cmd_send_codex_supervisor(name: str, message: str) -> int:
             "thread_id": binding.authority.value,
             "previous_turn_id": binding.current_turn_id,
             "canonical_cwd": str(FLEET_HOME.resolve()),
+            **({"restored_predecessor": restored_link}
+               if restored_link is not None else {}),
         },
     }
     client = observed["client"]
@@ -10787,6 +11427,10 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     dispatch. claim=None skips release for a husk but retains the boot ritual.
     Steer refusal/timeout aborts before destructive work; delivered steering can
     already have queued mail or forked the holder."""
+    if claim is None and _codex_record_route(rec) == "native":
+        raise FleetCliError(
+            f"{name}: a native supervisor without the current claim cannot "
+            "be respawned; preserve its uncertain row and journal")
     old_sid = rec.get("session_id")
     inc = claim.get("incarnation_id", "?") if claim else None
 
@@ -19225,22 +19869,78 @@ def _reconcile_codex_rejected_send(claim) -> int:
     journal = _codex_failed_supervisor_intent(
         operation_id, binding.host_generation, expected,
         allow_prepared=legacy_prepared)
+    blocked_by_restored_predecessor = (
+        journal.get("reason") == "blocked by unresolved predecessor operation")
+    restored_link = None
+    if blocked_by_restored_predecessor:
+        restored_link = OperationJournal(
+            FLEET_HOME, binding.host_generation).restored_policy_link(
+                fleet_name=binding.name,
+                incarnation_id=binding.incarnation_id,
+                thread_id=binding.authority.value)
+        if (restored_link is None
+                or restored_link["restore_generation"] != binding.host_generation
+                or pending.get("previous_claim_operation_id") !=
+                restored_link["restore_operation_id"]
+                or pending.get("previous_record_operation_id") !=
+                restored_link["restore_operation_id"]
+                or pending.get("previous_turn_id") != restored_link["turn_id"]
+                or pending.get("previous_adapter_state") not in {
+                    "uncertain", "active"}
+                or claim.get("uncertainty") != (
+                    "unresolved predecessor operation "
+                    + restored_link["original_operation_id"]
+                    + " blocks mutation")
+                or any(key in journal for key in (
+                    "accepted_at", "observed_at", "uncertain_at"))):
+            raise FleetCliError(
+                "restored supervisor send is not proved rejected before acceptance")
     observed = _codex_rejected_send_public_header(binding, client)
+    if (blocked_by_restored_predecessor
+            and observed != {"provider_status": "idle",
+                            "turn_status": "completed"}):
+        raise FleetCliError(
+            "restored supervisor failed send lacks idle completed turn proof")
     mail_paths = list(mailbox_dir().glob(
         f"{binding.authority.value}.md.claimed.*"))
     if (len(mail_paths) != 1 or mail_paths[0].is_symlink()
             or not mail_paths[0].is_file()):
         raise FleetCliError(
             "native Codex claimed mail is missing or ambiguous; claim remains uncertain")
+    mail_snapshot = _codex_restore_mail_snapshot(binding.authority.value)
+    if blocked_by_restored_predecessor:
+        from fleet_codex import _digest
+        queued = mail_paths[0].read_text(
+            encoding="utf-8", errors="replace").strip()
+        if not queued:
+            raise FleetCliError("restored supervisor claimed mail is empty")
+        params = {"threadId": binding.authority.value,
+                  "input": [{"type": "text", "text": queued,
+                             "text_elements": []}]}
+        if public_method == "turn/steer":
+            params["expectedTurnId"] = binding.current_turn_id
+        if journal.get("payload_digest") != _digest(
+                "rpc", {"method": public_method, "params": params}):
+            raise FleetCliError(
+                "restored supervisor failed send does not match claimed mail")
     with fleet_lock():
         live_claim = read_incarnation()
         data = read_registry_no_repair()
         if (live_claim != claim
                 or data["workers"].get(binding.name) != binding.record
                 or _registered_interface_mail_source() != source
+                or _codex_restore_mail_snapshot(binding.authority.value) !=
+                mail_snapshot
                 or _codex_failed_supervisor_intent(
                     operation_id, binding.host_generation, expected,
-                    allow_prepared=legacy_prepared) != journal):
+                    allow_prepared=legacy_prepared) != journal
+                or (restored_link is not None
+                    and OperationJournal(
+                        FLEET_HOME, binding.host_generation).restored_policy_link(
+                            fleet_name=binding.name,
+                            incarnation_id=binding.incarnation_id,
+                            thread_id=binding.authority.value)
+                    != restored_link)):
             raise FleetCliError(
                 "native Codex claim, Interface, or journal changed during recovery")
         if legacy_prepared:
@@ -19260,7 +19960,9 @@ def _reconcile_codex_rejected_send(claim) -> int:
         else:
             live_claim["last_operation_id"] = prior_claim_op
         row = data["workers"][binding.name]
-        row["adapter_state"] = pending.get("previous_adapter_state") or "active"
+        row["adapter_state"] = (
+            "active" if restored_link is not None else
+            pending.get("previous_adapter_state") or "active")
         row["provider_status"] = observed["provider_status"]
         if observed["provider_status"] in {"active", "idle"}:
             row["status"] = ("working" if observed["provider_status"] == "active"
@@ -19719,7 +20421,9 @@ def _reconcile_codex_restored_policy(claim) -> int:
         live["provider_status"] = "idle"
         live["last_operation_id"] = operation_id
         row = data["workers"][binding.name]
-        row["adapter_state"] = pending.get("previous_adapter_state") or "active"
+        # The original mismatched resume left this row uncertain. The exact
+        # committed cold restoration makes the same holder usable again.
+        row["adapter_state"] = "active"
         row["status"] = "idle"
         row["provider_status"] = "idle"
         row["codex_host_generation"] = client.generation
@@ -19879,16 +20583,1038 @@ def _restore_codex_supervisor_policy(args) -> int:
     return _reconcile_codex_restored_policy(read_incarnation())
 
 
+def _restored_history_evidence(path_value, expected_sha):
+    """Load one explicit owner-only current-continuation evidence packet."""
+    if (not isinstance(path_value, str) or not os.path.isabs(path_value)
+            or not isinstance(expected_sha, str)
+            or len(expected_sha) != 64
+            or any(c not in "0123456789abcdef" for c in expected_sha)):
+        raise FleetCliError("preserved-history evidence path or digest is missing")
+    path = Path(path_value)
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size > 16 * 1024):
+            raise FleetCliError("preserved-history evidence is not owner-only")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            raw = os.read(fd, 16 * 1024 + 1)
+            closed = os.fstat(fd)
+        finally:
+            os.close(fd)
+        after = path.lstat()
+    except OSError as exc:
+        raise FleetCliError("preserved-history evidence is unavailable") from exc
+    signature = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                               value.st_mtime_ns, value.st_ctime_ns)
+    if (signature(before) != signature(opened)
+            or signature(opened) != signature(closed)
+            or signature(closed) != signature(after)
+            or len(raw) != before.st_size
+            or hashlib.sha256(raw).hexdigest() != expected_sha):
+        raise FleetCliError("preserved-history evidence changed")
+    try:
+        evidence = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise FleetCliError("preserved-history evidence is malformed") from exc
+    if (not isinstance(evidence, dict) or evidence.get("schema") != 1
+            or evidence.get("kind") != "current-restored-continuation"
+            or evidence.get("home") != str(FLEET_HOME.resolve())
+            or not isinstance(evidence.get("retired"), dict)
+            or set(evidence["retired"]) != {"unbound_start", "narrow_resume"}
+            or not isinstance(evidence.get("old_hosts"), list)
+            or len(evidence["old_hosts"]) != 3):
+        raise FleetCliError("preserved-history evidence has wrong scope")
+    return evidence
+
+
+def _restored_history_present_nonliveness(evidence, generations, current_host):
+    """Prove present absence of every recorded old PID, never historical exit."""
+    if evidence is None:
+        return
+    hosts = evidence["old_hosts"]
+    if ({item.get("generation") for item in hosts if isinstance(item, dict)}
+            != generations or len(generations) != 3):
+        raise FleetCliError("preserved-history old-host generations differ")
+    seen_pids = set()
+    missing_identities = 0
+    now = time.time()
+    for item in hosts:
+        if (not isinstance(item, dict)
+                or item.get("codex_version") != "0.155.1"):
+            raise FleetCliError("preserved-history old-host provenance is ambiguous")
+        identities = (item.get("host_process_identity"),
+                      item.get("app_server_process_identity"))
+        if identities == (None, None):
+            missing_identities += 1
+            heartbeat = item.get("heartbeat")
+            if (not item.get("original_identity_missing") is True
+                    or item.get("shutdown_ack") is not True
+                    or not isinstance(heartbeat, (int, float))
+                    or isinstance(heartbeat, bool)
+                    or not 3 < now - heartbeat):
+                raise FleetCliError("missing original identity not disclosed")
+        elif (not all(isinstance(value, str) and value for value in identities)
+              or item.get("original_identity_missing") is not False):
+            raise FleetCliError("preserved-history old process identity is incomplete")
+        for key in ("host_pid", "app_server_pid"):
+            pid = item.get(key)
+            if (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+                    or pid in seen_pids or pid in {
+                        current_host["host_pid"], current_host["app_server_pid"]}):
+                raise FleetCliError("preserved-history old process PID is ambiguous")
+            seen_pids.add(pid)
+            try:
+                os.kill(pid, 0)  # public OS existence check; delivers no signal
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                raise FleetCliError("preserved-history old process may be live") from exc
+            else:
+                raise FleetCliError("preserved-history old process is live")
+    if missing_identities != 1:
+        raise FleetCliError("preserved-history missing-identity count differs")
+
+
+def _restored_history_loaded(client, expected):
+    """Read a complete manager-local loaded list; never infer thread history."""
+    seen_ids, seen_cursors = set(), set()
+    cursor = None
+    for _page in range(64):
+        params = {"limit": 100}
+        if cursor is not None:
+            params["cursor"] = cursor
+        observed = client.call({
+            "operation_id": f"restored-loaded-{uuid.uuid4()}",
+            "method": "rpc", "payload": {
+                "method": "thread/loaded/list", "params": params}}, timeout=10)
+        result = observed.result
+        if (observed.generation != client.generation
+                or not isinstance(result, dict)
+                or not isinstance(result.get("data"), list)
+                or len(result["data"]) > 100):
+            raise FleetCliError("preserved-history loaded list is malformed")
+        for thread_id in result["data"]:
+            if (not isinstance(thread_id, str) or not thread_id
+                    or thread_id in seen_ids):
+                raise FleetCliError("preserved-history loaded list repeats a thread")
+            seen_ids.add(thread_id)
+        next_cursor = result.get("nextCursor")
+        if next_cursor is None:
+            if seen_ids != expected:
+                raise FleetCliError("preserved-history loaded manager differs")
+            return sorted(seen_ids)
+        if (not isinstance(next_cursor, str) or not next_cursor
+                or next_cursor in seen_cursors or not result["data"]):
+            raise FleetCliError("preserved-history loaded cursor is ambiguous")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise FleetCliError("preserved-history loaded list exceeds page bound")
+
+
+def _restored_history_owned_record(path, maximum=1024 * 1024):
+    """Parse and digest the same stable Fleet-owned archived bytes."""
+    try:
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size > maximum):
+            raise FleetCliError("historical Fleet file is not owner-only")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(fd)
+            raw = os.read(fd, maximum + 1)
+            closed = os.fstat(fd)
+        finally:
+            os.close(fd)
+        after = path.lstat()
+    except OSError as exc:
+        raise FleetCliError("historical Fleet file is unavailable") from exc
+    signature = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                               value.st_mtime_ns, value.st_ctime_ns)
+    if (signature(before) != signature(opened)
+            or signature(opened) != signature(closed)
+            or signature(closed) != signature(after)
+            or len(raw) != before.st_size):
+        raise FleetCliError("historical Fleet file changed during read")
+    try:
+        record = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise FleetCliError("historical Fleet file is malformed") from exc
+    if not isinstance(record, dict):
+        raise FleetCliError("historical Fleet record is not an object")
+    return record, hashlib.sha256(raw).hexdigest()
+
+
+def _restored_resolved_callback(record):
+    """Require the fields written by record_request and resolve, including identity.
+
+    A resolved callback may have been pending, responded, or unknown before
+    resolve. Response fields and a turn/item ID are therefore not universal.
+    """
+    from fleet_codex import _public_uuid7
+
+    required = ("method", "thread_id", "turn_id", "item_id", "params",
+                "offered_decisions", "created_at", "resolved_at")
+    if (not isinstance(record, dict)
+            or record.get("state") != "resolved"
+            or any(field not in record for field in required)
+            or not isinstance(record["method"], str)
+            or not record["method"]
+            or not isinstance(record["offered_decisions"], list)
+            or any(not isinstance(value, str)
+                   for value in record["offered_decisions"])):
+        raise FleetCliError("resolved native callback record is malformed")
+    try:
+        _public_uuid7(record["thread_id"], "resolved callback thread id")
+    except ValueError as exc:
+        raise FleetCliError("resolved native callback thread id is malformed") from exc
+    params = record["params"]
+    if (not isinstance(params, dict)
+            or params.get("threadId") != record["thread_id"]
+            or params.get("turnId") != record["turn_id"]
+            or params.get("itemId") != record["item_id"]):
+        raise FleetCliError("resolved native callback request identity differs")
+    for field in ("created_at", "resolved_at"):
+        value = record[field]
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            raise FleetCliError("resolved native callback timing is malformed")
+
+
+def _restored_continuation_inventory(
+        registry, binding, *, pending_operation_id=None, history=None,
+        current_host=None):
+    """Account for every other row and its durable host evidence, without writes.
+
+    A model name does not identify the adapter.  A historical native row is
+    excluded only with terminal intent evidence; a bound thread additionally
+    needs a fresh public notLoaded observation before the host may be stopped.
+    """
+    from fleet_codex import (CodexApprovalStore, OperationJournal, _digest,
+                             _require_directory)
+
+    workers = registry.get("workers") if isinstance(registry, dict) else None
+    if not isinstance(workers, dict):
+        raise FleetCliError("native worker inventory is unavailable")
+    home = str(FLEET_HOME.resolve())
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    records = journal.records()
+    retired_sha = {}
+    retired_dir = FLEET_HOME / "state" / "codex" / "operations.retired"
+    if retired_dir.exists() or retired_dir.is_symlink():
+        _require_directory(retired_dir)
+        known_ids = {record.get("operation_id") for record in records}
+        for path in sorted(retired_dir.iterdir()):
+            if path.suffix != ".json" or not path.stem:
+                raise FleetCliError("retired native operation inventory is ambiguous")
+            record, raw_sha = _restored_history_owned_record(path)
+            if (record.get("schema") != 1
+                    or record.get("operation_id") != path.stem
+                    or path.stem in known_ids):
+                raise FleetCliError("retired native operation identity is ambiguous")
+            retired_sha[path.stem] = raw_sha
+            known_ids.add(path.stem)
+            records.append(record)
+    preserved = {}
+    if history is not None:
+        if current_host is None:
+            raise FleetCliError("preserved-history current host is unpinned")
+        for label, method in (("unbound_start", "thread/start"),
+                              ("narrow_resume", "thread/resume")):
+            pin = history["retired"].get(label)
+            if (not isinstance(pin, dict)
+                    or not isinstance(pin.get("operation_id"), str)
+                    or retired_sha.get(pin["operation_id"]) !=
+                    pin.get("sha256")):
+                raise FleetCliError("preserved-history archived bytes differ")
+            matches = [record for record in records
+                       if record.get("operation_id") == pin["operation_id"]]
+            if len(matches) != 1:
+                raise FleetCliError("preserved-history archive identity differs")
+            record = matches[0]
+            if (record.get("state") != "observed"
+                    or record.get("method") != "rpc"
+                    or record.get("public_method") != method
+                    or not isinstance(record.get("accepted_at"), (int, float))
+                    or not isinstance(record.get("observed_at"), (int, float))
+                    or not isinstance(record.get("generation"), str)
+                    or not isinstance(record.get("recovery"), dict)
+                    or not isinstance(record.get("result"), dict)):
+                raise FleetCliError("preserved-history accepted archive differs")
+            preserved[label] = record
+        if (preserved["unbound_start"]["operation_id"] ==
+                preserved["narrow_resume"]["operation_id"]):
+            raise FleetCliError("preserved-history archives overlap")
+    link = journal.restored_policy_link(
+        fleet_name=binding.name, incarnation_id=binding.incarnation_id,
+        thread_id=binding.authority.value,
+        operation_id=pending_operation_id)
+    approvals = CodexApprovalStore(FLEET_HOME, binding.host_generation).records()
+    if any(not isinstance(record, dict) or record.get("home") != home
+           for record in records):
+        raise FleetCliError("native operation inventory has an unknown home")
+    if any(record.get("state") != "resolved" for record in approvals):
+        raise FleetCliError("native callback inventory is unresolved or malformed")
+    for record in approvals:
+        _restored_resolved_callback(record)
+    inventory_records = []
+    for record in records:
+        if (pending_operation_id is not None
+                and record.get("operation_id") == pending_operation_id):
+            recovery = record.get("recovery")
+            if (not isinstance(recovery, dict)
+                    or recovery.get("kind") !=
+                    "supervisor/restored-continuation-reattach"
+                    or recovery.get("fleet_name") != binding.name
+                    or recovery.get("incarnation_id") != binding.incarnation_id
+                    or recovery.get("thread_id") != binding.authority.value
+                    or recovery.get("canonical_cwd") != home
+                    or record.get("method") != "rpc"
+                    or record.get("public_method") != "thread/resume"
+                    or record.get("generation") == binding.host_generation
+                    or record.get("state") not in {
+                        "prepared", "accepted", "observed", "committed"}):
+                raise FleetCliError("reserved reattachment journal is ambiguous")
+            continue
+        recovery = record.get("recovery")
+        owner = recovery.get("fleet_name") if isinstance(recovery, dict) else None
+        is_original = (owner == binding.name and isinstance(link, dict)
+                       and record.get("operation_id") ==
+                       link["original_operation_id"]
+                       and record.get("state") == "observed")
+        is_preserved = (history is not None and record in preserved.values())
+        if (not is_original and not is_preserved
+                and record.get("state") not in {"committed", "failed"}):
+            raise FleetCliError("another native operation is unresolved or malformed")
+        if (record.get("state") == "failed"
+                and any(key in record for key in (
+                    "accepted_at", "observed_at", "uncertain_at"))):
+            raise FleetCliError("failed native intent has acceptance evidence")
+        inventory_records.append(record)
+
+    bound = {}
+    native_rows = {}
+    historical_threads = set()
+    historical_generations = set()
+    preserved_rows = {}
+    for name, row in workers.items():
+        if name == binding.name:
+            continue
+        if not isinstance(row, dict):
+            raise FleetCliError(
+                "another native or ambiguous worker prevents exact-host shutdown")
+        native_fields = (
+            "codex_thread_id", "codex_turn_id", "codex_host_generation",
+            "codex_protocol_version", "codex_schema_digest",
+            "permission_effective", "adapter_state",
+        )
+        has_native_pin = any(row.get(key) is not None for key in native_fields)
+        route = _codex_record_route(row)
+        if (route == "mcx" and row.get("dispatch_kind") == "mcx"
+                and isinstance(row.get("mcx_id"), str)
+                and row["mcx_id"]
+                and not has_native_pin and row.get("pending_operation") is None
+                and row.get("last_operation_id") is None):
+            continue
+        # A daemon-hosted external session is not owned by this Codex host.
+        # Its model text and archival state do not establish provenance.
+        if (row.get("dispatch_kind") == "bg"
+                and row.get("substrate") in (None, "claude")
+                and isinstance(row.get("session_id"), str)
+                and row["session_id"]
+                and not has_native_pin
+                and row.get("mcx_id") is None
+                and row.get("pending_operation") is None
+                and row.get("last_operation_id") is None):
+            continue
+        native_rows[name] = row
+        if (route != "native"
+                or row.get("dispatch_kind") != "codex-app-server"
+                or row.get("status") != "dead-suspected"
+                or row.get("adapter_state") != "uncertain"
+                or row.get("pending_operation") is not None
+                or row.get("session_id") is not None
+                or not _is_supervisor_shaped(name)
+                or not isinstance(row.get("supervisor_incarnation_id"), str)
+                or not row["supervisor_incarnation_id"]
+                or row.get("cwd") != home):
+            raise FleetCliError(
+                "another native or ambiguous worker prevents exact-host shutdown")
+        operation_id = row.get("last_operation_id")
+        owned = [record for record in inventory_records
+                 if isinstance(record.get("recovery"), dict)
+                 and record["recovery"].get("fleet_name") == name]
+        latest = [record for record in owned
+                  if record.get("operation_id") == operation_id]
+        if (not isinstance(operation_id, str) or len(latest) != 1
+                or latest[0].get("method") != "rpc"
+                or latest[0].get("recovery", {}).get("incarnation_id") !=
+                row["supervisor_incarnation_id"]
+                or latest[0].get("recovery", {}).get("canonical_cwd") != home):
+            raise FleetCliError("historical native supervisor intent is ambiguous")
+        thread_id = row.get("codex_thread_id")
+        turn_id = row.get("codex_turn_id")
+        generation = row.get("codex_host_generation")
+        if thread_id is None:
+            accepted_start = (history is not None
+                              and latest[0] == preserved.get("unbound_start"))
+            result = latest[0].get("result")
+            returned = (result.get("thread")
+                        if isinstance(result, dict) else None)
+            if (turn_id is not None or generation is not None
+                    or latest[0].get("public_method") != "thread/start"
+                    or latest[0].get("recovery", {}).get("kind") !=
+                    "supervisor/thread-start"
+                    or (latest[0].get("state") != "failed"
+                        and not accepted_start)):
+                raise FleetCliError("native preclaim lacks pre-acceptance failure proof")
+            if accepted_start:
+                sandbox = result.get("sandbox") if isinstance(result, dict) else None
+                if (not isinstance(returned, dict)
+                        or not isinstance(returned.get("id"), str)
+                        or not returned["id"]
+                        or returned.get("cwd") != home
+                        or result.get("approvalPolicy") != "never"
+                        or result.get("approvalsReviewer") != "auto_review"
+                        or not isinstance(sandbox, dict)
+                        or sandbox.get("type") != "dangerFullAccess"
+                        or row.get("mode") != "bypass"):
+                    raise FleetCliError("accepted unbound historical start differs")
+                historical_threads.add(returned["id"])
+                historical_generations.add(latest[0]["generation"])
+                preserved_rows["unbound_start"] = name
+            continue
+        method = latest[0].get("public_method")
+        recovery = latest[0]["recovery"]
+        result = latest[0].get("result")
+        result_turn = (result.get("turn") if isinstance(result, dict)
+                       else None)
+        accepted_resume = (history is not None
+                           and latest[0] == preserved.get("narrow_resume"))
+        if accepted_resume:
+            profile = (result.get("activePermissionProfile")
+                       if isinstance(result, dict) else None)
+            sandbox = result.get("sandbox") if isinstance(result, dict) else None
+            result_thread = result.get("thread") if isinstance(result, dict) else None
+            previous = [entry for entry in owned
+                        if entry.get("state") == "committed"
+                        and entry.get("public_method") in {
+                            "turn/start", "turn/steer"}
+                        and entry.get("generation") == generation
+                        and isinstance(entry.get("recovery"), dict)
+                        and entry["recovery"].get("kind") ==
+                        f"supervisor/{entry['public_method']}"
+                        and entry["recovery"].get("canonical_cwd") == home
+                        and isinstance(entry.get("observed_at"), (int, float))
+                        and entry["observed_at"] < latest[0]["accepted_at"]
+                        and entry.get("recovery", {}).get("thread_id") == thread_id]
+            previous = [entry for entry in previous
+                        if isinstance(entry.get("result"), dict)
+                        and (entry["result"].get("turnId") == turn_id
+                             or (isinstance(entry["result"].get("turn"), dict)
+                                 and entry["result"]["turn"].get("id")
+                                 == turn_id))]
+            if (not previous
+                    or not isinstance(result_thread, dict)
+                    or result_thread.get("id") != thread_id
+                    or result_thread.get("cwd") != home
+                    or result.get("cwd") != home
+                    or not isinstance(sandbox, dict)
+                    or sandbox.get("type") != "workspaceWrite"
+                    or not isinstance(profile, dict)
+                    or profile.get("id") != ":workspace"
+                    or result.get("approvalPolicy") != "never"
+                    or result.get("approvalsReviewer") != "user"
+                    or row.get("mode") != "bypass"
+                    or recovery.get("kind") != "supervisor/thread-resume"
+                    or recovery.get("thread_id") != thread_id):
+                raise FleetCliError("accepted historical resume differs")
+            historical_generations.add(latest[0]["generation"])
+            preserved_rows["narrow_resume"] = name
+        if (not isinstance(thread_id, str) or not thread_id
+                or not isinstance(turn_id, str) or not turn_id
+                or not isinstance(generation, str) or not generation
+                or generation == binding.host_generation
+                or (latest[0].get("generation") != generation
+                    and not (accepted_resume
+                             and recovery.get("previous_host_generation")
+                             == generation))
+                or recovery.get("thread_id") != thread_id
+                or (not accepted_resume
+                    and latest[0].get("state") != "committed")
+                or (not accepted_resume
+                    and method not in {"turn/start", "turn/steer"})
+                or (not accepted_resume
+                    and recovery.get("kind") != f"supervisor/{method}")
+                or not isinstance(result, dict)
+                or (not accepted_resume and method == "turn/start" and (
+                    not isinstance(result_turn, dict)
+                    or result_turn.get("id") != turn_id
+                    or result_turn.get("status") != "inProgress"
+                    or not isinstance(recovery.get("previous_turn_id"), str)
+                    or not recovery["previous_turn_id"]
+                    or recovery["previous_turn_id"] == turn_id))
+                or (not accepted_resume and method == "turn/steer" and (
+                    result.get("turnId") != turn_id
+                    or recovery.get("previous_turn_id") != turn_id))
+                or thread_id == binding.authority.value
+                or thread_id in bound):
+            raise FleetCliError("historical native thread ownership is ambiguous")
+        bound[thread_id] = turn_id
+        historical_threads.add(thread_id)
+        historical_generations.add(generation)
+    if history is not None:
+        if (set(preserved_rows) != {"unbound_start", "narrow_resume"}
+                or len(historical_threads) != len(bound) + 1
+                or binding.authority.value in historical_threads):
+            raise FleetCliError("preserved-history old ownership differs")
+        missing = [item["generation"] for item in history["old_hosts"]
+                   if item.get("original_identity_missing") is True]
+        if missing != [preserved["narrow_resume"]["generation"]]:
+            raise FleetCliError("missing old identity belongs to wrong generation")
+        _restored_history_present_nonliveness(
+            history, historical_generations, current_host)
+    historical_mail = {}
+    for thread_id in sorted(historical_threads):
+        snapshot = _codex_restore_mail_snapshot(thread_id)
+        if history is not None and any(".claimed." in item["name"]
+                                       for item in snapshot):
+            raise FleetCliError("preserved-history old mail is claimed")
+        historical_mail[thread_id] = snapshot
+    return {
+        "digest": _digest("restored-continuation-other-evidence", {
+            "operations": inventory_records, "approvals": approvals,
+            "bound_threads": bound, "historical_mail": historical_mail,
+            "preserved_rows": preserved_rows, "history": history}),
+        "bound_threads": bound,
+        "historical_threads": sorted(historical_threads),
+        "rows_digest": _digest("restored-continuation-native-rows", native_rows),
+        "historical_mail": historical_mail,
+    }
+
+
+def _restored_continuation_public_inventory(client, binding, inventory):
+    """Prove that each historical bound thread is absent from this loaded host."""
+    observed = {}
+    for thread_id, turn_id in sorted(inventory["bound_threads"].items()):
+        result = _codex_paged_thread_read(
+            client, thread_id, binding.host_generation,
+            "restored-inventory-read").result
+        thread = result.get("thread") if isinstance(result, dict) else None
+        status = thread.get("status") if isinstance(thread, dict) else None
+        turns = thread.get("turns") if isinstance(thread, dict) else None
+        if (not isinstance(thread, dict) or thread.get("id") != thread_id
+                or thread.get("cwd") != str(FLEET_HOME.resolve())
+                or not isinstance(status, dict)
+                or status.get("type") != "notLoaded"
+                or status.get("activeFlags", []) != []
+                or not isinstance(turns, list) or not turns
+                or not isinstance(turns[-1], dict)
+                or turns[-1].get("id") != turn_id
+                or turns[-1].get("status") not in {
+                    "completed", "failed", "interrupted"}):
+            raise FleetCliError(
+                "historical native thread is loaded or public evidence is ambiguous")
+        observed[thread_id] = {"turn_id": turn_id,
+                               "turn_status": turns[-1]["status"],
+                               "status": "notLoaded"}
+    return observed
+
+
+def _restored_history_ref(args):
+    path = getattr(args, "preserve_retired_history_evidence", None)
+    digest = getattr(args, "expect_history_sha256", None)
+    if bool(path) != bool(digest):
+        raise FleetCliError("preserved-history selection requires path and digest")
+    return {"path": path, "sha256": digest} if path else None
+
+
+def _restored_history_from_ref(ref):
+    if ref is None:
+        return None
+    if (not isinstance(ref, dict)
+            or set(ref) != {"path", "sha256"}):
+        raise FleetCliError("preserved-history reference is malformed")
+    return _restored_history_evidence(ref["path"], ref["sha256"])
+
+
+def _restored_continuation_context(claim, registry, *, history_ref=None,
+                                   old_host=None):
+    """Resolve the exact held bypass supervisor and its immutable journal link."""
+    from fleet_codex import OperationJournal
+
+    binding = _codex_supervisor_binding(claim, registry, allowed_states={"held"})
+    if (claim.get("pending_operation") is not None
+            or binding.record.get("mode") != "bypass"
+            or binding.record.get("permission_effective") != {
+                "approvalPolicy": "never", "approvalsReviewer": "user",
+                "sandbox": {"type": "dangerFullAccess"}}
+            or binding.record.get("adapter_state") != "active"
+            or claim.get("provider_status") != "idle"
+            or binding.record.get("status") != "idle"):
+        raise FleetCliError("restored supervisor is not idle with recorded bypass")
+    history = _restored_history_from_ref(history_ref)
+    if history is not None and old_host is None:
+        old_host = _codex_restore_host_identity(_codex_existing_client(FLEET_HOME))
+    _restored_continuation_inventory(
+        registry, binding, history=history, current_host=old_host)
+    link = OperationJournal(FLEET_HOME, binding.host_generation).restored_policy_link(
+        fleet_name=binding.name, incarnation_id=binding.incarnation_id,
+        thread_id=binding.authority.value)
+    if (link is None or link["restore_generation"] != binding.host_generation
+            or claim.get("last_operation_id") != link["restore_operation_id"]
+            or binding.record.get("last_operation_id") !=
+            link["restore_operation_id"]
+            or binding.current_turn_id != link["turn_id"]
+            or _codex_model_slug(binding.record.get("model")) != link["model"]):
+        raise FleetCliError("restored supervisor journal link or claim changed")
+    return binding, link
+
+
+def _restored_continuation_preflight(claim, registry, binding, link, source,
+                                     *, selected_history=None):
+    """Compare all state pinned before the old host and child were stopped."""
+    from fleet_codex import _digest
+
+    proof = claim.get("restored_continuation_preflight")
+    reduced = json.loads(json.dumps(claim))
+    reduced.pop("restored_continuation_preflight", None)
+    history_ref = proof.get("preserved_history") if isinstance(proof, dict) else None
+    if selected_history != history_ref:
+        raise FleetCliError("preserved-history selection changed")
+    history = _restored_history_from_ref(history_ref)
+    inventory = _restored_continuation_inventory(
+        registry, binding, history=history,
+        current_host=proof.get("host") if isinstance(proof, dict) else None)
+    public = proof.get("other_native_public") if isinstance(proof, dict) else None
+    if (not isinstance(proof, dict)
+            or proof.get("source") != source
+            or proof.get("link") != link
+            or proof.get("other_inventory_digest") != inventory["digest"]
+            or not isinstance(public, dict)
+            or set(public) != set(inventory["bound_threads"])
+            or any(not isinstance(public.get(thread_id), dict)
+                   or public[thread_id].get("status") != "notLoaded"
+                   or public[thread_id].get("turn_id") != turn_id
+                   or public[thread_id].get("turn_status") not in {
+                       "completed", "failed", "interrupted"}
+                   for thread_id, turn_id in
+                   inventory["bound_threads"].items())
+            or proof.get("claim_digest") != _digest(
+                "restored-continuation-claim", reduced)
+            or proof.get("row_digest") != _digest(
+                "restored-continuation-row", binding.record)
+            or proof.get("native_rows_digest") != inventory["rows_digest"]
+            or proof.get("mail") != _codex_restore_mail_snapshot(
+                binding.authority.value)
+            or isinstance(proof.get("prepared_at"), bool)
+            or not isinstance(proof.get("prepared_at"), (int, float))
+            or not 0 <= time.time() - proof["prepared_at"] <= 300):
+        raise FleetCliError(
+            "restored continuation preflight expired or durable evidence changed")
+    return proof
+
+
+def _prepare_restored_continuation(args) -> int:
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("restored continuation requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    history_ref = _restored_history_ref(args)
+    history = _restored_history_from_ref(history_ref)
+    binding, link = _restored_continuation_context(
+        claim, registry, history_ref=history_ref)
+    _restored_continuation_expectations(args, binding, link)
+    client = _codex_existing_client(FLEET_HOME)
+    if (client.generation != binding.host_generation
+            or not client._owner_live() or not client._app_server_live()):
+        raise FleetCliError("exact old host and app-server are not live")
+    _codex_idle_restoration_header(binding, client)
+    old_host = _codex_restore_host_identity(client)
+    inventory = _restored_continuation_inventory(
+        registry, binding, history=history, current_host=old_host)
+    public_inventory = _restored_continuation_public_inventory(
+        client, binding, inventory)
+    if history is not None:
+        _restored_history_loaded(client, {binding.authority.value})
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    proof = {
+        "host": _codex_restore_host_identity(client),
+        "source": source, "link": link,
+        "other_inventory_digest": inventory["digest"],
+        "other_native_public": public_inventory,
+        "preserved_history": history_ref,
+        "prepared_at": time.time(),
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or _restored_continuation_inventory(
+                    data, binding, history=history,
+                    current_host=old_host)["digest"] != inventory["digest"]
+                or _restored_continuation_context(
+                    live, data, history_ref=history_ref,
+                    old_host=old_host)[1] != link):
+            raise FleetCliError("restored continuation changed before preparation")
+        reduced = json.loads(json.dumps(live))
+        reduced.pop("restored_continuation_preflight", None)
+        proof["claim_digest"] = _digest(
+            "restored-continuation-claim", reduced)
+        proof["row_digest"] = _digest(
+            "restored-continuation-row", binding.record)
+        proof["native_rows_digest"] = inventory["rows_digest"]
+        proof["mail"] = _codex_restore_mail_snapshot(binding.authority.value)
+        live["restored_continuation_preflight"] = proof
+        write_incarnation(live)
+    print("restored supervisor continuation prepared; prove exact Platform "
+          "host and app-server exit before explicit cold reattachment")
+    return 0
+
+
+def _restored_continuation_expectations(args, binding, link):
+    if (getattr(args, "expect_inc", None) != binding.incarnation_id
+            or getattr(args, "expect_thread", None) != binding.authority.value
+            or getattr(args, "expect_turn", None) != binding.current_turn_id
+            or getattr(args, "expect_resume_op", None) !=
+            link["original_operation_id"]
+            or getattr(args, "expect_restore_op", None) !=
+            link["restore_operation_id"]
+            or getattr(args, "expect_new_generation", None) !=
+            binding.host_generation):
+        raise FleetCliError("restored continuation expectations changed")
+
+
+def _reconcile_restored_continuation(claim) -> int:
+    """Settle an observed policy-bound reattach without replaying the RPC."""
+    from fleet_codex import OperationJournal, _digest
+
+    source = _codex_recovery_interface_source()
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(
+        claim, registry, allowed_states={"uncertain"})
+    pending = claim.get("pending_operation")
+    if (not isinstance(pending, dict)
+            or pending.get("kind") != "restored-continuation-reattach"
+            or pending.get("previous_generation") != binding.host_generation
+            or pending.get("previous_turn_id") != binding.current_turn_id):
+        raise FleetCliError("restored continuation reservation is ambiguous")
+    link = pending.get("restored_predecessor")
+    history_ref = pending.get("preserved_history")
+    history = _restored_history_from_ref(history_ref)
+    old_host = pending.get("previous_host")
+    if history is not None and not isinstance(old_host, dict):
+        raise FleetCliError("preserved-history old host proof is missing")
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    operation_id = pending.get("operation_id")
+    if (not isinstance(link, dict)
+            or journal.restored_policy_link(
+                fleet_name=binding.name, incarnation_id=binding.incarnation_id,
+                thread_id=binding.authority.value,
+                operation_id=operation_id) != link):
+        raise FleetCliError("restored continuation original link changed")
+    client = _codex_existing_client(FLEET_HOME)
+    if (not isinstance(operation_id, str)
+            or not operation_id.startswith("supervisor-continuation-")
+            or client.generation != pending.get("new_generation")
+            or claim.get("last_operation_id") != operation_id
+            or binding.record.get("last_operation_id") != operation_id
+            or binding.record.get("adapter_state") != "uncertain"):
+        raise FleetCliError("restored continuation host or intent changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "reserved-restored-continuation-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "reserved-restored-continuation-row", binding.record)
+            or pending.get("reserved_inventory_digest") != _digest(
+                "reserved-restored-continuation-inventory",
+                _restored_continuation_inventory(
+                    registry, binding, pending_operation_id=operation_id,
+                    history=history, current_host=old_host)["rows_digest"])
+            or pending.get("other_inventory_digest") !=
+                _restored_continuation_inventory(
+                    registry, binding,
+                    pending_operation_id=operation_id, history=history,
+                    current_host=old_host)["digest"]
+            or pending.get("mail") != _codex_restore_mail_snapshot(
+                binding.authority.value)):
+        raise FleetCliError("restored continuation reservation changed")
+    params = {
+        "threadId": binding.authority.value, "excludeTurns": True,
+        "cwd": str(FLEET_HOME.resolve()), "model": link["model"],
+        "approvalPolicy": "never", "approvalsReviewer": "user",
+        "sandbox": "danger-full-access",
+    }
+    expected_recovery = {
+        "kind": "supervisor/restored-continuation-reattach",
+        "fleet_name": binding.name, "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "previous_host_generation": binding.host_generation,
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+        "restored_predecessor": link,
+    }
+    new_journal = OperationJournal(FLEET_HOME, client.generation)
+    record = new_journal.load(operation_id)
+    if (record.get("state") not in {"observed", "committed"}
+            or record.get("home") != str(FLEET_HOME.resolve())
+            or record.get("generation") != client.generation
+            or record.get("method") != "rpc"
+            or record.get("public_method") != "thread/resume"
+            or record.get("payload_digest") != _digest(
+                "rpc", {"method": "thread/resume", "params": params})
+            or record.get("recovery") != expected_recovery):
+        raise FleetCliError("restored continuation has no exact observed result")
+    _codex_restored_resume_result(record.get("result"), binding)
+    _codex_idle_restoration_header(binding, client)
+    if history is not None:
+        _restored_history_loaded(client, {binding.authority.value})
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation !=
+                client.generation
+                or journal.restored_policy_link(
+                    fleet_name=binding.name,
+                    incarnation_id=binding.incarnation_id,
+                    thread_id=binding.authority.value,
+                    operation_id=operation_id) != link
+                or _restored_continuation_inventory(
+                    data, binding,
+                    pending_operation_id=operation_id, history=history,
+                    current_host=old_host)["digest"] !=
+                pending["other_inventory_digest"]
+                or _restored_continuation_inventory(
+                    data, binding, pending_operation_id=operation_id,
+                    history=history,
+                    current_host=old_host)["rows_digest"] !=
+                _restored_continuation_inventory(
+                    registry, binding, pending_operation_id=operation_id,
+                    history=history, current_host=old_host)["rows_digest"]
+                or new_journal.load(operation_id) != record
+                or pending.get("mail") != _codex_restore_mail_snapshot(
+                    binding.authority.value)):
+            raise FleetCliError("restored continuation changed during settlement")
+        if record["state"] == "observed":
+            new_journal.commit(operation_id)
+        live["state"] = "held"
+        live.pop("pending_operation", None)
+        live.pop("uncertainty", None)
+        live.pop("restored_continuation_preflight", None)
+        live["host_generation"] = client.generation
+        live["provider_status"] = "idle"
+        row = data["workers"][binding.name]
+        row["adapter_state"] = "active"
+        row["status"] = "idle"
+        row["provider_status"] = "idle"
+        row["codex_host_generation"] = client.generation
+        write_incarnation(live)
+        save_registry(data)
+    print("restored supervisor reattached with exact recorded policy; "
+          "no turn or original intent was replayed")
+    return 0
+
+
+def _reattach_restored_continuation(args) -> int:
+    from fleet_codex import _digest
+
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("restored continuation requires explicit --fleet-home")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    history_ref = _restored_history_ref(args)
+    history = _restored_history_from_ref(history_ref)
+    old_client = _codex_existing_client(FLEET_HOME)
+    old_host = _codex_restore_host_identity(old_client)
+    binding, link = _restored_continuation_context(
+        claim, registry, history_ref=history_ref, old_host=old_host)
+    _restored_continuation_expectations(args, binding, link)
+    proof = _restored_continuation_preflight(
+        claim, registry, binding, link, source,
+        selected_history=history_ref)
+    if (proof["host"] != _codex_restore_host_identity(old_client)
+            or old_client._owner_live() or old_client._app_server_live()
+            or not old_client._metadata_stale()):
+        raise FleetCliError(
+            "exact old host and app-server must exit with stale heartbeat")
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or _restored_continuation_context(
+                    live, data, history_ref=history_ref,
+                    old_host=old_host)[1] != link):
+            raise FleetCliError("restored continuation changed before host creation")
+        _restored_continuation_preflight(
+            live, data, binding, link, source,
+            selected_history=history_ref)
+    client = _codex_native_client(FLEET_HOME)
+    if (client.generation in {old_client.generation,
+                              link["original_generation"]}
+            or getattr(client, "_launched_process", None) is None):
+        raise FleetCliError("continuation requires a fresh host generation")
+    if history is not None:
+        _restored_history_loaded(client, set())
+    profile = _codex_permission_profile(binding.record["mode"])
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    operation_id = f"supervisor-continuation-{uuid.uuid4()}"
+    with fleet_lock():
+        live = read_incarnation()
+        data = read_registry_no_repair()
+        if (live != claim
+                or data["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation !=
+                client.generation
+                or _restored_continuation_context(
+                    live, data, history_ref=history_ref,
+                    old_host=old_host)[1] != link):
+            raise FleetCliError("restored continuation changed before reservation")
+        _restored_continuation_preflight(
+            live, data, binding, link, source,
+            selected_history=history_ref)
+        live["state"] = "uncertain"
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "restored-continuation-reattach",
+            "previous_generation": binding.host_generation,
+            "new_generation": client.generation,
+            "previous_turn_id": binding.current_turn_id,
+            "restored_predecessor": link,
+            "preserved_history": history_ref,
+            "previous_host": old_host if history_ref is not None else None,
+            "mail": proof["mail"],
+            "other_inventory_digest": proof["other_inventory_digest"],
+        }
+        live["last_operation_id"] = operation_id
+        live["uncertainty"] = "explicit restored continuation pending"
+        data["workers"][binding.name]["last_operation_id"] = operation_id
+        data["workers"][binding.name]["adapter_state"] = "uncertain"
+        live["pending_operation"]["reserved_inventory_digest"] = _digest(
+            "reserved-restored-continuation-inventory",
+            _restored_continuation_inventory(
+                data, binding, history=history,
+                current_host=old_host)["rows_digest"])
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "reserved-restored-continuation-row",
+            data["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "reserved-restored-continuation-claim", live)
+        reserved_claim = json.loads(json.dumps(live))
+        reserved_row = json.loads(json.dumps(data["workers"][binding.name]))
+        reserved_inventory = _restored_continuation_inventory(
+            data, binding, history=history,
+            current_host=old_host)
+        write_incarnation(live)
+        save_registry(data)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": {
+            "threadId": binding.authority.value, "excludeTurns": True,
+            "cwd": str(FLEET_HOME.resolve()), "model": link["model"],
+            "approvalPolicy": "never", "approvalsReviewer": "user",
+            "sandbox": "danger-full-access"}},
+        "recovery": {
+            "kind": "supervisor/restored-continuation-reattach",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "previous_host_generation": binding.host_generation,
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+            "restored_predecessor": link,
+        },
+    }
+
+    def guard_reserved(live_claim):
+        data = read_registry_no_repair()
+        if (live_claim != reserved_claim
+                or data["workers"].get(binding.name) != reserved_row
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation !=
+                client.generation
+                or _codex_restore_mail_snapshot(binding.authority.value) !=
+                proof["mail"]
+                or _restored_continuation_inventory(
+                    data, binding,
+                    pending_operation_id=operation_id, history=history,
+                    current_host=old_host)["digest"] !=
+                proof["other_inventory_digest"]
+                or _restored_continuation_inventory(
+                    data, binding,
+                    pending_operation_id=operation_id, history=history,
+                    current_host=old_host)["rows_digest"] !=
+                reserved_inventory["rows_digest"]
+                or _restored_continuation_context_original_link(
+                    binding, link) is False):
+            raise FleetCliError("restored continuation changed before dispatch")
+    try:
+        # A public provider read must not run while Fleet holds its state lock.
+        # Recheck immediately before the claimed dispatch; the durable guard
+        # below still compares every Fleet-owned target at dispatch time.
+        if history is not None:
+            _restored_history_loaded(client, set())
+        _call_codex_supervisor_claimed(
+            client, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"uncertain"},
+            pre_call_guard=guard_reserved)
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "restored continuation outcome uncertain; no reattach replayed") from exc
+    return _reconcile_restored_continuation(read_incarnation())
+
+
+def _restored_continuation_context_original_link(binding, link):
+    from fleet_codex import OperationJournal
+
+    return OperationJournal(
+        FLEET_HOME, binding.host_generation).restored_policy_link(
+            fleet_name=binding.name,
+            incarnation_id=binding.incarnation_id,
+            thread_id=binding.authority.value) == link
+
+
 def cmd_sup_reconcile(args) -> int:
     """Explicitly resume one exact native holder after a host-process restart.
 
     This verb never creates a thread, body, or turn. Ambiguous accepted resume
     evidence freezes the claim so an operator cannot accidentally replay it.
     """
+    if (_restored_history_ref(args) is not None
+            and not (getattr(args, "prepare_restored_continuation", False)
+                     or getattr(args, "reattach_restored_continuation", False))):
+        raise FleetCliError(
+            "preserved-history evidence applies only to explicit continuation")
     if getattr(args, "prepare_recorded_policy_restore", False):
         return _prepare_codex_supervisor_policy(args)
     if getattr(args, "restore_recorded_policy", False):
         return _restore_codex_supervisor_policy(args)
+    if getattr(args, "prepare_restored_continuation", False):
+        return _prepare_restored_continuation(args)
+    if getattr(args, "reattach_restored_continuation", False):
+        return _reattach_restored_continuation(args)
     claim = read_incarnation()
     if not _claim_uses_native_codex(claim):
         raise FleetCliError("sup-reconcile requires a native Codex supervisor claim")
@@ -19897,6 +21623,9 @@ def cmd_sup_reconcile(args) -> int:
         if (isinstance(pending, dict)
                 and pending.get("kind") == "resume-policy-restore"):
             return _reconcile_codex_restored_policy(claim)
+        if (isinstance(pending, dict)
+                and pending.get("kind") == "restored-continuation-reattach"):
+            return _reconcile_restored_continuation(claim)
         if (isinstance(pending, dict)
                 and pending.get("kind") == "thread/resume"):
             raise FleetCliError(
@@ -19918,6 +21647,17 @@ def cmd_sup_reconcile(args) -> int:
         claim, allowed_states=allowed_states)
     if claim.get("pending_operation") is not None:
         raise FleetCliError("native Codex supervisor operation is already pending")
+    if claim.get("state") == "held":
+        from fleet_codex import OperationJournal
+        linked = OperationJournal(
+            FLEET_HOME, binding.host_generation).restored_policy_link(
+                fleet_name=binding.name,
+                incarnation_id=binding.incarnation_id,
+                thread_id=binding.authority.value)
+        if linked is not None:
+            raise FleetCliError(
+                "restored supervisor requires explicit policy-bound continuation; "
+                "plain reconcile cannot resume its preserved observed predecessor")
     operation_id = f"supervisor-reconcile-{uuid.uuid4()}"
     _reserve_codex_supervisor_operation(
         binding, operation_id, "thread/resume",
@@ -23758,6 +25498,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_codex_reobserve.add_argument("--expect-generation", required=True)
     p_codex_reobserve.add_argument("--expect-last-op", required=True)
 
+    p_preaccept = sub.add_parser(
+        "codex-settle-preaccept",
+        help="settle one reviewed native worker thread/start authentication rejection")
+    p_preaccept.add_argument("name")
+    p_preaccept.add_argument("operation_id")
+    p_preaccept.add_argument("generation")
+    p_preaccept.add_argument("--evidence", required=True,
+                             help="owner-only exact preaccept classification JSON")
+    p_preaccept.add_argument("--expect-evidence-sha256", required=True,
+                             help="reviewed SHA-256 of the evidence JSON bytes")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -24033,10 +25784,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--restore-recorded-policy", action="store_true",
         help="restore recorded bypass with a distinct policy-bound cold "
              "thread/resume after exact host and app-server exit proof")
+    policy_restore.add_argument(
+        "--prepare-restored-continuation", action="store_true",
+        help="pin the linked committed restoration, exact idle Platform "
+             "host, claim, row, inventory, journal, and mail before shutdown")
+    policy_restore.add_argument(
+        "--reattach-restored-continuation", action="store_true",
+        help="after exact host and child exit, cold resume the restored "
+             "supervisor with its recorded bypass policy and no new turn")
+    p_supreconcile.add_argument(
+        "--preserve-retired-history-evidence", metavar="OWNER_ONLY_JSON",
+        help="explicitly preserve two exact accepted retired intents as unknown "
+             "during current-thread continuation; requires exact digest")
+    p_supreconcile.add_argument(
+        "--expect-history-sha256", metavar="SHA256",
+        help="exact raw SHA-256 of the explicit owner-only history evidence")
     p_supreconcile.add_argument("--expect-inc")
     p_supreconcile.add_argument("--expect-thread")
     p_supreconcile.add_argument("--expect-turn")
     p_supreconcile.add_argument("--expect-resume-op")
+    p_supreconcile.add_argument("--expect-restore-op")
     p_supreconcile.add_argument(
         "--expect-observed-generation", "--expect-new-generation",
         dest="expect_new_generation",
@@ -24329,6 +26096,8 @@ def main(argv=None) -> int:
             return cmd_sup_guard(args)
         if args.command == "sup-reconcile":
             return cmd_sup_reconcile(args)
+        if args.command == "codex-settle-preaccept":
+            return cmd_codex_settle_preaccept(args)
         if args.command == "sup-context":
             return cmd_sup_context(args)
         if args.command == "sup-notify":
