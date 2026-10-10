@@ -41,8 +41,19 @@ def test_exact_a1ee_store_contract_matches_runtime():
     current = (Path(fleet_codex.__file__)).read_text()
     source = code.decode("utf-8")
     for name in ("CodexApprovalStore", "_approval_decision", "_approval_key",
-                 "read_pending_requests"):
+                 ):
         assert _source_segment(source, name) == _source_segment(current, name)
+    # PR38 adds a global read-only view when thread_id is None. Fixed decline
+    # always supplies its exact string thread, so retain the original byte
+    # contract after removing only those two explicitly reviewed extensions.
+    reader = _source_segment(current, "read_pending_requests")
+    annotation = "thread_id: str | None, turn_id: str | None = None"
+    optional_filter = 'if thread_id is not None and value.get("thread_id") != thread_id:'
+    assert reader.count(annotation) == 1
+    assert reader.count(optional_filter) == 1
+    reader = reader.replace(annotation, "thread_id: str, turn_id: str | None = None")
+    reader = reader.replace(optional_filter, 'if value.get("thread_id") != thread_id:')
+    assert reader == _source_segment(source, "read_pending_requests")
 
 
 def test_synthetic_request_record_offers_decline_from_reviewed_a1ee_semantics():
