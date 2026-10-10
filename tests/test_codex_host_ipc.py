@@ -1315,7 +1315,7 @@ def test_oversized_mutation_reply_is_not_classified_as_rejection(
 
 def test_host_modules_do_not_import_registry_or_claim_writer():
     root = Path(__file__).resolve().parents[1] / "bin"
-    for name in ("fleet_codex.py", "fleet_codex_host.py"):
+    for name in ("fleet_codex.py", "fleet_codex_host.py", "fleet_lock.py"):
         path = root / name
         if not path.exists():
             pytest.fail(f"{name} is not implemented")

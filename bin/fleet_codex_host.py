@@ -18,7 +18,6 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
@@ -73,53 +72,18 @@ def _response(request: Mapping[str, Any] | None, *, ok: bool,
 
 
 @contextmanager
-def _approval_claim_lock(home: Path):
-    """Read Fleet claim/row under its existing file lock, without importing writers."""
-    path = home / "state" / "fleet.lock"
-    deadline = time.monotonic() + 5.0
-    token = f"{os.getpid()}:{uuid.uuid4().hex}".encode("utf-8")
-    while True:
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            try:
-                age = time.time() - path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > 30.0:
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            if time.monotonic() >= deadline:
-                raise HostRejected("supervisor approval Fleet lock is busy")
-            time.sleep(0.05)
-        except PermissionError:
-            if not path.exists():
-                raise
-            if time.monotonic() >= deadline:
-                raise HostRejected("supervisor approval Fleet lock is busy")
-            time.sleep(0.05)
+def _approval_claim_lock(home: Path, *, timeout: float = 5.0):
+    """Use the CLI's owner-safe lock for approval claim/row validation."""
+    from fleet_errors import FleetCliError
+    from fleet_lock import FleetLockTimeout, registry_lock
+
     try:
-        os.write(fd, token)
-    except OSError:
-        os.close(fd)
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        raise
-    os.close(fd)
-    try:
-        yield
-    finally:
-        try:
-            if path.read_bytes() == token:
-                path.unlink()
-        except OSError:
-            pass
+        with registry_lock(home / "state" / "fleet.lock", timeout=timeout):
+            yield
+    except FleetLockTimeout as exc:
+        raise HostRejected("supervisor approval Fleet lock is busy") from exc
+    except FleetCliError as exc:
+        raise HostRejected("supervisor approval Fleet lock is unsafe") from exc
 
 
 def _bounded_rpc_timeout(payload: Mapping[str, Any], operation_timeout: float,

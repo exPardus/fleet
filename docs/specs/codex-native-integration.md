@@ -600,6 +600,9 @@ continue through the ordinary worker guard.
 
 The running host must advertise the supervisor approval reservation capability;
 an older host refuses this route before any request or Fleet state mutation.
+The host and CLI share the same owner-safe `fleet.lock` implementation: an
+aged live owner stays protected, stale handoff checks the locked inode, and
+unsafe paths refuse without removal.
 The CLI reserves the complete current claim and unique supervisor row under
 `fleet.lock`, and the host revalidates the current Interface peer, reservation,
 full claim and row, and exact command request under the same lock immediately
