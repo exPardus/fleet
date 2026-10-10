@@ -2472,10 +2472,12 @@ def _codex_error_code(turn: dict) -> str | None:
 
 
 def _codex_paged_thread_read(client, thread_id: str, generation: str,
-                             prefix: str, *, hydrate_turn: str | None = None):
+                             prefix: str, *, hydrate_turn: str | None = None,
+                             hydrate_active: bool = False):
     """Read thread metadata and the newest two turns without a rollout frame.
 
-    Item pages are assembled locally only for the exact bound turn.  A page
+    Item pages are assembled locally only for the exact bound turn. Active
+    observation skips hydration unless a lifecycle proof explicitly requests it. A page
     whose single item exceeds IPC remains an explicit, closed failure.
     """
     def call(method, params):
@@ -2507,7 +2509,14 @@ def _codex_paged_thread_read(client, thread_id: str, generation: str,
         raise FleetCliError("native Codex turn cursor is malformed")
     if not data and cursor is not None:
         raise FleetCliError("native Codex empty turn page has a continuation")
-    if data and (hydrate_turn == "*" or hydrate_turn == data[0].get("id")):
+    # The newest running turn is an in-memory snapshot in app-server 0.155.1.
+    # Its durable item index can lag that snapshot.  Metadata is sufficient to
+    # establish the exact active turn; terminal results still require full pages.
+    active_turn = (isinstance(thread.get("status"), dict)
+                   and thread["status"].get("type") == "active"
+                   and data and data[0].get("status") == "inProgress")
+    if (data and (not active_turn or hydrate_active)
+            and (hydrate_turn == "*" or hydrate_turn == data[0].get("id"))):
         turn = dict(data[0])
         hydrate_turn = _provider_codex_id(turn.get("id"), "paged turn")
         items = []
@@ -2622,9 +2631,9 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
     items_view = turn.get("itemsView")
     if items_view not in {"notLoaded", "summary", "full"}:
         raise FleetCliError(f"{binding.name}: public item view is unknown")
-    if require_full and items_view != "full":
+    if require_full and turn_status != "inProgress" and items_view != "full":
         raise FleetCliError(f"{binding.name}: public item history is incomplete")
-    items = turn.get("items", [])
+    items = [] if turn_status == "inProgress" else turn.get("items", [])
     if not isinstance(items, list):
         raise FleetCliError(f"{binding.name}: public turn items are malformed")
     result_text = result_item_id = None
@@ -2662,6 +2671,131 @@ def _codex_worker_status(observed):
     if observed.get("error_code") in _CODEX_LIMIT_ERRORS:
         return "limited", "idle"
     return "dead", "idle"
+
+
+def _codex_active_reobserve_journal(binding: CodexWorkerBinding) -> None:
+    """Prove the row's last mutation committed and no exact worker intent is open."""
+    from fleet_codex import OperationJournal
+    directory = state_dir() / "codex" / "operations"
+    if not directory.is_dir() or directory.is_symlink():
+        raise FleetCliError(f"{binding.name}: native Codex operation journal is absent")
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    operation_id = binding.record.get("last_operation_id")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise FleetCliError(f"{binding.name}: no exact last Codex operation")
+    last = journal.load(operation_id)
+    recovery = last.get("recovery")
+    if (last.get("home") != str(FLEET_HOME.resolve())
+            or last.get("generation") != binding.host_generation
+            or last.get("state") != "committed"
+            or last.get("method") != "rpc"
+            or not isinstance(recovery, dict)
+            or recovery.get("fleet_name") != binding.name
+            or recovery.get("thread_id") != binding.thread_id
+            or recovery.get("canonical_cwd") != binding.cwd
+            or (last.get("public_method"), recovery.get("kind")) not in {
+                ("turn/start", "turn/start"),
+                ("turn/start", "worker/turn/start"),
+                ("turn/steer", "worker/turn/steer"),
+                ("thread/resume", "worker/thread-resume"),
+            }):
+        raise FleetCliError(
+            f"{binding.name}: last native Codex operation is not an exact "
+            "committed worker mutation")
+    result = last.get("result")
+    if not isinstance(result, dict):
+        raise FleetCliError(f"{binding.name}: last Codex operation has no result")
+    method = last["public_method"]
+    if method == "turn/steer":
+        result_turn = result.get("turnId")
+    elif method == "turn/start":
+        turn = result.get("turn")
+        result_turn = turn.get("id") if isinstance(turn, dict) else None
+    else:
+        thread = result.get("thread")
+        if (not isinstance(thread, dict)
+                or thread.get("id") != binding.thread_id
+                or thread.get("cwd") != binding.cwd):
+            raise FleetCliError(f"{binding.name}: last resume result disagrees")
+        result_turn = binding.turn_id
+    if result_turn != binding.turn_id:
+        raise FleetCliError(f"{binding.name}: last operation returned another turn")
+    # The host gates new mutations on every unresolved predecessor. A journal
+    # entry without recovery attribution cannot be proved unrelated to this row.
+    if journal.unresolved_predecessor(operation_id) is not None:
+        raise FleetCliError(
+            f"{binding.name}: unresolved native Codex predecessor operation")
+
+
+def _codex_active_reobserve_unknown_callback() -> None:
+    """Mirror the host's global unknown-request gate before clearing a row."""
+    from fleet_codex import read_pending_requests
+    if any(request.get("state") == "unknown"
+           for request in read_pending_requests(FLEET_HOME, None)):
+        raise FleetCliError(
+            "native Codex unknown blocking callback freezes active re-observation")
+
+
+def cmd_codex_reobserve_active(args) -> int:
+    """Settle only a cached active-read failure, without a provider mutation."""
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("codex-reobserve-active requires an explicit --fleet-home")
+    source = _registered_interface_mail_source()
+    if source is None or not _mail_source_is_current(source):
+        raise FleetCliError(
+            "codex-reobserve-active requires the current exact-home Interface")
+    data = read_registry_no_repair()
+    name = _resolve_worker_target(args.name)
+    record = data.get("workers", {}).get(name)
+    binding = _codex_worker_binding(name, record)
+    if (binding.thread_id != args.expect_thread
+            or binding.turn_id != args.expect_turn
+            or binding.host_generation != args.expect_generation
+            or record.get("last_operation_id") != args.expect_last_op):
+        raise FleetCliError(f"{name}: explicit active-reobserve pins disagree")
+    if (record.get("archived_at") is not None
+            or record.get("pending_operation") is not None
+            or record.get("status") != "dead-suspected"
+            or record.get("adapter_state") != "uncertain"):
+        raise FleetCliError(f"{name}: row is not an unsettled active observation")
+    _codex_active_reobserve_journal(binding)
+    _codex_active_reobserve_unknown_callback()
+    client = _codex_existing_client(FLEET_HOME)
+    if client.generation != binding.host_generation:
+        raise FleetCliError(f"{name}: native Codex host generation changed")
+    observed = _codex_worker_observe(binding, client=client)
+    if (observed["provider_status"] != "active"
+            or observed["turn_status"] != "inProgress"):
+        raise FleetCliError(f"{name}: exact bound turn is not active")
+    waits = _codex_wait_summaries(record)
+    current_waits = [wait for wait in waits if not wait.get("stale")]
+    if any(wait.get("state") != "pending" for wait in current_waits):
+        raise FleetCliError(f"{name}: current callback scope is unresolved")
+    with fleet_lock():
+        if (_registered_interface_mail_source() != source
+                or not _mail_source_is_current(source)):
+            raise FleetCliError("Interface registration changed during re-observation")
+        current = load_registry()
+        if current["workers"].get(name) != record:
+            raise FleetCliError(f"{name}: native Codex row changed during re-observation")
+        if _codex_wait_summaries(record) != waits:
+            raise FleetCliError(f"{name}: callback scope changed during re-observation")
+        _codex_active_reobserve_unknown_callback()
+        _codex_active_reobserve_journal(binding)
+        updated = dict(record)
+        updated["status"] = "working"
+        updated["adapter_state"] = (
+            "waiting" if observed["active_flags"] or current_waits else "active")
+        updated["provider_status"] = "active"
+        updated["last_activity"] = now_iso()
+        updated.pop("uncertain_reason", None)
+        current["workers"][name] = updated
+        save_registry(current)
+        _append_event_quiet("codex_active_reobserved", name,
+                            codex_thread_id=binding.thread_id,
+                            codex_turn_id=binding.turn_id)
+    print(f"{name}: exact active Codex turn re-observed; no turn was started")
+    return 0
 
 
 def _resume_codex_worker_on_current_host(
@@ -2992,12 +3126,12 @@ def _codex_supervisor_observe(binding, client=None, *, require_full=False):
     items_view = turn.get("itemsView")
     if items_view not in {"notLoaded", "summary", "full"}:
         raise FleetCliError("native Codex supervisor turn item view is unknown")
-    if require_full and items_view != "full":
+    if require_full and turn_status != "inProgress" and items_view != "full":
         raise FleetCliError(
             "native Codex supervisor item history is incomplete")
     result_text = None
     result_item_id = None
-    items = turn.get("items", [])
+    items = [] if turn_status == "inProgress" else turn.get("items", [])
     if not isinstance(items, list):
         raise FleetCliError("native Codex supervisor turn items are malformed")
     for item in items:
@@ -4333,7 +4467,8 @@ def recompute_worker_native(name: str, record: dict, roster_entries: list) -> di
 
 
 def recompute_worker_codex(name: str, record: dict,
-                           run=subprocess.run, which=shutil.which) -> dict:
+                           run=subprocess.run, which=shutil.which,
+                           *, _allow_uncertain_completion=False) -> dict:
     """Derive a Codex verdict through its record-local adapter."""
     updated = dict(record)
     updated.pop("waiting_for_permission", None)
@@ -4341,6 +4476,16 @@ def recompute_worker_codex(name: str, record: dict,
     route = _codex_record_route(record)
     if route == "native":
         if record.get("status") in _NATIVE_STICKY:
+            return updated
+        # A poisoned cache may also represent an accepted provider mutation.
+        # Ordinary status cannot distinguish it from a failed active read.
+        if record.get("pending_operation") is not None:
+            updated["status"] = "dead-suspected"
+            updated["adapter_state"] = "uncertain"
+            return updated
+        if (not _allow_uncertain_completion
+                and record.get("status") == "dead-suspected"
+                and record.get("adapter_state") == "uncertain"):
             return updated
         completed_evidence = False
         try:
@@ -9260,6 +9405,11 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
         name, rec, "send", allowed_statuses=allowed_statuses,
         allowed_adapter_states=allowed_adapter_states)
     provider = observed["provider_status"]
+    waits = _codex_wait_summaries(rec)
+    if any(not wait.get("stale") for wait in waits):
+        raise FleetCliError(
+            f"{name}: native Codex worker has an unresolved current callback; "
+            "no turn was started")
     if provider in {"notLoaded", "systemError"} or observed["active_flags"]:
         raise FleetCliError(
             f"{name}: native Codex worker is not steerable ({provider}); "
@@ -13288,7 +13438,8 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
             binding = _codex_worker_binding(name, before)
             if not _codex_worker_has_completed_evidence(binding):
                 continue
-            updated = recompute_worker_codex(name, before)
+            updated = recompute_worker_codex(
+                name, before, _allow_uncertain_completion=True)
         except (FleetCliError, OSError, ValueError):
             continue
         if updated.get("status") != "idle":
@@ -19130,7 +19281,7 @@ def _codex_activation_observe(client, binding):
     """Return one complete first turn, or refuse ambiguous adoption."""
     observation = _codex_paged_thread_read(
         client, binding.authority.value, client.generation,
-        "supervisor-activation-read", hydrate_turn="*")
+        "supervisor-activation-read", hydrate_turn="*", hydrate_active=True)
     if observation.generation != client.generation:
         raise FleetCliError("native Codex activation host generation changed")
     result = observation.result
@@ -23840,7 +23991,7 @@ def _codex_handoff_thread_read(
     """Prove an empty successor, or its exact single first turn, publicly."""
     observation = _codex_paged_thread_read(
         client, thread_id, generation, "supervisor-handoff-read",
-        hydrate_turn=expected_turn_id)
+        hydrate_turn=expected_turn_id, hydrate_active=True)
     if observation.generation != generation:
         raise FleetCliError("native Codex successor host generation changed")
     result = observation.result
@@ -25441,6 +25592,15 @@ def build_parser() -> argparse.ArgumentParser:
         "decision", help="literal offered choice, JSON object, or @file")
     p_codex_respond.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
+    p_codex_reobserve = sub.add_parser(
+        "codex-reobserve-active",
+        help="settle one cached native Codex active-read failure from exact public evidence")
+    p_codex_reobserve.add_argument("name")
+    p_codex_reobserve.add_argument("--expect-thread", required=True)
+    p_codex_reobserve.add_argument("--expect-turn", required=True)
+    p_codex_reobserve.add_argument("--expect-generation", required=True)
+    p_codex_reobserve.add_argument("--expect-last-op", required=True)
+
     p_preaccept = sub.add_parser(
         "codex-settle-preaccept",
         help="settle one reviewed native worker thread/start authentication rejection")
@@ -25989,6 +26149,8 @@ def main(argv=None) -> int:
             parser.error(f"unknown mail command {args.mail_command!r}")
         if args.command == "codex-respond":
             return cmd_codex_respond(args)
+        if args.command == "codex-reobserve-active":
+            return cmd_codex_reobserve_active(args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":
