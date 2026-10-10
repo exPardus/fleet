@@ -1062,3 +1062,61 @@ This design and plan are the review packet. Production implementation begins
 only after supervisor review. Review may narrow/split waves, but cannot weaken
 the no-private-state, no-fake-identity, supported-interrupt, exact-home,
 lock-scope, or no-duplicate-body invariants.
+
+### Terminal quota/SystemError preflight (source HOLD)
+
+`fleet --fleet-home <home> resume-limited <ordinary-worker> --terminal-quota`
+selects an exact native worker whose newest accepted turn failed with
+`usageLimitExceeded` and whose loaded public thread reports `systemError`.
+It requires the genuine registered Codex Interface, an explicit home and one
+name. It cannot sweep, select a supervisor, or use `--force-now`.
+
+The staged preflight binds the entire worker row, generation/schema, existing host
+and child process identities, canonical cwd, recorded permission policy,
+public configured model, complete newest failed-turn items, committed prior
+operation, durable exact-turn error evidence and fresh ordinary usage allowance.
+It refuses pending/unknown home operations, any unresolved callback, target
+mail (including claimed mail), and drift in complete operation/callback/error
+inventories, public turn, allowance or Interface identity. It never starts a
+host, resumes a thread, replays an operation, drains mail or promotes uncertainty.
+Existing ordinary `resume-limited` behavior and its guards are unchanged.
+
+**Dispatch is source-HOLD.** `_TERMINAL_QUOTA_DISPATCH_PROVEN_SCHEMAS` is empty;
+there is no command-line or environment override. After local caller/row/policy checks it refuses
+before host connection or public RPC, row reservation, journal mutation or
+`turn/start`. The staged public preflight below the hold is tested offline only.
+This is a guarded source checkpoint, not an operational recovery procedure.
+The early hold also preserves the existing child: the host's ordinary public-read
+path can replace an app-server child after event-queue overflow. Tests exercise
+the staged successor path only with a fixture-local replacement of this empty
+source allowlist; those results do not certify a real provider.
+
+Exact pinned upstream source inspection establishes a narrower result:
+
+- Codex 0.155.1 `be2951ea34f0d295ed0becf97079f92fa5f6950e` and
+  0.161.0 `979011409de0a60b52f179721948e65531d26144`,
+  `codex-rs/app-server/src/request_processors/turn_processor.rs`, implement
+  `turn/start` with `start_or_steer_turn`. The response can be `Started` or
+  `Steered`; it provides no conditional expected-previous-turn fence.
+- `codex-rs/app-server/src/thread_status.rs` clears the sticky system error
+  when a new turn starts. This proves a source-level transition, not that an
+  observed historical quota failure will recover successfully on a live account.
+- Both versions' `protocol/v2/thread_data.rs` expose an optional current
+  configured model when loaded, cwd and status, but no effective approval,
+  reviewer or sandbox policy. A recorded Fleet policy alone cannot attest
+  current loaded policy after another client changed settings.
+
+Removing the source hold requires independent review of a concrete mechanism
+that proves effective policy continuity and excludes concurrent input/settings
+changes across final observation and dispatch. A schema digest, reset allowance,
+passing fake-provider tests, or a distinct reply turn ID does not supply that
+proof: a request could already have steered another accepted turn before its
+reply fails validation. No live recovery is authorized by this source change.
+
+If eventually enabled under that proof, the staged path reserves the exact full
+row, journals one new same-thread `turn/start`, requires a distinct in-progress
+turn and unchanged generation, commits its journal and conditionally records the
+successor. Lost replies, malformed responses and commit failures retain the
+pending operation and freeze uncertainty without retry. An accepted result whose
+row changed retains the reservation for review. The original failed turn and
+accepted operation remain intact.
