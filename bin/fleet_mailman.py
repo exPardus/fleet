@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import fcntl
 import os
 import re
 import stat
@@ -255,13 +256,24 @@ def _ensure_claims_dir(home) -> Path:
     return root
 
 
-def _new_claim_dir(home) -> Path:
+def _new_claim_dir(home) -> tuple[Path, int]:
     root = _ensure_claims_dir(home)
     while True:
         path = root / f"claim-{uuid.uuid4().hex}"
         try:
             os.mkdir(path, 0o700)
-            return path
+            try:
+                owner_fd = os.open(path / "owner.lock",
+                                   os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                try:
+                    os.unlink(path / "owner.lock")
+                except OSError:
+                    pass
+                path.rmdir()
+                raise
+            return path, owner_fd
         except FileExistsError:
             continue
 
@@ -309,23 +321,6 @@ def _publish_claim(home, claim: Path, claim_dir: Path,
     return False
 
 
-def _restore_stale_claim(home, claim: Path, claim_dir: Path,
-                         original_name: str | None) -> bool:
-    """Restore the published name exclusively, or expose a fresh recovery name."""
-    if original_name and Path(original_name).name == original_name:
-        target = inbox_dir(home) / original_name
-        try:
-            os.link(claim, target, follow_symlinks=False)
-        except FileExistsError:
-            pass
-        except OSError:
-            return False
-        else:
-            _remove_private_claim(claim, claim_dir)
-            return True
-    return _publish_claim(home, claim, claim_dir, original_name)
-
-
 def _recover_stale_claims(home, *, now=None) -> int:
     """Make crash-left claims visible again; active (<5 min) claims stay private."""
     root = claims_dir(home)
@@ -345,25 +340,41 @@ def _recover_stale_claims(home, *, now=None) -> int:
         if (not stat.S_ISDIR(entry_stat.st_mode)
                 or current - entry_stat.st_mtime < CLAIM_STALE_SECONDS):
             continue
-        claim = entry / "mail"
         try:
-            claim_stat = os.lstat(claim)
-        except FileNotFoundError:
-            # Age cannot establish that the owner stopped between creating
-            # its private directory and renaming the published file into it.
-            # Leave this ambiguous state alone; cleanup could delete a rename
-            # that completes immediately after this lstat.
-            continue
+            owner_fd = os.open(entry / "owner.lock", os.O_RDONLY)
         except OSError:
             continue
-        if not stat.S_ISREG(claim_stat.st_mode):
-            continue
         try:
-            original_name = os.fsdecode((entry / "origin").read_bytes())
-        except OSError:
-            original_name = None
-        if _restore_stale_claim(home, claim, entry, original_name):
-            recovered += 1
+            try:
+                fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue
+            # Recheck after acquiring the owner's kernel-released lock.
+            try:
+                if (not stat.S_ISDIR(os.lstat(entry).st_mode)
+                        or current - os.lstat(entry).st_mtime < CLAIM_STALE_SECONDS):
+                    continue
+            except OSError:
+                continue
+            claim = entry / "mail"
+            try:
+                claim_stat = os.lstat(claim)
+            except OSError:
+                # A directory without its mail entry is ambiguous even after
+                # it is old; leave it untouched instead of guessing ownership.
+                continue
+            if not stat.S_ISREG(claim_stat.st_mode):
+                continue
+            try:
+                original_name = os.fsdecode((entry / "origin").read_bytes())
+            except OSError:
+                original_name = None
+            # Never restore a claim at the producer-mutable original name:
+            # a replacement there could remove the last old-content link.
+            if _publish_claim(home, claim, entry, original_name):
+                recovered += 1
+        finally:
+            os.close(owner_fd)
     return recovered
 
 
@@ -374,7 +385,7 @@ def _claim_source(home, name: str, v: Verdict):
     if (problem is not None or inode != v.inode
             or hashlib.sha256(raw).hexdigest() != v.sha):
         return None
-    claim_dir = _new_claim_dir(home)
+    claim_dir, owner_fd = _new_claim_dir(home)
     claim = claim_dir / "mail"
     try:
         (claim_dir / "origin").write_bytes(os.fsencode(name))
@@ -383,16 +394,19 @@ def _claim_source(home, name: str, v: Verdict):
         os.rename(src, claim)
     except FileNotFoundError:
         _remove_private_claim(claim, claim_dir)
+        os.close(owner_fd)
         return None
     except OSError:
         _remove_private_claim(claim, claim_dir)
+        os.close(owner_fd)
         return None
     claimed, claimed_problem, claimed_inode = read_mail_snapshot(claim)
     if (claimed_problem is not None or claimed_inode != v.inode
             or hashlib.sha256(claimed).hexdigest() != v.sha):
         _publish_claim(home, claim, claim_dir, name)
+        os.close(owner_fd)
         return None
-    return claim, claim_dir
+    return claim, claim_dir, owner_fd
 
 
 def read_mail_snapshot(path: Path):
@@ -498,7 +512,7 @@ def _contains(path: Path, marker: str) -> bool:
 
 
 def _step_digest(home, name, v: Verdict, prims: Prims):
-    cname = clean_name(name)
+    cname = clean_name(_canonical_mail_name(name))
     marker = f"mailman:{cname}:{v.sha[:12]}"
     if _contains(digest_path(home), marker):
         return
@@ -509,7 +523,7 @@ def _step_digest(home, name, v: Verdict, prims: Prims):
 
 
 def _step_log(home, name, v: Verdict, prims: Prims):
-    cname = clean_name(name)
+    cname = clean_name(_canonical_mail_name(name))
     marker = f"[mailman:{cname}:{v.sha[:12]}]"
     if _contains(log_path(home), marker):
         return
@@ -521,9 +535,15 @@ def _step_log(home, name, v: Verdict, prims: Prims):
 
 def _step_cursor(home, name, v: Verdict, prims: Prims):
     cursor, _ = prims.read_cursor(home)
-    if name not in cursor["mail"]:
-        cursor["mail"].append(name)
+    canonical = _canonical_mail_name(name)
+    if canonical not in cursor["mail"]:
+        cursor["mail"].append(canonical)
         prims.write_cursor(home, cursor)
+
+
+def _canonical_mail_name(name: str) -> str:
+    match = re.fullmatch(r"(.+)\.recovered-[0-9a-f]{32}\.mail", name)
+    return match.group(1) if match else name
 
 
 def _step_move(home, name, v: Verdict, prims: Prims,
@@ -592,7 +612,7 @@ def file_mail(home, name, v: Verdict, prims: Prims) -> bool:
     claimed = _claim_source(home, name, v)
     if claimed is None:
         return False
-    claim, claim_dir = claimed
+    claim, claim_dir, owner_fd = claimed
     try:
         _step_digest(home, name, v, prims)
         _step_log(home, name, v, prims)
@@ -600,6 +620,8 @@ def file_mail(home, name, v: Verdict, prims: Prims) -> bool:
         _step_move(home, name, v, prims, claim, claim_dir)
     except _Changed:
         return False
+    finally:
+        os.close(owner_fd)
     return True
 
 

@@ -1,5 +1,6 @@
 """fleet mailman (docs/specs/mailman.md): sorting, lossless filing, fail-safe wake."""
 import hashlib
+import fcntl
 import json
 import os
 import sys
@@ -229,6 +230,8 @@ def test_stale_claim_without_mail_is_left_for_paused_owner(home, monkeypatch):
     claim_dir = mm.claims_dir(home) / "claim-paused-owner"
     claim_dir.mkdir(parents=True)
     (claim_dir / "origin").write_bytes(b"a.md")
+    owner_fd = os.open(claim_dir / "owner.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(owner_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     old = time.time() - mm.CLAIM_STALE_SECONDS - 1
     os.utime(claim_dir, (old, old))
     claim = claim_dir / "mail"
@@ -243,10 +246,43 @@ def test_stale_claim_without_mail_is_left_for_paused_owner(home, monkeypatch):
         return real_unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(mm.os, "unlink", finish_owner_rename_before_cleanup)
-    assert mm._recover_stale_claims(home) == 0
-    assert not injected
-    assert source.read_text() == mail()
-    assert not claim.exists()
+    try:
+        assert mm._recover_stale_claims(home) == 0
+        assert not injected
+        assert source.read_text() == mail()
+        assert not claim.exists()
+    finally:
+        os.close(owner_fd)
+
+
+def test_stale_recovery_uses_alias_before_removing_claim(home, monkeypatch):
+    old_mail = mail()
+    claim_dir = mm.claims_dir(home) / "claim-abandoned"
+    claim_dir.mkdir(parents=True)
+    claim = claim_dir / "mail"
+    claim.write_text(old_mail)
+    (claim_dir / "origin").write_bytes(b"a.md")
+    lock_fd = os.open(claim_dir / "owner.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(lock_fd)
+    old = time.time() - mm.CLAIM_STALE_SECONDS - 1
+    os.utime(claim_dir, (old, old))
+    source = home / "mailbox" / "to-fleet" / "a.md"
+    real_unlink = mm.os.unlink
+    injected = False
+
+    def replace_original_before_private_cleanup(path, *args, **kwargs):
+        nonlocal injected
+        if Path(path) == claim and not injected:
+            injected = True
+            source.write_text("kind: question\nneeds-answer: yes\n\nnew arrival\n")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(mm.os, "unlink", replace_original_before_private_cleanup)
+    assert mm._recover_stale_claims(home) == 1
+    assert injected
+    assert source.read_text() == "kind: question\nneeds-answer: yes\n\nnew arrival\n"
+    aliases = list((home / "mailbox" / "to-fleet").glob("a.md.recovered-*.mail"))
+    assert len(aliases) == 1 and aliases[0].read_text() == old_mail
 
 
 def test_done_collision_skips_an_occupied_suffixed_name(home, capsys):

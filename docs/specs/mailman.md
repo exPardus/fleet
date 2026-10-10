@@ -259,17 +259,19 @@ or in `done/` (complete); there is no state in which the mail exists nowhere.
   `to-fleet/.mailman-claims/`. It verifies the claimed identity and digest, then links only that
   claimed inode into `done/`. It never unlinks a published inbox pathname after a userspace check.
   If a producer replaces the original path before the rename, the captured entry is rechecked and
-  preserved under a fresh `.recovered-<nonce>.mail` name when it does not match the verdict. A crash
-  leaves the claim private for five minutes; the next non-dry pass recovers stale claims to fresh
-  visible names. Producers must publish only at their original inbox names and must not modify claim
-  directories or mailman's nonce-suffixed recovery names. Age alone does not prove an owner stopped:
-  stale directories with a regular `mail` entry are made visible by exclusive hard link, while a
-  missing or ambiguous `mail` entry is left untouched because its owner may be paused before rename.
+  preserved under a fresh `.recovered-<nonce>.mail` name when it does not match the verdict. Each
+  claim holds an OS-released exclusive lock from before rename through completion. A non-dry pass
+  recovers only stale claims whose lock it can acquire, by hardlinking to a fresh visible name before
+  removing the private claim. Producers must publish only at their original inbox names and must not
+  modify claim directories or mailman's nonce-suffixed recovery names. A missing or ambiguous `mail`
+  entry is left untouched because its owner may be paused before rename. Recovered names preserve the
+  original name for digest, log, and cursor idempotency markers.
   A mail that classified WAKE is never passed to step 1–4 at all (§6.5).
 - **Lock-free.** Mailman takes no `fleet.lock` (like `relay-ack` and `watch`). Two concurrent runs are
   safe: the exclusive rename allows only one run to claim a published inbox name. A competing run
   sees that name gone and leaves the private claim to its owner; after five minutes, a regular stale
-  claim is made visible again, while ambiguous empty claim directories are never cleaned up by age.
+  claim is made visible only when recovery acquires its released owner lock, while ambiguous empty
+  claim directories are never cleaned up by age.
 
 ### 6.4 State: "already reported" wake mails
 
