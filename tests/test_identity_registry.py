@@ -380,68 +380,22 @@ class TestSiteACeiling:
         self._occ(monkeypatch, 405000)
         assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
-    def test_an_absent_FLEET_WORKER_EXEMPTS_because_ND4c_says_so(
-            self, id_home, monkeypatch):
-        """THE PIN THIS FIX WAVE INVERTED, and why.
-
-        Its predecessor -- `test_an_absent_FLEET_WORKER_no_longer_exempts_the_
-        holder` -- asserted the opposite, on the reasoning that the environment
-        has no standing to excuse a registered, resolved, over-ceiling
-        claim-holder. That reasoning is sound in the abstract and it is not the
-        ratified rule: `three-tier-command.md` §11.3 ND4(c) exempts on
-        `FLEET_WORKER`-absence *unconditionally* and *independent of any sid
-        resolution*, and SPEC.md:204 -- the citation the re-key was built on --
-        constrains only the guard enforcing *"a worker turn must never hold the
-        supervisor claim"*, which this site is not.
-
-        THE RESIDUAL HOLE THIS RATIFIES, stated so it is a known cost and not a
-        surprise: a claim-holder that unsets `FLEET_WORKER` escapes the 200k
-        ceiling. That is a self-inflicted escape by the one body the ceiling
-        exists to slow down, not an attack surface -- and the ceiling is
-        explicitly *"a speed-bump, not a security boundary"*. Buying protection
-        against it costs the human control channel, which ND1 forbids."""
+    def test_absent_stamp_does_not_exempt_known_claim_holder(self, id_home, monkeypatch):
         monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
         self._occ(monkeypatch, 500000)
-        assert fleet._ceiling_refuses_dispatch("spawn") is None
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
     @pytest.mark.parametrize("blank", ["", " ", "\t", "\n", "  \t\n "])
-    def test_a_BLANK_FLEET_WORKER_exempts_exactly_like_an_absent_one(
-            self, id_home, monkeypatch, blank):
-        """The equivalence class the exemption actually keys on, pinned.
-
-        `:2620` reads `not (os.environ.get("FLEET_WORKER") or "").strip()`, so
-        the exemption is granted to `""`, `" "`, `"\\t"`, `"\\n"` exactly as it
-        is to unset. The twin site `_doctor_check_identity_witness` already has
-        this pinned (`test_a_blanked_witness_reddens_it_too`); the CEILING is
-        the site where the collapse has a safety consequence, and it had no pin.
-
-        This is a CHARACTERIZATION pin, not an endorsement. ND4(c) is ratified
-        and says "absent", and ND1 forbids preventing the self-inflicted escape
-        -- so this asserts what the ceiling does today, and exists so that any
-        future re-grounding of ND4(c) has to change it deliberately rather than
-        discover the blank case in production.
-
-        The scenario is refusable by construction: same registered, resolved,
-        over-ceiling claim-holder as
-        `test_a_resolved_holder_over_the_ceiling_is_refused`, which is asserted
-        inline below rather than assumed -- a control that is not verified is
-        worse than no control."""
+    def test_blank_stamp_does_not_exempt_known_claim_holder(self, id_home, monkeypatch, blank):
+        monkeypatch.setenv("FLEET_WORKER", blank)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
         fleet.write_incarnation(_held("sid-holder"))
         _registry({"sup|inc-x|boot": _rec("sid-holder", status="working")})
         self._occ(monkeypatch, 500000)
-        # Control: a NON-blank stamp on this exact scenario must refuse. If it
-        # does not, the blank assertion below proves nothing.
-        monkeypatch.setenv("FLEET_WORKER", "sup|inc-x|boot")
-        assert fleet._ceiling_refuses_dispatch("spawn") is not None, (
-            "control failed: this scenario is not refusable, so the blank-stamp "
-            "assertion would be vacuous")
-        monkeypatch.setenv("FLEET_WORKER", blank)
-        assert fleet._ceiling_refuses_dispatch("spawn") is None, (
-            f"a blank stamp {blank!r} did not exempt like an absent one")
+        assert fleet._ceiling_refuses_dispatch("spawn") is not None
 
     def test_a_donated_FLEET_WORKER_costs_a_session_the_structural_exemption(
             self, id_home, monkeypatch):
