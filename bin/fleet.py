@@ -21153,7 +21153,7 @@ def _restored_shutdown_receipt_path(proof):
         "restored-shutdown-" + _digest("restored-shutdown-host", proof["host"]) + ".json")
 
 
-def _checked_restored_shutdown(client, expected_proof_digest, source):
+def _checked_restored_shutdown(client, expected_proof_digest, source, *, before_publish):
     """Run inside the serialized host immediately before stopping its provider."""
     from fleet_codex import _atomic_json, _digest
 
@@ -21188,14 +21188,23 @@ def _checked_restored_shutdown(client, expected_proof_digest, source):
     with fleet_lock():
         live = read_incarnation()
         data = read_registry_no_repair()
-        if live != claim or not _mail_source_is_current(source):
-            raise FleetCliError("restored shutdown claim or Interface changed")
+        if (live != claim or not _mail_source_is_current(source)
+                or data.get("workers", {}).get(binding.name) != binding.record):
+            raise FleetCliError("restored shutdown claim, row or Interface changed")
+        current_binding, current_link = _restored_continuation_context(
+            live, data, history_ref=history_ref, old_host=proof["host"])
+        if current_link != link or current_binding != binding:
+            raise FleetCliError("restored shutdown binding or journal link changed")
         _restored_continuation_preflight(
-            live, data, binding, link, source, selected_history=history_ref)
+            live, data, current_binding, current_link, source,
+            selected_history=history_ref)
         # The host serves no further IPC request between this receipt and exit.
         path = _restored_shutdown_receipt_path(proof)
         if path.exists() or path.is_symlink():
             raise FleetCliError("restored shutdown already has a receipt; do not replay")
+        # Publication can fail after rename. The host must irrevocably stop
+        # accepting IPC before any usable receipt can appear, even on errors.
+        before_publish()
         _atomic_json(path, receipt)
     return receipt
 

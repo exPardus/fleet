@@ -382,6 +382,8 @@ and after the exact host and app-server child have exited, by
 `--shutdown-restored-continuation`: the authenticated host repeats their public
 terminal/notLoaded proofs and complete loaded list in its serialized handler,
 writes a preflight-bound receipt, and stops without another IPC dispatch.
+The final lock revalidates the fresh holder row and binding; receipt publication
+errors after rename still stop IPC service, preserving the checked boundary.
 Reattach refuses an unchecked external exit or missing/mismatched receipt.
 All three calls require the exact incarnation,
 thread, completed turn, original observed resume, committed restoration, and

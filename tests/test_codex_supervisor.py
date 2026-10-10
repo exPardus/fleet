@@ -3946,7 +3946,8 @@ def _checked_test_shutdown(client, monkeypatch=None):
         monkeypatch.setattr(client, "call", loaded)
     proof = fleet.read_incarnation()["restored_continuation_preflight"]
     return fleet._checked_restored_shutdown(
-        client, _digest("restored-shutdown-proof", proof), proof["source"])
+        client, _digest("restored-shutdown-proof", proof), proof["source"],
+        before_publish=lambda: None)
 
 
 @pytest.mark.parametrize("race", ["loaded", "advanced", "loaded-at-final-list"])
@@ -4041,7 +4042,8 @@ def test_supported_shutdown_sends_exact_preflight_and_preserves_claim(
             shutdowns.append(operation)
             result = fleet._checked_restored_shutdown(
                 client, operation["payload"]["proof_digest"],
-                before["restored_continuation_preflight"]["source"])
+                before["restored_continuation_preflight"]["source"],
+                before_publish=lambda: None)
             return SimpleNamespace(generation=client.generation, result=result)
         return original(operation, timeout)
 
@@ -4050,4 +4052,71 @@ def test_supported_shutdown_sends_exact_preflight_and_preserves_claim(
     args.shutdown_restored_continuation = True
     assert fleet.cmd_sup_reconcile(args) == 0
     assert len(shutdowns) == 1
+    assert fleet.read_incarnation() == before
+
+
+def test_checked_shutdown_revalidates_holder_row_after_final_public_read(
+        supervisor_home, monkeypatch):
+    name, _op, _journal, client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    path, sha, _archived = _seed_preserved_observed_history(
+        supervisor_home, client, monkeypatch)
+    args.preserve_retired_history_evidence = str(path)
+    args.expect_history_sha256 = sha
+    assert fleet.cmd_sup_reconcile(args) == 0
+    before = fleet.read_incarnation()
+    original = client.call
+
+    def race(operation, timeout):
+        result = original(operation, timeout)
+        if operation["payload"]["method"] == "thread/loaded/list":
+            registry = fleet.load_registry()
+            registry["workers"][name]["status"] = "running"
+            fleet.save_registry(registry)
+        return result
+
+    monkeypatch.setattr(client, "call", race)
+    with pytest.raises(fleet.FleetCliError, match="changed"):
+        _checked_test_shutdown(client)
+    assert fleet.read_incarnation() == before
+    assert not fleet._restored_shutdown_receipt_path(
+        before["restored_continuation_preflight"]).exists()
+
+
+def test_checked_shutdown_fences_before_receipt_rename_and_directory_fsync_failure(
+        supervisor_home, monkeypatch):
+    import stat
+    from fleet_codex import _digest
+
+    _name, _op, _journal, client, _current, args = \
+        _restored_continuation_setup(supervisor_home, monkeypatch)
+    path, sha, _archived = _seed_preserved_observed_history(
+        supervisor_home, client, monkeypatch)
+    args.preserve_retired_history_evidence = str(path)
+    args.expect_history_sha256 = sha
+    assert fleet.cmd_sup_reconcile(args) == 0
+    before = fleet.read_incarnation()
+    proof = before["restored_continuation_preflight"]
+    receipt_path = fleet._restored_shutdown_receipt_path(proof)
+    fenced = []
+    fsync = os.fsync
+
+    def fence():
+        assert not receipt_path.exists()
+        fenced.append(True)
+
+    def fail_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            assert fenced == [True]
+            raise OSError("post-rename directory fsync failure")
+        return fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_fsync)
+    with pytest.raises(OSError, match="post-rename"):
+        fleet._checked_restored_shutdown(
+            client, _digest("restored-shutdown-proof", proof), proof["source"],
+            before_publish=fence)
+    assert fenced == [True]
+    assert json.loads(receipt_path.read_text())["proof_digest"] == _digest(
+        "restored-shutdown-proof", proof)
     assert fleet.read_incarnation() == before

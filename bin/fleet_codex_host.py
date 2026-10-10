@@ -777,8 +777,14 @@ class Host:
                     registered = {"kind": "codex", **{key: claim[key] for key in (
                         "claim_id", "thread_id", "ancestor_pid",
                         "ancestor_start_identity", "uid")}}
+
+                    def fence_publication():
+                        nonlocal should_stop
+                        should_stop = True
+
                     result = fleet._checked_restored_shutdown(
-                        view, payload["proof_digest"], registered)
+                        view, payload["proof_digest"], registered,
+                        before_publish=fence_publication)
                     should_stop = True
                 elif method == "host/shutdown":
                     result = {"stopping": True}

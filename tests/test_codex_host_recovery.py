@@ -598,7 +598,7 @@ def test_replacement_host_conservatively_reconciles_accepted_intent_before_ready
         _shutdown(client)
 
 
-@pytest.mark.parametrize("case", ["checked", "historical-drift", "wrong-interface"])
+@pytest.mark.parametrize("case", ["checked", "historical-drift", "wrong-interface", "publication-error"])
 def test_checked_shutdown_stops_only_after_serialized_authenticated_boundary(
         tmp_path, monkeypatch, case):
     import hashlib
@@ -634,18 +634,32 @@ def test_checked_shutdown_stops_only_after_serialized_authenticated_boundary(
     monkeypatch.setattr(module, "_send_frame", lambda conn, data, deadline: sent.append(data))
     calls = []
 
-    def checked(client, digest, registered):
+    def checked(client, digest, registered, *, before_publish=lambda: None):
         calls.append((digest, registered))
         if case == "historical-drift":
             raise fleet.FleetCliError("historical thread became active")
+        if case == "publication-error":
+            # Exercise real publication: rename succeeds before directory fsync fails.
+            before_publish()
+            fsync = os.fsync
+
+            def fail_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("injected post-rename directory fsync failure")
+                return fsync(fd)
+
+            monkeypatch.setattr(os, "fsync", fail_directory_fsync)
+            fleet_codex._atomic_json(tmp_path / "receipt.json", {"checked": True})
         return {"checked": True}
 
     monkeypatch.setattr(fleet, "_checked_restored_shutdown", checked)
     monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
     connection = SimpleNamespace(close=lambda: None)
-    assert host._serve_connection(connection) is (case == "checked")
+    assert host._serve_connection(connection) is (case in {"checked", "publication-error"})
     response = json.loads(sent[-1])
     assert response["ok"] is (case == "checked")
     assert bool(calls) is (case != "wrong-interface")
     if calls:
         assert calls == [("proof", {"kind": "codex", **claim})]
+    if case == "publication-error":
+        assert json.loads((tmp_path / "receipt.json").read_text()) == {"checked": True}

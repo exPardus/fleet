@@ -734,7 +734,10 @@ history selection for the shutdown boundary. The current registered Interface
 must authenticate to the old host. Inside its serialized request handler, the
 host repeats the public `notLoaded` and terminal newest-turn proof for every
 historical bound thread, checks the current idle holder and complete loaded
-list, and rechecks local preflight and Interface continuity. It writes one
+list, and re-resolves the fresh holder binding, full row, journal link, local
+preflight and Interface continuity under the final lock. Before publishing any
+receipt bytes it irrevocably commits to stop serving IPC, including when rename
+has succeeded but directory fsync later raises. It writes one
 owner-only `state/codex/restored-shutdown-<host-identity-digest>.json` receipt bound to the complete
 preflight, then exits without serving another IPC operation. Historical public
 drift refuses shutdown and leaves the claim, rows, journals and mail intact.
