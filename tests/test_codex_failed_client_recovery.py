@@ -618,9 +618,18 @@ def test_real_host_fences_unclassified_public_mutations_and_shutdown(tmp_path, s
             client, "alternate-stop", "host/shutdown-restored", {"proof_digest": "a" * 64}))
         assert restored_stop["ok"] is False
         assert "failed-client recovery blocks host shutdown" in restored_stop["error"]
+        cancelled_stop = _raw_call(client, _envelope(
+            client, "cancelled-stop", "host/shutdown-cancelled-approval",
+            {"proof_digest": "a" * 64}))
+        assert cancelled_stop["ok"] is False
+        assert "failed-client recovery blocks host shutdown" in cancelled_stop["error"]
         with pytest.raises(fleet_codex.HostRejected, match="blocks host shutdown"):
             client.call({"operation_id": "client-alternate-stop",
                          "method": "host/shutdown-restored",
+                         "payload": {"proof_digest": "a" * 64}}, timeout=2)
+        with pytest.raises(fleet_codex.HostRejected, match="blocks host shutdown"):
+            client.call({"operation_id": "client-cancelled-stop",
+                         "method": "host/shutdown-cancelled-approval",
                          "payload": {"proof_digest": "a" * 64}}, timeout=2)
         assert client.call({"operation_id": "still-live", "method": "ping",
                             "payload": {}}, timeout=2).result["generation"] == client.generation

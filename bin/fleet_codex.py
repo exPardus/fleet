@@ -2558,7 +2558,8 @@ class CodexHostClient:
         if method == "rpc":
             authorize_failed_client_recovery_rpc(
                 self.home, self.generation, operation_id, payload, digest)
-        elif method in {"host/shutdown", "host/shutdown-restored"}:
+        elif method in {"host/shutdown", "host/shutdown-restored",
+                        "host/shutdown-cancelled-approval"}:
             authorize_failed_client_recovery_shutdown(
                 self.home, self.generation, operation_id, method=method)
         public_method = _public_method(method, payload)

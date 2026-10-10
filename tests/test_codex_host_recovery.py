@@ -693,8 +693,12 @@ def test_cancelled_shutdown_stops_only_after_serialized_authenticated_boundary(
     view = SimpleNamespace(generation=host.generation)
     monkeypatch.setattr(fleet_codex.CodexHostClient, "_existing", lambda home: view)
     monkeypatch.setattr(module.os, "urandom", lambda size: b"c" * size)
-    request = {"method": "host/shutdown-cancelled-approval", "operation_timeout": 30,
-               "payload": {"proof_digest": "proof"}}
+    request = {
+        "operation_id": "cancelled-stop",
+        "method": "host/shutdown-cancelled-approval",
+        "operation_timeout": 30,
+        "payload": {"proof_digest": "proof"},
+    }
     frames = iter([hmac.digest(host.authkey, b"c" * 32, hashlib.sha256),
                    json.dumps(request).encode()])
     monkeypatch.setattr(module, "_recv_frame", lambda *args: next(frames))

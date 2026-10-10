@@ -853,6 +853,9 @@ class Host:
                         before_publish=fence_publication)
                     should_stop = True
                 elif method == "host/shutdown-cancelled-approval":
+                    authorize_failed_client_recovery_shutdown(
+                        self.home, self.generation, request["operation_id"],
+                        method=method)
                     claim = read_interface_claim(self.home)
                     peer_pid, peer_uid = _ipc_peer_credentials(connection)
                     source = codex_process_source(peer_pid)
