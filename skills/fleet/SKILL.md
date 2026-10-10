@@ -170,6 +170,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
 - `fleet watch [--fleet-home PATH ...] [--mcx-dir DIR ...] [--mem-floor-mb MB] [--disk-floor-gb GB] [--interval S] [--timeout S]`: wait for the first mail, fleet/mcx lane transition, low-memory, or low-disk event; exits 3 on timeout.
+- `fleet mailman init|run|digest --fleet-home PATH`: seed wake rules, classify inbox mail, file low-signal messages, and wait for interface mail. The seed catches `READY:` and both `do-not-merge` and `do not merge`; missing or invalid config wakes on every mail. Filing checks the same inode and content through the link/unlink boundary. The command remains fail-safe destructive pending an effect-tier ruling.
 - `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
