@@ -171,6 +171,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet interface-register`: register the current tmux pane as the interface.
 - `fleet watch [--fleet-home PATH ...] [--mcx-dir DIR ...] [--mem-floor-mb MB] [--disk-floor-gb GB] [--interval S] [--timeout S]`: wait for the first mail, fleet/mcx lane transition, low-memory, or low-disk event; exits 3 on timeout.
 - `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
+- `fleet mailman init|run|digest --fleet-home PATH`: `init` seeds `mailman.json` (wake rules live there); `run [--timeout S]` files FYI/status mail (digest + relay log + `done/`) and returns only when a mail needs you (exit 0, paths printed; exit 3 on timeout, 4 if the bridge hook keeps failing; a missing or bad config wakes on every mail); `digest [--since 24h]` rolls up what was filed. Acknowledge wake mails with `relay-ack`. Prefer `mailman run` under `run_in_background` over `watch` for mail.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
