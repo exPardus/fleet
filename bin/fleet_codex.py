@@ -1436,7 +1436,7 @@ class CodexApprovalStore:
         return record
 
 
-def read_pending_requests(home: Path, thread_id: str, turn_id: str | None = None,
+def read_pending_requests(home: Path, thread_id: str | None, turn_id: str | None = None,
                           current_generation: str | None = None) -> list[dict[str, Any]]:
     """Read durable waits without starting a host, taking a lock, or writing."""
     home = _canonical_home(home)
@@ -1463,7 +1463,7 @@ def read_pending_requests(home: Path, thread_id: str, turn_id: str | None = None
             raise UnsafeHostState(f"Codex approval identity mismatch: {path}")
         if value.get("state") not in CodexApprovalStore._UNRESOLVED:
             continue
-        if value.get("thread_id") != thread_id:
+        if thread_id is not None and value.get("thread_id") != thread_id:
             continue
         if turn_id is not None and value.get("turn_id") not in (None, turn_id):
             continue
