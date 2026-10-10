@@ -68,6 +68,40 @@ ID, real turn ID where applicable, and canonical cwd match the Fleet preclaim.
 
 ## 3. Current adapter and public protocol
 
+### Held supervisor current-turn interrupt
+
+`fleet --fleet-home <exact-home> codex-sup-interrupt-current <typed-request-id>
+--request-id-type int|string` is a dedicated, one-turn rescue route. It requires a
+current process-bound Codex Interface, a held native supervisor claim, an exact
+unique current row, a single exact pending command approval, and fresh original
+host and app-server child identities. The remaining `--expect-*` arguments pin
+the reviewed incarnation, thread, turn, callback key and bytes, and host
+processes. It does not answer an approval or interrupt ordinary workers.
+
+This is an explicit compatibility route for the retained old dispatcher, not a
+current-host approval feature. `--expect-old-host-sha256` remains pinned to
+`ef4516e021043984f7aee4d408d6c9292393def4696353bf3a01d71b3aa2036b`.
+It identifies the separately reviewed loaded source; neither the argument nor
+host metadata proves loaded Python bytes. Before any live use, an independently
+reviewed operator procedure must establish original loaded-process provenance
+and continuous writer exclusion. The CLI requires the old dispatcher's exact
+`unknown host method` refusal for `approval/supervisor-reservation-v1`; capable
+hosts, other refusals and lost replies fail closed. That capability check is
+corroborating evidence only, never source attestation. The current host module,
+protocol schemas and paged observation remain unchanged. Source integration
+and fixture tests do not authorize a live interrupt or reuse an old procedure.
+
+The command reserves the complete claim and target row, issues one authenticated
+journaled `turn/interrupt`, and then reads the public thread to drain old-host
+notifications. It settles only after the same turn is terminal and idle, the
+exact callback is durably resolved without a response, and no unresolved
+callback remains. Any missing or contradictory proof retains the reservation;
+the interrupt must never be replayed. After settlement, a separate verified
+`fleet send supervisor` can deliver existing queued mail with one distinct wake
+direction. That send is a separate decision and must not be repeated after an
+uncertain result.
+
+
 ### Exact worker preaccept authentication rejection
 
 `fleet --fleet-home <exact-home> codex-settle-preaccept <worker> <operation-id>
