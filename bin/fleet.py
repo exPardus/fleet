@@ -16975,7 +16975,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     The sid union handles forks whose claim still names their earlier session;
     sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
     :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23057`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
     safe; the age boundary distinguishes respawn.
@@ -26381,10 +26381,73 @@ def _watch_timeout_arg(value: str) -> float:
     return timeout
 
 
+class _FleetHelpFormatter(argparse.HelpFormatter):
+    """Hide suppressed subcommands instead of printing argparse's sentinel."""
+
+    def _format_action(self, action):
+        if action.help == argparse.SUPPRESS:
+            return ""
+        return super()._format_action(action)
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        """Wrap usage text with one stable policy across argparse versions."""
+        # ``argparse.add_subparsers()`` formats a prefix-free usage line to
+        # derive each child parser's ``prog``. Preserve its explicit empty
+        # prefix; turning it into ``usage: `` compounds at every nesting
+        # level (for example, ``usage: usage: fleet mail verify``).
+        if prefix is None:
+            prefix = "usage: "
+        rendered = super()._format_usage(usage, actions, groups, prefix)
+        flat = " ".join(rendered.split())
+        if not flat.startswith(prefix):
+            return rendered
+
+        body = flat[len(prefix):].strip()
+        continuation = " " * len(prefix)
+        lines = []
+        current = prefix
+        for word in body.split():
+            separator = "" if current == prefix else " "
+            if (current != prefix
+                    and len(current) + len(separator) + len(word) > self._width):
+                lines.append(current.rstrip())
+                current = continuation + word
+            else:
+                current += separator + word
+        lines.append(current.rstrip())
+        return "\n".join(lines) + "\n\n"
+
+    def _format_action_invocation(self, action):
+        """Render every option alias with its metavar on all Python versions.
+
+        Python 3.14 changed argparse's multi-option rendering: earlier
+        versions print e.g. ``-n LINES, --lines LINES`` while 3.14 prints
+        ``-n, --lines LINES``. The CLI reference is generated from this
+        formatter, so keep the user-facing synopsis stable across our
+        supported Python versions.
+        """
+        if not action.option_strings:
+            return super()._format_action_invocation(action)
+        if action.nargs == 0:
+            return ", ".join(action.option_strings)
+        default = self._get_default_metavar_for_optional(action)
+        args = self._format_args(action, default)
+        return ", ".join(
+            f"{option} {args}" for option in action.option_strings)
+
+
+class _FleetArgumentParser(argparse.ArgumentParser):
+    """Use Fleet's version-stable formatter for every nested command parser."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("formatter_class", _FleetHelpFormatter)
+        super().__init__(*args, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
-    parser = argparse.ArgumentParser(
+    parser = _FleetArgumentParser(
         prog="fleet", description="claude-fleet manager CLI",
         epilog="global: --fleet-home <PATH> selects which fleet home to act on "
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
@@ -26434,7 +26497,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
-                         help="Codex reasoning effort when --model is codex:<model>")
+                         help="legacy mcx reasoning effort; ignored by the native "
+                              "Codex adapter")
     p_spawn.add_argument(
         "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
@@ -26597,7 +26661,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
-    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach = sub.add_parser("attach", help=argparse.SUPPRESS)
     p_attach.add_argument("name")
     p_attach.add_argument("--force", action="store_true")
 
@@ -26610,7 +26674,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("--task", default=None)
     p_respawn.add_argument("--force", action="store_true")
     p_respawn.add_argument("--force-band", action="store_true",
-                           help="override the supervisor soft context-band refusal; never the hard ceiling")
+                           help="with --task: override the supervisor soft context-band "
+                                "refusal; never the hard ceiling")
     p_respawn.add_argument("--yes", action="store_true",
                            help="confirm respawning a worker this session did not spawn")
     p_respawn.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
@@ -27002,6 +27067,13 @@ def build_parser() -> argparse.ArgumentParser:
                               "DECLINED on an entry whose minted_at reads fine")
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
+
+    hidden_commands = {
+        choice.dest for choice in sub._choices_actions
+        if choice.help == argparse.SUPPRESS
+    }
+    sub.metavar = "{" + ",".join(
+        name for name in sub.choices if name not in hidden_commands) + "}"
 
     return parser
 
@@ -27452,11 +27524,6 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
             status = recompute_worker_native(n, rec, entries).get("status")
         elif _is_codex_record(rec):
             if _codex_record_route(rec) == "mcx":
-                # Probe mcx completion.
-
-
-
-
                 expected_mcx_id = rec.get("mcx_id")
                 expected_status = rec.get("status")
                 expected_last_dispatch_at = rec.get("last_dispatch_at")
