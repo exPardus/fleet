@@ -809,7 +809,7 @@ second resume. A plain held-claim `sup-reconcile` refuses this linked state.
 
 The authenticated `host/shutdown-restored` handler has one bounded lazy
 CLI-reader seam for the checked-shutdown helper. Import itself performs no
-filesystem, process or network action. The reachable helper chain does not
+filesystem mutations or process/network actions. The reachable helper chain does not
 write registry, claim, event or operation records, repair state, or dispatch
 provider mutations. It reads the existing Codex stores (their constructors may
 ensure owner-only store directories), takes the shared owner-safe lock, and

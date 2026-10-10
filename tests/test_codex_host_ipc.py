@@ -1319,6 +1319,10 @@ def test_host_modules_do_not_import_registry_or_claim_writer():
     root = Path(__file__).resolve().parents[1] / "bin"
     for name in ("fleet_codex.py", "fleet_codex_host.py", "fleet_lock.py"):
         tree = ast.parse((root / name).read_text(encoding="utf-8"))
+        assert not any(isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name)
+                       and node.func.id == "fleet_lock"
+                       for node in ast.walk(tree))
         imports = [node for node in ast.walk(tree)
                    if isinstance(node, ast.Import)
                    and any(alias.name == "fleet" for alias in node.names)]
@@ -1406,7 +1410,7 @@ def test_checked_shutdown_reachable_cli_helpers_exclude_state_writers():
     assert publishers == ["_checked_restored_shutdown"]
 
 
-def test_lazy_cli_import_has_no_filesystem_process_or_network_effects(tmp_path):
+def test_lazy_cli_import_has_no_filesystem_mutations_or_process_network_actions(tmp_path):
     root = Path(__file__).resolve().parents[1] / "bin"
     script = r'''import sys, os
 sys.path.insert(0, sys.argv[1])
