@@ -21,7 +21,7 @@ mail for those threads, supervisor queue and journal, and affected worktree
 heads, tracked state and lane receipts. Every original operation must be
 committed. An unresolved recorded callback refuses before interruption.
 Tracked-state evidence includes raw Git index bytes, staged blob identities,
-raw tracked file bytes and modes, and symlink link bytes without following
+raw tracked file bytes, file types and permission modes, and symlink link bytes without following
 their targets. This detects different edits with identical Git status, including
 assume-unchanged files. Git read commands disable optional index refreshes.
 Untracked files are outside this evidence contract. Submodules, unsupported file

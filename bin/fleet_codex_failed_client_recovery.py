@@ -141,7 +141,7 @@ def _worktree_evidence(cwd: Path) -> dict[str, Any]:
                                   item.st_ctime_ns)
         if signature(before) != signature(after):
             raise FleetCliError("tracked file changed during recovery inspection")
-        rows.append((index, name, stat.S_IMODE(before.st_mode),
+        rows.append((index, name, stat.S_IFMT(before.st_mode), stat.S_IMODE(before.st_mode),
                      hashlib.sha256(data).hexdigest()))
     if entries != _git(cwd, "ls-files", "--stage", "-z"):
         raise FleetCliError("tracked index changed during recovery inspection")

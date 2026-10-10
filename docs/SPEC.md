@@ -466,7 +466,7 @@ recovery with `codex-recover-failed-client`. This Linux-only procedure pins the
 old host and app-server PID/start identities, held claim, all same-generation
 rows, committed operation inventory, recorded approval inventory, target mail,
 supervisor queue/journal, and affected worktree heads and lane receipts. The
-worktree evidence pins raw index and tracked file bytes, including already
+worktree evidence pins raw index and tracked file bytes/types/modes, including already
 dirty and assume-unchanged files. Complete persisted turn/item histories must
 agree across two bounded reads; unknown or nonterminal item state refuses.
 This is still a source checkpoint on HOLD: bounded tests do not replace the

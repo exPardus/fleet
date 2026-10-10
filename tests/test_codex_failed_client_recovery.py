@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -972,6 +973,48 @@ def test_tracked_symlink_pins_link_bytes_without_reading_target(tmp_path):
     link.unlink()
     link.symlink_to("missing-second-target")
     assert _REAL_WORKTREE_EVIDENCE(cwd) != before
+
+
+@pytest.mark.parametrize("original_type", ["symlink", "regular"])
+def test_assume_unchanged_file_type_collision_refuses_cas(staged, monkeypatch, original_type):
+    fake, args, old = staged
+    cwd = Path(fake.rows[args.name]["cwd"])
+    monkeypatch.setattr(recovery, "_git", _REAL_GIT)
+    monkeypatch.setattr(recovery, "_worktree_evidence", _REAL_WORKTREE_EVIDENCE)
+
+    def git(*arguments):
+        subprocess.run(["git", "-C", str(cwd), *arguments], check=True,
+                       capture_output=True)
+
+    git("init", "-q")
+    target = cwd / "preserved"
+    value = "missing-target"
+    target.symlink_to(value)
+    link_mode = stat.S_IMODE(target.lstat().st_mode)
+    if original_type == "regular":
+        target.unlink()
+        target.write_bytes(os.fsencode(value))
+        target.chmod(link_mode)
+    git("add", "preserved")
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "commit", "-qm", "fixture")
+    git("update-index", "--assume-unchanged", "preserved")
+    before_status = _REAL_GIT(cwd, "status", "--porcelain", "--untracked-files=no")
+    before_index = _REAL_GIT(cwd, "ls-files", "--stage", "-z")
+    recovery._prepare(fake, args)
+    record = recovery._load(fake)
+    target.unlink()
+    if original_type == "symlink":
+        target.write_bytes(os.fsencode(value))
+        target.chmod(link_mode)
+    else:
+        target.symlink_to(value)
+    assert stat.S_IMODE(target.lstat().st_mode) == link_mode
+    assert _REAL_GIT(cwd, "status", "--porcelain", "--untracked-files=no") == before_status
+    assert _REAL_GIT(cwd, "ls-files", "--stage", "-z") == before_index
+    with pytest.raises(FleetCliError, match="worktrees changed"):
+        recovery._compare(fake, record)
+    assert old.calls == []
 
 
 def test_alternate_checked_shutdown_cannot_bypass_failed_client_barrier(staged):
