@@ -25,6 +25,11 @@ WINDOW = 20
 # This target ancestor refreshed only executable self-citation prose. Its
 # missing trailer cannot be repaired without rewriting the shared merge base.
 HISTORICAL_METADATA_EXEMPTIONS = {
+    # 7f405164 changed the parser's top-level help formatting without the
+    # docs-currency surface in the same commit. The follow-up docs/reference
+    # repair is intentionally a new commit, so keep this immutable history
+    # violation explicit rather than pretending a later docs edit repairs it.
+    "7f405164fc1c20d5eca3d9a9b81e21d063ed0942",
     "ffd1197836ef2f5a586f35434d58b97ab5c3f892",
 }
 
