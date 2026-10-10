@@ -81,6 +81,7 @@ def test_filing_is_lossless(home, capsys):
     assert "LANDED lane-a at abc123" in lines(LOG(home))[0]
     d = lines(DIGEST(home))
     assert len(d) == 1 and "| a.md |" in d[0] and "<!-- mailman:a.md:" in d[0]
+    assert not list(mm.claims_dir(home).glob("claim-*"))
     cursor = json.loads((home / "state" / "interface" / "watch-cursor.json").read_text())
     assert "a.md" in cursor["mail"]
 
@@ -283,6 +284,7 @@ def test_stale_recovery_uses_alias_before_removing_claim(home, monkeypatch):
     assert source.read_text() == "kind: question\nneeds-answer: yes\n\nnew arrival\n"
     aliases = list((home / "mailbox" / "to-fleet").glob("a.md.recovered-*.mail"))
     assert len(aliases) == 1 and aliases[0].read_text() == old_mail
+    assert not claim_dir.exists()
 
 
 def test_done_collision_skips_an_occupied_suffixed_name(home, capsys):

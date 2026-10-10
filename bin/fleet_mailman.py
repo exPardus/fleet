@@ -289,6 +289,10 @@ def _remove_private_claim(claim: Path, claim_dir: Path) -> None:
     except FileNotFoundError:
         pass
     try:
+        os.unlink(claim_dir / "owner.lock")
+    except FileNotFoundError:
+        pass
+    try:
         claim_dir.rmdir()
     except OSError:
         pass
@@ -322,7 +326,7 @@ def _publish_claim(home, claim: Path, claim_dir: Path,
 
 
 def _recover_stale_claims(home, *, now=None) -> int:
-    """Make crash-left claims visible again; active (<5 min) claims stay private."""
+    """Recover only stale claims whose per-claim owner lock is released."""
     root = claims_dir(home)
     try:
         st = os.lstat(root)
