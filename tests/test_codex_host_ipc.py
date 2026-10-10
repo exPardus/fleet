@@ -1295,6 +1295,7 @@ def test_oversized_mutation_reply_is_not_classified_as_rejection(
         "fleet_home": str(client.home),
         "payload_digest": module._digest("rpc", operation["payload"]),
         "error": "host response exceeds MAX_IPC_BYTES; page the request",
+        "result": None,
     }
 
     class Connection:
@@ -1335,18 +1336,25 @@ def test_host_modules_do_not_import_registry_or_claim_writer():
         if name != "fleet_codex_host.py":
             assert imports == [] and accesses == []
             continue
-        arms = [node for node in ast.walk(tree) if isinstance(node, ast.If)
-                and ast.unparse(node.test) == "method == 'host/shutdown-restored'"]
-        assert len(arms) == 1
-        allowed = {id(node) for statement in arms[0].body
-                   for node in ast.walk(statement)}
-        assert len(imports) == 1 and id(imports[0]) in allowed
-        assert imports[0].names[0].name == "fleet"
-        assert imports[0].names[0].asname is None
-        assert len(imports[0].names) == 1
-        assert {node.attr for node in accesses} == {
-            "FLEET_HOME", "_checked_restored_shutdown"}
-        assert all(id(node) in allowed for node in accesses)
+        seams = {
+            "host/shutdown-restored": "_checked_restored_shutdown",
+            "host/shutdown-cancelled-approval": "_checked_cancelled_approval_shutdown"}
+        allowed = set()
+        for method, helper in seams.items():
+            arms = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                    and ast.unparse(node.test) == f"method == '{method}'"]
+            assert len(arms) == 1
+            nodes = {id(node) for statement in arms[0].body
+                     for node in ast.walk(statement)}
+            local_imports = [node for node in imports if id(node) in nodes]
+            assert len(local_imports) == 1
+            assert len(local_imports[0].names) == 1
+            assert local_imports[0].names[0].asname is None
+            assert {node.attr for node in accesses if id(node) in nodes} == {
+                "FLEET_HOME", helper}
+            allowed.update(nodes)
+        assert len(imports) == len(seams)
+        assert all(id(node) in allowed for node in imports + accesses)
         parents = {id(child): node for node in ast.walk(tree)
                    for child in ast.iter_child_nodes(node)}
         assert all(isinstance(parents[id(node)], ast.Attribute)
@@ -1437,3 +1445,84 @@ print("import is inert")
                                text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "import is inert"
+
+
+def test_checked_cancelled_shutdown_reader_closure_excludes_state_writers():
+    root = Path(__file__).resolve().parents[1] / "bin"
+    tree = ast.parse((root / "fleet.py").read_text(encoding="utf-8"))
+    definitions = {node.name: node for node in tree.body
+                   if isinstance(node, ast.FunctionDef)}
+    pending = ["_checked_cancelled_approval_shutdown"]
+    reachable = set()
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(node.func.id for node in ast.walk(definitions[name])
+                       if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Name)
+                       and node.func.id in definitions)
+    assert reachable == {
+        '_checked_cancelled_approval_shutdown',
+        '_codex_cancel_approval_store',
+        '_codex_cancel_claim_without_preflight',
+        '_codex_cancel_expectations',
+        '_codex_cancel_host_identity',
+        '_codex_cancel_host_worker_rows',
+        '_codex_cancel_original_policy',
+        '_codex_cancel_pinned_old_host',
+        '_codex_cancel_preflight_state',
+        '_codex_cancel_public_status',
+        '_codex_cancel_shutdown_receipt_path',
+        '_codex_cancelled_context',
+        '_codex_error_code',
+        '_codex_existing_client',
+        '_codex_paged_thread_read',
+        '_codex_permission_profile',
+        '_codex_record_route',
+        '_codex_recovery_interface_source',
+        '_codex_restore_host_identity',
+        '_codex_restore_mail_snapshot',
+        '_codex_supervisor_binding',
+        '_codex_supervisor_observe',
+        '_codex_worker_binding',
+        '_codex_worker_observe',
+        '_is_codex_record',
+        '_is_supervisor_shaped',
+        '_mail_provider_registration_is_exclusive',
+        '_mail_source_is_current',
+        '_provider_codex_id',
+        '_registered_interface_mail_source',
+        '_registration_path_present',
+        '_registration_token',
+        '_registry_corrupt_reason',
+        '_restored_history_loaded',
+        'current_caller_session',
+        'fleet_lock',
+        'incarnation_path',
+        'lock_path',
+        'mailbox_dir',
+        'read_incarnation',
+        'read_registry_no_repair',
+        'registry_path',
+        'state_dir',
+        'supervisor_dir',
+    }
+    forbidden = {"save_registry", "write_incarnation", "load_registry",
+                 "append_event", "dispatch_bg", "dispatch_codex",
+                 "commit", "accept", "fail", "prepare", "respond",
+                 "write_text", "write_bytes", "unlink", "replace",
+                 "rename", "remove", "Popen", "run", "system"}
+    publishers = []
+    for name in reachable:
+        for node in ast.walk(definitions[name]):
+            if not isinstance(node, ast.Call):
+                continue
+            callee = (node.func.id if isinstance(node.func, ast.Name)
+                      else node.func.attr if isinstance(node.func, ast.Attribute)
+                      else None)
+            assert callee not in forbidden, (name, callee)
+            if callee == "_atomic_json":
+                publishers.append(name)
+    assert publishers == ["_checked_cancelled_approval_shutdown"]

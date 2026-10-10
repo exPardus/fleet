@@ -68,6 +68,48 @@ ID, real turn ID where applicable, and canonical cwd match the Fleet preclaim.
 
 ## 3. Current adapter and public protocol
 
+### Held supervisor current-turn interrupt
+
+`fleet --fleet-home <exact-home> codex-sup-interrupt-current <typed-request-id>
+--request-id-type int|string` is a dedicated, one-turn rescue route. It requires a
+current process-bound Codex Interface, a held native supervisor claim, an exact
+unique current row, a single exact pending command approval, and fresh original
+host and app-server child identities. The remaining `--expect-*` arguments pin
+the reviewed incarnation, thread, turn, callback key and bytes, and host
+processes. It does not answer an approval or interrupt ordinary workers.
+
+This is an explicit compatibility route for the retained old dispatcher, not a
+current-host approval feature. `--expect-old-host-sha256` remains pinned to
+`ef4516e021043984f7aee4d408d6c9292393def4696353bf3a01d71b3aa2036b`.
+It identifies the separately reviewed loaded source; neither the argument nor
+host metadata proves loaded Python bytes. Before any live use, an independently
+reviewed operator procedure must establish original loaded-process provenance
+and continuous writer exclusion. The CLI requires the old dispatcher's exact
+`unknown host method` refusal for `approval/supervisor-reservation-v1`; capable
+hosts, other refusals and lost replies fail closed. That capability check is
+corroborating evidence only, never source attestation. The current host module,
+protocol schemas and paged observation remain unchanged. Source integration
+and fixture tests do not authorize a live interrupt or reuse an old procedure.
+
+The command reserves the complete claim and target row, issues one authenticated
+journaled `turn/interrupt`, and then reads the public thread to drain old-host
+notifications. It settles only after the same turn is terminal and idle, the
+exact callback is durably resolved without a response, and no unresolved
+callback remains. Any missing or contradictory proof retains the reservation;
+the interrupt must never be replayed. After journal commit, settlement re-reads
+the terminal public turn and both public and durable callback inventories,
+then verifies both original OS process identities after the final public reads;
+a new wait, changed turn or replaced child retains the reservation. Pending callbacks carrying
+response/consumption evidence refuse before reservation. Host IPC envelopes
+must carry an exact boolean `ok`, all correlation/result/error fields, and
+consistent success/error shapes; malformed, duplicate-key and non-finite JSON
+replies are unavailable evidence, never a typed old-host rejection.
+After settlement, a separate verified
+`fleet send supervisor` can deliver existing queued mail with one distinct wake
+direction. That send is a separate decision and must not be repeated after an
+uncertain result.
+
+
 ### Exact worker preaccept authentication rejection
 
 `fleet --fleet-home <exact-home> codex-settle-preaccept <worker> <operation-id>
@@ -450,6 +492,20 @@ turn evidence stays non-idle. An unresolved mutation prevents an older
 completion from vouching for unknown provider work. Host loss, a failed live
 read, malformed evidence, or conflicting identity maps to
 `dead-suspected`, never to a proved death. File-only views remain file-only.
+`fleet doctor --repair` can also settle an ordinary worker send whose exact
+`turn/start` or `turn/steer` journal already contains an `observed` or
+`committed` successful result. The returned turn must agree with the proposed
+adoption, immutable operation identity and generation, and the newest turn read
+through the existing paged observer. It retains the original journal result,
+requires no unresolved predecessor or current callback, reconstructs the original
+operation from retained mail to verify its complete payload digest, and checks the
+complete registry row plus the sole claimed-mail inode and bytes before clearing the
+reservation and finalizing that delivered mail. Conflicting or incomplete
+results, accepted/uncertain journals, changed callbacks/mail/rows, multiple
+claims and host-generation drift remain fenced. A terminal predecessor alone
+never proves rejection; this path neither restores mail nor retries a provider
+mutation. It excludes supervisor rows and is inactive without `--repair`.
+
 `fleet doctor --repair` backfills rows that were already committed
 `dead-suspected` before this completion rule shipped. It requires the same
 exact bound thread/turn in durable evidence and a validated live `thread/read`,
@@ -818,8 +874,9 @@ same idle completed turn before local settlement. An accepted, uncertain,
 or mismatched result stays fenced, preserving journals and mail without a
 second resume. A plain held-claim `sup-reconcile` refuses this linked state.
 
-The authenticated `host/shutdown-restored` handler has one bounded lazy
-CLI-reader seam for the checked-shutdown helper. Import itself performs no
+The authenticated `host/shutdown-restored` and
+`host/shutdown-cancelled-approval` handlers have separate bounded lazy
+CLI-reader seams for their exact checked-shutdown helpers. Import itself performs no
 filesystem mutations or process/network actions. The reachable helper chain does not
 write registry, claim, event or operation records, repair state, or dispatch
 provider mutations. It reads the existing Codex stores (their constructors may
@@ -827,6 +884,77 @@ ensure owner-only store directories), takes the shared owner-safe lock, and
 publishes only the exact shutdown receipt after the irrevocable stop fence.
 Other host paths retain the writer-free module boundary. Structural closure
 and fresh-interpreter import audits enforce this exception.
+
+An existing native supervisor command approval on a host predating the
+supervisor response reservation cannot be answered through a newer CLI: the
+running host lacks that boundary. For an explicitly abandoned approval turn,
+the registered Codex Interface may instead use `sup-reconcile
+--cancel-pending-approval` with explicit home and exact incarnation, thread,
+turn, old host generation, request ID, item ID, method, raw command and cwd.
+Cancellation refuses any existing claim, holder or row reservation and any
+nonactionable holder, before provider reads and again in the locked reservation
+transaction. A missing host journal never grants permission to replace an intent.
+Fleet requires the recorded `accept` policy, one durable pending callback on
+the bound active turn, `waitingOnApproval`, no other unresolved host journal,
+and the exact live old host and child. This cancellation is permitted only
+when that **running** host reports Codex `0.155.1` and schema SHA-256
+`f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3`.
+Fleet pins both values in the old host identity, cancellation journal, and
+prepared proof; a different reviewed Codex version refuses before reservation.
+A full claim/row reservation blocks
+ordinary competing supervisor mutations. The old host's existing journaled
+`turn/interrupt` carries the exact thread and turn IDs. Codex 0.155.1 aborts
+pending per-thread callbacks on `TurnAborted`; Fleet requires the specific
+record to become `resolved` with no response fields, an exact observed
+interrupt journal, and a newest `interrupted`/idle public turn. Any ambiguous
+effect retains the reservation and is never retried. The successful path
+leaves the claim uncertain and fenced: it does not create a turn or consume
+queued mail.
+
+`--prepare-cancelled-approval-resume` records a five-minute proof of that
+terminal callback, committed interrupt, source, old host and child identities,
+complete supervisor claim and row, target inbox/claimed-mail contents, and
+the complete exact-home native worker inventory. A native row with a missing
+or divergent host generation, invalid binding, or invalid route cannot be
+treated as unrelated and blocks preparation. An explicit `codex-app-server`
+dispatch marker remains native-shaped even if its substrate and thread fields
+are corrupt. Every proved same-host worker turn
+must be publicly idle or unloaded with terminal turns and no active flags;
+the host must have no unresolved callbacks or journal operations. Any
+native inventory drift after preparation refuses shutdown or cold resume.
+Preparation alone does not authorize a cold boundary. The exact registered
+Interface must request `--shutdown-cancelled-approval`; the serialized
+`host/shutdown-cancelled-approval` handler repeats the interrupted holder and
+all native terminal-turn reads, checks the complete loaded-thread set, and
+checks every unresolved callback and operation. Its final owner-safe locked
+comparison includes the current holder row, original cancellation, all local
+journal/callback records and full prepared claim/mail/native-row proof. Before
+writing the owner-only host-bound, whole-preflight-digest receipt it fences
+further IPC dispatch irreversibly, including receipt write/fsync errors. Cold
+resume always requires that exact receipt before host creation. An older
+loaded handler without this method stays held; no raw or external shutdown
+can supply equivalent authority. Lost acknowledgement retains the receipt
+and requires exact host/child exit proof, never replay or host replacement.
+
+After the exact old host and app-server child exit with a stale heartbeat,
+`--resume-cancelled-approval` requires the same explicit pins and proof before
+host creation and provider dispatch. The new generation must prove the
+supervisor approval reservation capability before any resume; this keeps a
+later `accept`-mode request serviceable through the reviewed one-shot
+`codex-respond supervisor` route. It creates one
+distinct cold `thread/resume` intent on the **same** thread, with
+`excludeTurns=true`, canonical cwd, recorded model, `approvalPolicy=on-request`,
+`approvalsReviewer=user`, and `sandbox=workspace-write`. The effective response
+must equal the original recorded policy in full, and the newest turn must
+still be interrupted and idle. Settlement uses exact claim/row/mail/source,
+callback, old/new journal and host checks. Unrelated product rows may progress;
+their requests and mail are not edited. Other active workers or unresolved
+requests prevent a safe host shutdown until separately settled. A lost or
+ambiguous interrupt or resume response leaves its intent fenced, with no
+automatic provider replay.
+
+This is a source contract for offline validation. A source merge is not an
+executable recovery procedure or permission to act on existing hosts.
 
 ### 10.4 Retiring an absent legacy Claude claim
 
@@ -1048,3 +1176,61 @@ This design and plan are the review packet. Production implementation begins
 only after supervisor review. Review may narrow/split waves, but cannot weaken
 the no-private-state, no-fake-identity, supported-interrupt, exact-home,
 lock-scope, or no-duplicate-body invariants.
+
+### Terminal quota/SystemError preflight (source HOLD)
+
+`fleet --fleet-home <home> resume-limited <ordinary-worker> --terminal-quota`
+selects an exact native worker whose newest accepted turn failed with
+`usageLimitExceeded` and whose loaded public thread reports `systemError`.
+It requires the genuine registered Codex Interface, an explicit home and one
+name. It cannot sweep, select a supervisor, or use `--force-now`.
+
+The staged preflight binds the entire worker row, generation/schema, existing host
+and child process identities, canonical cwd, recorded permission policy,
+public configured model, complete newest failed-turn items, committed prior
+operation, durable exact-turn error evidence and fresh ordinary usage allowance.
+It refuses pending/unknown home operations, any unresolved callback, target
+mail (including claimed mail), and drift in complete operation/callback/error
+inventories, public turn, allowance or Interface identity. It never starts a
+host, resumes a thread, replays an operation, drains mail or promotes uncertainty.
+Existing ordinary `resume-limited` behavior and its guards are unchanged.
+
+**Dispatch is source-HOLD.** `_TERMINAL_QUOTA_DISPATCH_PROVEN_SCHEMAS` is empty;
+there is no command-line or environment override. After local caller/row/policy checks it refuses
+before host connection or public RPC, row reservation, journal mutation or
+`turn/start`. The staged public preflight below the hold is tested offline only.
+This is a guarded source checkpoint, not an operational recovery procedure.
+The early hold also preserves the existing child: the host's ordinary public-read
+path can replace an app-server child after event-queue overflow. Tests exercise
+the staged successor path only with a fixture-local replacement of this empty
+source allowlist; those results do not certify a real provider.
+
+Exact pinned upstream source inspection establishes a narrower result:
+
+- Codex 0.155.1 `be2951ea34f0d295ed0becf97079f92fa5f6950e` and
+  0.161.0 `979011409de0a60b52f179721948e65531d26144`,
+  `codex-rs/app-server/src/request_processors/turn_processor.rs`, implement
+  `turn/start` with `start_or_steer_turn`. The response can be `Started` or
+  `Steered`; it provides no conditional expected-previous-turn fence.
+- `codex-rs/app-server/src/thread_status.rs` clears the sticky system error
+  when a new turn starts. This proves a source-level transition, not that an
+  observed historical quota failure will recover successfully on a live account.
+- Both versions' `protocol/v2/thread_data.rs` expose an optional current
+  configured model when loaded, cwd and status, but no effective approval,
+  reviewer or sandbox policy. A recorded Fleet policy alone cannot attest
+  current loaded policy after another client changed settings.
+
+Removing the source hold requires independent review of a concrete mechanism
+that proves effective policy continuity and excludes concurrent input/settings
+changes across final observation and dispatch. A schema digest, reset allowance,
+passing fake-provider tests, or a distinct reply turn ID does not supply that
+proof: a request could already have steered another accepted turn before its
+reply fails validation. No live recovery is authorized by this source change.
+
+If eventually enabled under that proof, the staged path reserves the exact full
+row, journals one new same-thread `turn/start`, requires a distinct in-progress
+turn and unchanged generation, commits its journal and conditionally records the
+successor. Lost replies, malformed responses and commit failures retain the
+pending operation and freeze uncertainty without retry. An accepted result whose
+row changed retains the reservation for review. The original failed turn and
+accepted operation remain intact.

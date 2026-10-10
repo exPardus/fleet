@@ -35,12 +35,16 @@ from fleet_codex import (
     _canonical_home,
     _digest,
     _fleet_state_digest,
+    authorize_failed_client_recovery_rpc,
+    authorize_failed_client_recovery_shutdown,
     _recv_frame,
     _public_evidence,
     _public_method,
     _process_identity,
     _public_uuid7,
+    authorize_failed_client_recovery_operation,
     codex_process_source,
+    failed_client_recovery_barrier,
     interface_source_matches,
     read_interface_claim,
     _read_key,
@@ -163,6 +167,12 @@ class Host:
 
     def _restart_app_server_after_queue_overflow(self, deadline: float) -> None:
         """Replace only the failed stdio child before read-only recovery."""
+        barrier = failed_client_recovery_barrier(self.home)
+        if (barrier is not None
+                and barrier["state"] in {"boot_requested", "rebind", "complete"}
+                and self.generation != barrier.get("old_host", {}).get("generation")):
+            raise HostRejected(
+                "failed-client replacement child changed; recovery remains held")
         previous = self.client
         if previous is not None:
             self._drain_notifications()
@@ -567,6 +577,9 @@ class Host:
                 elif method == "rpc":
                     if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
                         raise ValueError("rpc payload is malformed")
+                    authorize_failed_client_recovery_rpc(
+                        self.home, self.generation, request["operation_id"],
+                        payload, request["payload_digest"])
                     rpc_timeout = _bounded_rpc_timeout(
                         payload, float(request["operation_timeout"]), deadline)
                     assert self.client is not None
@@ -591,6 +604,11 @@ class Host:
                         self._drain_notifications()
                     else:
                         params = payload.get("params")
+                        authorize_failed_client_recovery_operation(
+                            self.home, self.generation, request["operation_id"],
+                            public_method, params.get("threadId")
+                            if isinstance(params, dict) else None,
+                            request["payload_digest"])
                         operation_id = request["operation_id"]
                         mutating_operation_id = operation_id
                         try:
@@ -599,6 +617,9 @@ class Host:
                                     "public mutation params must be an object")
                             self._authorize_public_mutation(
                                 connection, public_method, payload)
+                            barrier = failed_client_recovery_barrier(self.home)
+                            if barrier is not None and barrier["state"] == "rebind":
+                                self._authorize_failed_client_interface(connection)
                         except HostRejected as exc:
                             # Shape and authentication checks precede acceptance.
                             # A proved rejection must not leave prepared intent.
@@ -730,6 +751,10 @@ class Host:
                 elif method == "approval/supervisor-reservation-v1":
                     result = {"version": 1}
                 elif method == "approval/respond":
+                    authorize_failed_client_recovery_operation(
+                        self.home, self.generation, request["operation_id"],
+                        "approval/respond", payload.get("thread_id")
+                        if isinstance(payload, dict) else None)
                     if not isinstance(payload, dict):
                         raise ValueError("approval response payload is malformed")
                     assert self.client is not None
@@ -786,6 +811,9 @@ class Host:
                         "state": current.get("state"),
                     }
                 elif method == "host/shutdown-restored":
+                    authorize_failed_client_recovery_shutdown(
+                        self.home, self.generation, request["operation_id"],
+                        method="host/shutdown-restored")
                     claim = read_interface_claim(self.home)
                     peer_pid, peer_uid = _ipc_peer_credentials(connection)
                     source = codex_process_source(peer_pid)
@@ -824,7 +852,53 @@ class Host:
                         view, payload["proof_digest"], registered,
                         before_publish=fence_publication)
                     should_stop = True
+                elif method == "host/shutdown-cancelled-approval":
+                    authorize_failed_client_recovery_shutdown(
+                        self.home, self.generation, request["operation_id"],
+                        method=method)
+                    claim = read_interface_claim(self.home)
+                    peer_pid, peer_uid = _ipc_peer_credentials(connection)
+                    source = codex_process_source(peer_pid)
+                    if (claim is None or peer_uid != os.getuid()
+                            or source.get("uid") != peer_uid
+                            or not interface_source_matches(claim, source)):
+                        raise HostRejected("checked shutdown requires the exact Interface")
+                    if not isinstance(payload, dict) or set(payload) != {"proof_digest"}:
+                        raise HostRejected("checked shutdown payload is malformed")
+                    import fleet
+                    from fleet_codex import CodexHostClient
+                    fleet.FLEET_HOME = self.home
+                    view = CodexHostClient._existing(self.home)
+                    if view is None or view.generation != self.generation:
+                        raise HostRejected("checked shutdown host metadata changed")
+
+                    def public_read(operation, timeout):
+                        assert self.client is not None
+                        rpc = operation["payload"]
+                        observed = self.client.request(
+                            rpc["method"], rpc["params"],
+                            timeout=min(timeout, _remaining(deadline)))
+                        self._drain_notifications()
+                        return SimpleNamespace(generation=self.generation, result=observed)
+
+                    view.call = public_read
+                    view.pending_approvals = lambda thread_id, turn_id=None: (
+                        self.approvals.unresolved(thread_id=thread_id, turn_id=turn_id))
+                    registered = {"kind": "codex", **{key: claim[key] for key in (
+                        "claim_id", "thread_id", "ancestor_pid",
+                        "ancestor_start_identity", "uid")}}
+
+                    def fence_publication():
+                        nonlocal should_stop
+                        should_stop = True
+
+                    result = fleet._checked_cancelled_approval_shutdown(
+                        view, payload["proof_digest"], registered,
+                        before_publish=fence_publication)
+                    should_stop = True
                 elif method == "host/shutdown":
+                    authorize_failed_client_recovery_shutdown(
+                        self.home, self.generation, request["operation_id"])
                     result = {"stopping": True}
                     should_stop = True
                 else:
@@ -1017,6 +1091,17 @@ class Host:
         if target == claim.get("thread_id"):
             raise HostRejected(
                 f"external Interface thread is observe-only; refusing {public_method}")
+
+    def _authorize_failed_client_interface(self, connection: socket.socket) -> None:
+        """A staged recovery resume belongs to the exact current Interface."""
+        claim = read_interface_claim(self.home)
+        if not isinstance(claim, dict):
+            raise HostRejected("failed-client recovery has no Interface claim")
+        peer_pid, peer_uid = _ipc_peer_credentials(connection)
+        source = codex_process_source(peer_pid)
+        if (peer_uid != os.getuid() or source.get("uid") != peer_uid
+                or not interface_source_matches(claim, source)):
+            raise HostRejected("failed-client recovery requires exact Interface peer")
 
     def _exact_home_supervisor_source(self, source: Mapping[str, Any]) -> bool:
         """Allow the genuine current supervisor without weakening cwd binding."""

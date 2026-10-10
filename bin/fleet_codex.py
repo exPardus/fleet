@@ -62,6 +62,96 @@ class HostRejected(FleetCliError):
     """The home host refused an invalid or unauthorized operation."""
 
 
+def failed_client_recovery_barrier(home: Path) -> dict[str, Any] | None:
+    """Read the durable recovery fence without repairing or creating state."""
+    path = _canonical_home(home) / "state" / "codex" / "failed-client-recovery.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    _require_regular(path)
+    if path.stat().st_size > 2 * 1024 * 1024:
+        raise UnsafeHostState("failed-client recovery barrier exceeds its bound")
+    value = _read_json(path)
+    if (not isinstance(value, dict) or value.get("schema") != 1
+            or value.get("home") != str(_canonical_home(home))
+            or value.get("state") not in {
+                "prepared", "authorized", "shutdown_sent", "shutdown_ack",
+                "exited", "boot_requested", "rebind", "complete",
+            }):
+        raise UnsafeHostState("failed-client recovery barrier is malformed")
+    return value
+
+
+def authorize_failed_client_recovery_operation(
+        home: Path, generation: str, operation_id: str,
+        public_method: str, target_thread: str | None = None,
+        payload_digest: str | None = None) -> None:
+    """Allow only the one staged rebind mutation while a home is fenced."""
+    barrier = failed_client_recovery_barrier(home)
+    if barrier is None:
+        return
+    if barrier["state"] == "complete":
+        held = barrier.get("held_threads")
+        if (not isinstance(held, list)
+                or any(not isinstance(item, str) or not item for item in held)):
+            raise HostRejected("failed-client held-thread fence is malformed")
+        if target_thread is not None and target_thread in held:
+            raise HostRejected("failed-client historical thread remains held")
+        return
+    if (barrier["state"] == "rebind"
+            and public_method == "thread/resume"
+            and barrier.get("new_generation") == generation
+            and barrier.get("current_operation") == operation_id
+            and barrier.get("current_thread") == target_thread
+            and barrier.get("current_payload_digest") == payload_digest
+            and isinstance(payload_digest, str)
+            and len(payload_digest) == 64):
+        return
+    raise HostRejected("failed-client recovery barrier blocks provider mutation")
+
+
+_FAILED_CLIENT_READ_METHODS = frozenset({
+    "thread/read", "thread/turns/list", "thread/items/list", "thread/list",
+    "config/read", "configRequirements/read",
+})
+
+
+def authorize_failed_client_recovery_rpc(
+        home: Path, generation: str, operation_id: str,
+        payload: Any, payload_digest: str) -> None:
+    """Fence the entire RPC surface while recovery is staged or held."""
+    if failed_client_recovery_barrier(home) is None:
+        return
+    if not isinstance(payload, dict) or not isinstance(payload.get("method"), str):
+        raise HostRejected("failed-client RPC method is malformed")
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        raise HostRejected("failed-client RPC params are malformed")
+    method = payload["method"]
+    if method in _FAILED_CLIENT_READ_METHODS:
+        return
+    if method not in _MUTATING_PUBLIC_METHODS:
+        raise HostRejected("failed-client recovery blocks unreviewed public RPC")
+    authorize_failed_client_recovery_operation(
+        home, generation, operation_id, method, params.get("threadId"),
+        payload_digest)
+
+
+def authorize_failed_client_recovery_shutdown(
+        home: Path, generation: str, operation_id: str,
+        *, method: str = "host/shutdown") -> None:
+    """Permit only the staged original-host stop; protect its replacement."""
+    barrier = failed_client_recovery_barrier(home)
+    if barrier is None:
+        return
+    old = barrier.get("old_host")
+    if (method == "host/shutdown" and barrier.get("state") == "shutdown_sent"
+            and isinstance(old, dict)
+            and old.get("generation") == generation
+            and barrier.get("shutdown_operation") == operation_id):
+        return
+    raise HostRejected("failed-client recovery blocks host shutdown")
+
+
 def _reviewed_schema_manifest(
     command: Sequence[str],
     *,
@@ -1651,6 +1741,91 @@ class OperationJournal:
                 operation_id, {"observed"}, "committed", result=evidence)
         return record
 
+    def observed_operation(self, operation: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a durably observed mutation without sending it again.
+
+        This is the response-loss boundary: the complete immutable intent must
+        match the journal, and only an already observed/committed result is
+        recoverable.  Prepared, accepted, and uncertain intents remain frozen.
+        """
+        operation_id = self._validate_id(operation.get("operation_id"))
+        method = operation.get("method")
+        payload = operation.get("payload", {})
+        recovery = operation.get("recovery", {})
+        record = self.load(operation_id)
+        if (record.get("generation") != self.generation
+                or record.get("method") != method
+                or record.get("payload_digest") != _digest(method, payload)
+                or record.get("recovery") != _public_evidence(recovery)):
+            raise HostRejected(
+                f"operation {operation_id} does not match its durable intent")
+        if record.get("state") not in {"observed", "committed"}:
+            raise HostRejected(
+                f"operation {operation_id} is {record.get('state')}; exact "
+                "provider acceptance is not yet proven")
+        if "result" not in record:
+            raise HostRejected(
+                f"operation {operation_id} has no durable observed result")
+        return record
+
+    def worker_turn_id(
+            self, operation_id: str, *, fleet_name: str, thread_id: str,
+            previous_turn_id: str, canonical_cwd: str) -> str:
+        """Read the exact successful worker send; unresolved acceptance stays fenced."""
+        record = self.load(operation_id)
+        method = record.get("public_method")
+        recovery = record.get("recovery")
+        expected = {
+            "kind": f"worker/{method}", "fleet_name": fleet_name,
+            "thread_id": thread_id, "previous_turn_id": previous_turn_id,
+            "canonical_cwd": canonical_cwd,
+        }
+        if (record.get("generation") != self.generation
+                or record.get("method") != "rpc"
+                or method not in {"turn/start", "turn/steer"}
+                or not isinstance(recovery, dict)
+                or any(recovery.get(key) != value for key, value in expected.items())
+                or record.get("state") not in {"observed", "committed"}):
+            raise HostRejected(
+                f"operation {operation_id} has no exact successful worker turn result")
+        result = record.get("result")
+        if not isinstance(result, dict):
+            raise HostRejected(f"operation {operation_id} has no worker turn result")
+        turn = result.get("turn")
+        returned = (turn.get("id") if isinstance(turn, dict) else None
+                    ) if method == "turn/start" else result.get("turnId")
+        try:
+            returned = _public_uuid7(returned, "returned worker turn")
+        except ValueError as exc:
+            raise HostRejected(f"operation {operation_id} has no genuine returned turn") from exc
+        # Never silently prefer one result identity over a conflicting second one.
+        identities = [result.get("turnId")]
+        if isinstance(turn, dict):
+            identities.append(turn.get("id"))
+        if (any(value is not None and value != returned for value in identities)
+                or (result.get("threadId") is not None
+                    and result["threadId"] != thread_id)
+                or (method == "turn/steer" and returned != previous_turn_id)
+                or (method == "turn/start" and (returned == previous_turn_id
+                    or turn.get("status") != "inProgress"))):
+            raise HostRejected(f"operation {operation_id} worker turn result conflicts")
+        return returned
+
+    def adopt_worker_turn(self, operation_id: str, *, turn_id: str,
+                          **identity: Any) -> dict[str, Any]:
+        """Commit a proven successful send without replacing its original result.
+
+        Provider history cannot prove an accepted/uncertain send was rejected.
+        Only observed/committed success is eligible, and every invocation checks
+        the durable returned turn before clearing Fleet's reservation.
+        """
+        if self.worker_turn_id(operation_id, **identity) != turn_id:
+            raise HostRejected(f"operation {operation_id} adopted turn does not match result")
+        record = self.commit(operation_id)
+        if self.worker_turn_id(operation_id, **identity) != turn_id:
+            raise HostRejected(f"operation {operation_id} result changed during adoption")
+        return record
+
     def adopt_spawn_queue_overflow(
             self, operation_id: str, result: Mapping[str, Any]) -> dict[str, Any]:
         """Adopt one spawn mutation from exact post-overflow public evidence.
@@ -2127,6 +2302,7 @@ class CodexHostClient:
         self.metadata_path = self.state_dir / "host.json"
         self.key_path = self.state_dir / "host.key"
         self.generation = str(metadata["generation"])
+        self.codex_version = metadata.get("codex_version")
         self.schema_digest = metadata.get("schema_digest")
         self.protocol_version = metadata["codex_protocol_version"]
         self._endpoint = metadata["endpoint"]
@@ -2379,8 +2555,20 @@ class CodexHostClient:
         if not isinstance(method, str) or not method:
             raise ValueError("method must be a non-empty string")
         digest = _digest(method, payload)
+        if method == "rpc":
+            authorize_failed_client_recovery_rpc(
+                self.home, self.generation, operation_id, payload, digest)
+        elif method in {"host/shutdown", "host/shutdown-restored",
+                        "host/shutdown-cancelled-approval"}:
+            authorize_failed_client_recovery_shutdown(
+                self.home, self.generation, operation_id, method=method)
         public_method = _public_method(method, payload)
         if public_method is not None:
+            params = payload.get("params") if isinstance(payload, dict) else None
+            target = params.get("threadId") if isinstance(params, dict) else None
+            authorize_failed_client_recovery_operation(
+                self.home, self.generation, operation_id, public_method, target,
+                digest)
             prepared = OperationJournal(self.home, self.generation).prepare(operation)
             if prepared.get("payload_digest") != digest:
                 raise HostRejected(
@@ -2414,9 +2602,21 @@ class CodexHostClient:
             raise HostUnavailable("Codex host response was lost") from exc
         finally:
             connection.close()
+        def response_object(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError("duplicate IPC response key")
+                value[key] = item
+            return value
+
+        def invalid_constant(_value):
+            raise ValueError("non-finite IPC response constant")
+
         try:
-            response = json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
+            response = json.loads(raw.decode("utf-8"), object_pairs_hook=response_object,
+                                  parse_constant=invalid_constant)
+        except (UnicodeError, ValueError) as exc:
             raise HostUnavailable("Codex host returned invalid JSON") from exc
         if not isinstance(response, dict):
             raise HostUnavailable("Codex host response is not an object")
@@ -2428,8 +2628,18 @@ class CodexHostClient:
         }
         if any(response.get(key) != value for key, value in expected.items()):
             raise HostUnavailable("Codex host response correlation mismatch")
-        if response.get("ok") is not True:
-            error = str(response.get("error") or "Codex host rejected operation")
+        if (set(response) != {*expected, "ok", "result", "error"}
+                or type(response.get("ok")) is not bool
+                or (response["ok"] and response["error"] is not None)
+                or (not response["ok"] and (
+                    response["result"] is not None
+                    or not isinstance(response["error"], str)
+                    or not response["error"]
+                    or len(response["error"]) > 300))):
+            raise HostUnavailable("Codex host response envelope is malformed" + (
+                "; mutation outcome is uncertain" if public_method is not None else ""))
+        if response["ok"] is False:
+            error = response["error"]
             if public_method is not None:
                 if error == "host response exceeds MAX_IPC_BYTES; page the request":
                     raise HostUnavailable(error + "; mutation outcome is uncertain")
@@ -2501,6 +2711,14 @@ class CodexHostClient:
 
     def commit(self, operation_id: str) -> None:
         OperationJournal(self.home, self.generation).commit(operation_id)
+
+    def recover_observed(self, operation: Mapping[str, Any]) -> CodexObservation:
+        """Recover one exact durable result; never contact the provider host."""
+        record = OperationJournal(
+            self.home, self.generation).observed_operation(operation)
+        return CodexObservation(
+            record["operation_id"], record["generation"],
+            record["payload_digest"], record["result"])
 
     def commit_handoff_turn_start(self, operation_id: str, **evidence: Any) -> None:
         OperationJournal(self.home, self.generation).commit_handoff_turn_start(

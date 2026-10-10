@@ -1,23 +1,7 @@
-"""three-tier-command.md §11.3 -- the supervisor's dispatch bands (B4),
-**350k soft / 400k hard since the 2026-08-05 operator ruling** (200k before it).
-
-At and above `SUPERVISOR_BAND_HARD_TOKENS` the dispatch verbs (`fleet spawn`/`fleet send`)
-REFUSE to start new worker turns -- but for EXACTLY ONE caller: the supervisor
-claim-holder (ND1). The interface tier is exempt STRUCTURALLY (ND4c), a caller
-that holds no claim is never subject, the identity gate resolves through
-`retired_sids` (ND4a) so the un-restamped fork-steer window does not fail open,
-and an unresolvable identity fails TOWARD the band (ND4b). Occupancy is the
-caller's OWN transcript (B2/B3).
-
-ND4c's KEY CHANGED (SPEC.md:204, `tests/test_identity_registry.py`). It read
-*"no `FLEET_WORKER` in its env"*; the machine-wide daemon donates that stamp to
-sessions it never launched, so its presence and its absence say equally little
-about the acting body. The structural question is now asked of the registry --
-*"does any record claim my own sid, and am I the claim-holder"* -- and ND4b
-narrows to match: an identity fleet cannot place at all abstains and exempts
-(it is the interface, a human shell, or a body inside its own dispatch window,
-and a newborn body cannot be at 200k tokens), while a REGISTERED body whose
-holder-ness is merely indeterminate still fails toward the band.
+"""Current 350k/400k supervisor dispatch bands and claim identity exemptions.
+Known holders are subject without a stamp, including adopted and fork-steered
+callers. Proven nonholders and unstamped indeterminate callers remain exempt;
+stamped indeterminate callers fail toward the band. Worker bands stay 250k/300k.
 """
 import json
 from types import SimpleNamespace
@@ -130,27 +114,14 @@ class TestCeiling:
         self._occ(monkeypatch, 500000)
         assert fleet._ceiling_refuses_dispatch("send") is None
 
-    def test_the_interface_CAN_be_the_claim_holder_and_is_still_exempt(
+    def test_adopted_interface_claim_holder_is_not_stamp_exempt(
             self, ceil_home, monkeypatch):
-        """rb's reachability correction, pinned so the false impossibility
-        cannot be re-recorded.
-
-        An intervening revision rewrote the test above away from the shape
-        "interface carrying the HOLDER's own sid", with the comment that it is
-        *"not a shape the fleet can produce -- the interface is a human's
-        session and the holder is a `--bg` supervisor body"*. That is false:
-        `fleet sup-boot` is runnable from an interface session and stamps THAT
-        session's sid into the claim. So the shape is reachable, it is exactly
-        the case ND4(c) has to survive, and (c) still exempts it -- an
-        unstamped session is outside fleet's launch surface whether or not it
-        happens to hold the claim."""
-        monkeypatch.delenv("FLEET_WORKER", raising=False)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-interface")
         _write_incarnation(_held("sid-interface"))
         _write_registry({})
         self._occ(monkeypatch, 500000)
         assert fleet._caller_holds_supervisor_claim("sid-interface") is True
-        assert fleet._ceiling_refuses_dispatch("send") is None
+        assert fleet._ceiling_refuses_dispatch("send") is not None
 
     def test_interface_is_exempt_even_when_nothing_places_either_sid(
             self, ceil_home, monkeypatch):
@@ -330,3 +301,43 @@ class TestWiring:
         with pytest.raises(fleet.FleetCliError) as ei:
             fleet.cmd_spawn(args)
         assert "11.3" not in str(ei.value)
+
+
+@pytest.mark.parametrize("stamp", [None, "", "  "])
+@pytest.mark.parametrize("identity", ["direct", "adopted", "fork-steered"])
+def test_known_unstamped_holder_uses_current_bands_and_force_override(
+        ceil_home, monkeypatch, stamp, identity):
+    if stamp is not None:
+        monkeypatch.setenv("FLEET_WORKER", stamp)
+    caller = "sid-new" if identity == "fork-steered" else "sid-holder"
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", caller)
+    _write_incarnation(_held("sid-holder"))
+    if identity == "fork-steered":
+        _write_registry({"sup|inc-x|boot": {"session_id": caller,
+                                           "retired_sids": ["sid-holder"]}})
+    elif identity == "adopted":
+        _write_registry({"adopted-name": {"session_id": caller, "retired_sids": []}})
+    occupancy = [375000]
+    monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/own")
+    monkeypatch.setattr(fleet, "_transcript_occupancy", lambda path: occupancy[0])
+    assert fleet._ceiling_refuses_dispatch("spawn") is not None
+    assert fleet._ceiling_refuses_dispatch("spawn", force_band=True) is None
+    occupancy[0] = 400000
+    assert "400,000" in fleet._ceiling_refuses_dispatch("send", force_band=True)
+    assert fleet.SUPERVISOR_BAND_HARD_TOKENS == 400000
+    assert fleet.WORKER_BAND_HARD_TOKENS == 300000
+
+
+@pytest.mark.parametrize("registry", ["missing", "corrupt"])
+def test_direct_unstamped_holder_cannot_escape_by_unreadable_registry(
+        ceil_home, monkeypatch, registry):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-holder")
+    _write_incarnation(_held("sid-holder"))
+    path = ceil_home / "state/fleet.json"
+    if registry == "corrupt":
+        path.write_bytes(b"not-json")
+    monkeypatch.setattr(fleet, "find_transcript_path", lambda name, sid: "/own")
+    monkeypatch.setattr(fleet, "_transcript_occupancy", lambda path: 400000)
+    assert fleet._ceiling_refuses_dispatch("spawn", force_band=True) is not None
+    assert not list(path.parent.glob("fleet.json.corrupt.*"))
+    assert path.read_bytes() == b"not-json" if registry == "corrupt" else not path.exists()

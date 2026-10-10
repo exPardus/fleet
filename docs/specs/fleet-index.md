@@ -179,27 +179,27 @@ $ grep -n '"--context"' bin/fleet.py
 15673:    p_spawn.add_argument("--context", default=None,
 ```
 
-**What a digest costs, measured.** An uncapped thing owes a measurement rather than an adjective, and the per-file rendering is still uncapped: `render_digest` emits one row per indexed symbol at any size and **never truncates.** Measured 2026-07-27: `--context bin/fleet.py` (16,075 source lines) rendered **539 digest lines / 27,835 chars**, and fifty distinct files of that size render **~1.39 MB** into a single prompt. Re-measured 2026-07-30 over this repo's 177 default-selected sources, staged into a temp root and indexed, then `compose_context_digests` called per path:
+**What a digest costs, measured.** An uncapped thing owes a measurement rather than an adjective, and the per-file rendering is still uncapped: `render_digest` emits one row per indexed symbol at any size and **never truncates.** The latest complete multi-file profile is the 2026-10-09 snapshot below: `bin/fleet.py` was 23,389 source lines and rendered **890 digest lines / 50,060 chars**. That run staged this repo's 233 default-selected sources into a temp root and indexed them, then called `compose_context_digests` per path. A current single-file recheck on 2026-10-10 measures `bin/fleet.py` at 27,121 source lines and **961 digest lines / 55,215 chars**; `tests/test_native.py` is 42,153 chars. Fifty digests of the current `fleet.py` size would be about **2.76 MB** in one prompt.
 
 | measurement | rendered digest |
 | --- | --- |
-| largest single-file digest (`tests/test_native.py`, 478 symbols) | **40,993 chars** |
-| `bin/fleet.py`'s own digest (543 symbols) | 27,741 chars |
-| median single-file digest | 893 chars |
-| mean single-file digest | 2,783 chars |
-| the 13 largest files together | 246,919 chars |
-| the 14 largest files together | 255,236 chars |
-| every selected source (177 files, 5,794 argv chars) | **492,570 chars / 6,812 lines** |
-| eight *spellings* of one file, pre-dedupe (180 argv chars) | **327,944 chars — 8.00x** |
+| largest single-file digest (`bin/fleet.py`, 889 symbols) | **50,060 chars** |
+| `tests/test_native.py`'s digest (489 symbols) | 42,153 chars |
+| median single-file digest | 1,265 chars |
+| mean single-file digest | 2,871 chars |
+| the 11 largest files together | 234,030 chars |
+| the 12 largest files together | 252,719 chars |
+| every selected source (233 files, 6,575 argv chars) | **669,045 chars / 9,584 lines** |
+| eight *spellings* of one file, pre-dedupe (180 argv chars) | **337,224 chars — 8.00x** |
 
-The last row is not a hypothetical: it is FINDING C, and it is the reason there is now a cap. Note also what it says about proxies — 180 argv chars produced 327,944 digest chars, **1,822 digest chars per argv char.** Argv length, file count and any settings flag are three orders of magnitude away from the thing that lands in the worker's context, so the cap is counted on the **rendered digest's own chars, as produced,** and on nothing else.
+The last row is not a hypothetical: it is FINDING C, and it is the reason there is now a cap. Note also what it says about proxies — 180 argv chars produced 337,224 digest chars, **about 1,873 digest chars per argv char.** Argv length, file count and any settings flag are three orders of magnitude away from the thing that lands in the worker's context, so the cap is counted on the **rendered digest's own chars, as produced,** and on nothing else.
 
 **The cap: warn at a threshold, REFUSE above a ceiling, NEVER truncate** (FINDING C, supervisor-tier spec decision, 2026-07-30 — this supersedes this section's earlier *"No cap was added here"*). Two grades and no third:
 
 | grade | rendered digest chars | behaviour |
 | --- | --- | --- |
-| — | ≤ `INDEX_DIGEST_WARN_CHARS` (50,000) | served, silent |
-| warn | > 50,000 | served **in full**, one warning naming the measured size and the ceiling |
+| — | ≤ `INDEX_DIGEST_WARN_CHARS` (60,000) | served, silent |
+| warn | > 60,000 | served **in full**, one warning naming the measured size and the ceiling |
 | refuse | > `INDEX_DIGEST_REFUSE_CHARS` (250,000) | `IndexDigestTooLargeError`, exit 1, nothing registered |
 
 **Built 2026-07-30:**
@@ -212,15 +212,19 @@ $ grep -n '^INDEX_DIGEST_\|^class IndexDigestTooLargeError' bin/fleet.py
 16027:INDEX_DIGEST_REFUSE_CHARS = 250_000
 ```
 
+The receipt is historical. The current 2026-10-10 recheck measures
+`bin/fleet.py` at 961 digest lines / 55,215 chars; the live warning threshold
+remains 60,000, leaving 4,785 chars of headroom.
+
 `IndexDigestTooLargeError` is a `FleetCliError`, so `main()` renders it and exits 1. On the spawn path that lands in the window fix wave C1 opened on purpose — `cmd_spawn` composes *above* the registry commit — so a refused spawn leaves no phantom `{"status": "working", "session_id": null}` record. That ordering is load-bearing for the refusal and is pinned twice: by C1's own `test_compose_runs_before_the_registry_commit` and by `TestTheDigestSizeCap::test_a_refused_digest_leaves_no_phantom_registry_record`.
 
 **Why refusing rather than truncating, and why that is not the cap the parking sentence declined.** The sentence this replaces reasoned that "capping would silently impose `q`'s limit on a path this spec exempts" — and against a *truncating* cap that reasoning was right, and it is the reasoning §11.1 rests on. Warn-plus-refuse is a different instrument and it imposes nothing of `q`'s: the digest a worker receives is always complete or absent, never trimmed. The asymmetry is the whole argument. **A truncated symbol table is indistinguishable from a complete one** — a worker that reads one concludes the symbol does not exist and re-implements it, silently, and nothing in the transcript says why. Refusing costs the manager one retyped `--context`. So §11.1's "the two renderings differ only when the cap truncates" survives intact: this cap never truncates, so the two renderings still differ only there.
 
-**Where both numbers come from.** WARN sits above the largest single-file digest measured above (40,993), so naming **one** file never warns and a warning genuinely means *"this costs more than the biggest file in this repo."* That headroom is also what keeps the cost pin below green — it asserts `warnings == []` for `bin/fleet.py` alone, and `bin/fleet.py` grows every wave. REFUSE sits in the measured gap between the largest plausible ask (the 13 largest files in this repo, 246,919) and the pathology the cap exists to stop (327,944): a manager naming a dozen of this repo's largest files, or ~280 median ones, is served in full, while both the blowup and the whole-repo ask (492,570) are refused. The gap is real and it is where the ceiling was placed; neither number was invented. Re-measure both if this repo's shape changes materially — `tests/test_index_compose.py::TestTheDigestSizeCap`'s last two tests fail loudly, by name, when either number stops matching its grounding.
+**Where both numbers come from.** The latest current single-file check is 55,215 chars, so the 60,000 warning threshold leaves 4,785 chars of headroom; naming one file stays silent today, and the cost pin checks that condition. The aggregate figures below are the dated 2026-10-09 profile: REFUSE sits between its largest plausible ask (the 11 largest files, 234,030) and its measured pathology (337,224): a manager naming eleven files of those sizes, or about 197 median files, was served in full, while both the blowup and whole-repo ask (669,045) were refused. Re-measure the aggregate profile if this repo's shape changes materially; the last two `TestTheDigestSizeCap` tests pin the arithmetic against that dated snapshot.
 
 The cost of "uncapped" is still pinned by measurement rather than by adjective (`tests/test_index_compose.py::test_the_uncapped_digest_cost_is_pinned_by_measurement` — the M4 pin, which pins the *shape* of the growth: one row per indexed symbol, no truncation at any size, linear in distinct files).
 
-**What that pin does not do, measured 2026-07-30 rather than assumed:** it does **not** catch a truncating cap, and a ruling that leans on it to do so is relying on a coincidence of fixture size. Injected both ways: truncating at the **ceiling** (`digest[:250_000]`) leaves M4 **green** — M4's fixture is `bin/fleet.py` alone (27,741 chars) plus two copies of it (~55,482), so a 250,000-char trim never fires inside it — while truncating at the **warn threshold** (`digest[:50_000]`) does red M4, because its two-copies assertion crosses 50,000. So M4 reds only for a cap that trims below ~55,500 chars, and the more plausible wrong implementation slips straight past it. The pins that actually catch truncation are `TestTheDigestSizeCap::test_a_digest_over_the_hard_ceiling_is_refused_not_truncated` (the ceiling must **raise**, not return something shorter) and `::test_a_digest_over_the_warn_threshold_warns_and_is_served_in_full` (digest row count compared against the **shard**, never against the digest itself).
+**What that pin does not do, measured 2026-10-09 rather than assumed:** it does **not** catch a truncating cap, and a ruling that leans on it to do so is relying on a coincidence of fixture size. Injected both ways: truncating at the **ceiling** (`digest[:250_000]`) leaves M4 **green** — M4's fixture is `bin/fleet.py` alone (50,060 chars) plus two copies of it (~100,120), so a 250,000-char trim never fires inside it — while truncating at the **warn threshold** (`digest[:60_000]`) does red M4, because its two-copies assertion crosses 60,000. So M4 reds only for a cap that trims below ~100,000 chars, and the more plausible wrong implementation slips straight past it. The pins that actually catch truncation are `TestTheDigestSizeCap::test_a_digest_over_the_hard_ceiling_is_refused_not_truncated` (the ceiling must **raise**, not return something shorter) and `::test_a_digest_over_the_warn_threshold_warns_and_is_served_in_full` (digest row count compared against the **shard**, never against the digest itself).
 
 **Duplicates are dropped on the CANONICAL rel, first spelling wins** (FINDING C — this corrects the wave-M4 claim it replaces). `--context a.py,a.py` used to render `a.py` twice; M4 fixed that in `parse_context_arg`, which compares **raw argv strings**. Canonicalisation happens one layer down, in `_index_posix_rel`, and it folds away `./`, `\`, `//` and an interior `/./` — so `a.py` and `./a.py` remained two keys to the dedupe and one file to everything downstream, and the digest was rendered once per **spelling**. That is the 8.00x row in the table above, and **raw-string dedup ahead of canonicalisation was the entire blowup.**
 
