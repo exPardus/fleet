@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "code_commit": "8c3f73a9ab86a6b30d8598680c772a34c4d00781",
+  "code_paths": [
+    "bin/fleet.py"
+  ],
+  "documents": {
+    "docs/specs/codex-fixed-decline.md": "47ac6fbb777d64185173808333ccb42cb7625d74bb21b4b98b857efe7287cc6d"
+  }
+}

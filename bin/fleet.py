@@ -7706,24 +7706,30 @@ def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
     return 0
 
 
-def cmd_status(args) -> int:
-    """Recompute worker state, conditionally persist transitions and print a table.
-    Read the snapshot without repair, probe outside the lock, then merge under
-    fleet_lock only when the record still equals its pre-probe snapshot.
-    Concurrent writes win over stale verdicts. --stale-ok reads committed state."""
-    # --stale-ok reads committed state without probes, locks or writes.
-    # Named queries include tombstones; default bulk listings hide them.
+def cmd_status(args, run=subprocess.run, which=shutil.which) -> int:
+    if getattr(args, "stale_ok", False):
+        return _cmd_status_view(args)
+    return _cmd_status_refresh(args, run=run, which=which)
+
+
+def _cmd_status_view(args) -> int:
+    """Render committed state only; no recompute or mutation edge."""
     if args.name is not None:
         args.name = _resolve_worker_target(args.name)
     include_archived = getattr(args, "all", False) or args.name is not None
-    if getattr(args, "stale_ok", False):
-        snap = status_snapshot(include_archived=include_archived)
-        if getattr(args, "json", False):
-            print(json.dumps(snap, indent=2))
-        else:
-            _print_snapshot_table(snap, args.name)
-        return 0
+    snap = status_snapshot(include_archived=include_archived)
+    if getattr(args, "json", False):
+        print(json.dumps(snap, indent=2))
+    else:
+        _print_snapshot_table(snap, args.name)
+    return 0
 
+
+def _cmd_status_refresh(args, run=subprocess.run, which=shutil.which) -> int:
+    """Explicit authoritative recompute; may persist transitions and notify."""
+    if args.name is not None:
+        args.name = _resolve_worker_target(args.name)
+    include_archived = getattr(args, "all", False) or args.name is not None
     # D4: read the pre-probe snapshot without repair or lock; a corrupt registry
     # must refuse before any merge could quarantine it. The ordinary status verb
     # still probes and persists; --stale-ok is the file-only view.
@@ -24925,6 +24931,43 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
 
 
 def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
+                  process_tree_fn=None) -> int:
+    if getattr(args, "do", False):
+        return _sup_guard_action(args, snapshot_fn=snapshot_fn,
+                                 roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+    return _sup_guard_view(args, snapshot_fn=snapshot_fn,
+                           roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+
+
+def _sup_guard_view(args, *, snapshot_fn=None, roster_fn=None,
+                    process_tree_fn=None) -> int:
+    """Observe and render once; never sweep, wake or send."""
+    claim = read_incarnation()
+    if isinstance(claim, dict) and claim.get("provider") == "codex":
+        observation = _codex_sup_guard_observe()
+        verdict = observation.get("verdict", "PAGE")
+        reason = observation.get("reason", "native observation unavailable")
+        line = _sup_guard_line(verdict, reason, observation.get("body_name"))
+        if getattr(args, "json", False):
+            print(json.dumps({**observation, "verdict": line, "sent": False,
+                              "lane_done_sent": []}, separators=(",", ":"), sort_keys=True))
+        else:
+            print(line)
+        return 0
+    observation = _sup_guard_observe(
+        snapshot_fn=snapshot_fn, roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+    verdict, reason, detail = _sup_guard_decide(observation)
+    line = _sup_guard_line(verdict, reason, detail.get("body_name"))
+    if getattr(args, "json", False):
+        print(json.dumps({"verdict": line, "reason": reason, **detail,
+                          "sent": False, "lane_done_sent": []},
+                         separators=(",", ":"), sort_keys=True))
+    else:
+        print(line)
+    return 0
+
+
+def _sup_guard_action(args, *, snapshot_fn=None, roster_fn=None,
                   process_tree_fn=None) -> int:
     """Observe twice before action; only WAKE acts, and never spawns.
 
