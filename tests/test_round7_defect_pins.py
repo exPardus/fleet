@@ -556,8 +556,10 @@ RATIFIED_BUT_UNBUILT = ()
 # so it waits here under the fail-safe unknown-verb default (`destructive`).
 # `codex-respond` is provider-specific direction; keep the fail-safe unknown
 # tier until the operator adds it to the ratified §5 table.
+# `mailman` remains here until its destructive cross-home effect is explicitly ruled.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
-                                     "lane-done", "sup-reconcile", "codex-respond")
+                                     "lane-done", "sup-reconcile", "codex-respond",
+                                     "mailman")
 
 
 def _classified_verbs():
@@ -785,6 +787,10 @@ class TestRatifiedTableIsTranscribedFaithfully:
 
 
 class TestEveryShippedVerbHasAnEffectDisposition:
+    def test_mailman_stays_on_fail_safe_destructive_default(self):
+        assert "mailman" in UNCLASSIFIED_BY_THE_RATIFIED_TABLE
+        assert fleet.verb_effect_tier("mailman") == "destructive"
+
     def test_no_verb_is_both_classified_and_declared_unclassified(self):
         overlap = _classified_verbs() & set(UNCLASSIFIED_BY_THE_RATIFIED_TABLE)
         assert not overlap, f"declared unclassified but the table names it: {sorted(overlap)}"
