@@ -27,11 +27,12 @@ omission and its exact source identity visible in that document. If a pinned
 document needs revision, replace the forward repair through a separately
 reviewed design rather than silently updating its frozen receipt.
 
-The views-doctrine detector specializes the read-only CLI variants:
-`status --stale-ok` and `sup-guard` without `--do`. It propagates only known
-argument fields and constants; unknown/rebound arguments and unknown branches
-stay conservative. Direct stores, augmented assignment, setter/helper/method
-calls and aliases invalidate or update cached facts before later branches.
-Mutating journal construction, host startup and host
-reconciliation remain forbidden on the read-only execution paths. Tests retain
-unguarded-call, unknown-branch, rebinding and mutating-variant controls.
+The views-doctrine detector retains its original conservative AST graph:
+every branch and statement in each reachable source function is inspected.
+Dedicated `_cmd_status_view` and `_sup_guard_view` functions contain only the
+existing read-only behavior; mutation bodies are separate. Public CLI routers
+are structurally pinned to direct `--stale-ok` / `--do` dispatch and tested at
+both flag values, so an unguarded prelude or swapped destination is rejected.
+No cached Python argument facts or partial abstract interpreter are used.
+OperationJournal, host startup and reconciliation remain prohibited on view
+roots, including nested, annotated, setter or starred-call mutations.

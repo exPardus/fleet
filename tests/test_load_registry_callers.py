@@ -175,6 +175,8 @@ def _callers(source: str = SRC) -> dict:
 # this path is correct. If the function documents itself as read-only, or runs
 # on a hot path, or is reached from a view, the answer is no and the fix is
 # `_registry_records_or_none()` / `_read_registry_readonly()` instead.
+# _cmd_status_refresh is the old cmd_status authoritative mutation body,
+# moved unchanged behind the public router; --stale-ok calls _cmd_status_view.
 ALLOWED = {
     # --- lifecycle verbs and their native halves: mutate under the lock ---
     "cmd_spawn", "cmd_send", "_cmd_send_native", "_wake_supervisor_native",
@@ -278,7 +280,7 @@ ALLOWED = {
     # is now `read_registry_no_repair`, and since that one always runs first, a
     # corrupt registry refuses before this call is ever reached.
     # `TestTheViewSurfaceIsNotAmongTheCallers` pins both halves.
-    "cmd_status",
+    "_cmd_status_refresh",
     # `cmd_doctor` keeps its calls on the `--repair` branch only, under
     # `fleet_lock`. After the 2026-07-27 gate those calls ARE the quarantine
     # surface: the operator typed the flag, which is the entire point of the
@@ -492,7 +494,7 @@ class TestTheDetectorCannotBeWalkedAround:
         notices -- the name is already allowlisted."""
         tree = ast.parse(SRC)
         fn = next(n for n in tree.body
-                  if isinstance(n, ast.FunctionDef) and n.name == "cmd_status")
+                  if isinstance(n, ast.FunctionDef) and n.name == "_cmd_status_refresh")
         locked = {c.lineno for w in ast.walk(fn) if isinstance(w, ast.With)
                   for item in w.items
                   if isinstance(item.context_expr, ast.Call)
@@ -501,7 +503,7 @@ class TestTheDetectorCannotBeWalkedAround:
                   for c in ast.walk(w)
                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                   and c.func.id == "load_registry"}
-        calls = set(_callers().get("cmd_status", []))
+        calls = set(_callers().get("_cmd_status_refresh", []))
         assert calls, "cmd_status stopped calling load_registry entirely -- if " \
                       "that is intended, drop it from ALLOWED and delete this test"
         assert calls == locked, (

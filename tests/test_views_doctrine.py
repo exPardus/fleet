@@ -182,7 +182,7 @@ def _view_calls():
     """The bare verbs the read-only commands expose, as callables."""
     return {
         "fleet status": lambda: fleet.cmd_status(
-            argparse.Namespace(name=None, all=False, stale_ok=False, json=False)),
+            argparse.Namespace(name=None, all=False, stale_ok=True, json=False)),
         "fleet peek": lambda: fleet.cmd_peek(
             argparse.Namespace(name="w", lines=20)),
         "fleet result": lambda: fleet.cmd_result(
@@ -239,179 +239,36 @@ def test_the_statusline_read_path_does_not_quarantine(tmp_path, monkeypatch):
 
 
 def _view_execution_names(source, roots, *, do=False):
-    """Conservative call graph specialized to the explicit view's args.do.
+    """Original conservative graph: every statement and branch is inspected.
 
-    Only constants and the propagated do field are known. Unknown conditions
-    explore both branches; unguarded calls are never excluded by helper name.
+    do is accepted for old probe compatibility; it never prunes the graph.
+    Source separates the view roots from the explicitly mutating CLI variants.
     """
     tree = ast.parse(source)
     functions = {node.name: node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    unknown = object()
-    names, visited = set(), set()
-    pending = [(name, (do, True)) for name in roots]
-
-    def value(node, env):
-        if isinstance(node, ast.Constant):
-            return node.value
-        if isinstance(node, ast.Name):
-            return env.get(node.id, unknown)
-        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.attr in {"do", "stale_ok"}):
-            return env.get(node.value.id + "." + node.attr, unknown)
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id == "getattr" and "getattr" not in env
-                and "getattr" not in functions and len(node.args) >= 2
-                and isinstance(node.args[0], ast.Name)
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value in {"do", "stale_ok"}):
-            return env.get(node.args[0].id + "." + node.args[1].value, unknown)
-        if isinstance(node, ast.BoolOp):
-            parts = [value(part, env) for part in node.values]
-            known = [bool(part) for part in parts if part is not unknown]
-            if isinstance(node.op, ast.And) and False in known:
-                return False
-            if isinstance(node.op, ast.Or) and True in known:
-                return True
-            if len(known) == len(parts):
-                return all(known) if isinstance(node.op, ast.And) else any(known)
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-            result = value(node.operand, env)
-            return not result if result is not unknown else unknown
-        return unknown
-
-    def visit(node, env):
-        if isinstance(node, ast.Name):
-            names.add(node.id)
-        if isinstance(node, ast.Attribute):
-            names.add(node.attr)
-        if isinstance(node, ast.If):
-            visit(node.test, env)
-            result = value(node.test, env)
-            branches = ([node.body, node.orelse] if result is unknown else
-                        [node.body if result else node.orelse])
-            endings = []
-            for branch in branches:
-                branch_env = dict(env)
-                ended = False
-                for child in branch:
-                    if visit(child, branch_env):
-                        ended = True
-                        break
-                endings.append(ended)
-                if result is not unknown:
-                    env.clear()
-                    env.update(branch_env)
-                else:
-                    # Unknown branch assignments must not leave a stale false
-                    # fact that hides a later mutation.
-                    for key in list(env):
-                        if branch_env.get(key, unknown) != env[key]:
-                            env[key] = unknown
-            return all(endings)
-        if isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.Try)):
-            # Iteration/exception paths may not execute a store seen by the
-            # walk. Inspect all paths, then invalidate changed facts at the join.
-            branch_env = dict(env)
-            for child in ast.iter_child_nodes(node):
-                visit(child, branch_env)
-            for key in set(env) | set(branch_env):
-                if env.get(key, unknown) != branch_env.get(key, unknown):
-                    env[key] = unknown
-            return False
-        if isinstance(node, ast.NamedExpr):
-            visit(node.value, env)
-            visit(node.target, env)
-            if isinstance(node.target, ast.Name):
-                env[node.target.id] = value(node.value, env)
-            return False
-        if isinstance(node, ast.IfExp):
-            visit(node.test, env)
-            result = value(node.test, env)
-            for child in ([node.body, node.orelse] if result is unknown else
-                          [node.body if result else node.orelse]):
-                visit(child, dict(env))
-            return
-        if isinstance(node, ast.Assign):
-            # RHS calls can mutate the object before its field is read.
-            visit(node.value, env)
-            evaluated = value(node.value, env)
-            for target in node.targets:
-                visit(target, env)
-                if isinstance(target, ast.Name):
-                    env[target.id] = evaluated
-                    for field in ("do", "stale_ok"):
-                        env.pop(target.id + "." + field, None)
-                elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-                    env[target.value.id + "." + target.attr] = evaluated
-                else:
-                    for reference in ast.walk(target):
-                        if isinstance(reference, ast.Name):
-                            env[reference.id] = unknown
-                            for field in ("do", "stale_ok"):
-                                env.pop(reference.id + "." + field, None)
-            # Creating an alias lets later stores/calls mutate the original.
-            if isinstance(node.value, ast.Name):
-                for field in ("do", "stale_ok"):
-                    env.pop(node.value.id + "." + field, None)
-            return False
-        if isinstance(node, ast.AugAssign):
-            visit(node.value, env)
-            visit(node.target, env)
-            if isinstance(node.target, ast.Name):
-                env[node.target.id] = unknown
-            elif isinstance(node.target, ast.Attribute) and isinstance(node.target.value, ast.Name):
-                env[node.target.value.id + "." + node.target.attr] = unknown
-            return False
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in functions):
-            # Preserve the do specialization only for a directly forwarded
-            # argument. Constructed/rebound/unknown arguments explore actions.
-            passed = (unknown, unknown)
-            if node.args and isinstance(node.args[0], ast.Name):
-                passed = tuple(env.get(node.args[0].id + "." + field, unknown)
-                               for field in ("do", "stale_ok"))
-            pending.append((node.func.id, passed))
-        for child in ast.iter_child_nodes(node):
-            visit(child, env)
-        if isinstance(node, ast.Call):
-            pure_getter = (isinstance(node.func, ast.Name) and node.func.id == "getattr"
-                           and "getattr" not in env and "getattr" not in functions)
-            if not pure_getter:
-                # Any unknown or helper call may mutate passed objects, including
-                # setattr and method receivers. Do not retain their cached fields.
-                arguments = list(node.args) + [kw.value for kw in node.keywords]
-                if isinstance(node.func, ast.Attribute):
-                    arguments.append(node.func.value)
-                for argument in arguments:
-                    if isinstance(argument, ast.Name):
-                        for field in ("do", "stale_ok"):
-                            env.pop(argument.id + "." + field, None)
-        return isinstance(node, ast.Return)
-
+    reachable, pending = set(), list(roots)
     while pending:
-        name, bound_do = pending.pop()
-        key = (name, bound_do)
-        if key in visited or name not in functions:
+        name = pending.pop()
+        if name in reachable or name not in functions:
             continue
-        visited.add(key)
-        function = functions[name]
-        env = {}
-        if function.args.args:
-            for field, bound in zip(("do", "stale_ok"), bound_do):
-                env[function.args.args[0].arg + "." + field] = bound
-        for statement in function.body:
-            if visit(statement, env):
-                break
-    return names
+        reachable.add(name)
+        for call in ast.walk(functions[name]):
+            if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id in functions):
+                pending.append(call.func.id)
+    return {node.id for name in reachable for node in ast.walk(functions[name])
+            if isinstance(node, ast.Name)} | {
+        node.attr for name in reachable for node in ast.walk(functions[name])
+        if isinstance(node, ast.Attribute)}
 
 
 def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
     forbidden = {"CodexHostClient", "reconcile_home", "OperationJournal"}
     source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
     live_names = _view_execution_names(source, [
-        "status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
-        "cmd_sup_guard", "cmd_mail_verify"])
+        "status_snapshot", "_cmd_status_view", "cmd_peek", "cmd_result",
+        "_sup_guard_view", "cmd_mail_verify"])
     assert forbidden.isdisjoint(live_names), (
         "read-only view execution reaches live Codex helpers: "
         + str(sorted(forbidden & live_names)))
@@ -433,7 +290,7 @@ def helper(args):
     if do and awake():
         OperationJournal()
 """
-    assert "OperationJournal" not in _view_execution_names(source, ["view"], do=False)
+    assert "OperationJournal" in _view_execution_names(source, ["view"], do=False)
     assert "OperationJournal" in _view_execution_names(source, ["view"], do=True)
     assert "OperationJournal" in _view_execution_names(
         source.replace("return helper(args)", "return helper(unknown_args())"), ["view"])
@@ -918,3 +775,54 @@ def test_view_detector_keeps_zero_iteration_path_and_assignment_expression():
     if do:
         OperationJournal()
 """, ["view"])
+
+
+def _readonly_routers_are_direct(source):
+    expected = ast.parse('''def cmd_status(args, run=subprocess.run, which=shutil.which) -> int:
+    if getattr(args, "stale_ok", False):
+        return _cmd_status_view(args)
+    return _cmd_status_refresh(args, run=run, which=which)
+def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None, process_tree_fn=None) -> int:
+    if getattr(args, "do", False):
+        return _sup_guard_action(args, snapshot_fn=snapshot_fn,
+                                 roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+    return _sup_guard_view(args, snapshot_fn=snapshot_fn,
+                           roster_fn=roster_fn, process_tree_fn=process_tree_fn)
+''')
+    functions = {node.name: node for node in ast.parse(source).body
+                 if isinstance(node, ast.FunctionDef)}
+    return all(node.name in functions and ast.dump(node) == ast.dump(functions[node.name])
+               for node in expected.body)
+
+
+def test_readonly_public_routers_have_no_prelude_or_extra_mutation_edges():
+    source = pathlib.Path(fleet.__file__).read_text(encoding="utf-8")
+    assert _readonly_routers_are_direct(source)
+    assert not _readonly_routers_are_direct(source.replace(
+        'if getattr(args, "do", False):',
+        'OperationJournal()\n    if getattr(args, "do", False):', 1))
+    assert not _readonly_routers_are_direct(source.replace(
+        'return _cmd_status_view(args)', 'return _cmd_status_refresh(args)', 1))
+
+
+@pytest.mark.parametrize("stale", [True, False])
+def test_status_public_router_selects_exact_readonly_or_mutation_root(monkeypatch, stale):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(fleet, "_cmd_status_view", lambda args: calls.append("view") or 0)
+    monkeypatch.setattr(fleet, "_cmd_status_refresh",
+                        lambda args, **kwargs: calls.append("refresh") or 0)
+    assert fleet.cmd_status(SimpleNamespace(stale_ok=stale)) == 0
+    assert calls == ["view" if stale else "refresh"]
+
+
+@pytest.mark.parametrize("do", [False, True])
+def test_guard_public_router_selects_exact_readonly_or_action_root(monkeypatch, do):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(fleet, "_sup_guard_view",
+                        lambda args, **kwargs: calls.append("view") or 0)
+    monkeypatch.setattr(fleet, "_sup_guard_action",
+                        lambda args, **kwargs: calls.append("action") or 0)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=do)) == 0
+    assert calls == ["action" if do else "view"]
