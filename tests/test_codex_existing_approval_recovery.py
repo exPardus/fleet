@@ -860,3 +860,68 @@ def test_cancellation_parser_and_dispatch_preserve_existing_routes(monkeypatch, 
     with pytest.raises(SystemExit):
         fleet.build_parser().parse_args(["sup-reconcile", flag,
                                         "--restore-recorded-policy"])
+
+
+def _install_prior_cancel_reservation(kind, claim, row):
+    operation_id = "preexisting-reservation-without-host-journal"
+    if kind in {"prior-cancel", "other-claim-reservation"}:
+        claim["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-turn-cancel" if kind == "prior-cancel" else "approval-response"}
+        claim["last_operation_id"] = operation_id
+        row["last_operation_id"] = operation_id
+        row["adapter_state"] = "mutating"
+    elif kind == "holder-reservation":
+        claim["holder"]["pending_operation"] = {"operation_id": operation_id}
+    elif kind == "row-reservation":
+        row["pending_operation"] = {"operation_id": operation_id}
+    elif kind == "nonworking-holder":
+        row["status"] = "idle"
+    elif kind == "archived-holder":
+        row["archived_at"] = "2026-10-10T00:00:00Z"
+    else:
+        row["adapter_state"] = kind
+
+
+@pytest.mark.parametrize("kind", [
+    "prior-cancel", "other-claim-reservation", "holder-reservation", "row-reservation",
+    "mutating", "uncertain", "launching", "nonworking-holder", "archived-holder"])
+def test_cancellation_preserves_existing_reservation_without_journal(apps_home, kind):
+    home, store, old, _current, cwd, _mail = apps_home
+    claim = fleet.read_incarnation()
+    registry = fleet.read_registry_no_repair()
+    _install_prior_cancel_reservation(kind, claim, registry["workers"][NAME])
+    fleet.write_incarnation(claim)
+    fleet.save_registry(registry)
+    before_claim = fleet.read_incarnation()
+    before_registry = fleet.read_registry_no_repair()
+    before_request = store._load_path(store.path(6))
+    assert list((home / "state" / "codex" / "operations").glob("*.json")) == []
+    with pytest.raises(fleet.FleetCliError, match="reservation|actionable"):
+        fleet._cancel_codex_supervisor_approval(args(cwd))
+    assert fleet.read_incarnation() == before_claim
+    assert fleet.read_registry_no_repair() == before_registry
+    assert store._load_path(store.path(6)) == before_request
+    assert old.mutations == []
+    assert list((home / "state" / "codex" / "operations").glob("*.json")) == []
+
+
+@pytest.mark.parametrize("kind", ["prior-cancel", "row-reservation", "uncertain"])
+def test_cancellation_refuses_reservation_arriving_before_final_lock(apps_home, kind):
+    _home, store, old, _current, cwd, _mail = apps_home
+    retained = {}
+    def race():
+        old.on_pending = None
+        claim = fleet.read_incarnation()
+        registry = fleet.read_registry_no_repair()
+        _install_prior_cancel_reservation(kind, claim, registry["workers"][NAME])
+        fleet.write_incarnation(claim)
+        fleet.save_registry(registry)
+        retained.update(claim=claim, registry=registry)
+    old.on_pending = race
+    with pytest.raises(fleet.FleetCliError, match="reservation|actionable"):
+        fleet._cancel_codex_supervisor_approval(args(cwd))
+    assert fleet.read_incarnation() == retained["claim"]
+    assert fleet.read_registry_no_repair() == retained["registry"]
+    assert store._load_path(store.path(6))["state"] == "pending"
+    assert old.mutations == []

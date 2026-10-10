@@ -835,6 +835,9 @@ running host lacks that boundary. For an explicitly abandoned approval turn,
 the registered Codex Interface may instead use `sup-reconcile
 --cancel-pending-approval` with explicit home and exact incarnation, thread,
 turn, old host generation, request ID, item ID, method, raw command and cwd.
+Cancellation refuses any existing claim, holder or row reservation and any
+nonactionable holder, before provider reads and again in the locked reservation
+transaction. A missing host journal never grants permission to replace an intent.
 Fleet requires the recorded `accept` policy, one durable pending callback on
 the bound active turn, `waitingOnApproval`, no other unresolved host journal,
 and the exact live old host and child. This cancellation is permitted only

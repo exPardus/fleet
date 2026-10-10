@@ -22225,6 +22225,22 @@ def _codex_cancel_public_status(binding, client, *, terminal=False):
     return observed
 
 
+def _codex_cancel_actionable(claim, row):
+    """A journal-free reservation is still authoritative; never replace it."""
+    holder = claim.get("holder") if isinstance(claim, dict) else None
+    if (not isinstance(claim, dict) or not isinstance(row, dict)
+            or not isinstance(holder, dict)
+            or claim.get("pending_operation") is not None
+            or holder.get("pending_operation") is not None
+            or row.get("pending_operation") is not None):
+        raise FleetCliError("approval cancellation has an existing or ambiguous reservation")
+    if (claim.get("state") != "held"
+            or row.get("adapter_state") not in {"active", "waiting"}
+            or row.get("status") != "working"
+            or row.get("archived_at") is not None):
+        raise FleetCliError("approval cancellation holder is not actionable")
+
+
 def _cancel_codex_supervisor_approval(args) -> int:
     """Abort one pending callback through the old host's journalled turn RPC."""
     from fleet_codex import OperationJournal, _digest
@@ -22244,6 +22260,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
     claim = read_incarnation()
     data = read_registry_no_repair()
     binding = _codex_supervisor_binding(claim, data, allowed_states={"held"})
+    _codex_cancel_actionable(claim, binding.record)
     _codex_cancel_original_policy(binding)
     client = _codex_existing_client(FLEET_HOME)
     old_host = _codex_cancel_pinned_old_host(client)
@@ -22282,6 +22299,7 @@ def _cancel_codex_supervisor_approval(args) -> int:
     with fleet_lock():
         live = read_incarnation()
         registry = read_registry_no_repair()
+        _codex_cancel_actionable(live, registry.get("workers", {}).get(binding.name))
         if (live != claim
                 or registry["workers"].get(binding.name) != binding.record
                 or _registered_interface_mail_source() != source
