@@ -26058,6 +26058,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_preaccept.add_argument("--expect-evidence-sha256", required=True,
                              help="reviewed SHA-256 of the evidence JSON bytes")
 
+    p_failed_client = sub.add_parser(
+        "codex-recover-failed-client",
+        help="stage exact-home native Codex recovery after a failed host client")
+    p_failed_client.add_argument(
+        "recovery_action", choices=("prepare", "decision", "shutdown",
+                                    "verify-exit", "boot", "adopt-boot", "rebind",
+                                    "settle-rebind", "finish",
+                                    "status"))
+    p_failed_client.add_argument("--generation")
+    p_failed_client.add_argument("--host-pid", type=int)
+    p_failed_client.add_argument("--host-start")
+    p_failed_client.add_argument("--child-pid", type=int)
+    p_failed_client.add_argument("--child-start")
+    p_failed_client.add_argument("--incarnation")
+    p_failed_client.add_argument("--thread")
+    p_failed_client.add_argument("--turn")
+    p_failed_client.add_argument("--codex-executable")
+    p_failed_client.add_argument("--decision-file")
+    p_failed_client.add_argument("--name")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -26599,6 +26619,10 @@ def main(argv=None) -> int:
             return cmd_codex_decline_fixed(args)
         if args.command == "codex-reobserve-active":
             return cmd_codex_reobserve_active(args)
+        if args.command == "codex-recover-failed-client":
+            import fleet_codex_failed_client_recovery
+            return fleet_codex_failed_client_recovery.cmd_recover(
+                sys.modules[__name__], args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":
