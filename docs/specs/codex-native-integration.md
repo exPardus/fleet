@@ -450,6 +450,20 @@ turn evidence stays non-idle. An unresolved mutation prevents an older
 completion from vouching for unknown provider work. Host loss, a failed live
 read, malformed evidence, or conflicting identity maps to
 `dead-suspected`, never to a proved death. File-only views remain file-only.
+`fleet doctor --repair` can also settle an ordinary worker send whose exact
+`turn/start` or `turn/steer` journal already contains an `observed` or
+`committed` successful result. The returned turn must agree with the proposed
+adoption, immutable operation identity and generation, and the newest turn read
+through the existing paged observer. It retains the original journal result,
+requires no unresolved predecessor or current callback, reconstructs the original
+operation from retained mail to verify its complete payload digest, and checks the
+complete registry row plus the sole claimed-mail inode and bytes before clearing the
+reservation and finalizing that delivered mail. Conflicting or incomplete
+results, accepted/uncertain journals, changed callbacks/mail/rows, multiple
+claims and host-generation drift remain fenced. A terminal predecessor alone
+never proves rejection; this path neither restores mail nor retries a provider
+mutation. It excludes supervisor rows and is inactive without `--repair`.
+
 `fleet doctor --repair` backfills rows that were already committed
 `dead-suspected` before this completion rule shipped. It requires the same
 exact bound thread/turn in durable evidence and a validated live `thread/read`,
