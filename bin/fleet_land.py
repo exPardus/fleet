@@ -243,7 +243,15 @@ def _commit_dirty(repo: Path, worktree: Path, lane: str, files: list[str],
     if staged_unexpected:
         raise FleetCliError(
             f"land: staging exposed unlisted paths: {', '.join(staged_unexpected)}")
-    _git(repo, "commit", "-m", f"fleet land {lane}: record lane result", cwd=worktree)
+    subject = f"fleet land {lane}: record lane result"
+    try:
+        report = (worktree / report_rel).read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        report = ""
+    docs_trailer = next((line for line in report.splitlines()
+                         if re.fullmatch(r"Docs: n/a(?: -- .+)?", line)), None)
+    message = subject if docs_trailer is None else f"{subject}\n\n{docs_trailer}"
+    _git(repo, "commit", "-m", message, cwd=worktree)
 
 
 def _base_branch(repo: Path, lane_branch: str, base: str,

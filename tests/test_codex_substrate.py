@@ -298,6 +298,16 @@ class TestRecompute:
         _set_state(worktree, "00000001", "stopped")
         assert fleet.recompute_worker_codex("cx1", rec)["status"] == "dead"
 
+    def test_running_state_overrides_stale_result_after_steer(self, codex_home):
+        worktree, rec = _spawn(codex_home)
+        job = _job(worktree, rec["mcx_id"])
+        (job / "result").write_text("OLD ANSWER\n", encoding="utf-8")
+        _set_state(worktree, rec["mcx_id"], "running")
+        out = fleet.recompute_worker_codex("cx1", rec)
+        assert out["status"] == "working"
+        assert "mcx_result_text" not in out
+        assert fleet.cmd_result(SimpleNamespace(name="cx1")) == 1
+
     def test_sticky_statuses_are_preserved(self, codex_home):
         worktree, rec = _spawn(codex_home)
         rec["status"] = "interrupted"
@@ -353,6 +363,24 @@ class TestPeekAndResult:
         _set_state(worktree, rec["mcx_id"], "done")
         rc = fleet.cmd_result(SimpleNamespace(name="cx1"))
         assert rc == 0
+        assert f"RESULT-{rec['mcx_id']}" in capsys.readouterr().out
+
+    def test_wait_persists_completed_mcx_result(self, codex_home, capsys):
+        worktree, rec = _spawn(codex_home)
+        calls = []
+
+        def finish_run(_seconds):
+            calls.append(True)
+            _set_state(worktree, rec["mcx_id"], "done")
+
+        args = SimpleNamespace(names=["cx1"], any=False, timeout=5)
+        assert fleet.cmd_wait(args, sleep=finish_run) == 0
+        stored = fleet.load_registry()["workers"]["cx1"]
+        assert stored["status"] == "idle"
+        assert stored["mcx_result_id"] == rec["mcx_id"]
+        assert stored["mcx_result_text"] == f"RESULT-{rec['mcx_id']}\n"
+        assert calls
+        assert fleet.cmd_result(SimpleNamespace(name="cx1")) == 0
         assert f"RESULT-{rec['mcx_id']}" in capsys.readouterr().out
 
     def test_result_on_a_live_run_exits_1(self, codex_home, capsys):

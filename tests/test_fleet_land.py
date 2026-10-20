@@ -95,6 +95,35 @@ def test_land_commits_allowed_dirty_paths_rebases_and_is_idempotent(
     assert _git(lane, "rev-parse", "HEAD").stdout.strip() == first_tip
 
 
+@pytest.mark.parametrize("docs_line", ["Docs: n/a", "Docs: n/a -- no public docs surface"])
+def test_land_carries_docs_na_line_as_commit_trailer(
+        tmp_path, monkeypatch, docs_line):
+    repo, lane, base = _repo(tmp_path)
+    _result(lane, base)
+    report = lane / "docs" / "lanes" / "w1.md"
+    report.write_text(f"# Lane w1\nDONE means: result is landable.\n{docs_line}\n",
+                      encoding="utf-8")
+    (lane / "README.md").write_text("changed\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(fleet_land, "_check_commands",
+                        lambda worktree, tests: [("tests[1]", 0)])
+    assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
+    message = _git(lane, "log", "-1", "--format=%B").stdout
+    assert message.rstrip("\n").splitlines()[-1] == docs_line
+
+
+def test_land_does_not_invent_docs_trailer(tmp_path, monkeypatch):
+    repo, lane, base = _repo(tmp_path)
+    _result(lane, base)
+    (lane / "README.md").write_text("changed\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(fleet_land, "_check_commands",
+                        lambda worktree, tests: [("tests[1]", 0)])
+    assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
+    message = _git(lane, "log", "-1", "--format=%B").stdout
+    assert "Docs:" not in message
+
+
 def test_land_red_verdict_prints_no_merge_command(tmp_path, monkeypatch, capsys):
     repo, lane, base = _repo(tmp_path)
     _result(lane, base)
