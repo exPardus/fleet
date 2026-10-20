@@ -5573,6 +5573,17 @@ def registry_status(value) -> str:
     return TYPE_FAULT
 
 
+def _supervisor_row_incarnation(name, rec):
+    """The incarnation a supervisor-shaped registry row belongs to: its
+    `supervisor_incarnation_id` field, else the middle segment of
+    `sup|<inc>|<role>`. None when neither is a string."""
+    inc = rec.get("supervisor_incarnation_id") if isinstance(rec, dict) else None
+    if isinstance(inc, str) and inc:
+        return inc
+    parts = name.split("|") if isinstance(name, str) else []
+    return parts[1] if len(parts) == 3 and parts[1] else None
+
+
 def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read a file-only fleet snapshot without locking, probing or mutating state.
     Project workers, numeric totals, unknown-field markers and supervisor claim state.
@@ -5648,6 +5659,14 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # The separate supervisor snapshot states which body holds the claim.
             "tier": "supervisor" if _is_supervisor_shaped(name) else "worker",
         }
+        if row["tier"] == "supervisor":
+            # Only the body of the claim's incarnation is a current body; a
+            # retired incarnation's row is history. With no readable claim
+            # incarnation nothing can be called retired, so the row stays current.
+            claim_inc = snap["supervisor"].get("incarnation_id")
+            row["current_body"] = (
+                not isinstance(claim_inc, str) or not claim_inc
+                or _supervisor_row_incarnation(name, rec) == claim_inc)
         if _codex_record_route(rec) == "native":
             row["codex_waits"] = _codex_wait_summaries(rec)
         if _codex_record_route(rec) == "mcx":
@@ -19548,6 +19567,59 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
     return name, row
 
 
+def _retire_stale_supervisor_rows(dry_run=False) -> int:
+    """Mark dead every supervisor-shaped row of a non-current incarnation.
+
+    Current = `supervisor/INCARNATION`'s incarnation_id; with no readable claim
+    nothing can be called stale and the verb refuses. `working` rows are left
+    (they may be doing something) and so are already-dead and archived rows.
+    Rows are only marked, never deleted; `fleet clean` removes dead rows."""
+    with fleet_lock():
+        # The claim is read under the lock so a handoff completing between the
+        # read and the save cannot make the new current body look stale.
+        status, claim = read_incarnation_status()
+        cur = claim.get("incarnation_id") if status == "ok" else None
+        if not isinstance(cur, str) or not cur:
+            raise FleetCliError("sup-retire-legacy --stale-rows: claim absent or "
+                                "corrupt; cannot tell which incarnation is current")
+        # A pending handoff successor is not stale: protect every incarnation
+        # named by HANDSHAKE or the claim's handoff_pending, and refuse when
+        # either record is present but unidentifiable.
+        protected = {cur}
+        if handoff_pending_torn(claim):
+            raise FleetCliError("sup-retire-legacy --stale-rows: torn handoff "
+                                "entry; resolve the handoff first")
+        protected.update(e["successor_inc"] for e in handoff_pending_entries(claim))
+        if handshake_path().exists():
+            hs = read_handshake()
+            hs_inc = hs.get("incarnation_id") if hs else None
+            if not isinstance(hs_inc, str) or not hs_inc:
+                raise FleetCliError("sup-retire-legacy --stale-rows: HANDSHAKE "
+                                    "unreadable; resolve the handoff first")
+            protected.add(hs_inc)
+        registry = read_registry_no_repair()
+        stale = [name for name, row in registry["workers"].items()
+                 if isinstance(row, dict) and _is_supervisor_shaped(name)
+                 and not row.get("archived_at")
+                 and row.get("status") not in ("dead", "working")
+                 and _supervisor_row_incarnation(name, row) not in protected]
+        if not dry_run and stale:
+            at = now_iso()
+            for name in stale:
+                row = registry["workers"][name]
+                old = row.get("status")
+                row.update({"status": "dead", "legacy_retired_at": at,
+                            "legacy_retired_incarnation_id":
+                                _supervisor_row_incarnation(name, row)})
+                append_event("status_changed", name, old=old, new="dead")
+            save_registry(registry)
+    verb = "would retire" if dry_run else "retired"
+    print(f"{verb} {len(stale)} stale supervisor row(s); current incarnation {cur}")
+    for name in stale:
+        print(f"  {name}")
+    return 0
+
+
 def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
     """Retire an exact absent legacy holder from the registered Codex Interface.
 
@@ -19556,6 +19628,14 @@ def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
     """
     if not getattr(args, "_fleet_home_explicit", False):
         raise FleetCliError("sup-retire-legacy requires explicit --fleet-home")
+    if getattr(args, "stale_rows", False):
+        if args.expect_inc or args.expect_sid:
+            raise FleetCliError("sup-retire-legacy: --stale-rows takes no "
+                                "--expect-inc/--expect-sid")
+        return _retire_stale_supervisor_rows(dry_run=getattr(args, "dry_run", False))
+    if not args.expect_inc or not args.expect_sid:
+        raise FleetCliError("sup-retire-legacy requires --expect-inc and --expect-sid "
+                            "(or --stale-rows)")
     source = _codex_recovery_interface_source()
     if not supervisor_goals_active():
         raise FleetCliError("sup-retire-legacy: supervisor goals are inactive")
@@ -26322,10 +26402,17 @@ def build_parser() -> argparse.ArgumentParser:
         "sup-retire-legacy",
         help="retire one proven absent stale Claude supervisor claim from the "
              "registered native Codex Interface; creates no body or turn")
-    p_retire_legacy.add_argument("--expect-inc", required=True,
-                                 type=_argparse_incarnation_id)
-    p_retire_legacy.add_argument("--expect-sid", required=True,
-                                 help="exact old Claude supervisor session ID")
+    p_retire_legacy.add_argument("--expect-inc", type=_argparse_incarnation_id,
+                                 help="exact stale claim incarnation (claim mode)")
+    p_retire_legacy.add_argument("--expect-sid",
+                                 help="exact old Claude supervisor session ID "
+                                      "(claim mode)")
+    p_retire_legacy.add_argument("--stale-rows", action="store_true",
+                                 help="instead of the claim: mark dead every "
+                                      "non-working supervisor row whose "
+                                      "incarnation is not supervisor/INCARNATION")
+    p_retire_legacy.add_argument("--dry-run", action="store_true",
+                                 help="with --stale-rows: list rows, change nothing")
 
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")

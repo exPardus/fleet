@@ -321,7 +321,7 @@ class TestSingleHomeShortCircuit:
             self, home, at, monkeypatch, run_main):
         """§5's arming paragraph, driven: with slice (d) in place, the line is
         the same bytes the shipped renderer produces on its own."""
-        at(home("only", worker("sid-x", status="working")))
+        at(home("only", worker(CAPTURED_SID, status="working")))
         expected = sl.render_statusline(fleet.status_snapshot(), color=False)
         monkeypatch.setenv("NO_COLOR", "1")
         rc, out = run_main(BLOB_LATER_RENDER)
@@ -560,7 +560,7 @@ class TestWordsExitZero:
 
     def test_a_resolver_that_explodes_mid_lookup_still_renders(
             self, home, listed, at, monkeypatch, run_main):
-        a, b = home("a", worker("sid-a", status="working")), home("b")
+        a, b = home("a", worker(CAPTURED_SID, status="working")), home("b")
         at(a)
         listed(a, b)
 
