@@ -282,17 +282,16 @@ class TestTwoHomesRenderTwoNameplates:
         two = plain(run_main(blob("sid-2"))[1]).strip().split()[0]
         assert one == two == sl.nameplate(fleet.home_tag(a))
 
-    def test_the_unclaimed_session_still_names_the_home_it_read(
+    def test_the_unclaimed_session_renders_nothing(
             self, home, at, listed, run_main):
-        """`HOME_DEFAULT`: nothing claimed this session, so the default home's
-        roster is what renders. On a multi-fleet machine an UNTAGGED row among
-        tagged ones would be the one row the operator could not place."""
+        """w302: a session that no home's registry claims is not a fleet
+        member, so the default home's roster is NOT shown to it."""
         a = home("alpha", worker("sid-a", "working"))
         b = home("bravo", worker("sid-b"))
         listed(b)
         at(a)
-        line = plain(run_main(blob("nobody-claims-this"))[1]).strip()
-        assert line.startswith(sl.nameplate(fleet.home_tag(a))), line
+        rc, out = run_main(blob("nobody-claims-this"))
+        assert rc == 0 and out.strip() == ""
 
     @pytest.mark.parametrize("snap,tail", [
         ({"ok": False, "reason": "unreadable"}, ": registry unreadable"),

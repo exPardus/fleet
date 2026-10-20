@@ -60,6 +60,11 @@ import fleet  # noqa: E402
 
 PREFIX = "[fleet]"
 STALE_AFTER_SECONDS = 300
+#: An `idle` / `dead-suspected` row whose last activity is older than this is
+#: not advertised on any statusline row: days-old husks are history, not state,
+#: and `fleet status` still lists them.
+HIDE_STALE_ROW_SECONDS = 24 * 3600
+_HIDE_WHEN_OLD = ("idle", "dead-suspected")
 
 
 def nameplate(tag=None) -> str:
@@ -307,9 +312,27 @@ def _supervisor_chunk(snap: dict, paint, stale_after: int):
     return chunk
 
 
+def _row_too_old(w: dict) -> bool:
+    """True for an idle / dead-suspected row older than the hide threshold."""
+    if w.get("status") not in _HIDE_WHEN_OLD:
+        return False
+    age = w.get("stale_seconds")
+    return isinstance(age, (int, float)) and age > HIDE_STALE_ROW_SECONDS
+
+
+def _is_current_body(w: dict) -> bool:
+    """A supervisor body counts only when it is the claim's incarnation.
+
+    `current_body` is projected by `fleet.status_snapshot` from
+    supervisor/INCARNATION; a row from a hand-built snapshot that lacks the key
+    is trusted (True) so older callers render as they always did."""
+    return w.get("current_body", True) is not False
+
+
 def _live_supervisor_bodies(workers) -> int:
     return sum(1 for w in workers if isinstance(w, dict)
-               and w.get("tier") == "supervisor" and w.get("status") != "dead")
+               and w.get("tier") == "supervisor" and w.get("status") != "dead"
+               and _is_current_body(w))
 
 
 def _bucket_order(buckets) -> tuple:
@@ -392,6 +415,8 @@ def render_statusline(snap: dict, color: bool = True,
         # rejoins the flat roster for the grey tail -- see the block comment
         # above `_supervisor_chunk`.
         if w.get("tier") == "supervisor" and w.get("status") != "dead":
+            continue
+        if _row_too_old(w):
             continue
         buckets.setdefault(_bucket(w), []).append(w)
 
@@ -638,6 +663,26 @@ def resolve_blob_home(payload, population=None, install=None) -> dict:
         return dict(unresolved)
 
 
+def session_is_unregistered(payload, population, pane="") -> bool:
+    """True when the blob names a session that is a member of NO fleet home.
+
+    Member = its sid is in some home's registry (worker or supervisor body) or
+    it is the registered interface of a home. A blob without a session id gives
+    no evidence either way and is NOT unregistered (the shipped rendering). A
+    home whose registry is unreadable might hold the sid, so it is not called
+    unregistered. Pure file reads; never raises, and a failure answers False."""
+    try:
+        sid = blob_session_id(payload)
+        if not sid or population is None:
+            return False
+        look = fleet.lookup_home_for_sid(sid, population=population)
+        if look["state"] in ("hit", "ambiguous") or look["unreadable"]:
+            return False
+        return not interface_homes(population, sid=sid, pane=pane)
+    except BaseException:  # noqa: BLE001
+        return False
+
+
 def _paint_terminus(line: str, color: bool) -> str:
     """Paint the nameplate and nothing else, so the WORDS are exactly the
     constant they came from and `plain(line)` round-trips to it."""
@@ -871,8 +916,9 @@ def render_home_row(snap, home, color=True):
         workers = []
     rows = [w for w in workers if isinstance(w, dict)]
     bodies = [w for w in rows if w.get("tier") == "supervisor"
-              and w.get("status") in _SUP_BODY_LIVE]
-    lanes = [w for w in rows if w.get("tier") != "supervisor"]
+              and w.get("status") in _SUP_BODY_LIVE and _is_current_body(w)]
+    lanes = [w for w in rows if w.get("tier") != "supervisor"
+             and not _row_too_old(w)]
     working = sum(1 for w in lanes if w.get("status") == "working")
 
     word, age, ref = _sup_state(snap, bodies)
@@ -1099,6 +1145,11 @@ def main() -> int:
                                            os.environ.get("TMUX_PANE"))
                       if population is not None else [])
 
+        # A session that belongs to no fleet home gets no fleet row at all
+        # (delegates still run below -- they are the operator's own statusline).
+        unregistered = session_is_unregistered(
+            payload, population, os.environ.get("TMUX_PANE"))
+
         # Delegates print above fleet's row. A delegate that fails, hangs, or
         # emits unprintable bytes is dropped -- it must never cost fleet's row.
         #
@@ -1119,6 +1170,8 @@ def main() -> int:
         # an ambiguity there is no home to read a roster from, so the word takes
         # the row's place -- one line either way, exit 0 either way.
         line = render_home_terminus(decision, color=_want_color())
+        if unregistered and line is None:
+            return 0
         if view_homes:
             for row in render_interface_rows(view_homes, color=_want_color(),
                                              lead=line):

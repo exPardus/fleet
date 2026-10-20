@@ -427,7 +427,11 @@ mail, queues, journals, and unrelated workers, records the original claim in
 ignored retirement evidence, writes a released claim and old-holder tombstone,
 marks evidence complete only after those writes, and creates no Codex thread
 or turn. Native spawn requires that complete evidence and exact tombstone
-before dispatch. See
+before dispatch.
+`sup-retire-legacy --stale-rows [--dry-run]` is the separate row-only mode: it
+marks non-working supervisor rows whose incarnation is not
+`supervisor/INCARNATION` dead (with `legacy_retired_at`), touching no claim,
+mail or journal; it refuses when the claim is unreadable. See
 `docs/specs/codex-native-integration.md` §10.4 for CLI semantics and refusals.
 After a native Codex mutation enters the durable `accepted` journal state,
 any host error—including a provider reply too large for the 64 KiB journal

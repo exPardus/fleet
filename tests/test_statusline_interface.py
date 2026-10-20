@@ -143,7 +143,8 @@ class TestInterfaceSignal:
     def test_another_pane_is_not_the_interface(self, home, machine, run_main):
         """A stale registration (a pane id from an earlier tmux server) does
         not put its home on a different pane's bar."""
-        base = home("fleet", {"w1": rec("working")}, goals=False)
+        base = home("fleet", {"w1": rec("working", sid="iface-sid")},
+                    goals=False)
         pm = home("pm", {"lane": rec("working")}, pane="%1")
         machine(base, pm)
         rc, rows = run_main(pane="%0")
@@ -214,10 +215,26 @@ class TestHomeRow:
                                 f"done 2 unread")
 
     def test_two_live_bodies_still_alarm(self, home):
-        h = home("pm", {"sup|inc-1|boot": rec("idle", 60, "a"),
-                        "sup|inc-2|boot": rec("working", 60, "b")},
+        two = {"supervisor_incarnation_id": "inc-1"}
+        h = home("pm", {"sup|inc-1|boot": rec("idle", 60, "a") | two,
+                        "sup|inc-2|boot": rec("working", 60, "b") | two},
                  claim=HELD)
         assert self._row(h) == f"{plate(h)}  sup working  2 bodies"
+
+    def test_a_retired_incarnations_body_is_not_a_body(self, home):
+        """w302: only the body of supervisor/INCARNATION's incarnation counts;
+        a retired successor row beside it is not "2 bodies" and its age does
+        not make the supervisor `stale`."""
+        h = home("pm", {"sup|inc-1|boot": rec("idle", 60, "a"),
+                        "sup|inc-0|successor": rec("idle", 295 * 3600, "b")},
+                 claim=HELD)
+        assert self._row(h) == f"{plate(h)}  sup idle 1m"
+
+    def test_only_retired_bodies_means_no_live_body(self, home):
+        h = home("pm", {"sup|inc-0|successor": rec("idle", 295 * 3600, "b")},
+                 claim=HELD)
+        assert "bodies" not in self._row(h)
+        assert "stale 295h" not in self._row(h)
 
     def test_a_frozen_home_is_suppressed(self, home):
         h = home("fleet", {"sup|inc-0|boot": rec("dead", 9),
