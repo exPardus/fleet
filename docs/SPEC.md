@@ -26,6 +26,9 @@ gate; `__main__` runs the DONE checks too (not only `currency_violations`), so
 `land`'s GREEN enforces exactly what the wave floor's pytest pass does -- a lane
 report missing its DONE-means line no longer shows GREEN at `land` and only
 fails later, after the whole two-interpreter floor (queue item 12, w90).
+When a lane report carries an exact `Docs: n/a` or `Docs: n/a -- …` line,
+`fleet land` copies that line unchanged into the result commit's trailer so the
+docs-currency history gate sees the lane's stated documentation disposition.
 
 The supervisor procedure is `skills/fleet/supervisor.md`: last three journal
 checkpoints (≤40 lines for new entries), lossless journal history rolls, 40k-token

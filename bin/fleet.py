@@ -3399,11 +3399,36 @@ def _mcx_probe(record, run=subprocess.run, which=shutil.which):
     mcx_id = record.get("mcx_id")
     if not mcx_id:
         return None
+    # A completed prior turn's result may remain readable briefly after mcx
+    # restarts the same job for steer. Its state file describes the current
+    # run, so never let a stale result make wait/status declare it idle.
+    try:
+        state = (_mcx_dir(record) / mcx_id / "state").read_text(
+            encoding="utf-8").strip().lower()
+    except (OSError, UnicodeError):
+        state = None
+    if state in {"starting", "running"}:
+        return "working"
+    if state in {"done", "completed", "complete", "idle"}:
+        return "idle"
+    if state in {"stopped", "dead", "failed", "error"}:
+        return "dead"
     try:
         proc = _mcx_run(record, ["result", mcx_id], run=run, which=which)
     except FleetCliError:
         return None
     return {2: "working", 0: "idle"}.get(proc.returncode, "dead")
+
+
+def _mcx_saved_result(record) -> str | None:
+    """Read the completed mcx answer from its job directory when available."""
+    mcx_id = record.get("mcx_id")
+    if not mcx_id:
+        return None
+    try:
+        return (_mcx_dir(record) / mcx_id / "result").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
 
 
 def dispatch_codex(name, cwd, prompt_body, model, mode="dontask", effort="medium",
@@ -4499,6 +4524,11 @@ def recompute_worker_codex(name: str, record: dict,
     if verdict is None:
         return updated
     updated["status"] = verdict
+    if verdict == "idle":
+        result_text = _mcx_saved_result(record)
+        if result_text is not None:
+            updated["mcx_result_id"] = record.get("mcx_id")
+            updated["mcx_result_text"] = result_text
     return updated
 
 
@@ -8512,6 +8542,13 @@ def _cmd_result_codex(name: str, rec: dict,
         print(f"{name}: no mcx worker id recorded -- dispatch may not have "
               "committed", file=sys.stderr)
         return 1
+    if (rec.get("mcx_result_id") == mcx_id
+            and isinstance(rec.get("mcx_result_text"), str)):
+        print(rec["mcx_result_text"].rstrip("\n"))
+        return 0
+    if _mcx_probe(rec, run=run, which=which) == "working":
+        print(f"{name}: turn still running (mcx {mcx_id})", file=sys.stderr)
+        return 1
     proc = _mcx_run(rec, ["result", mcx_id], run=run, which=which)
     if proc.returncode == 2:
         print(f"{name}: turn still running (mcx {mcx_id})", file=sys.stderr)
@@ -8703,6 +8740,10 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                 text = evidence.get("result_text")
                 if isinstance(text, str):
                     summary = text
+        elif (_codex_record_route(rec) == "mcx"
+              and rec.get("mcx_result_id") == rec.get("mcx_id")
+              and isinstance(rec.get("mcx_result_text"), str)):
+            summary = rec["mcx_result_text"]
         if outcome is not None and outcome.get("kind") == "result":
             summary = outcome.get("result_text")
         if summary is None:
@@ -10098,6 +10139,8 @@ def _cmd_send_codex(name: str, message: str,
         r = data["workers"].get(name)
         if r is not None and r.get("mcx_id") == rec["mcx_id"]:
             r["status"] = "working"
+            r.pop("mcx_result_id", None)
+            r.pop("mcx_result_text", None)
             r["last_dispatch_at"] = now_iso()
             r["last_activity"] = now_iso()
             r["turns"] = r.get("turns", 0) + 1

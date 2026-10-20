@@ -173,6 +173,8 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
+  If its local lane report has an exact `Docs: n/a` or `Docs: n/a -- …` line,
+  that line is copied unchanged as the landing commit trailer.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
 - `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state; `body` names the holder's registry model and substrate (e.g. `openrouter/<slug>`) when the row records them.

@@ -118,11 +118,16 @@ retry remains bounded by the monotonic lock deadline.
 
 At `6fa06c9`, `--model codex:<model>` sets `substrate=codex`,
 `dispatch_kind=mcx`, and stores an eight-character `mcx_id`. Fleet shells
-out to `mcx spawn`, `result`, `steer`, and `stop`. It maps exit code 2
-to working, 0 to idle, and another completed probe to dead. `mcx steer`
-restarts the run; busy send refuses. Results, logs, and usage come from the
-lane's gitignored `.mcx/<id>/` directory. Tests cover worker spawn, status,
-peek, result, send, interrupt, kill, respawn, wave-stop, and accounting.
+out to `mcx spawn`, `result`, `steer`, and `stop`. The `.mcx/<id>/state` file
+is authoritative while a run is starting or running, so a result left by the
+previous run cannot make a freshly steered lane look idle. Terminal results
+are captured in the registry row with their mcx id; `fleet result` serves that
+durable answer, and `fleet wait` blocks on the current run state. Status, wait,
+and the supervisor's existing lane-done sweep all use the record-local mcx
+observer. `mcx steer` restarts the run; busy send refuses. Results, logs, and
+usage come from the lane's gitignored `.mcx/<id>/` directory. Tests cover
+worker spawn, status, peek, result, send, interrupt, kill, respawn, wave-stop,
+and accounting.
 
 That compatibility adapter cannot provide the target lifecycle:
 
