@@ -16808,10 +16808,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3862, :3897, :3927, :3966, :4003, :4065, :4145, :5169, :11734, :11896, :12164, :12391, :12427, :12669, :12670, :12759, :12769, :12780, :12878, :13400, :16760, :19725, :19737, :19886, :22903, :22904, :23008, :23069, :24062, :24064, :24102, :24586, :27025`).
+    sites that already key on the union (`:3862, :3897, :3927, :3966, :4003, :4065, :4145, :5169, :11734, :11896, :12164, :12391, :12427, :12669, :12670, :12759, :12769, :12780, :12878, :13400, :16760, :19725, :19737, :19886, :22903, :22904, :23008, :23075, :23123, :24085, :24087, :24125, :24609, :27048`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10205, :10789, :15040, :25515. This makes union identity
+    OWN prior sid alone: :10205, :10789, :15040, :25538. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17530,7 +17530,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10205, :10789, :15040,
-    # :25515) -- so union identity cannot make one body answer for another.
+    # :25538) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -23057,15 +23057,21 @@ def _fork_took_over_rows(entries):
             if any(r.get("state") != "done" for r in rows)}
 
 
-def _sup_guard_body_name(sids):
-    """Resolve a body name from the same registry record as its sid union."""
+def _sup_guard_body_name(sids, holder_sid=None, registry=None):
+    """Resolve the claim holder, preferring its current sid over shared history."""
     if not sids:
         return None
-    registry = _registry_records_or_none()
+    if registry is None:
+        registry = _registry_records_or_none()
     if registry is None:
         return None
     wanted = set(sids)
-    for name, record in (registry.get("workers") or {}).items():
+    workers = registry.get("workers") or {}
+    if holder_sid:
+        for name, record in workers.items():
+            if isinstance(record, dict) and record.get("session_id") == holder_sid:
+                return name
+    for name, record in workers.items():
         if wanted.intersection(_record_sids(record)):
             return name
     return None
@@ -23103,10 +23109,18 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         sids = _sup_guard_body_sids(claim)
     else:
         sids = None
-    body_name = _sup_guard_body_name(sids)
     registry = _registry_records_or_none()
+    holder_sid = None
+    if isinstance(claim, dict):
+        if state == "held":
+            holder_sid = claim.get("session_id")
+        elif state == "released":
+            holder_sid = claim.get("released_by_sid") or claim.get("session_id")
+    body_name = _sup_guard_body_name(sids, holder_sid, registry)
     body_record = ((registry.get("workers") or {}).get(body_name)
                    if isinstance(registry, dict) and body_name else None)
+    if isinstance(body_record, dict):
+        sids = sorted(_record_sids(body_record))
     parked_finished_lanes = []
     parked_at = parked.get("parked_at")
     try:
@@ -23135,10 +23149,19 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
                 continue
             if outcome.get("kind") == "result" and finished_at >= parked_since:
                 parked_finished_lanes.append(lane_name)
+    # A Stop outcome can precede the next authoritative `fleet status` merge.
+    # The guard already has the roster; read that outcome to recognize the
+    # completed current turn without mutating the registry from this view.
+    body_status = body_record.get("status") if isinstance(body_record, dict) else None
+    if body_status in ("working", "dead-suspected"):
+        sid = body_record.get("session_id")
+        since = body_record.get("last_dispatch_at") or body_record.get("created")
+        if sid and has_fresh_outcome(body_name, sid, since):
+            body_status = "idle"
     # Idle holder rows are resumable between turns.
     idle_resumable_holder = bool(
         isinstance(body_record, dict)
-        and body_record.get("status") == "idle"
+        and body_status == "idle"
         and not body_record.get("archived_at"))
     # Fleet and native projections may supply park status without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
