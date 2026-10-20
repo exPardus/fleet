@@ -26,6 +26,9 @@ WINDOW = 20
 # missing trailer cannot be repaired without rewriting the shared merge base.
 HISTORICAL_METADATA_EXEMPTIONS = {
     "ffd1197836ef2f5a586f35434d58b97ab5c3f892",
+    # Merged via PR #40 without a docs change or trailer; it is now an
+    # ancestor of main, so every lane rebased on main inherited the failure.
+    "8c3f73a9ab86a6b30d8598680c772a34c4d00781",
 }
 
 
