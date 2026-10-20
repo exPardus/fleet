@@ -59,17 +59,13 @@ def _never_touch_the_real_home(tmp_path, tmp_path_factory, monkeypatch):
     green on the broken world -- which is exactly what happened for six days.
 
     Tests that assert on these paths override them again with their own value.
-    Claude workspace-trust writes use CLAUDE_CONFIG_DIR, with HOME/USERPROFILE
-    redirected per test so the writer's explicit and fallback paths are both
-    isolated. `test_trust_acceptance.py` guards its atomic destination."""
+    Claude workspace-trust writes use an isolated CLAUDE_CONFIG_DIR. HOME
+    remains unchanged so the home-resolution seam pins retain their intended
+    semantics. `test_trust_acceptance.py` guards the trust writer's destination."""
     import fleet
-    # Trust acceptance uses Claude's own user config. Isolate both its explicit
-    # config root and HOME fallback for every test, not only trust-specific tests.
+    # Redirect Claude's config directly rather than changing HOME: the home
+    # resolution seam tests intentionally compare inherited and absent HOME.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    monkeypatch.delenv("HOMEDRIVE", raising=False)
-    monkeypatch.delenv("HOMEPATH", raising=False)
     sandbox = tmp_path_factory.mktemp("fake-home")
     (sandbox / ".claude").mkdir()
     monkeypatch.setattr(fleet, "user_settings_path",
