@@ -2591,6 +2591,23 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
     }
 
 
+def _codex_system_error_terminal(observed) -> bool:
+    """A systemError thread whose exact newest turn is terminal in the full read."""
+    return (observed["provider_status"] == "systemError"
+            and observed["turn_status"] in {"completed", "failed", "interrupted"}
+            and observed.get("items_view") == "full")
+
+
+def _codex_system_error_evidence(observed) -> dict:
+    binding = observed["binding"]
+    return {
+        "thread_id": binding.thread_id, "turn_id": binding.turn_id,
+        "provider_status": observed["provider_status"],
+        "turn_status": observed["turn_status"],
+        "error_kind": observed.get("error_code"),
+    }
+
+
 def _codex_worker_status(observed):
     """Map a validated public observation to registry and adapter states."""
     provider = observed["provider_status"]
@@ -10989,7 +11006,12 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         before = dict(read_registry_no_repair()["workers"][name])
         binding = _codex_worker_binding(name, before)
         observed = _codex_worker_observe(binding, require_full=True)
-    if (observed["provider_status"] != "idle"
+    system_error_proof = None
+    if _codex_system_error_terminal(observed):
+        # The full public read shows the exact newest turn terminal under a
+        # systemError thread: that is terminal proof; record what was seen.
+        system_error_proof = _codex_system_error_evidence(observed)
+    elif (observed["provider_status"] != "idle"
             or observed["turn_status"] not in {
                 "completed", "failed", "interrupted"}):
         raise FleetCliError(
@@ -11083,10 +11105,13 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         record = data["workers"].get(name)
         if record == respawn_claim:
             retired = list(record.get("retired_codex_threads") or [])
-            retired.append({
+            retired_entry = {
                 "thread_id": binding.thread_id, "turn_id": binding.turn_id,
                 "terminal_status": observed["turn_status"],
-            })
+            }
+            if system_error_proof is not None:
+                retired_entry["terminal_proof"] = system_error_proof
+            retired.append(retired_entry)
             record.update({
                 "codex_thread_id": thread_id, "codex_turn_id": None,
                 "codex_host_generation": reply.generation,
@@ -11108,6 +11133,10 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
             if task_override is not None:
                 record.update({"task": task_override[:LEGACY_TASK_SNAPSHOT_CHARS]})
             save_registry(data)
+            if system_error_proof is not None:
+                _append_event_quiet(
+                    "codex_system_error_terminal_proof", name,
+                    **system_error_proof)
             _append_event_quiet(
                 "codex_thread_bound", name, codex_thread_id=thread_id,
                 host_generation=reply.generation)
@@ -13972,7 +14001,76 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
     return reconciled
 
 
-def _doctor_check_dead_suspected(workers: dict, reconciled=()):
+def _reconcile_dead_suspected_codex_system_errors() -> list[str]:
+    """Settle dead-suspected native rows whose exact turn ended under systemError.
+
+    Same snapshot/CAS discipline as the completion reconciler: read the full
+    public turn outside the lock, commit only when the whole row is unchanged.
+    A non-terminal, unreadable, or mismatched read changes nothing.
+    """
+    with fleet_lock():
+        data = load_registry()
+        candidates = {
+            name: dict(record)
+            for name, record in data.get("workers", {}).items()
+            if (isinstance(record, dict)
+                and record.get("status") == "dead-suspected"
+                and record.get("archived_at") is None
+                and record.get("pending_operation") is None
+                and _codex_record_route(record) == "native"
+                and not _is_supervisor_shaped(name))
+        }
+
+    prepared = {}
+    for name, before in candidates.items():
+        try:
+            binding = _codex_worker_binding(name, before)
+            observed = _codex_worker_observe(binding, require_full=True)
+        except (FleetCliError, OSError, ValueError):
+            continue
+        if (not _codex_system_error_terminal(observed)
+                or observed["turn_status"] == "completed"
+                or observed["active_flags"]
+                or _codex_current_waits(before)):
+            continue
+        updated = dict(before)
+        updated.update({
+            "status": ("interrupted" if observed["turn_status"] == "interrupted"
+                       else "dead"),
+            "adapter_state": "terminal-failed",
+            "provider_status": observed["provider_status"],
+            "last_activity": now_iso(),
+        })
+        if observed.get("error_code") is not None:
+            updated["codex_error_code"] = observed["error_code"]
+        prepared[name] = (before, updated, _codex_system_error_evidence(observed))
+
+    if not prepared:
+        return []
+
+    reconciled = []
+    with fleet_lock():
+        data = load_registry()
+        workers = data.get("workers", {})
+        for name, (before, updated, _evidence) in prepared.items():
+            if workers.get(name) != before:
+                continue
+            workers[name] = updated
+            reconciled.append(name)
+        if reconciled:
+            save_registry(data)
+            for name in reconciled:
+                _, updated, evidence = prepared[name]
+                append_event(
+                    "status_changed", name, old="dead-suspected",
+                    new=updated["status"],
+                    reason="native Codex systemError with terminal turn",
+                    **evidence)
+    return reconciled
+
+
+def _doctor_check_dead_suspected(workers: dict, reconciled=(),
+                                 reconciled_errors=()):
     """Note dead-suspected rows in the supplied snapshot without recomputing.
     The verdict is advisory and recomputable, never a sticky respawn trigger.
     """
@@ -13980,6 +14078,10 @@ def _doctor_check_dead_suspected(workers: dict, reconciled=()):
         f"reconciled {len(reconciled)} exact native Codex completion(s): "
         f"{', '.join(sorted(reconciled))}; "
         if reconciled else "")
+    if reconciled_errors:
+        repaired += (
+            f"settled {len(reconciled_errors)} native Codex systemError "
+            f"terminal turn(s): {', '.join(sorted(reconciled_errors))}; ")
     names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
     if names:
         return ("dead-suspected", True,
@@ -14607,11 +14709,14 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     registry_quarantined = None
     registry_rename_attempted = False
     reconciled_codex = []
+    reconciled_codex_errors = []
     try:
         if repair:
             with fleet_lock():
                 data = load_registry()          # the ONE quarantine site left
             reconciled_codex = _reconcile_dead_suspected_codex_completions()
+            reconciled_codex_errors = (
+                _reconcile_dead_suspected_codex_system_errors())
             # Refresh the diagnostic snapshot after the conditional repair.
             with fleet_lock():
                 data = load_registry()
@@ -14648,7 +14753,8 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(
-            _doctor_check_dead_suspected, workers, reconciled_codex),
+            _doctor_check_dead_suspected, workers, reconciled_codex,
+            reconciled_codex_errors),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_permission_denials, workers),
