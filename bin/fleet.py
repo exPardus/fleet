@@ -1915,6 +1915,52 @@ def _worker_env(name: str) -> dict:
     return env
 
 
+def _ensure_claude_directory_trusted(directory) -> None:
+    """Record Claude's accepted workspace-trust bit before Fleet launches there.
+
+    Claude has no supported launch flag for accepting the workspace trust
+    dialog. Keep this edit narrowly scoped to the resolved project entry.
+    """
+    target = str(Path(directory).expanduser().resolve())
+    config_root = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_path = (Path(config_root).expanduser() / ".claude.json"
+                   if config_root else Path.home() / ".claude.json")
+    try:
+        if config_path.exists():
+            raw = config_path.read_text(encoding="utf-8")
+            config = json.loads(raw)
+            if not isinstance(config, dict):
+                raise ValueError("top-level JSON value must be an object")
+        else:
+            config = {}
+        projects = config.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            raise ValueError("projects must be an object")
+        entry = projects.setdefault(target, {})
+        if not isinstance(entry, dict):
+            raise ValueError(f"projects[{target!r}] must be an object")
+        if entry.get("hasTrustDialogAccepted") is True:
+            return
+        entry["hasTrustDialogAccepted"] = True
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".claude.json.", dir=str(config_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(config, stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, config_path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise FleetCliError(
+            f"cannot accept Claude workspace trust in {config_path}: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # OpenRouter substrate (item 24): `--model openrouter:<slug>` dispatch.
 #
@@ -15118,6 +15164,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # missing/unreadable key file refuses cleanly with no partial dispatch state.
     dispatch_model, settings_arg = _openrouter_dispatch_args(model, settings)
     try:
+        _ensure_claude_directory_trusted(cwd)
         tasks_dir().mkdir(parents=True, exist_ok=True)
         # Create journals_dir before --add-dir: nonexistent directories grant nothing
         # and a headless worker cannot answer the resulting write-permission prompt.
@@ -24969,6 +25016,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = _successor_worker_name(successor_inc)
+    _ensure_claude_directory_trusted(FLEET_HOME)
     # Use the rendered instance settings (merged with the OpenRouter env block
     # when the successor's model names one) so the successor receives fleet hooks.
     argv = [exe, "--bg", "-n", name,
