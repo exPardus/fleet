@@ -556,8 +556,22 @@ RATIFIED_BUT_UNBUILT = ()
 # so it waits here under the fail-safe unknown-verb default (`destructive`).
 # `codex-respond` is provider-specific direction; keep the fail-safe unknown
 # tier until the operator adds it to the ratified §5 table.
+# `codex-decline-fixed`, `codex-reobserve-active` and `codex-settle-preaccept`
+# (w300 Codex recovery verbs) are the same family as `codex-respond` and wait
+# here for the same reason: the ratified §5 table is operator-owned. Their real
+# effects, read from the code rather than guessed: `codex-decline-fixed` sends
+# one pinned decline of a supervisor callback to the old host (a provider
+# mutation); `codex-reobserve-active` writes the worker row and one event after
+# an exact read-only provider observation (no turn started); and
+# `codex-settle-preaccept` settles a worker row and its operation journal
+# without dispatch or replay. All three write home-scoped state and all three
+# refuse without an explicit `--fleet-home`, so the unknown-verb default
+# (`destructive`) is the safe tier and, for a wrong-home write, the right one.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
-                                     "lane-done", "sup-reconcile", "codex-respond")
+                                     "lane-done", "sup-reconcile", "codex-respond",
+                                     "codex-decline-fixed",
+                                     "codex-reobserve-active",
+                                     "codex-settle-preaccept")
 
 
 def _classified_verbs():
