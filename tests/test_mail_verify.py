@@ -31,6 +31,8 @@ def home(tmp_path, monkeypatch):
         INTERFACE_SID + "\n", encoding="utf-8")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", INTERFACE_SID)
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("MCX_WORKER", raising=False)
+    monkeypatch.delenv("FLEET_WORKER", raising=False)
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
 
@@ -109,6 +111,102 @@ def test_native_codex_lane_supervisor_send_is_lane_labelled(
 
     assert mail_id is None
     assert notice == "FLEET LANE MAIL lane-build\nlane progress"
+
+
+def test_claude_lane_supervisor_send_uses_current_registry_sid(
+        home, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", HOLDER_SID)
+    fleet.save_registry({"workers": {"lane-claude": {
+        "substrate": None, "dispatch_kind": "bg", "session_id": HOLDER_SID,
+        "retired_sids": [INTERFACE_SID],
+    }}})
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "Claude lane progress")
+
+    assert mail_id is None
+    assert notice == "FLEET LANE MAIL lane-claude\nClaude lane progress"
+
+
+def test_mcx_lane_supervisor_send_uses_current_thread_event(
+        home, monkeypatch):
+    mcx_id = "a1b2c3d4"
+    job = home / "lane" / ".mcx" / mcx_id
+    job.mkdir(parents=True)
+    (job / "events.jsonl").write_text(json.dumps({
+        "type": "thread.started", "thread_id": CODEX_THREAD,
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    monkeypatch.setenv("MCX_WORKER", "1")
+    # mcx may inherit the dispatcher's Claude sid; it cannot identify this lane.
+    fleet.save_registry({"workers": {
+        "lane-mcx": {
+            "substrate": "codex", "dispatch_kind": "mcx",
+            "session_id": None, "mcx_id": mcx_id, "cwd": str(home / "lane"),
+        },
+        "lane-claude": {
+            "dispatch_kind": "bg", "session_id": INTERFACE_SID,
+        },
+    }})
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "mcx lane progress")
+
+    assert mail_id is None
+    assert notice == "FLEET LANE MAIL lane-mcx\nmcx lane progress"
+
+
+def test_unknown_or_spoofed_lane_name_stays_unverified(home, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("FLEET_WORKER", "lane-claude")
+    fleet.save_registry({"workers": {"lane-claude": {
+        "dispatch_kind": "bg", "session_id": HOLDER_SID,
+    }}})
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "unsupported claim")
+
+    assert mail_id is None
+    assert notice.startswith("FLEET UNVERIFIED INTERFACE MAIL\n")
+
+
+def test_mcx_lane_without_matching_machine_event_stays_unverified(
+        home, monkeypatch):
+    mcx_id = "a1b2c3d4"
+    job = home / "lane" / ".mcx" / mcx_id
+    job.mkdir(parents=True)
+    (job / "events.jsonl").write_text(json.dumps({
+        "type": "thread.started", "thread_id": "different-thread",
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    monkeypatch.setenv("MCX_WORKER", "1")
+    fleet.save_registry({"workers": {"lane-mcx": {
+        "substrate": "codex", "dispatch_kind": "mcx",
+        "session_id": None, "mcx_id": mcx_id, "cwd": str(home / "lane"),
+    }}})
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "unknown Codex caller")
+
+    assert mail_id is None
+    assert notice.startswith("FLEET UNVERIFIED INTERFACE MAIL\n")
+
+
+def test_lane_launch_envs_drop_inherited_provider_identities(
+        home, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", INTERFACE_SID)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    monkeypatch.setenv("MCX_WORKER", "1")
+
+    claude_env = fleet._worker_env("lane-claude")
+    mcx_env = fleet._mcx_env(home / "lane")
+
+    assert claude_env["FLEET_WORKER"] == "lane-claude"
+    assert "CLAUDE_CODE_SESSION_ID" not in claude_env
+    assert "CODEX_THREAD_ID" not in claude_env
+    assert "CLAUDE_CODE_SESSION_ID" not in mcx_env
+    assert "CODEX_THREAD_ID" not in mcx_env
+    assert "MCX_WORKER" not in mcx_env
 
 
 def test_ambiguous_codex_thread_falls_back_to_interface_verification(
