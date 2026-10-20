@@ -481,7 +481,10 @@ class TestTheRetargetIsRealAndStillOpen:
         not do: `resolve()` follows it straight back to the repo."""
         root = tmp_path / "install"
         (root / "bin").mkdir(parents=True)
-        for source in fleet_implementation_paths():
+        # Every sibling module: fleet_lock imports fleet_codex at call time, so
+        # the census population alone is not a runnable tree.
+        bin_dir = fleet_implementation_paths()[0].parent
+        for source in sorted(bin_dir.glob("fleet*.py")):
             target = root / "bin" / source.name
             try:
                 os.link(source, target)      # same device: free

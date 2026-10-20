@@ -195,6 +195,10 @@ ALLOWED = {
     "_resume_one_limited_codex", "_cmd_respawn_codex_native",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
     "_cmd_kill_codex_native",
+    # `codex-reobserve-active` reads the row via `read_registry_no_repair`, then
+    # re-loads it inside `with fleet_lock():` to compare-and-swap the row and
+    # `save_registry` it. A mutating verb, never a view.
+    "cmd_codex_reobserve_active",
     # w105: the native Codex worker and supervisor paths (codex-native-
     # integration spec). Each entry was audited from the AST: every
     # `load_registry` call in it sits LEXICALLY inside `with fleet_lock():`,

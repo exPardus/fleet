@@ -174,6 +174,18 @@ class _FakeHost:
                 "status": {"type": self.provider_status, "activeFlags": []},
                 "turns": self.turns,
             }}, generation=self.generation)
+        if method == "thread/turns/list":
+            # Production reads the newest two turns by page, newest first.
+            return SimpleNamespace(result={
+                "data": list(reversed(self.turns))[:2], "nextCursor": None,
+            }, generation=self.generation)
+        if method == "thread/items/list":
+            turn_id = operation["payload"]["params"]["turnId"]
+            return SimpleNamespace(result={"data": [
+                {"turnId": turn_id, "item": item}
+                for turn in self.turns if turn["id"] == turn_id
+                for item in turn["items"]], "nextCursor": None},
+                generation=self.generation)
         return SimpleNamespace(result={}, generation=self.generation)
 
     def commit(self, operation_id):
@@ -213,10 +225,13 @@ class TestNativeCodexKill:
 
         assert fleet.cmd_kill(argparse.Namespace(name="cx-native", yes=True, nonce=None)) == 0
 
-        op, proof = host.calls
+        op, *proof = host.calls
         assert op["payload"] == {"method": "turn/interrupt", "params": {
             "threadId": THREAD_ID, "turnId": TURN_ID}}
-        assert proof["payload"]["method"] == "thread/read"
+        # The proof is the paged public read: thread, newest turns, items, recheck.
+        assert [c["payload"]["method"] for c in proof] == [
+            "thread/read", "thread/turns/list", "thread/items/list",
+            "thread/turns/list"]
         assert host.commits == [op["operation_id"]]
         assert fleet.load_registry()["workers"]["cx-native"]["status"] == "dead"
 
@@ -288,7 +303,8 @@ class TestNativeCodexKill:
         row = fleet.load_registry()["workers"]["cx-native"]
         assert row["status"] == "dead"
         assert row["dead_reason"] == "bound thread has no provider turns"
-        assert [op["payload"]["method"] for op in host.calls] == ["thread/read"]
+        assert [op["payload"]["method"] for op in host.calls] == [
+            "thread/read", "thread/turns/list", "thread/turns/list"]
 
     def test_kill_refuses_post_accept_precommit_bound_row_with_a_live_turn(
             self, home, monkeypatch):
@@ -308,7 +324,8 @@ class TestNativeCodexKill:
                 name="cx-native", yes=True, nonce=None))
 
         assert fleet.load_registry()["workers"]["cx-native"] == original
-        assert [op["payload"]["method"] for op in host.calls] == ["thread/read"]
+        assert [op["payload"]["method"] for op in host.calls] == [
+            "thread/read", "thread/turns/list", "thread/turns/list"]
 
 
 class TestNativeCodexArchive:
