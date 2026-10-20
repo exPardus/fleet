@@ -519,11 +519,16 @@ envelope. It includes the rejected body for diagnosis and tells the supervisor
 not to act, to journal and surface the failure and body, and to request
 registration plus a resend. Non-supervisor sends retain the ordinary raw-mail
 path. Fleet-generated structured supervisor notices bypass this free-form
-Interface envelope. A native Codex lane whose `CODEX_THREAD_ID` uniquely
-matches a native Codex worker row receives a `FLEET LANE MAIL <name>` label
-instead. Missing or ambiguous matches follow the Interface verification path.
-This is a lane-origin label only; it does not grant Interface authority or
-alter receipt verification.
+Interface envelope. Registered lane senders receive a `FLEET LANE MAIL <name>`
+label when exactly one non-archived lane row matches their provider identity:
+the current `CLAUDE_CODE_SESSION_ID` for a Claude lane, or `CODEX_THREAD_ID`
+for a native Codex lane. For an mcx Codex lane, Fleet matches that thread ID to
+the `thread.started` machine event in the row's current `.mcx/<mcx_id>/events.jsonl`.
+Codex callers do not use an inherited Claude sid as lane identity. Missing or
+ambiguous matches follow the Interface verification path; `FLEET_WORKER` alone
+never proves a lane. This is a lane-origin label only; it does not grant
+Interface authority or alter receipt verification. Launch environments strip
+the other provider's inherited session/thread identity so a child uses its own.
 
 **Idle steering = fork-steer (RATIFIED G2(b)).** No CLI channel injects a prompt into an existing idle daemon session; `claude --bg --resume <sid>` **forks** — new sid, full transcript carried. Fleet adopts the fork as the worker's new canonical identity: old sid → `retired_sids`, mailbox re-pointed, ceiling file re-written, fresh `-n` restamp (which is also when a category change renders — no post-hoc rename channel exists, G13). The **universal drain rule** survives: every launch path (spawn, fork-steer, resume-limited, respawn) drains the current sid's mailbox into the composed prompt, and `status` flags `idle+mail`.
 
