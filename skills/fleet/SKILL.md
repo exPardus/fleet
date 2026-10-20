@@ -226,8 +226,10 @@ The floor runs in a fresh clone of the home. With no config it is the fleet repo
 `{python}` is replaced by each interpreter and must be present. `expected_failures` defaults to empty once a config exists. `env` names must be identifiers; a `null` value unsets that variable (the floor otherwise pins `UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache`). One interpreter skips the cross-interpreter comparison; two or more must agree on totals and failures. Unknown keys or malformed values refuse the close before the claim.
 
 The same file owns landing gates. With no `supervisor/wave-close.json` (the
-fleet home), `fleet land` runs the historical `docs-currency` and `receipts`
-gates. A configured home runs no fleet-specific gate by default; set `gates` to
+fleet home), `fleet land` runs `docs-currency`, `receipts`, and `citations`.
+The `citations` gate runs `tools/refresh_citations.py --check` only when the
+lane changes `bin/fleet.py`; `--write` refreshes unambiguous line pins before
+landing. A configured home runs no fleet-specific gate by default; set `gates` to
 an explicit list of built-in gate names or `{name, command}` objects for that
 home's own checks.
 

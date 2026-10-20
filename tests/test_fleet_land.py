@@ -75,7 +75,7 @@ def test_land_commits_allowed_dirty_paths_rebases_and_is_idempotent(
     (lane / "README.md").write_text("changed\n", encoding="utf-8")
     monkeypatch.chdir(repo)
     monkeypatch.setattr(fleet_land, "_check_commands",
-                        lambda worktree, tests: [("tests[1]", 0)])
+                        lambda worktree, tests, **kwargs: [("tests[1]", 0)])
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
     first_tip = _git(lane, "rev-parse", "HEAD").stdout.strip()
     assert not _git(lane, "status", "--porcelain").stdout
@@ -106,7 +106,7 @@ def test_land_carries_docs_na_line_as_commit_trailer(
     (lane / "README.md").write_text("changed\n", encoding="utf-8")
     monkeypatch.chdir(repo)
     monkeypatch.setattr(fleet_land, "_check_commands",
-                        lambda worktree, tests: [("tests[1]", 0)])
+                        lambda worktree, tests, **kwargs: [("tests[1]", 0)])
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
     message = _git(lane, "log", "-1", "--format=%B").stdout
     assert message.rstrip("\n").splitlines()[-1] == docs_line
@@ -118,7 +118,7 @@ def test_land_does_not_invent_docs_trailer(tmp_path, monkeypatch):
     (lane / "README.md").write_text("changed\n", encoding="utf-8")
     monkeypatch.chdir(repo)
     monkeypatch.setattr(fleet_land, "_check_commands",
-                        lambda worktree, tests: [("tests[1]", 0)])
+                        lambda worktree, tests, **kwargs: [("tests[1]", 0)])
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
     message = _git(lane, "log", "-1", "--format=%B").stdout
     assert "Docs:" not in message
@@ -130,7 +130,7 @@ def test_land_red_verdict_prints_no_merge_command(tmp_path, monkeypatch, capsys)
     (lane / "README.md").write_text("changed\n", encoding="utf-8")
     monkeypatch.chdir(repo)
     monkeypatch.setattr(fleet_land, "_check_commands",
-                        lambda worktree, tests: [("tests[1]", 1)])
+                        lambda worktree, tests, **kwargs: [("tests[1]", 1)])
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 1
     out = capsys.readouterr().out
     assert "verdict: RED" in out
@@ -198,6 +198,37 @@ def test_foreign_home_config_disables_fleet_only_land_gates(tmp_path, monkeypatc
     checks = fleet_land._check_commands(worktree, [])
 
     assert checks == []
+
+
+def test_citation_gate_runs_only_for_fleet_py_change(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label:
+                        seen.append((label, command)) or 0)
+    fleet_land._check_commands(tmp_path, [], home_root=tmp_path,
+                               files_changed=["README.md"])
+    assert "citations" not in [name for name, _ in seen]
+    seen.clear()
+    fleet_land._check_commands(tmp_path, [], home_root=tmp_path,
+                               files_changed=["bin/fleet.py"])
+    assert [name for name, _ in seen].count("citations") == 1
+    assert "refresh_citations.py --check" in dict(seen)["citations"]
+
+
+def test_foreign_home_can_opt_into_citation_gate(tmp_path, monkeypatch):
+    config = tmp_path / "supervisor" / "wave-close.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"gates": ["citations"]}), encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label:
+                        seen.append(label) or 0)
+    assert fleet_land._check_commands(tmp_path, [], home_root=tmp_path,
+                                      files_changed=["README.md"]) == []
+    assert fleet_land._check_commands(tmp_path, [], home_root=tmp_path,
+                                      files_changed=["bin/fleet.py"]) == [
+                                          ("citations", 0)]
+    assert seen == ["citations"]
 
 
 def test_builtin_gate_selection_runs_only_the_selected_gate(tmp_path, monkeypatch):
