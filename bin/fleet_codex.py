@@ -46,7 +46,7 @@ SCHEMA_FIXTURES = (
 )
 REVIEWED_SCHEMA_MANIFESTS = {
     version: SCHEMA_FIXTURES / version / "manifest.json"
-    for version in ("0.155.1", "0.160.0", "0.161.0")
+    for version in ("0.155.1", "0.160.0", "0.161.0", "0.162.0")
 }
 
 
@@ -2456,7 +2456,18 @@ class CodexHostClient:
             "method": "rpc",
             "payload": {"method": "configRequirements/read", "params": {}},
         }
-        return self.call(operation, timeout=timeout).result
+        result = self.call(operation, timeout=timeout).result
+        if isinstance(result, dict) and "supportsIndependentSpeedModes" in result:
+            # Codex 0.162 adds a speed capability beside the requirements.
+            # Permission preflight expects only the requirements envelope;
+            # preserve that contract without hiding unknown response fields.
+            speed_modes = result["supportsIndependentSpeedModes"]
+            if speed_modes is not None and not isinstance(speed_modes, bool):
+                raise HostRejected(
+                    "Codex supportsIndependentSpeedModes must be boolean or null")
+            result = {key: value for key, value in result.items()
+                      if key != "supportsIndependentSpeedModes"}
+        return result
 
     def pending_approvals(self, thread_id: str,
                           turn_id: str | None = None) -> list[dict[str, Any]]:

@@ -292,7 +292,7 @@ def test_generate_contract_rejects_oversized_public_schema(tmp_path):
         _generator()(str(codex), tmp_path / "fixture")
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0"])
 def test_checked_fixture_pins_reviewed_public_contract(version):
     fixture = FIXTURES / version
     manifest = json.loads((fixture / "manifest.json").read_text())
@@ -334,7 +334,7 @@ def test_0160_no_inference_contract_changes_only_the_version():
     assert new == old
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0"])
 def test_checked_fixture_contains_no_private_codex_path(version):
     for path in (FIXTURES / version).glob("*.json"):
         text = path.read_text(encoding="utf-8")
@@ -368,3 +368,116 @@ def test_codex_error_codes_read_variants_under_anyof_and_oneof(tmp_path):
         definitions = {"CodexErrorInfo": {
             key: [{"enum": ["other"]}, entry]}}
         assert _codex_errors(definitions) == ["activeTurnNotSteerable", "other"]
+
+
+def test_0162_reviewed_contract_is_identical_to_0161():
+    assert (FIXTURES / "0.162.0" / "v2-contract.json").read_bytes() == (
+        FIXTURES / "0.161.0" / "v2-contract.json").read_bytes()
+
+
+def test_0162_no_inference_contract_changes_only_the_version():
+    old = json.loads(
+        (FIXTURES / "0.161.0" / "no-inference-acceptance.json").read_text())
+    new = json.loads(
+        (FIXTURES / "0.162.0" / "no-inference-acceptance.json").read_text())
+    assert old.pop("codex_version") == "0.161.0"
+    assert new.pop("codex_version") == "0.162.0"
+    assert new == old
+
+
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0"])
+def test_reviewed_fixture_selected_from_exact_installed_version(
+        tmp_path, monkeypatch, version):
+    from types import SimpleNamespace
+    import fleet_codex
+
+    monkeypatch.setattr(
+        fleet_codex.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=f"codex-cli {version}\n"))
+    selected = fleet_codex._reviewed_schema_manifest(["codex"], cwd=tmp_path)
+    assert selected == fleet_codex.REVIEWED_SCHEMA_MANIFESTS[version]
+    assert json.loads(selected.read_text())["codex_version"] == version
+
+
+def _read_requirements_response(response):
+    from types import SimpleNamespace
+    from fleet_codex import CodexHostClient
+
+    def call(operation, *, timeout):
+        assert operation["payload"] == {
+            "method": "configRequirements/read", "params": {}}
+        return SimpleNamespace(result=response)
+
+    return CodexHostClient.config_requirements(SimpleNamespace(call=call))
+
+
+@pytest.mark.parametrize("speed_modes", [None, False, True])
+def test_0162_speed_capability_preserves_permission_preflight(speed_modes):
+    import fleet
+
+    requirements = {
+        "allowedApprovalPolicies": ["never"],
+        "allowedSandboxModes": ["workspace-write"],
+        "browserUse": {"extension": {"requestHeaders": [
+            {"name": "X-Example", "value": "public-example"}]}},
+    }
+    response = {"requirements": requirements,
+                "supportsIndependentSpeedModes": speed_modes}
+    result = _read_requirements_response(response)
+
+    assert result == {"requirements": requirements}
+    assert "supportsIndependentSpeedModes" in response
+    assert fleet._validate_codex_managed_requirements(result, {
+        "approvalPolicy": "never", "sandbox": "workspace-write"}) == {
+            "allowedApprovalPolicies": ["never"],
+            "allowedSandboxModes": ["workspace-write"],
+        }
+    with pytest.raises(fleet.FleetCliError, match="disallows requested"):
+        fleet._validate_codex_managed_requirements(result, {
+            "approvalPolicy": "on-request", "sandbox": "workspace-write"})
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", [], {}])
+def test_0162_speed_capability_rejects_malformed_values(value):
+    from fleet_codex import HostRejected
+
+    with pytest.raises(HostRejected, match="supportsIndependentSpeedModes"):
+        _read_requirements_response({
+            "requirements": None, "supportsIndependentSpeedModes": value})
+
+
+def test_0162_speed_capability_keeps_unknown_fields_fail_closed():
+    import fleet
+
+    result = _read_requirements_response({
+        "requirements": None, "supportsIndependentSpeedModes": True,
+        "unknownRequirement": True})
+    with pytest.raises(fleet.FleetCliError, match="response is malformed"):
+        fleet._validate_codex_managed_requirements(result, {})
+
+
+def test_0162_optional_event_fields_do_not_complete_a_turn(tmp_path):
+    from fleet_codex import CodexPublicEvidenceStore
+
+    home = tmp_path / "home"
+    home.mkdir()
+    store = CodexPublicEvidenceStore(home)
+    thread_id = "019f0000-0000-7000-8000-000000000001"
+    turn_id = "019f0000-0000-7000-8000-000000000002"
+    partial = {"id": "partial", "type": "agentMessage",
+               "text": "Partial answer", "phase": "partial_answer"}
+    result = store.record({"method": "item/completed", "params": {
+        "threadId": thread_id, "turnId": turn_id, "item": partial}})
+    assert "turn_status" not in result
+    final = {"id": "final", "type": "agentMessage",
+             "text": "Complete answer", "phase": "final_answer"}
+    result = store.record({"method": "turn/completed", "params": {
+        "threadId": thread_id, "turn": {
+            "id": turn_id, "rootTurnId": turn_id, "status": "completed",
+            "items": [partial, {
+                "id": "activity", "type": "subAgentActivity",
+                "model": "example-model", "reasoningEffort": "high"}, final],
+        }}})
+    assert result["turn_status"] == "completed"
+    assert result["result_text"] == "Complete answer"
