@@ -3,7 +3,7 @@
 **Status:** Option A approved and native is the default for new Codex workers
 and Codex supervisor bodies. The explicit mcx compatibility selector remains.
 **Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1,
-0.160.0 and 0.161.0 v2 JSON Schemas generated from isolated installs with
+0.160.0, 0.161.0 and 0.162.0 v2 JSON Schemas generated with
 `codex app-server generate-json-schema`.
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -136,13 +136,13 @@ That compatibility adapter cannot provide the target lifecycle:
 ### 3.2 Reviewed Codex v2 schemas
 
 For a new host, the adapter selects an explicit reviewed manifest from exact
-`codex --version` output. Versions 0.155.1, 0.160.0 and 0.161.0 are reviewed; any other
+`codex --version` output. Versions 0.155.1, 0.160.0, 0.161.0 and 0.162.0 are reviewed; any other
 version refuses before host startup, and an installed schema whose digest
 differs from its selected manifest never publishes ready. An already-live host
 is instead authenticated against the reviewed version and digest recorded in
 its metadata, so upgrading the installed CLI does not strand native work owned
 by the prior reviewed host. The adapter begins with `initialize` and
-`initialized`. Both reviewed generated schemas expose:
+`initialized`. All reviewed generated schemas expose:
 
 | Concern | Exact public surface |
 | --- | --- |
@@ -204,6 +204,33 @@ no-inference RPC sequence. Only the raw schema digest differs. The generator
 had to learn that 0.161 emits `CodexErrorInfo` variants under `anyOf` rather
 than `oneOf`; without that, `activeTurnNotSteerable` and the object-form
 connection error codes silently dropped out of the extraction.
+
+Review of 0.162.0 against 0.161.0 compared the complete generated v2 schema,
+request/notification envelopes, reachable parameter and response definitions,
+initialization, and approval responses. Regenerating 0.161.0 reproduced its
+reviewed raw digest. The compact `v2-contract.json` remains byte-identical;
+it records required fields and selected enums, so it does not capture the
+following changes to optional fields. The new raw schema digest is
+`0bf5254bede109d4ae03ce2e81372e4c93a30b359c0749ec7dce7a9382a7f857`.
+
+| Surface | Complete-schema delta and Fleet handling |
+| --- | --- |
+| `initialize`, `initialized`, `thread/start` | Request fields, effective identity/permission response fields, and handshake unchanged. Nested thread history has the turn/item additions below. |
+| `turn/start` | Adds optional nullable `parentTurnId` and `rootTurnId`. Fleet omits them; required `threadId` and `input` are unchanged. |
+| `turn/steer`, `turn/interrupt` | Requests and responses unchanged, including `expectedTurnId` and exact interrupt IDs. |
+| `thread/read`, `thread/list`, `thread/resume`, `thread/turns/list`, `thread/items/list` | Envelopes, pagination, and required fields unchanged. `Turn.rootTurnId` is optional and nullable; Fleet continues binding to `Turn.id`. `thread/loaded/list` is unchanged. |
+| Approval and input server requests/responses | All unchanged, including command, file, permissions, user input, MCP elicitation, and `serverRequest/resolved`. |
+| Turn/item events and paged items | Adds `MessagePhase.partial_answer`, optional nullable `subAgentActivity.model` and `.reasoningEffort`, and optional nullable `MisalignmentErrorDetails.reviewTarget`. Fleet ignores these fields; only terminal turn status completes work. Partial text never supplies terminal proof. Event envelopes, statuses, error codes, token usage, and rate limits are unchanged. |
+| `configRequirements/read` | Adds optional nullable boolean `supportsIndependentSpeedModes` beside `requirements`. The adapter validates and removes this speed capability before permission preflight, whose strict envelope otherwise rejects it. Unknown top-level fields still fail closed. Nested `browserUse.extension.requestHeaders` is optional; preflight still checks the same approval/sandbox restrictions and Codex enforces browser requirements. |
+
+Other schema changes affect surfaces Fleet does not send or inspect:
+`thread/attachmentOwner/list` is new; `ResponseItem` adds `additional_tools`;
+`EnvironmentSkillsParams` is new; skill metadata/summary paths now reference
+`LegacyAppPathString`; and provider capability responses remove `namespaceTools`.
+No consumed field was removed or made required. The no-inference acceptance
+fixture changes only its version; it is an expected RPC contract, not evidence
+of a new live acceptance run. The only required adapter behavior change is the
+speed capability normalization above. Schema extraction needs no change.
 
 ## 4. Alternatives
 
@@ -1004,7 +1031,7 @@ Grade actions and side effects, not wording.
 
 | ID | Layer | Test | Required result |
 | --- | --- | --- | --- |
-| P1 | Schema | Generate 0.155.1, 0.160.0 and 0.161.0 v2 schemas; validate each fixture digest | Either reviewed exact version/digest accepted; unknown version or drift disables native only |
+| P1 | Schema | Generate 0.155.1, 0.160.0, 0.161.0 and 0.162.0 v2 schemas; validate each fixture digest | Each reviewed exact version/digest accepted; unknown version or drift disables native only |
 | P2 | Protocol | Initialize; start/read/list/resume disposable thread at exact cwd | Real ID/cwd agree |
 | P3 | Protocol | Start, active, steer with expected turn, page history, complete | One real turn lineage; final result persisted |
 | P4 | Protocol | Interrupt active disposable turn | Supported request with real IDs; same turn observed terminal |
