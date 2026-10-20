@@ -471,7 +471,7 @@ callback cannot be cleared by this command.
 
 The wave-close row's per-home configuration also owns landing gates: a missing
 `supervisor/wave-close.json` preserves the fleet home's `docs-currency` and
-`receipts` gates, while a configured foreign home defaults to no fleet-specific
+`receipts`, and conditional `citations` gates, while a configured foreign home defaults to no fleet-specific
 gate and may select named built-ins or `{name, command}` checks. Merge subjects
 `merge(hotfix/<name>): ...` are interface/supervisor bookkeeping, listed in
 throughput with workers `0` and exempt from worker joining; unknown merge
@@ -479,7 +479,7 @@ subjects remain UNPARSED and refuse the close. Both the floor and landing-gate
 configuration are resolved from the home checkout root, even when `fleet land`
 is invoked from a nested directory or a linked lane worktree; refusal totals
 count every merge in the range, including hotfix bookkeeping. Named gates use
-one shared allowlist (`docs-currency` and `receipts`); unknown names refuse
+one shared allowlist (`docs-currency`, `receipts`, and `citations`); the citation gate checks `bin/fleet.py` self-citations only when that file is in the lane's `files_changed`, using `tools/refresh_citations.py --check` (and `--write` refreshes unambiguous targets). Unknown names refuse
 before either landing or wave-close work begins.
 
 ## 8. Outcome store + the hook write boundary
