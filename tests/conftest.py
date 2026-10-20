@@ -19,7 +19,7 @@ if str(BIN_DIR) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
-def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
+def _never_touch_the_real_home(tmp_path, tmp_path_factory, monkeypatch):
     """Redirect every path fleet resolves from `Path.home()` into a tmp dir.
 
     `fleet init --statusline` writes `~/.claude/settings.json`, and doctor
@@ -58,9 +58,18 @@ def _never_touch_the_real_home(tmp_path_factory, monkeypatch):
     EveryFile`), because a pin written inside an opted-in file would have gone
     green on the broken world -- which is exactly what happened for six days.
 
-    Tests that assert on these paths override them again with their own value;
-    this fixture only guarantees the default is never the real home."""
+    Tests that assert on these paths override them again with their own value.
+    Claude workspace-trust writes use CLAUDE_CONFIG_DIR, with HOME/USERPROFILE
+    redirected per test so the writer's explicit and fallback paths are both
+    isolated. `test_trust_acceptance.py` guards its atomic destination."""
     import fleet
+    # Trust acceptance uses Claude's own user config. Isolate both its explicit
+    # config root and HOME fallback for every test, not only trust-specific tests.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
     sandbox = tmp_path_factory.mktemp("fake-home")
     (sandbox / ".claude").mkdir()
     monkeypatch.setattr(fleet, "user_settings_path",
