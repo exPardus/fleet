@@ -219,6 +219,7 @@ ALLOWED = {
     "cmd_sup_reconcile", "_reconcile_codex_activating",
     "_call_codex_activating_recovery", "_reconcile_codex_handoff_predecessor",
     "_reconcile_dead_suspected_codex_completions",
+    "_reconcile_dead_suspected_codex_system_errors",
     "_freeze_codex_predecessor_retirement",
     "_finalize_codex_predecessor_retirement",
     "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
