@@ -247,9 +247,22 @@ def test_read_only_views_do_not_start_or_reconcile_a_codex_host():
         node.name: node for node in tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    # Two entry points are deliberately NOT roots, each because the owning doc
+    # defines them as mutating, not as views:
+    #  * `cmd_sup_guard`: SPEC §12 (`sup-guard` row; G-K8 C bullet) -- `--do` is
+    #    the keeper tick, takes `fleet.lock`, and wakes the supervisor through
+    #    `send` on `WAKE`, which on a Codex supervisor reaches the host journal.
+    #    Its verdict half is "lock-free ... writes nothing", so the observation
+    #    and decision helpers are rooted instead and stay pinned.
+    #  * `cmd_status`: SPEC §5 `status` row -- the authoritative path (no
+    #    `--stale-ok`) takes the lock, recomputes, writes, and delivers
+    #    lane-done for idle Codex lanes (SPEC lane-done: "Idle Codex
+    #    observations use the same bridge"). The view path is
+    #    `--stale-ok` = `status_snapshot`, which is rooted.
+    pending = ["status_snapshot", "cmd_peek", "cmd_result",
+               "_sup_guard_observe", "_sup_guard_decide", "_sup_guard_line",
+               "cmd_mail_verify"]
     reachable = set()
-    pending = ["status_snapshot", "cmd_status", "cmd_peek", "cmd_result",
-               "cmd_sup_guard", "cmd_mail_verify"]
     while pending:
         name = pending.pop()
         if name in reachable or name not in functions:

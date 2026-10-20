@@ -204,7 +204,15 @@ class TestTheGrammarIsNotOsPathIsabs:
     # would be "absolute" on 3.10 and not on 3.13, and would then fall through
     # to the cwd-resolution check, which resolves it to nothing and returns
     # False either way. Reported in the a1 report, not changed here.
-    ISABS_CALLERS_DISPOSITIONED = {"_resolved_from_current_directory"}
+    #
+    # `_restored_history_evidence` is the second, dispositioned the same way.
+    # It validates an explicit evidence-file argument that is then opened with
+    # `os.getuid` / `O_NOFOLLOW` / `lstat` -- POSIX-only, and no home path. The
+    # host's own path dialect is the right question there: the spec grammar
+    # would accept `C:/x` or a UNC share on POSIX, which `Path()` there reads
+    # as a relative name, so delegating to it would be the wrong check.
+    ISABS_CALLERS_DISPOSITIONED = {"_resolved_from_current_directory",
+                                   "_restored_history_evidence"}
 
     def test_the_isabs_census_is_unchanged(self):
         """A CENSUS, not a ban, because a blanket ban would forbid a correct

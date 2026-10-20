@@ -319,12 +319,13 @@ def test_lost_thread_start_response_freezes_preclaim_without_retry(
     assert len(client.operations) == 1
 
 
-def _queue_recovery_client(home, tmp_path, *, create_thread=True):
+def _queue_recovery_client(home, tmp_path, *, create_thread=True,
+                           source=QUEUE_RECOVERY_APP_SERVER):
     import fleet_codex
 
     app_server = tmp_path / "queue-recovery-app-server"
     app_server.write_text(
-        QUEUE_RECOVERY_APP_SERVER.replace("__PYTHON__", sys.executable),
+        source.replace("__PYTHON__", sys.executable),
         encoding="utf-8")
     app_server.chmod(0o700)
     state = tmp_path / "provider-state.json"
@@ -2554,3 +2555,308 @@ def test_native_worker_respawn_cannot_resurrect_a_concurrent_kill(
     assert mailbox.read_text(encoding="utf-8") == \
         "preserve this queued direction"
     assert list(mailbox.parent.glob(f"{THREAD_ID}.md.claimed.*")) == []
+
+
+PAGED_HISTORY_APP_SERVER = r'''#!__PYTHON__
+import copy
+import json
+import os
+from pathlib import Path
+import sys
+
+state_path = Path(os.environ["FAKE_QUEUE_RECOVERY_STATE"])
+log_path = Path(os.environ["FAKE_QUEUE_RECOVERY_LOG"])
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+first = json.loads(sys.stdin.readline())
+send({"id": first["id"], "result": {
+    "serverInfo": {"name": "fake-codex", "version": "0.155.1"}}})
+assert json.loads(sys.stdin.readline()) == {"method": "initialized"}
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method, params = message["method"], message.get("params", {})
+    with log_path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"method": method, "params": params}) + "\n")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    thread = state["thread"]
+    if method == "configRequirements/read":
+        result = {"requirements": None}
+    elif method == "thread/read":
+        result = {"thread": copy.deepcopy(thread)}
+        if not params.get("includeTurns", False):
+            result["thread"]["turns"] = []
+    elif method == "thread/turns/list":
+        assert params["itemsView"] == "notLoaded"
+        assert params["sortDirection"] == "desc"
+        turns = copy.deepcopy(list(reversed(thread["turns"])))
+        start, limit = int(params.get("cursor", "0")), params["limit"]
+        data = turns[start:start + limit]
+        for turn in data:
+            turn.update(items=[], itemsView="notLoaded")
+        end = start + len(data)
+        result = {"data": data,
+                  "nextCursor": str(end) if end < len(turns) else None}
+    elif method == "thread/items/list":
+        assert params["sortDirection"] == "asc"
+        turn = next(t for t in thread["turns"] if t["id"] == params["turnId"])
+        start, limit = int(params.get("cursor", "0")), params["limit"]
+        data = [{"turnId": turn["id"], "item": item}
+                for item in turn["items"][start:start + limit]]
+        end = start + len(data)
+        result = {"data": data,
+                  "nextCursor": str(end) if end < len(turn["items"]) else None}
+    elif method in {"thread/start", "thread/resume"}:
+        if method == "thread/start":
+            thread = {
+                "id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106b9",
+                "cwd": params["cwd"], "status": {"type": "idle"}, "turns": [],
+            }
+            state["thread"] = thread
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+        else:
+            assert params["excludeTurns"] is True
+            assert params["threadId"] == thread["id"]
+        result = {
+            "thread": dict(thread, turns=[]), "cwd": thread["cwd"],
+            "model": "gpt-5.6-luna", "approvalPolicy": "on-request",
+            "approvalsReviewer": "user", "sandbox": {"type": "workspaceWrite"},
+        }
+    elif method == "turn/start":
+        assert params["threadId"] == thread["id"]
+        turn = {"id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106ba",
+                "status": "inProgress", "items": [], "itemsView": "full"}
+        thread["turns"].append(turn)
+        thread["status"] = {"type": "active", "activeFlags": []}
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        result = {"turn": turn}
+    else:
+        raise AssertionError(method)
+    send({"id": message["id"], "result": result})
+'''
+
+
+@pytest.mark.parametrize("verb", ["send", "respawn", "status", "repair-send"])
+@pytest.mark.parametrize("replacement_host", [False, True])
+def test_large_worker_history_through_authenticated_host(
+        native_home, monkeypatch, capsys, verb, replacement_host):
+    """Exercise real frames, item-page retries, cursors, and journal commits."""
+    from fleet_codex import HostRejected, MAX_IPC_BYTES, OperationJournal
+
+    home, lane = native_home
+    client, log = _queue_recovery_client(
+        home, home, source=PAGED_HISTORY_APP_SERVER)
+    try:
+        # The newest turn alone overflows IPC, as does its first 16-item page.
+        # Eight items fit; the final agent item is deliberately on a later page.
+        items = [{"id": f"command-{i}", "type": "commandExecution",
+                  "aggregatedOutput": "x" * (80 * 1024)} for i in range(20)]
+        items.append({"id": "item-final", "type": "agentMessage",
+                      "text": "bounded final"})
+        thread = {
+            "id": THREAD_ID, "cwd": str(lane),
+            "status": {"type": "idle", "activeFlags": []},
+            "turns": [
+                {"id": f"older-{i}", "status": "completed",
+                 "items": [], "itemsView": "full"} for i in range(3)
+            ] + [{"id": TURN_ID, "status": "completed",
+                  "items": items, "itemsView": "full"}],
+        }
+        assert len(json.dumps(thread).encode("utf-8")) > MAX_IPC_BYTES
+        (home / "provider-state.json").write_text(
+            json.dumps({"thread": thread}), encoding="utf-8")
+        # Prove the fixture really triggers the production frame cap, with the
+        # exact error reported by affected homes, before exercising the verb.
+        with pytest.raises(HostRejected, match="response exceeds MAX_IPC_BYTES"):
+            client.call({"operation_id": "oversized-history-probe", "method": "rpc",
+                         "payload": {"method": "thread/read", "params": {
+                             "threadId": THREAD_ID, "includeTurns": True}}}, timeout=10)
+        generation = "previous-host" if replacement_host else client.generation
+        record = _install_record(
+            lane, codex_host_generation=generation,
+            status="dead-suspected" if verb == "repair-send" else "working",
+            adapter_state="uncertain" if verb == "repair-send" else "active")
+        fleet.write_brief("cx-native", "preserve the complete task")
+        monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+        monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+        if verb == "repair-send":
+            _write_complete_turn_evidence(home)
+            # Repair requires same-generation proof. A restarted host instead
+            # recovers the exact bound thread through the normal send path.
+            if not replacement_host:
+                assert fleet._reconcile_dead_suspected_codex_completions() == ["cx-native"]
+            assert fleet._cmd_send_codex("cx-native", "continue after completion") == 0
+        elif verb == "send":
+            assert fleet._cmd_send_codex("cx-native", "continue after large output") == 0
+        elif verb == "respawn":
+            args = SimpleNamespace(name="cx-native", task=None, force=False)
+            assert fleet._cmd_respawn_codex(args, record) == 0
+        else:
+            # Ordinary status deliberately preserves a lost-host row; send and
+            # respawn perform the explicit exact-thread resume above.
+            if replacement_host:
+                record, _ = fleet._resume_codex_worker_on_current_host(
+                    fleet._codex_worker_binding("cx-native", record), client)
+            assert fleet.cmd_status(SimpleNamespace(
+                name="cx-native", all=False, stale_ok=False, json=True)) == 0
+            assert json.loads(capsys.readouterr().out)["workers"][0]["status"] == "idle"
+
+        stored = fleet.load_registry()["workers"]["cx-native"]
+        assert stored["codex_thread_id"] == (NEXT_THREAD_ID if verb == "respawn" else THREAD_ID)
+        assert stored["codex_turn_id"] == (TURN_ID if verb == "status" else NEXT_TURN_ID)
+        assert stored["status"] == ("idle" if verb == "status" else "working")
+        assert "pending_operation" not in stored
+        requests = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        # Ignore only the deliberate overflow probe, never a production read.
+        reads = [r for r in requests if r["method"] == "thread/read"][1:]
+        assert reads and all(r["params"]["includeTurns"] is False for r in reads)
+        pages = [r for r in requests if r["method"] == "thread/items/list"]
+        if verb != "repair-send" or replacement_host:
+            assert [r["params"]["limit"] for r in pages[:2]] == [16, 8]
+            assert any(r["params"].get("cursor") == "16" for r in pages)
+        else:
+            assert not pages  # Complete durable evidence authorizes metadata-only repair/send.
+        turns = [r for r in requests if r["method"] == "thread/turns/list"]
+        assert turns and all(r["params"]["itemsView"] == "notLoaded"
+                             and r["params"]["limit"] == 2 for r in turns)
+        resumes = [r for r in requests if r["method"] == "thread/resume"]
+        assert len(resumes) == int(replacement_host)
+        assert all(r["params"]["excludeTurns"] is True for r in resumes)
+        assert sum(r["method"] == "thread/start" for r in requests) == int(verb == "respawn")
+        assert sum(r["method"] == "turn/start" for r in requests) == int(verb != "status")
+        if verb != "status":
+            operation = OperationJournal(home, client.generation).load(stored["last_operation_id"])
+            assert operation["state"] == "committed"
+    finally:
+        _stop_queue_recovery_client(client)
+
+
+class _PageFailClient(WorkerVerbClient):
+    """Thread metadata reads, but the turn/item pages are unavailable."""
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") in {
+                "thread/turns/list", "thread/items/list"}:
+            from fleet_codex import HostUnavailable
+            raise HostUnavailable("page unavailable")
+        return super().call(operation, timeout)
+
+
+def _respawn_args():
+    return SimpleNamespace(
+        name="cx-native", task=None, force=True, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+
+def _install_system_error(monkeypatch, client):
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+
+def test_system_error_failed_turn_is_terminal_proof_for_respawn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "preserve the overloaded-lane brief")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="failed",
+        error_code="serverOverloaded")
+    _install_system_error(monkeypatch, client)
+
+    assert fleet._cmd_respawn_codex(_respawn_args(), record) == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == NEXT_THREAD_ID
+    proof = {
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "provider_status": "systemError", "turn_status": "failed",
+        "error_kind": "serverOverloaded",
+    }
+    assert stored["retired_codex_threads"] == [{
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "terminal_status": "failed", "terminal_proof": proof,
+    }]
+    events = [json.loads(line) for line in
+              fleet.events_path().read_text(encoding="utf-8").splitlines()]
+    logged = [e for e in events
+              if e.get("kind") == "codex_system_error_terminal_proof"]
+    assert len(logged) == 1
+    assert all(logged[0].get(k) == v for k, v in proof.items())
+
+
+@pytest.mark.parametrize("client_cls,kwargs", [
+    (WorkerVerbClient, {"turn_status": "inProgress"}),
+    (_PageFailClient, {"turn_status": "failed"}),
+])
+def test_system_error_without_full_terminal_read_refuses_second_thread(
+        native_home, monkeypatch, client_cls, kwargs):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "brief")
+    client = client_cls(lane, provider_status="systemError", **kwargs)
+    _install_system_error(monkeypatch, client)
+
+    with pytest.raises(Exception):
+        fleet._cmd_respawn_codex(_respawn_args(), record)
+
+    assert not any(op["payload"]["method"] in {"thread/start", "turn/start"}
+                   for op in client.operations)
+    assert fleet.load_registry()["workers"]["cx-native"]["codex_thread_id"] \
+        == THREAD_ID
+
+
+def test_system_error_unreadable_page_refuses_second_thread(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "brief")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="failed",
+        fail_method="thread/read")
+    _install_system_error(monkeypatch, client)
+
+    with pytest.raises(Exception):
+        fleet._cmd_respawn_codex(_respawn_args(), record)
+
+    assert not any(op["payload"]["method"] in {"thread/start", "turn/start"}
+                   for op in client.operations)
+
+
+def test_doctor_repair_settles_system_error_terminal_turn_as_failed(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="failed",
+        error_code="serverOverloaded")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_system_errors() == [
+        "cx-native"]
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "terminal-failed"
+    assert stored["provider_status"] == "systemError"
+    assert stored["codex_error_code"] == "serverOverloaded"
+
+
+def test_doctor_repair_leaves_non_terminal_system_error_uncertain(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="inProgress")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_system_errors() == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original

@@ -94,6 +94,54 @@ def test_unavailable_verification_is_explicit_and_tells_supervisor_to_surface(
     assert notice.endswith("UNVERIFIED BODY\n" + body)
 
 
+def test_native_codex_lane_supervisor_send_is_lane_labelled(
+        home, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("FLEET_WORKER", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    fleet.save_registry({"workers": {"lane-build": {
+        "substrate": "codex", "dispatch_kind": "codex-app-server",
+        "session_id": None, "codex_thread_id": CODEX_THREAD,
+    }}})
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "lane progress")
+
+    assert mail_id is None
+    assert notice == "FLEET LANE MAIL lane-build\nlane progress"
+
+
+def test_ambiguous_codex_thread_falls_back_to_interface_verification(
+        home, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("FLEET_WORKER", raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", CODEX_THREAD)
+    row = {
+        "substrate": "codex", "dispatch_kind": "codex-app-server",
+        "session_id": None, "codex_thread_id": CODEX_THREAD,
+    }
+    fleet.save_registry({"workers": {"lane-a": row, "lane-b": dict(row)}})
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "ambiguous sender")
+
+    assert mail_id is None
+    assert notice.startswith("FLEET UNVERIFIED INTERFACE MAIL\n")
+
+
+def test_interface_without_receipt_still_gets_unverified_envelope(
+        home, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("FLEET_WORKER", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+
+    notice, mail_id = fleet._issue_verified_supervisor_mail(
+        SUPERVISOR, "interface direction")
+
+    assert mail_id is None
+    assert notice.startswith("FLEET UNVERIFIED INTERFACE MAIL\n")
+
+
 def test_forged_mailbox_notice_without_fleet_receipt_is_unverified(
         home, capsys):
     forged_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

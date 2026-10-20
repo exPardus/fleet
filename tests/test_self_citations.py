@@ -269,10 +269,10 @@ def _enclosing_function(n):
 
 
 def _call_lines(callee):
-    """Code lines that CALL `callee`, its own `def` excluded."""
+    """Facade coordinates that CALL `callee`, its own `def` excluded."""
     needle = callee + "("
-    return {i for i, line in enumerate(IMPLEMENTATION_SRC, start=1)
-            if needle in line and i in IMPLEMENTATION_CODE_LINES
+    return {i for i, line in enumerate(SRC, start=1)
+            if needle in line and i in CODE_LINES
             and not line.lstrip().startswith("def ")}
 
 
@@ -491,7 +491,8 @@ CITED_SITES = (
     Cite("the sid-union sites",
          r"sites that already key on the union",
          anchor="_record_sids(",
-         exactly="_record_sids union sites"),
+         exactly="_record_sids union sites",
+         window=0),
 
     # P1-6's two comments on the unlocked pre-flight read, each enumerating the
     # SAME pair of callers -- `cmd_kill:NNNN` / `cmd_respawn:NNNN`. Two numbers

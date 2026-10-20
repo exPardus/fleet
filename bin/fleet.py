@@ -954,20 +954,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:11909) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:12911) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:16370) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:13331) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:14409) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:17872) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:3738) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:4033) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4433) -- expose that distinction to views.
-      * `_doctor_check_registry` (:13161) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:16244) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4742) -- expose that distinction to views.
+      * `_doctor_check_registry` (:14659) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:17746) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7106) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:18024) -- render the release explanation.
+      * `_print_snapshot_table` (:7951) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:19526) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1500,6 +1500,26 @@ def _issue_verified_supervisor_mail(target: str, body: str) -> tuple[str, str | 
     """Return raw worker mail or a verified/unverified supervisor notice."""
     if not _is_supervisor_shaped(target):
         return body, None
+    # Native Codex lanes are threads in one shared app-server host, so the
+    # launcher cannot stamp a per-lane FLEET_WORKER value. Resolve their name
+    # from the unique native registry row for this provider thread instead.
+    # This is routing context, never Interface authority.
+    lane_thread = os.environ.get("CODEX_THREAD_ID")
+    if lane_thread:
+        try:
+            workers = read_registry_no_repair().get("workers", {})
+            lane_matches = [
+                (name, record) for name, record in workers.items()
+                if isinstance(name, str) and not _is_supervisor_shaped(name)
+                and isinstance(record, dict)
+                and _codex_record_route(record) == "native"
+                and record.get("codex_thread_id") == lane_thread
+            ] if isinstance(workers, dict) else []
+        except (OSError, FleetCliError):
+            lane_matches = []
+        if len(lane_matches) == 1:
+            lane_name, _lane = lane_matches[0]
+            return f"FLEET LANE MAIL {lane_name}\n{body}", None
     source = _registered_interface_mail_source()
     if source is None:
         notice = (
@@ -1893,6 +1913,52 @@ def _worker_env(name: str) -> dict:
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["FLEET_WORKER"] = name
     return env
+
+
+def _ensure_claude_directory_trusted(directory) -> None:
+    """Record Claude's accepted workspace-trust bit before Fleet launches there.
+
+    Claude has no supported launch flag for accepting the workspace trust
+    dialog. Keep this edit narrowly scoped to the resolved project entry.
+    """
+    target = str(Path(directory).expanduser().resolve())
+    config_root = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_path = (Path(config_root).expanduser() / ".claude.json"
+                   if config_root else Path.home() / ".claude.json")
+    try:
+        if config_path.exists():
+            raw = config_path.read_text(encoding="utf-8")
+            config = json.loads(raw)
+            if not isinstance(config, dict):
+                raise ValueError("top-level JSON value must be an object")
+        else:
+            config = {}
+        projects = config.setdefault("projects", {})
+        if not isinstance(projects, dict):
+            raise ValueError("projects must be an object")
+        entry = projects.setdefault(target, {})
+        if not isinstance(entry, dict):
+            raise ValueError(f"projects[{target!r}] must be an object")
+        if entry.get("hasTrustDialogAccepted") is True:
+            return
+        entry["hasTrustDialogAccepted"] = True
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".claude.json.", dir=str(config_path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(config, stream, indent=2)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, config_path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        raise FleetCliError(
+            f"cannot accept Claude workspace trust in {config_path}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2522,6 +2588,23 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
         "turn_status": turn_status, "items_view": items_view,
         "result_item_id": result_item_id, "result_text": result_text,
         "error_code": _codex_error_code(turn),
+    }
+
+
+def _codex_system_error_terminal(observed) -> bool:
+    """A systemError thread whose exact newest turn is terminal in the full read."""
+    return (observed["provider_status"] == "systemError"
+            and observed["turn_status"] in {"completed", "failed", "interrupted"}
+            and observed.get("items_view") == "full")
+
+
+def _codex_system_error_evidence(observed) -> dict:
+    binding = observed["binding"]
+    return {
+        "thread_id": binding.thread_id, "turn_id": binding.turn_id,
+        "provider_status": observed["provider_status"],
+        "turn_status": observed["turn_status"],
+        "error_kind": observed.get("error_code"),
     }
 
 
@@ -3932,9 +4015,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:16370`), because legacy upgrades also require a complete registry.
+    (`:17872`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1091`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1041`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -5553,6 +5636,17 @@ def registry_status(value) -> str:
     return TYPE_FAULT
 
 
+def _supervisor_row_incarnation(name, rec):
+    """The incarnation a supervisor-shaped registry row belongs to: its
+    `supervisor_incarnation_id` field, else the middle segment of
+    `sup|<inc>|<role>`. None when neither is a string."""
+    inc = rec.get("supervisor_incarnation_id") if isinstance(rec, dict) else None
+    if isinstance(inc, str) and inc:
+        return inc
+    parts = name.split("|") if isinstance(name, str) else []
+    return parts[1] if len(parts) == 3 and parts[1] else None
+
+
 def status_snapshot(now=None, include_archived: bool = False) -> dict:
     """Read a file-only fleet snapshot without locking, probing or mutating state.
     Project workers, numeric totals, unknown-field markers and supervisor claim state.
@@ -5628,6 +5722,14 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
             # The separate supervisor snapshot states which body holds the claim.
             "tier": "supervisor" if _is_supervisor_shaped(name) else "worker",
         }
+        if row["tier"] == "supervisor":
+            # Only the body of the claim's incarnation is a current body; a
+            # retired incarnation's row is history. With no readable claim
+            # incarnation nothing can be called retired, so the row stays current.
+            claim_inc = snap["supervisor"].get("incarnation_id")
+            row["current_body"] = (
+                not isinstance(claim_inc, str) or not claim_inc
+                or _supervisor_row_incarnation(name, rec) == claim_inc)
         if _codex_record_route(rec) == "native":
             row["codex_waits"] = _codex_wait_summaries(rec)
         if _codex_record_route(rec) == "mcx":
@@ -10904,7 +11006,12 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         before = dict(read_registry_no_repair()["workers"][name])
         binding = _codex_worker_binding(name, before)
         observed = _codex_worker_observe(binding, require_full=True)
-    if (observed["provider_status"] != "idle"
+    system_error_proof = None
+    if _codex_system_error_terminal(observed):
+        # The full public read shows the exact newest turn terminal under a
+        # systemError thread: that is terminal proof; record what was seen.
+        system_error_proof = _codex_system_error_evidence(observed)
+    elif (observed["provider_status"] != "idle"
             or observed["turn_status"] not in {
                 "completed", "failed", "interrupted"}):
         raise FleetCliError(
@@ -10998,10 +11105,13 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         record = data["workers"].get(name)
         if record == respawn_claim:
             retired = list(record.get("retired_codex_threads") or [])
-            retired.append({
+            retired_entry = {
                 "thread_id": binding.thread_id, "turn_id": binding.turn_id,
                 "terminal_status": observed["turn_status"],
-            })
+            }
+            if system_error_proof is not None:
+                retired_entry["terminal_proof"] = system_error_proof
+            retired.append(retired_entry)
             record.update({
                 "codex_thread_id": thread_id, "codex_turn_id": None,
                 "codex_host_generation": reply.generation,
@@ -11023,6 +11133,10 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
             if task_override is not None:
                 record.update({"task": task_override[:LEGACY_TASK_SNAPSHOT_CHARS]})
             save_registry(data)
+            if system_error_proof is not None:
+                _append_event_quiet(
+                    "codex_system_error_terminal_proof", name,
+                    **system_error_proof)
             _append_event_quiet(
                 "codex_thread_bound", name, codex_thread_id=thread_id,
                 host_generation=reply.generation)
@@ -11559,7 +11673,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:10170` / `cmd_respawn:9461`, before
+    # resolution that runs from `cmd_kill:11588` / `cmd_respawn:10872`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -11590,9 +11704,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:10170` / `cmd_respawn:9461`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:11588` / `cmd_respawn:10872`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:9482-9491` spells out that design -- resolve under the lock.
+    # `cmd_respawn:10893-10900` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -13887,7 +14001,76 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
     return reconciled
 
 
-def _doctor_check_dead_suspected(workers: dict, reconciled=()):
+def _reconcile_dead_suspected_codex_system_errors() -> list[str]:
+    """Settle dead-suspected native rows whose exact turn ended under systemError.
+
+    Same snapshot/CAS discipline as the completion reconciler: read the full
+    public turn outside the lock, commit only when the whole row is unchanged.
+    A non-terminal, unreadable, or mismatched read changes nothing.
+    """
+    with fleet_lock():
+        data = load_registry()
+        candidates = {
+            name: dict(record)
+            for name, record in data.get("workers", {}).items()
+            if (isinstance(record, dict)
+                and record.get("status") == "dead-suspected"
+                and record.get("archived_at") is None
+                and record.get("pending_operation") is None
+                and _codex_record_route(record) == "native"
+                and not _is_supervisor_shaped(name))
+        }
+
+    prepared = {}
+    for name, before in candidates.items():
+        try:
+            binding = _codex_worker_binding(name, before)
+            observed = _codex_worker_observe(binding, require_full=True)
+        except (FleetCliError, OSError, ValueError):
+            continue
+        if (not _codex_system_error_terminal(observed)
+                or observed["turn_status"] == "completed"
+                or observed["active_flags"]
+                or _codex_current_waits(before)):
+            continue
+        updated = dict(before)
+        updated.update({
+            "status": ("interrupted" if observed["turn_status"] == "interrupted"
+                       else "dead"),
+            "adapter_state": "terminal-failed",
+            "provider_status": observed["provider_status"],
+            "last_activity": now_iso(),
+        })
+        if observed.get("error_code") is not None:
+            updated["codex_error_code"] = observed["error_code"]
+        prepared[name] = (before, updated, _codex_system_error_evidence(observed))
+
+    if not prepared:
+        return []
+
+    reconciled = []
+    with fleet_lock():
+        data = load_registry()
+        workers = data.get("workers", {})
+        for name, (before, updated, _evidence) in prepared.items():
+            if workers.get(name) != before:
+                continue
+            workers[name] = updated
+            reconciled.append(name)
+        if reconciled:
+            save_registry(data)
+            for name in reconciled:
+                _, updated, evidence = prepared[name]
+                append_event(
+                    "status_changed", name, old="dead-suspected",
+                    new=updated["status"],
+                    reason="native Codex systemError with terminal turn",
+                    **evidence)
+    return reconciled
+
+
+def _doctor_check_dead_suspected(workers: dict, reconciled=(),
+                                 reconciled_errors=()):
     """Note dead-suspected rows in the supplied snapshot without recomputing.
     The verdict is advisory and recomputable, never a sticky respawn trigger.
     """
@@ -13895,6 +14078,10 @@ def _doctor_check_dead_suspected(workers: dict, reconciled=()):
         f"reconciled {len(reconciled)} exact native Codex completion(s): "
         f"{', '.join(sorted(reconciled))}; "
         if reconciled else "")
+    if reconciled_errors:
+        repaired += (
+            f"settled {len(reconciled_errors)} native Codex systemError "
+            f"terminal turn(s): {', '.join(sorted(reconciled_errors))}; ")
     names = sorted(name for name, rec in workers.items() if rec.get("status") == "dead-suspected")
     if names:
         return ("dead-suspected", True,
@@ -14522,11 +14709,14 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
     registry_quarantined = None
     registry_rename_attempted = False
     reconciled_codex = []
+    reconciled_codex_errors = []
     try:
         if repair:
             with fleet_lock():
                 data = load_registry()          # the ONE quarantine site left
             reconciled_codex = _reconcile_dead_suspected_codex_completions()
+            reconciled_codex_errors = (
+                _reconcile_dead_suspected_codex_system_errors())
             # Refresh the diagnostic snapshot after the conditional repair.
             with fleet_lock():
                 data = load_registry()
@@ -14563,7 +14753,8 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(
-            _doctor_check_dead_suspected, workers, reconciled_codex),
+            _doctor_check_dead_suspected, workers, reconciled_codex,
+            reconciled_codex_errors),
         # Keep worker-action rows together; tzdata owns the final check slot.
         functools.partial(_doctor_check_permission_stalls, workers, which=which, run=run),
         functools.partial(_doctor_check_permission_denials, workers),
@@ -15098,6 +15289,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     # missing/unreadable key file refuses cleanly with no partial dispatch state.
     dispatch_model, settings_arg = _openrouter_dispatch_args(model, settings)
     try:
+        _ensure_claude_directory_trusted(cwd)
         tasks_dir().mkdir(parents=True, exist_ok=True)
         # Create journals_dir before --add-dir: nonexistent directories grant nothing
         # and a headless worker cannot answer the resulting write-permission prompt.
@@ -16499,10 +16691,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1091`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1034`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4421`) applies here too. An unreadable registry
+    rule for the view path (`:4730`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -16573,11 +16765,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3542, :3577, :3607, :3646, :3683,
-    :3745, :3825, :4830, :10273, :10435, :10699, :10926, :10962, :11204, :11205,
-    :11294, :11304, :11315, :11413, :11935, :15214, :19122, :19123, :19227, :19288, :20717, :23038`).
+    sites that already key on the union (`:3837, :3872, :3902, :3941, :3978, :4040, :4120, :5139, :11691, :11853, :12121, :12348, :12384, :12626, :12627, :12716, :12726, :12737, :12835, :13357, :16717, :19682, :19694, :19843, :22860, :22861, :22965, :23026, :24019, :24021, :24059, :24543, :26982`).
+
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :8751, :9335, :13495, :21639. This makes union identity
+    OWN prior sid alone: :10162, :10746, :14997, :25472. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17295,16 +17486,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:8751, :9335, :13495,
-    # :21639) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10162, :10746, :14997,
+    # :25472) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1091`), which is a write. Routing the identity read
+        # file aside (`:1034`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:15188`).
+        # names this gate as its reason (`:16691`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -17674,7 +17865,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:11906`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13328`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19528,6 +19719,59 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
     return name, row
 
 
+def _retire_stale_supervisor_rows(dry_run=False) -> int:
+    """Mark dead every supervisor-shaped row of a non-current incarnation.
+
+    Current = `supervisor/INCARNATION`'s incarnation_id; with no readable claim
+    nothing can be called stale and the verb refuses. `working` rows are left
+    (they may be doing something) and so are already-dead and archived rows.
+    Rows are only marked, never deleted; `fleet clean` removes dead rows."""
+    with fleet_lock():
+        # The claim is read under the lock so a handoff completing between the
+        # read and the save cannot make the new current body look stale.
+        status, claim = read_incarnation_status()
+        cur = claim.get("incarnation_id") if status == "ok" else None
+        if not isinstance(cur, str) or not cur:
+            raise FleetCliError("sup-retire-legacy --stale-rows: claim absent or "
+                                "corrupt; cannot tell which incarnation is current")
+        # A pending handoff successor is not stale: protect every incarnation
+        # named by HANDSHAKE or the claim's handoff_pending, and refuse when
+        # either record is present but unidentifiable.
+        protected = {cur}
+        if handoff_pending_torn(claim):
+            raise FleetCliError("sup-retire-legacy --stale-rows: torn handoff "
+                                "entry; resolve the handoff first")
+        protected.update(e["successor_inc"] for e in handoff_pending_entries(claim))
+        if handshake_path().exists():
+            hs = read_handshake()
+            hs_inc = hs.get("incarnation_id") if hs else None
+            if not isinstance(hs_inc, str) or not hs_inc:
+                raise FleetCliError("sup-retire-legacy --stale-rows: HANDSHAKE "
+                                    "unreadable; resolve the handoff first")
+            protected.add(hs_inc)
+        registry = read_registry_no_repair()
+        stale = [name for name, row in registry["workers"].items()
+                 if isinstance(row, dict) and _is_supervisor_shaped(name)
+                 and not row.get("archived_at")
+                 and row.get("status") not in ("dead", "working")
+                 and _supervisor_row_incarnation(name, row) not in protected]
+        if not dry_run and stale:
+            at = now_iso()
+            for name in stale:
+                row = registry["workers"][name]
+                old = row.get("status")
+                row.update({"status": "dead", "legacy_retired_at": at,
+                            "legacy_retired_incarnation_id":
+                                _supervisor_row_incarnation(name, row)})
+                append_event("status_changed", name, old=old, new="dead")
+            save_registry(registry)
+    verb = "would retire" if dry_run else "retired"
+    print(f"{verb} {len(stale)} stale supervisor row(s); current incarnation {cur}")
+    for name in stale:
+        print(f"  {name}")
+    return 0
+
+
 def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
     """Retire an exact absent legacy holder from the registered Codex Interface.
 
@@ -19536,6 +19780,14 @@ def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
     """
     if not getattr(args, "_fleet_home_explicit", False):
         raise FleetCliError("sup-retire-legacy requires explicit --fleet-home")
+    if getattr(args, "stale_rows", False):
+        if args.expect_inc or args.expect_sid:
+            raise FleetCliError("sup-retire-legacy: --stale-rows takes no "
+                                "--expect-inc/--expect-sid")
+        return _retire_stale_supervisor_rows(dry_run=getattr(args, "dry_run", False))
+    if not args.expect_inc or not args.expect_sid:
+        raise FleetCliError("sup-retire-legacy requires --expect-inc and --expect-sid "
+                            "(or --stale-rows)")
     source = _codex_recovery_interface_source()
     if not supervisor_goals_active():
         raise FleetCliError("sup-retire-legacy: supervisor goals are inactive")
@@ -24949,6 +25201,7 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     pre_sids = {e.get("sessionId") for e in (pre_payload if pre_ok else [])
                 if isinstance(e, dict) and isinstance(e.get("sessionId"), str)}
     name = _successor_worker_name(successor_inc)
+    _ensure_claude_directory_trusted(FLEET_HOME)
     # Use the rendered instance settings (merged with the OpenRouter env block
     # when the successor's model names one) so the successor receives fleet hooks.
     argv = [exe, "--bg", "-n", name,
@@ -26302,10 +26555,17 @@ def build_parser() -> argparse.ArgumentParser:
         "sup-retire-legacy",
         help="retire one proven absent stale Claude supervisor claim from the "
              "registered native Codex Interface; creates no body or turn")
-    p_retire_legacy.add_argument("--expect-inc", required=True,
-                                 type=_argparse_incarnation_id)
-    p_retire_legacy.add_argument("--expect-sid", required=True,
-                                 help="exact old Claude supervisor session ID")
+    p_retire_legacy.add_argument("--expect-inc", type=_argparse_incarnation_id,
+                                 help="exact stale claim incarnation (claim mode)")
+    p_retire_legacy.add_argument("--expect-sid",
+                                 help="exact old Claude supervisor session ID "
+                                      "(claim mode)")
+    p_retire_legacy.add_argument("--stale-rows", action="store_true",
+                                 help="instead of the claim: mark dead every "
+                                      "non-working supervisor row whose "
+                                      "incarnation is not supervisor/INCARNATION")
+    p_retire_legacy.add_argument("--dry-run", action="store_true",
+                                 help="with --stale-rows: list rows, change nothing")
 
     p_supstat = sub.add_parser("sup-status", help="read-only supervisor claim/handshake status")
     p_supstat.add_argument("--json", action="store_true")

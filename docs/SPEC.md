@@ -195,6 +195,7 @@ claude --bg [--resume <old-sid>] -n "<cat>|<name>|<hint>" --settings state/worke
 - **`--add-dir` pre-authorizes exactly `tasks_dir()`** (least privilege): the task file lives outside the worker's cwd, and under any non-bypass mode the first Read would otherwise hang forever on an unapprovable headless permission prompt.
 - **Name guard at the choke point:** rejects non-`NAME_RE` and uuid-shaped names (F6) even from a future direct caller.
 - **Settings are the rendered instance** (`state/worker-settings.json`), never the template; a missing instance hard-fails before any mutation (`_require_instance_settings` @1736) — never a hookless worker looking healthy in the roster.
+- **Claude workspace trust:** before either native Claude launch path dispatches, Fleet resolves the launched directory and atomically sets only `projects[<resolved directory>].hasTrustDialogAccepted=true` in the Claude config (`CLAUDE_CONFIG_DIR/.claude.json`, or `~/.claude.json` when unset). Existing JSON keys are preserved; invalid JSON refuses before launch and is left untouched. Views and Codex launches do not edit Claude config.
 - **Rendered name = `<category>|<name>|<hint>`** (`render_native_name` @6067; `DEFAULT_CATEGORY = "fleet"`, hint clamped to 40). Display-only: the roster join is by sid, never by name (`ai-title` can mutate a forked session's name — contract hazard).
 - **Short-id join (G6 fallback — `--session-id` does not compose with `--bg`):** parse the short id from `--bg` stdout after **ANSI-stripping** it (`_ANSI_ESCAPE_RE` @6049, applied @6077 — the daemon's stdout can carry escapes), then join to the full sid via roster polling (`_join_roster_by_short_id` @6089, 60 s window, 3 s poll), **excluding every sid captured in a pre-dispatch roster snapshot** so a foreign session sharing the prefix can never be adopted. No join within the window ⇒ `NativeDispatchError` carrying the short id (the operator's only recovery handle; also `add_note`-ed onto any exception escaping mid-join).
 - **Attach-verify (`_await_attach` @6114, 30 s window):** a joined roster entry is not a started session — rarely the daemon mints the entry and never attaches the runner (the never-attach wedge, live finding 2026-07-16). Life signals, any of: entry gains `status`/`pid`; entry reached a terminal/blocked state literal (it RAN — the discriminator owns the verdict); entry vanished post-join (reaped, not wedge-shaped); an outcome record for the sid exists (fast completion). **H1:** a full-window roster blackout (zero successful fetches) is CANNOT-VERIFY, never a wedge verdict — raises loudly and touches nothing, because a wedge verdict licenses stop/rm and must never be issued against a session never once observed.
@@ -427,7 +428,11 @@ mail, queues, journals, and unrelated workers, records the original claim in
 ignored retirement evidence, writes a released claim and old-holder tombstone,
 marks evidence complete only after those writes, and creates no Codex thread
 or turn. Native spawn requires that complete evidence and exact tombstone
-before dispatch. See
+before dispatch.
+`sup-retire-legacy --stale-rows [--dry-run]` is the separate row-only mode: it
+marks non-working supervisor rows whose incarnation is not
+`supervisor/INCARNATION` dead (with `legacy_retired_at`), touching no claim,
+mail or journal; it refuses when the claim is unreadable. See
 `docs/specs/codex-native-integration.md` §10.4 for CLI semantics and refusals.
 After a native Codex mutation enters the durable `accepted` journal state,
 any host error—including a provider reply too large for the 64 KiB journal
@@ -511,7 +516,11 @@ envelope. It includes the rejected body for diagnosis and tells the supervisor
 not to act, to journal and surface the failure and body, and to request
 registration plus a resend. Non-supervisor sends retain the ordinary raw-mail
 path. Fleet-generated structured supervisor notices bypass this free-form
-Interface envelope.
+Interface envelope. A native Codex lane whose `CODEX_THREAD_ID` uniquely
+matches a native Codex worker row receives a `FLEET LANE MAIL <name>` label
+instead. Missing or ambiguous matches follow the Interface verification path.
+This is a lane-origin label only; it does not grant Interface authority or
+alter receipt verification.
 
 **Idle steering = fork-steer (RATIFIED G2(b)).** No CLI channel injects a prompt into an existing idle daemon session; `claude --bg --resume <sid>` **forks** — new sid, full transcript carried. Fleet adopts the fork as the worker's new canonical identity: old sid → `retired_sids`, mailbox re-pointed, ceiling file re-written, fresh `-n` restamp (which is also when a category change renders — no post-hoc rename channel exists, G13). The **universal drain rule** survives: every launch path (spawn, fork-steer, resume-limited, respawn) drains the current sid's mailbox into the composed prompt, and `status` flags `idle+mail`.
 
