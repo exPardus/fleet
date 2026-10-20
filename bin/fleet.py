@@ -1500,6 +1500,26 @@ def _issue_verified_supervisor_mail(target: str, body: str) -> tuple[str, str | 
     """Return raw worker mail or a verified/unverified supervisor notice."""
     if not _is_supervisor_shaped(target):
         return body, None
+    # Native Codex lanes are threads in one shared app-server host, so the
+    # launcher cannot stamp a per-lane FLEET_WORKER value. Resolve their name
+    # from the unique native registry row for this provider thread instead.
+    # This is routing context, never Interface authority.
+    lane_thread = os.environ.get("CODEX_THREAD_ID")
+    if lane_thread:
+        try:
+            workers = read_registry_no_repair().get("workers", {})
+            lane_matches = [
+                (name, record) for name, record in workers.items()
+                if isinstance(name, str) and not _is_supervisor_shaped(name)
+                and isinstance(record, dict)
+                and _codex_record_route(record) == "native"
+                and record.get("codex_thread_id") == lane_thread
+            ] if isinstance(workers, dict) else []
+        except (OSError, FleetCliError):
+            lane_matches = []
+        if len(lane_matches) == 1:
+            lane_name, _lane = lane_matches[0]
+            return f"FLEET LANE MAIL {lane_name}\n{body}", None
     source = _registered_interface_mail_source()
     if source is None:
         notice = (
