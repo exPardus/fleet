@@ -26,7 +26,7 @@ _REQUIRED_RESULT_KEYS = {
 }
 _TEST_KEYS = {"command", "rc", "passed", "failed", "skipped"}
 _CLAIM_KEYS = {"claim", "command"}
-LAND_GATE_NAMES = frozenset(("docs-currency", "receipts"))
+LAND_GATE_NAMES = frozenset(("docs-currency", "receipts", "citations"))
 
 
 def _git(repo: Path, *args: str, cwd: Path | None = None,
@@ -333,6 +333,7 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
             ("docs-currency", f"{python} tests/test_docs_currency.py ."),
             ("receipts", f"{python} tools/verify_receipts.py --strict "
              "--skip-volatile docs/specs/*.md"),
+            ("citations", f"{python} tools/refresh_citations.py --check"),
         ]
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FleetCliError(f"land: cannot read {path}: {exc}") from exc
@@ -349,9 +350,12 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
                     f"land: supervisor/wave-close.json gates[{index}] names "
                     f"unknown built-in gate {gate!r}")
             python = shlex.quote(sys.executable)
-            command = (f"{python} tests/test_docs_currency.py ." if gate == "docs-currency"
-                       else f"{python} tools/verify_receipts.py --strict "
-                            "--skip-volatile docs/specs/*.md")
+            command = {
+                "docs-currency": f"{python} tests/test_docs_currency.py .",
+                "receipts": (f"{python} tools/verify_receipts.py --strict "
+                             "--skip-volatile docs/specs/*.md"),
+                "citations": f"{python} tools/refresh_citations.py --check",
+            }[gate]
             resolved.append((gate, command))
             continue
         if (not isinstance(gate, dict) or set(gate) != {"name", "command"}
@@ -366,7 +370,8 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
     return resolved
 
 
-def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = None) \
+def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = None,
+                    files_changed: list[str] | None = None) \
         -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
     checks = []
@@ -374,6 +379,8 @@ def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = 
         checks.append((f"tests[{index}]", _run_shell(
             item["command"], worktree, log_dir, f"test-{index}")))
     for name, command in _land_gates(worktree, home_root=home_root):
+        if name == "citations" and "bin/fleet.py" not in (files_changed or []):
+            continue
         checks.append((name, _run_shell(command, worktree, log_dir, name)))
     return checks
 
@@ -395,8 +402,10 @@ def cmd_land(args) -> int:
     _rebase(repo, worktree, lane_branch, source_branch)
     home_override = getattr(args, "_fleet_home", None)
     checks = (_check_commands(worktree, payload["tests"],
-                              home_root=Path(home_override))
-              if home_override else _check_commands(worktree, payload["tests"]))
+                              home_root=Path(home_override),
+                              files_changed=payload["files_changed"])
+              if home_override else _check_commands(
+                  worktree, payload["tests"], files_changed=payload["files_changed"]))
     tip = _git_output(repo, "rev-parse", f"refs/heads/{lane_branch}")
     stat = _git_output(repo, "diff", "--shortstat", f"{base}..{tip}") or "0 files changed"
     red = [name for name, rc in checks if rc != 0]

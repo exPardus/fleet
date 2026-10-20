@@ -63,7 +63,7 @@ def _land_lane(lane, base, monkeypatch, repo):
     (lane / "README.md").write_text("changed\n", encoding="utf-8")
     monkeypatch.chdir(repo)
     monkeypatch.setattr(fleet_land, "_check_commands",
-                        lambda worktree, tests: [("tests[1]", 0)])
+                        lambda worktree, tests, **_: [("tests[1]", 0)])
     assert fleet_land.cmd_land(argparse.Namespace(lane="w1")) == 0
 
 
