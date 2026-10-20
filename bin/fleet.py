@@ -954,20 +954,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:13374) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:14452) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:17915) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:13421) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:14499) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:17962) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:4058) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:4105) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4772) -- expose that distinction to views.
-      * `_doctor_check_registry` (:14702) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:17789) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:4819) -- expose that distinction to views.
+      * `_doctor_check_registry` (:14749) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:17836) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:7981) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:19569) -- render the release explanation.
+      * `_print_snapshot_table` (:8028) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:19616) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -1427,15 +1427,8 @@ def _mail_provider_registration_is_exclusive(provider: str) -> bool:
 
 def _registered_interface_mail_source() -> dict | None:
     """Return registered Interface provenance for this send, or ``None``."""
-    caller_sid = current_caller_session()
-    if caller_sid is not None:
-        if not _mail_provider_registration_is_exclusive("claude"):
-            return None
-        registered = _registration_token(state_dir() / "interface-session")
-        if registered == caller_sid:
-            return {"kind": "claude-session", "session_id": caller_sid}
-        return None
-
+    # A Codex process may inherit the launcher's Claude sid. Its own provider
+    # thread must take precedence over that inherited Interface credential.
     if os.environ.get("CODEX_THREAD_ID"):
         if not _mail_provider_registration_is_exclusive("codex"):
             return None
@@ -1455,6 +1448,17 @@ def _registered_interface_mail_source() -> dict | None:
             "claim_id": claim["claim_id"],
             **{key: claim[key] for key in compared},
         }
+
+    if os.environ.get("MCX_WORKER") == "1":
+        return None
+    caller_sid = current_caller_session()
+    if caller_sid is not None:
+        if not _mail_provider_registration_is_exclusive("claude"):
+            return None
+        registered = _registration_token(state_dir() / "interface-session")
+        if registered == caller_sid:
+            return {"kind": "claude-session", "session_id": caller_sid}
+        return None
 
     pane = os.environ.get("TMUX_PANE")
     registered = _registration_token(state_dir() / "interface-pane")
@@ -1496,30 +1500,70 @@ def _mail_source_is_current(source: dict) -> bool:
     return False
 
 
+def _mcx_current_thread_id(record: dict) -> str | None:
+    """Read the current mcx run's provider thread from its machine event."""
+    mcx_id = record.get("mcx_id")
+    cwd = record.get("cwd")
+    if (not isinstance(mcx_id, str) or not _CODEX_WORKER_ID_RE.fullmatch(mcx_id)
+            or not isinstance(cwd, str) or not cwd):
+        return None
+    try:
+        with (_mcx_dir(record) / mcx_id / "events.jsonl").open(
+                encoding="utf-8") as events:
+            line = events.readline(65537)
+        if len(line) > 65536:
+            return None
+        event = json.loads(line)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(event, dict) or event.get("type") != "thread.started":
+        return None
+    thread_id = event.get("thread_id")
+    return thread_id if isinstance(thread_id, str) else None
+
+
+def _registered_lane_mail_sender() -> str | None:
+    """Resolve a unique lane from provider identity and read-only registry evidence."""
+    lane_thread = os.environ.get("CODEX_THREAD_ID")
+    # mcx workers can inherit the dispatcher's Claude sid. A Codex caller must
+    # identify itself by its provider thread, not that inherited sid.
+    lane_sid = None if lane_thread or os.environ.get("MCX_WORKER") == "1" \
+        else current_caller_session()
+    if not lane_thread and not lane_sid:
+        return None
+    try:
+        workers = read_registry_no_repair().get("workers", {})
+    except (OSError, FleetCliError):
+        return None
+    if not isinstance(workers, dict):
+        return None
+    matches = []
+    for name, record in workers.items():
+        if (not isinstance(name, str) or name == SUPERVISOR_BODY_NAME
+                or _is_supervisor_shaped(name) or not isinstance(record, dict)
+                or record.get("archived_at") is not None):
+            continue
+        if lane_thread:
+            route = _codex_record_route(record)
+            if (route == "native"
+                    and record.get("codex_thread_id") == lane_thread):
+                matches.append(name)
+            elif (route == "mcx"
+                  and _mcx_current_thread_id(record) == lane_thread):
+                matches.append(name)
+        elif (record.get("session_id") == lane_sid
+              and record.get("dispatch_kind") == "bg"):
+            matches.append(name)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _issue_verified_supervisor_mail(target: str, body: str) -> tuple[str, str | None]:
     """Return raw worker mail or a verified/unverified supervisor notice."""
     if not _is_supervisor_shaped(target):
         return body, None
-    # Native Codex lanes are threads in one shared app-server host, so the
-    # launcher cannot stamp a per-lane FLEET_WORKER value. Resolve their name
-    # from the unique native registry row for this provider thread instead.
-    # This is routing context, never Interface authority.
-    lane_thread = os.environ.get("CODEX_THREAD_ID")
-    if lane_thread:
-        try:
-            workers = read_registry_no_repair().get("workers", {})
-            lane_matches = [
-                (name, record) for name, record in workers.items()
-                if isinstance(name, str) and not _is_supervisor_shaped(name)
-                and isinstance(record, dict)
-                and _codex_record_route(record) == "native"
-                and record.get("codex_thread_id") == lane_thread
-            ] if isinstance(workers, dict) else []
-        except (OSError, FleetCliError):
-            lane_matches = []
-        if len(lane_matches) == 1:
-            lane_name, _lane = lane_matches[0]
-            return f"FLEET LANE MAIL {lane_name}\n{body}", None
+    lane_name = _registered_lane_mail_sender()
+    if lane_name is not None:
+        return f"FLEET LANE MAIL {lane_name}\n{body}", None
     source = _registered_interface_mail_source()
     if source is None:
         notice = (
@@ -1911,6 +1955,7 @@ def _worker_env(name: str) -> dict:
     """
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env.pop("CODEX_THREAD_ID", None)
     env["FLEET_WORKER"] = name
     return env
 
@@ -3326,6 +3371,8 @@ def _mcx_env(cwd, approval=None, effort=None) -> dict:
     fleet session that is itself an mcx worker must not inherit the guard."""
     env = dict(os.environ)
     env.pop("MCX_WORKER", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env.pop("CODEX_THREAD_ID", None)
     env["MCX_DIR"] = (Path(cwd) / ".mcx").as_posix()
     if approval is not None:
         # Fleet's persisted mode is authoritative. In particular, do not let a
@@ -4040,7 +4087,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:17915`), because legacy upgrades also require a complete registry.
+    (`:17962`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1041`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -11716,7 +11763,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:11631` / `cmd_respawn:10915`, before
+    # resolution that runs from `cmd_kill:11678` / `cmd_respawn:10962`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -11747,9 +11794,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:11631` / `cmd_respawn:10915`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:11678` / `cmd_respawn:10962`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:10936-10943` spells out that design -- resolve under the lock.
+    # `cmd_respawn:10983-10990` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -16737,7 +16784,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1034`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4760`) applies here too. An unreadable registry
+    rule for the view path (`:4807`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -16808,10 +16855,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:3862, :3897, :3927, :3966, :4003, :4065, :4145, :5169, :11734, :11896, :12164, :12391, :12427, :12669, :12670, :12759, :12769, :12780, :12878, :13400, :16760, :19725, :19737, :19886, :22903, :22904, :23008, :23069, :24062, :24064, :24102, :24586, :27025`).
+    sites that already key on the union (`:3909, :3944, :3974, :4013, :4050, :4112, :4192, :5216, :11781, :11943, :12211, :12438, :12474, :12716, :12717, :12806, :12816, :12827, :12925, :13447, :16807, :19772, :19784, :19933, :22950, :22951, :23055, :23122, :23170, :24132, :24134, :24172, :24656, :27095`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10205, :10789, :15040, :25515. This makes union identity
+    OWN prior sid alone: :10252, :10836, :15087, :25585. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17529,8 +17576,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10205, :10789, :15040,
-    # :25515) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10252, :10836, :15087,
+    # :25585) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17538,7 +17585,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1034`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:16734`).
+        # names this gate as its reason (`:16781`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -17908,7 +17955,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13371`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13418`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -23057,15 +23104,21 @@ def _fork_took_over_rows(entries):
             if any(r.get("state") != "done" for r in rows)}
 
 
-def _sup_guard_body_name(sids):
-    """Resolve a body name from the same registry record as its sid union."""
+def _sup_guard_body_name(sids, holder_sid=None, registry=None):
+    """Resolve the claim holder, preferring its current sid over shared history."""
     if not sids:
         return None
-    registry = _registry_records_or_none()
+    if registry is None:
+        registry = _registry_records_or_none()
     if registry is None:
         return None
     wanted = set(sids)
-    for name, record in (registry.get("workers") or {}).items():
+    workers = registry.get("workers") or {}
+    if holder_sid:
+        for name, record in workers.items():
+            if isinstance(record, dict) and record.get("session_id") == holder_sid:
+                return name
+    for name, record in workers.items():
         if wanted.intersection(_record_sids(record)):
             return name
     return None
@@ -23103,10 +23156,18 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         sids = _sup_guard_body_sids(claim)
     else:
         sids = None
-    body_name = _sup_guard_body_name(sids)
     registry = _registry_records_or_none()
+    holder_sid = None
+    if isinstance(claim, dict):
+        if state == "held":
+            holder_sid = claim.get("session_id")
+        elif state == "released":
+            holder_sid = claim.get("released_by_sid") or claim.get("session_id")
+    body_name = _sup_guard_body_name(sids, holder_sid, registry)
     body_record = ((registry.get("workers") or {}).get(body_name)
                    if isinstance(registry, dict) and body_name else None)
+    if isinstance(body_record, dict):
+        sids = sorted(_record_sids(body_record))
     parked_finished_lanes = []
     parked_at = parked.get("parked_at")
     try:
@@ -23135,10 +23196,19 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
                 continue
             if outcome.get("kind") == "result" and finished_at >= parked_since:
                 parked_finished_lanes.append(lane_name)
+    # A Stop outcome can precede the next authoritative `fleet status` merge.
+    # The guard already has the roster; read that outcome to recognize the
+    # completed current turn without mutating the registry from this view.
+    body_status = body_record.get("status") if isinstance(body_record, dict) else None
+    if body_status in ("working", "dead-suspected"):
+        sid = body_record.get("session_id")
+        since = body_record.get("last_dispatch_at") or body_record.get("created")
+        if sid and has_fresh_outcome(body_name, sid, since):
+            body_status = "idle"
     # Idle holder rows are resumable between turns.
     idle_resumable_holder = bool(
         isinstance(body_record, dict)
-        and body_record.get("status") == "idle"
+        and body_status == "idle"
         and not body_record.get("archived_at"))
     # Fleet and native projections may supply park status without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)

@@ -280,6 +280,47 @@ def test_stale_idle_holder_wakes_regardless_of_lanes(
     assert capsys.readouterr().out == f"WAKE {BODY}\n"
 
 
+def test_stale_stored_working_holder_with_result_wakes_correct_successor(
+        home, monkeypatch, capsys):
+    successor = "sup|inc-guard|successor"
+    data = fleet.load_registry()
+    holder = data["workers"].pop(BODY)
+    holder["status"] = "working"  # Stop landed before status merged its verdict.
+    holder["retired_sids"] = [f"old-sid-{n}" for n in range(9)]
+    predecessor = fleet.new_worker_record(
+        "predecessor-sid", str(home), "old", "bypass", dispatch_kind="bg")
+    predecessor["retired_sids"] = [holder["retired_sids"][0]]
+    predecessor["status"] = "dead"
+    data["workers"] = {BODY: predecessor, successor: holder}
+    fleet.save_registry(data)
+    fleet.append_outcome(successor, {
+        "ts": fleet.now_iso(), "session_id": SID, "kind": "result",
+        "result_text": "turn complete",
+    })
+
+    run_guard(monkeypatch, snapshot(age=7144), [])
+    assert capsys.readouterr().out == f"WAKE {successor}\n"
+
+
+def test_stale_stored_working_holder_without_result_still_dispatches(
+        home, monkeypatch, capsys):
+    run_guard(monkeypatch, snapshot(age=7144), [])
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_roster_busy_holder_pages_despite_finished_result_and_idle_registry(
+        home, monkeypatch, capsys):
+    data = fleet.load_registry()
+    data["workers"][BODY]["status"] = "idle"
+    fleet.save_registry(data)
+    fleet.append_outcome(BODY, {
+        "ts": fleet.now_iso(), "session_id": SID, "kind": "result",
+        "result_text": "previous turn complete",
+    })
+    run_guard(monkeypatch, snapshot(age=7144), [row(SID, status="busy")])
+    assert capsys.readouterr().out == "PAGE roster says busy\n"
+
+
 def test_unreadable_registry_is_page_not_dispatch(home, monkeypatch, capsys):
     broken = {"ok": False, "reason": "quarantined", "workers": [],
               "supervisor": {"goals_active": True, "state": "held",
