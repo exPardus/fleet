@@ -510,6 +510,7 @@ keeps that reservation and retained mail instead of retrying.
 | exact newest turn is `completed` in both durable evidence and validated live read | `idle`, including after live-view eviction |
 | `notLoaded` with missing or disagreeing completion evidence | `dead-suspected`; explicit recovery is required, never inferred death |
 | `systemError` with missing or disagreeing completion evidence | `dead-suspected`/PAGE |
+| `systemError` thread whose exact newest turn is `failed` or `interrupted` in the full public read, settled by `fleet doctor --repair` | `dead` (`interrupted` if so) with adapter state `terminal-failed`; event `status_changed` carries thread id, turn id, turn status, error kind |
 | host loss, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
 | limit error + authoritative future reset | `limited` |
 | limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
@@ -535,6 +536,16 @@ call releases its reservation; only a possibly accepted provider call freezes
 the row and keeps the reservation for reconciliation.
 
 ### 8.3 Interrupt and terminal operations
+
+`respawn` also accepts a `systemError` thread (for example after a
+`serverOverloaded` turn) as terminal proof, but only when the full public read
+shows the exact newest bound turn `completed`, `failed`, or `interrupted`. The
+observed thread id, turn id, provider status, turn status, and error kind are
+logged as `codex_system_error_terminal_proof` and kept in the
+`retired_codex_threads` entry as `terminal_proof`. A `systemError` thread whose
+newest turn is still `inProgress`, or whose pages cannot be read, refuses and
+creates no second thread. Ordinary `status` keeps such rows `dead-suspected`;
+only `doctor --repair` settles them to `terminal-failed`.
 
 **Implemented 2026-10-04:** worker `interrupt` issues one supported request and
 then requires an exact same-turn terminal read before committing the terminal

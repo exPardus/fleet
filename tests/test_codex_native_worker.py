@@ -2732,3 +2732,131 @@ def test_large_worker_history_through_authenticated_host(
             assert operation["state"] == "committed"
     finally:
         _stop_queue_recovery_client(client)
+
+
+class _PageFailClient(WorkerVerbClient):
+    """Thread metadata reads, but the turn/item pages are unavailable."""
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") in {
+                "thread/turns/list", "thread/items/list"}:
+            from fleet_codex import HostUnavailable
+            raise HostUnavailable("page unavailable")
+        return super().call(operation, timeout)
+
+
+def _respawn_args():
+    return SimpleNamespace(
+        name="cx-native", task=None, force=True, setting_sources=None,
+        token_ceiling=None, max_budget_usd=None, force_band=False)
+
+
+def _install_system_error(monkeypatch, client):
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+
+
+def test_system_error_failed_turn_is_terminal_proof_for_respawn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "preserve the overloaded-lane brief")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="failed",
+        error_code="serverOverloaded")
+    _install_system_error(monkeypatch, client)
+
+    assert fleet._cmd_respawn_codex(_respawn_args(), record) == 0
+
+    assert [op["payload"]["method"] for op in client.operations] == [
+        "thread/read", "thread/start", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["codex_thread_id"] == NEXT_THREAD_ID
+    proof = {
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "provider_status": "systemError", "turn_status": "failed",
+        "error_kind": "serverOverloaded",
+    }
+    assert stored["retired_codex_threads"] == [{
+        "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "terminal_status": "failed", "terminal_proof": proof,
+    }]
+    events = [json.loads(line) for line in
+              fleet.events_path().read_text(encoding="utf-8").splitlines()]
+    logged = [e for e in events
+              if e.get("kind") == "codex_system_error_terminal_proof"]
+    assert len(logged) == 1
+    assert all(logged[0].get(k) == v for k, v in proof.items())
+
+
+@pytest.mark.parametrize("client_cls,kwargs", [
+    (WorkerVerbClient, {"turn_status": "inProgress"}),
+    (_PageFailClient, {"turn_status": "failed"}),
+])
+def test_system_error_without_full_terminal_read_refuses_second_thread(
+        native_home, monkeypatch, client_cls, kwargs):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "brief")
+    client = client_cls(lane, provider_status="systemError", **kwargs)
+    _install_system_error(monkeypatch, client)
+
+    with pytest.raises(Exception):
+        fleet._cmd_respawn_codex(_respawn_args(), record)
+
+    assert not any(op["payload"]["method"] in {"thread/start", "turn/start"}
+                   for op in client.operations)
+    assert fleet.load_registry()["workers"]["cx-native"]["codex_thread_id"] \
+        == THREAD_ID
+
+
+def test_system_error_unreadable_page_refuses_second_thread(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    fleet.write_brief("cx-native", "brief")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="failed",
+        fail_method="thread/read")
+    _install_system_error(monkeypatch, client)
+
+    with pytest.raises(Exception):
+        fleet._cmd_respawn_codex(_respawn_args(), record)
+
+    assert not any(op["payload"]["method"] in {"thread/start", "turn/start"}
+                   for op in client.operations)
+
+
+def test_doctor_repair_settles_system_error_terminal_turn_as_failed(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="failed",
+        error_code="serverOverloaded")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_system_errors() == [
+        "cx-native"]
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "dead"
+    assert stored["adapter_state"] == "terminal-failed"
+    assert stored["provider_status"] == "systemError"
+    assert stored["codex_error_code"] == "serverOverloaded"
+
+
+def test_doctor_repair_leaves_non_terminal_system_error_uncertain(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    original = _install_record(
+        lane, status="dead-suspected", adapter_state="uncertain")
+    client = WorkerVerbClient(
+        lane, provider_status="systemError", turn_status="inProgress")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_system_errors() == []
+    assert fleet.load_registry()["workers"]["cx-native"] == original
