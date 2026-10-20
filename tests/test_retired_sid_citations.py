@@ -42,7 +42,6 @@ import re
 from pathlib import Path
 
 import fleet
-from fleet_sources import fleet_implementation_source
 
 
 SRC = Path(fleet.__file__).read_text(encoding="utf-8").splitlines()
@@ -70,8 +69,10 @@ def _cited_line_numbers():
 def _writer_line_numbers():
     # The fleet.py prefix retains physical line coordinates; any writer in a
     # leaf gets an out-of-facade coordinate and fails the citation equality.
-    source = fleet_implementation_source().splitlines()
-    return {i for i, line in enumerate(source, start=1) if _WRITE_RE.match(line)}
+    # Citations address the facade's physical coordinates. The extracted
+    # sibling modules are concatenated for source scans, so their offsets are
+    # not line numbers in bin/fleet.py.
+    return {i for i, line in enumerate(SRC, start=1) if _WRITE_RE.match(line)}
 
 
 class TestRetiredSidWritersAreWhereTheyAreCited:
