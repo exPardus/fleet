@@ -193,6 +193,9 @@ ALLOWED = {
     "_freeze_codex_worker_operation", "_cmd_send_codex_native",
     "_reserve_codex_initial_turn_start", "_resume_codex_worker_on_current_host",
     "_resume_one_limited_codex", "_cmd_respawn_codex_native",
+    # w334: `_release_codex_rejected_worker` restores one failed reservation
+    # inside `fleet_lock()` and pairs the load with save_registry + an event.
+    "_release_codex_rejected_worker",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
     "_cmd_kill_codex_native",
     # `codex-reobserve-active` reads the row via `read_registry_no_repair`, then
