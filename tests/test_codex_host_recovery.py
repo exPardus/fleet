@@ -66,6 +66,27 @@ def _app_requests(log, method):
             if row.get("event") == "request" and row.get("method") == method]
 
 
+def test_unresolved_predecessor_is_thread_scoped_but_unattributed_is_global(
+        tmp_path):
+    module = _module()
+    home = tmp_path.resolve()
+    journal = module.OperationJournal(home, "generation-1")
+    first = _mutation("thread-one", value=1)
+    second = _mutation("thread-two", value=2)
+    second["payload"]["params"]["threadId"] = "thread-2"
+    second["recovery"]["thread_id"] = "thread-2"
+    journal.prepare(first)
+    journal.prepare(second)
+    assert journal.unresolved_predecessor("thread-two") is None
+    same = _mutation("thread-one-next", value=3)
+    journal.prepare(same)
+    assert journal.unresolved_predecessor("thread-one-next")["operation_id"] == "thread-one"
+    unknown = _mutation("unattributed", value=4)
+    unknown["recovery"].pop("thread_id")
+    journal.prepare(unknown)
+    assert journal.unresolved_predecessor("thread-two")["operation_id"] == "unattributed"
+
+
 @pytest.mark.parametrize("params", [None, [], "wrong"])
 def test_malformed_public_mutation_refuses_without_stopping_host(
         tmp_path, params):

@@ -5,6 +5,18 @@ import fleet
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _stable_watch_resources(monkeypatch):
+    """Keep ordinary watch tests independent of the host's resource state.
+
+    A nearly full filesystem (or low-memory test host) is a real watch event,
+    but it must not turn timeout/error-path assertions into LOWDISK/LOWMEM
+    successes. Tests for those events override the relevant probe explicitly.
+    """
+    monkeypatch.setattr(fleet.PLATFORM, "memory_available_mb", lambda: 100_000)
+    monkeypatch.setattr(fleet, "_watch_free_disk_gb", lambda _path: 100.0)
+
+
 def _home(tmp_path):
     home = tmp_path / "home"
     (home / "state" / "interface").mkdir(parents=True)
@@ -14,6 +26,11 @@ def _home(tmp_path):
     )
     (home / "mailbox" / "to-fleet").mkdir(parents=True)
     return home
+
+
+def test_watch_tests_use_fixed_host_resource_readings():
+    assert fleet._watch_mem_available_mb() == 100_000
+    assert fleet._watch_free_disk_gb(Path("/")) == 100.0
 
 
 def test_watch_reports_mail_and_persists_cursor(tmp_path, capsys, monkeypatch):

@@ -567,11 +567,16 @@ RATIFIED_BUT_UNBUILT = ()
 # without dispatch or replay. All three write home-scoped state and all three
 # refuse without an explicit `--fleet-home`, so the unknown-verb default
 # (`destructive`) is the safe tier and, for a wrong-home write, the right one.
+# `codex-settle-rejected` (w334) is the same family: it settles a frozen worker
+# row proved rejected before acceptance (restores claimed mail, clears the
+# reservation) without a provider mutation, and refuses without an explicit
+# `--fleet-home`; it waits here under the same fail-safe default.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
                                      "lane-done", "sup-reconcile", "codex-respond",
                                      "codex-decline-fixed",
                                      "codex-reobserve-active",
-                                     "codex-settle-preaccept")
+                                     "codex-settle-preaccept",
+                                     "codex-settle-rejected")
 
 
 def _classified_verbs():
