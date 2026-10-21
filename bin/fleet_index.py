@@ -917,10 +917,8 @@ INDEX_FAILED_RC = 6
 def _index_root_arg(args) -> Path:
     """`--path DIR` names the INDEX ROOT on all four verbs, defaulting to cwd.
 
-    Note the deliberate asymmetry with M2's `fleet q --path GLOB`, which is a
-    filter: `q` takes no root argument (its root comes from the §11.1
-    walk-up), so the flag name is free there for the job a querying worker
-    actually needs."""
+    Deliberately unlike `fleet q --path GLOB`, a filter: `q` takes no root
+    argument (its root comes from the §11.1 walk-up)."""
     raw = getattr(args, "path", None)
     try:
         root = (Path(raw).expanduser() if raw else Path.cwd()).resolve()
@@ -1037,10 +1035,8 @@ def _print_index_report(report) -> int:
     for warning in report["warnings"]:
         print(f"fleet: {warning}", file=sys.stderr)
     # A file this run could not index is a file the index does not describe.
-    # Exiting 0 on `failed 3` reads as success to every caller that checks a
-    # return code instead of parsing the count line back out of stdout --
-    # and exiting 1 reads as "the command did not run at all", which is the
-    # collision `INDEX_FAILED_RC` exists to break.
+    # Exit 0 reads as success to callers that check only the return code, and
+    # exit 1 as "the command did not run", the collision `INDEX_FAILED_RC` breaks.
     return INDEX_FAILED_RC if report["failed"] else 0
 
 
@@ -1117,10 +1113,8 @@ Q_NOTE_CAP = 20
 def _q_pointer(hit) -> str:
     """§11.4's pointer line: `<path>:<line>-<end>\\t<kind>\\t<name>\\t<sig>`.
 
-    `rel` is already the index's canonical forward-slash form on every
-    platform (§11.2) and is formatted as a plain string -- a `str(Path(rel))`
-    anywhere here would emit `src\\api.py` on win32 and diverge §12's goldens
-    from a Linux run."""
+    `rel` is already the canonical forward-slash form (§11.2); a `str(Path(rel))`
+    would emit `src\\api.py` on win32 and diverge §12's goldens."""
     rel, name, line, end, kind, sig = hit
     return f"{rel}:{line}-{end}\t{kind}\t{name}\t{sig}"
 
@@ -1128,11 +1122,8 @@ def _q_pointer(hit) -> str:
 def _q_source_lines(source_path) -> list:
     """The lines of a source file, for a `--src` slice.
 
-    BYTES FROM THE FILE (§11.4). The index supplies the range and the file
-    supplies truth: source never comes from the shard, which is what makes the
-    slice worth more than the pointer. Undecodable bytes are replaced rather
-    than raised on -- a latin-1 source file still slices, and the only failure
-    this reports is OSError, the §11.5 "unreadable at slice time" row."""
+    BYTES FROM THE FILE (§11.4): source never comes from the shard. Undecodable
+    bytes are replaced; the only failure reported is OSError (§11.5)."""
     text = Path(source_path).read_bytes().decode("utf-8", "replace")
     return _index_split_lines(text)
 
@@ -1182,11 +1173,9 @@ def _q_collect_rows(root, rels, kind, no_refresh, notes) -> tuple:
 def _q_match(rows, query) -> list:
     """§11.2's three forms, in their short-circuit order.
 
-    The short-circuit is the whole point: ANY exact hit means tail matching
-    never runs, so the two tiers never mix in one result. §11.2's own worked
-    example -- `q run` returns the top-level `run` and NOT `Beta.run`, which
-    stays reachable as `q Beta.run`. Ambiguity WITHIN a tier is still
-    ambiguity; the short-circuit never resolves it by falling through."""
+    ANY exact hit means tail matching never runs, so the tiers never mix:
+    `q run` returns top-level `run`, not `Beta.run` (reachable as `q Beta.run`).
+    Ambiguity WITHIN a tier is still ambiguity."""
     if "*" in query or "?" in query:
         # Form 3, over the NAME. `fnmatchcase`, never `fnmatch`: the latter
         # case-folds via `os.path.normcase` on win32, so `beta.*` would match
@@ -1239,11 +1228,9 @@ def _q_print_slice(root, hit, notes) -> int:
 def _q_shard_rels(root, path_glob):
     """The shard set a query runs over, `--path`-filtered.
 
-    Filtering happens BEFORE verification (§11.2: "after `--path`/`--kind`
-    filtering"), which is not just an ordering detail -- it is what keeps a
-    narrow query from re-hashing, refreshing and pruning every source file in
-    the repo. Returns None when the glob selected nothing, which the caller
-    reports rather than presenting as "no such symbol"."""
+    Filtering happens BEFORE verification (§11.2), so a narrow query does not
+    re-hash, refresh and prune every source file. Returns None when the glob
+    selected nothing, which the caller reports rather than as "no such symbol"."""
     rels = index_shard_rels(root)
     if path_glob is None:
         return rels
@@ -1343,11 +1330,9 @@ def _q_contained(root, rel) -> bool:
 def _q_outline_rels(root, raw) -> list:
     """`--outline PATH` as index-root-relative posix paths, best first.
 
-    A path that resolves against the process cwd and lands inside the index
-    root wins: a worker that has cd'd into `src/` says `api.py` and means
-    `src/api.py`. The raw argument is kept as a second candidate because
-    pointer lines print index-root-relative paths, so a worker copying one
-    back from a subdirectory must still hit."""
+    A path that resolves against the cwd and lands inside the index root wins
+    (`api.py` from `src/` means `src/api.py`). The raw argument is a second
+    candidate because pointer lines print root-relative paths."""
     out = []
     try:
         resolved = Path(raw).expanduser().resolve()
@@ -1381,11 +1366,9 @@ def _q_outline_rels(root, raw) -> list:
 def _q_outline_known(root, rel) -> bool:
     """Is there something to outline at `rel`?
 
-    Either a shard (which may be stale, missing its source, whatever -- the
-    choke point sorts that out), or a source file this index's include/exclude
-    actually SELECTS. The selection test is deliberate: outlining an excluded
-    file would refresh a shard the very next `build` prunes, which is the same
-    promise-it-cannot-keep `update_index` already refuses to make."""
+    Either a shard (which may be stale or sourceless), or a source file the
+    include/exclude SELECTS: outlining an excluded file would refresh a shard
+    the next `build` prunes."""
     if shard_path_for_source(root, rel).is_file():
         return True
     if not (Path(root) / rel).is_file():
