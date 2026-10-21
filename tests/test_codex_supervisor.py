@@ -644,6 +644,38 @@ def test_host_failed_supervisor_thread_start_releases_preclaim(
     assert fleet.read_registry_no_repair()["workers"] == {}
 
 
+def test_host_failed_supervisor_boot_turn_releases_claim_for_respawn(
+        supervisor_home, monkeypatch):
+    from fleet_codex import HostRejected, OperationJournal
+
+    class RejectedTurnClient(FakeSupervisorClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == "turn/start":
+                journal = OperationJournal(supervisor_home, self.generation)
+                journal.prepare(operation)
+                journal.fail(operation["operation_id"], "blocked by predecessor")
+                raise HostRejected("blocked by predecessor")
+            return super().call(operation, timeout)
+
+    monkeypatch.setattr(fleet, "_codex_native_client",
+                        lambda _home: RejectedTurnClient(supervisor_home))
+    with pytest.raises(fleet.FleetCliError, match="claim released; rerun sup-spawn"):
+        fleet.cmd_sup_spawn(_args())
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "released"
+    assert claim["rejected_operation_id"].startswith(
+        f"supervisor-{claim['incarnation_id']}-turn-")
+    [(old_name, row)] = fleet.read_registry_no_repair()["workers"].items()
+    assert (row["status"], row["adapter_state"]) == ("dead", "rejected")
+
+    client = FakeSupervisorClient(supervisor_home)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    assert fleet.cmd_sup_spawn(_args()) == 0
+    claim = fleet.read_incarnation()
+    assert claim["state"] == "held" and claim["current_turn_id"] == TURN_ID
+    assert claim["incarnation_id"] not in old_name
+
+
 def test_stale_predecessor_cannot_authorize_mutation_after_handoff(
         supervisor_home):
     client = FakeSupervisorClient(supervisor_home)
@@ -846,7 +878,7 @@ def test_host_failed_supervisor_send_restores_claim_and_mail(
     monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
     original_claim = fleet.read_incarnation()
     original_row = fleet.read_registry_no_repair()["workers"][name]
-    with pytest.raises(fleet.FleetCliError, match="rejected before acceptance.*retry"):
+    with pytest.raises(fleet.FleetCliError, match="rejected before acceptance.*queued.*do not resend"):
         fleet._cmd_send_codex_supervisor(name, "try this again")
     claim = fleet.read_incarnation()
     row = fleet.read_registry_no_repair()["workers"][name]

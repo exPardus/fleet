@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import fnmatch
 import functools
 import hashlib
@@ -954,20 +955,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:13623) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:14701) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:18164) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:13694) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:14772) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:18235) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:4261) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:4339) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:4975) -- expose that distinction to views.
-      * `_doctor_check_registry` (:14951) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:18038) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:5053) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15022) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:18109) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:8201) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:19818) -- render the release explanation.
+      * `_print_snapshot_table` (:8279) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:19889) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -2871,6 +2872,30 @@ def cmd_codex_settle_rejected(args) -> int:
     claims = sorted(mailbox_dir().glob(f"{thread_id}.md.claimed.*"))
     if len(claims) > 1:
         raise FleetCliError(f"{name}: claimed mail is ambiguous")
+    # An earlier CLI recorded no previous state; settle to what the public
+    # thread shows, so a rejected steer on a running turn stays working.
+    status = thread.get("status")
+    running = ((isinstance(status, dict) and status.get("type") == "active")
+               or (turns and turns[-1].get("status") == "inProgress"))
+    observed_state = (("working", "active") if running else
+                      ("idle", "bound" if turn_id is None else "idle"))
+    prior_files = None
+    if (recovery.get("kind") == "worker/respawn-thread"
+            and "prior_files" not in pending):
+        # An earlier CLI kept no snapshot of what this respawn replaced. The
+        # composed task file repeats the mail being restored, so remove it;
+        # the brief must still match the row's recorded brief prefix.
+        snapshot = row.get("task") or ""
+        brief = brief_file_path(name)
+        try:
+            text = brief.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        if snapshot and not text.startswith(snapshot):
+            raise FleetCliError(
+                f"{name}: the rejected respawn replaced the brief and no "
+                f"snapshot exists; restore {brief} by hand, then rerun")
+        prior_files = {"task": None}
     binding = CodexWorkerBinding(name, thread_id, turn_id, generation, cwd, row)
     with fleet_lock():
         if (_registered_interface_mail_source() != source
@@ -2880,7 +2905,8 @@ def cmd_codex_settle_rejected(args) -> int:
             raise FleetCliError(f"{name}: settlement evidence changed")
     if not _release_codex_rejected_worker(
             binding, args.operation_id, claims[0] if claims else None,
-            expected_record=row, expected_intent=intent, source=source):
+            expected_record=row, expected_intent=intent, source=source,
+            observed_state=observed_state, prior_files=prior_files):
         raise FleetCliError(f"{name}: failed intent or mail changed; row remains frozen")
     print(f"{name}: rejected Codex operation settled; retry")
     return 0
@@ -3020,8 +3046,9 @@ def _guard_codex_worker_operation(name: str, record: dict, action: str, *,
 def _reserve_codex_worker_operation(binding, operation_id, kind, *,
                                     allowed_statuses=None,
                                     allowed_adapter_states=None,
-                                    expected_record=None):
-    """Durably serialize Fleet mutations for one exact worker incarnation."""
+                                    expected_record=None, prior_files=None):
+    """Durably serialize Fleet mutations for one exact worker incarnation.
+    `prior_files` keeps the brief and task bytes a rejected respawn restores."""
     with fleet_lock():
         data = load_registry()
         record = data["workers"].get(binding.name)
@@ -3049,6 +3076,11 @@ def _reserve_codex_worker_operation(binding, operation_id, kind, *,
             "previous_adapter_state": record.get("adapter_state"),
             "previous_operation_id": record.get("last_operation_id"),
         }
+        if prior_files is not None:
+            record["pending_operation"]["prior_files"] = {
+                key: (None if value is None
+                      else base64.b64encode(value).decode("ascii"))
+                for key, value in prior_files.items()}
         record["last_operation_id"] = operation_id
         save_registry(data)
         return dict(record)
@@ -3102,14 +3134,46 @@ def _codex_operation_failed_before_acceptance(client, operation_id, exc) -> bool
             and record.get("state") == "failed")
 
 
+def _restore_rejected_codex_claim(claim_path) -> bool:
+    """Return one claimed mailbox file by hard link; newer mail keeps it frozen."""
+    if claim_path is None:
+        return True
+    try:
+        _restore_rejected_codex_mail(
+            claim_path, claim_path.name.split(".md.claimed.")[0])
+    except FleetCliError:
+        return False
+    return True
+
+
+def _restore_codex_prior_files(name, prior_files) -> None:
+    """Put back the brief and task bytes a rejected respawn replaced."""
+    for key, path in (("brief", brief_file_path(name)),
+                      ("task", task_file_path(name))):
+        if key not in prior_files:
+            continue
+        value = prior_files[key]
+        try:
+            if value is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(base64.b64decode(value))
+        except OSError:
+            pass
+
+
 def _release_codex_rejected_worker(binding, operation_id, claim_path=None, *,
                                    expected_record=None, expected_intent=None,
-                                   source=None) -> bool:
-    """Restore one failed reservation and its unconsumed mail."""
-    if claim_path is not None:
-        restore_mailbox_claim(claim_path)
-        if claim_path.exists():
-            return False
+                                   source=None, observed_state=None,
+                                   prior_files=None) -> bool:
+    """Restore one failed reservation, its unconsumed mail, and replaced files.
+
+    Every check runs under fleet.lock before any mail or file moves, so a
+    refused release leaves the claim exactly where the freeze reports it.
+    `observed_state` is the (status, adapter_state) a row reserved by an
+    earlier CLI, which recorded no previous state, settles to.
+    """
     with fleet_lock():
         data = load_registry()
         record = data["workers"].get(binding.name)
@@ -3129,10 +3193,21 @@ def _release_codex_rejected_worker(binding, operation_id, claim_path=None, *,
                 or record.get("codex_thread_id") != binding.thread_id
                 or record.get("codex_turn_id") != binding.turn_id):
             return False
+        if not _restore_rejected_codex_claim(claim_path):
+            return False
+        files = pending.get("prior_files")
+        if isinstance(files, dict):
+            _restore_codex_prior_files(binding.name, files)
+        elif prior_files is not None:
+            _restore_codex_prior_files(binding.name, prior_files)
         record.pop("pending_operation", None)
-        record["status"] = pending.get("previous_status") or "idle"
-        record["adapter_state"] = (pending.get("previous_adapter_state")
-                                   or ("bound" if binding.turn_id is None else "idle"))
+        if "previous_status" in pending or observed_state is None:
+            record["status"] = pending.get("previous_status") or "idle"
+            record["adapter_state"] = (
+                pending.get("previous_adapter_state")
+                or ("bound" if binding.turn_id is None else "idle"))
+        else:
+            record["status"], record["adapter_state"] = observed_state
         previous = pending.get("previous_operation_id")
         if previous is None:
             record.pop("last_operation_id", None)
@@ -3414,8 +3489,9 @@ def _reserve_codex_supervisor_operation(
 
 
 def _clear_codex_supervisor_operation(
-        binding, operation_id, *, allowed_states=None):
-    """Release an observation-only reservation; queued mail remains durable."""
+        binding, operation_id, *, allowed_states=None, restore_claim=None):
+    """Release an observation-only reservation; queued mail remains durable.
+    `restore_claim` returns claimed mail only after the lock-held checks pass."""
     with fleet_lock():
         claim = read_incarnation()
         data = load_registry()
@@ -3436,6 +3512,8 @@ def _clear_codex_supervisor_operation(
                 or pending.get("operation_id") != operation_id
                 or not isinstance(record, dict)
                 or record.get("last_operation_id") != operation_id):
+            return False
+        if not _restore_rejected_codex_claim(restore_claim):
             return False
         claim.pop("pending_operation", None)
         previous_claim = pending.get("previous_claim_operation_id")
@@ -4243,9 +4321,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18164`), because legacy upgrades also require a complete registry.
+    (`:18235`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1041`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1042`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -7819,21 +7897,21 @@ def _cmd_spawn_codex_native(args, cwd, task, prompt, record, *, sleep=time.sleep
     except BaseException as exc:
         if _codex_operation_failed_before_acceptance(
                 client, turn_operation_id, exc):
-            restore_mailbox_claim(mail_claim)
-            if mail_claim is None or not mail_claim.exists():
-                with fleet_lock():
-                    data = load_registry()
-                    record = data["workers"].get(name)
-                    if record == turn_claim:
-                        record.pop("pending_operation", None)
-                        record.update({"status": "idle", "adapter_state": "bound",
-                                       "last_activity": now_iso()})
-                        save_registry(data)
-                        _append_event_quiet("codex_host_rejected", name,
-                                            operation_id=turn_operation_id)
-                        raise FleetCliError(
-                            f"{name}: native Codex respawn turn/start rejected "
-                            "before acceptance; bound thread is idle; retry") from exc
+            with fleet_lock():
+                data = load_registry()
+                record = data["workers"].get(name)
+                if record == turn_claim:
+                    record.pop("pending_operation", None)
+                    record.update({"status": "idle", "adapter_state": "bound",
+                                   "last_activity": now_iso()})
+                    save_registry(data)
+                    _append_event_quiet("codex_host_rejected", name,
+                                        operation_id=turn_operation_id)
+                    raise FleetCliError(
+                        f"{name}: native Codex initial turn/start rejected "
+                        "before acceptance; the bound thread has no turn; "
+                        f"run `fleet kill {name}` and `fleet clean`, then "
+                        "spawn again") from exc
         _freeze_codex_preclaim(name, turn_claim, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -10106,14 +10184,14 @@ def _cmd_send_codex_supervisor(name: str, message: str) -> int:
                 raise FleetCliError(
                     "native Codex supervisor steer changed the current turn")
     except BaseException as exc:
-        if _codex_operation_failed_before_acceptance(client, operation_id, exc):
-            restore_mailbox_claim(claim_path)
-            if (not claim_path.exists()
-                    and _clear_codex_supervisor_operation(
-                        binding, operation_id)):
-                raise FleetCliError(
-                    f"{name}: native Codex supervisor {method} rejected "
-                    "before acceptance; mail restored; retry") from exc
+        if (_codex_operation_failed_before_acceptance(client, operation_id, exc)
+                and _clear_codex_supervisor_operation(
+                    binding, operation_id,
+                    restore_claim=claim_path)):
+            raise FleetCliError(
+                f"{name}: native Codex supervisor {method} rejected "
+                "before acceptance; the message is queued for the next "
+                "delivery; do not resend it") from exc
         _freeze_codex_supervisor_preclaim(
             binding.name, binding.incarnation_id, operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -10268,7 +10346,8 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
                     binding, operation_id, claim_path)):
             raise FleetCliError(
                 f"{name}: native Codex {method} rejected before acceptance; "
-                "mail restored; retry") from exc
+                "the message is queued for the next delivery; do not resend "
+                "it") from exc
         _freeze_codex_worker_operation(binding, operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -11313,7 +11392,8 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
     operation_id = f"worker-{name}-respawn-thread-{uuid.uuid4()}"
     respawn_claim = _reserve_codex_worker_operation(
         binding, operation_id, "respawn/thread-start",
-        expected_record=before)
+        expected_record=before,
+        prior_files={"brief": prior_brief, "task": prior_task})
     mail_claim = None
     managed_requirements = None
     try:
@@ -11368,21 +11448,12 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
         _validate_codex_thread_effective(result, requested_model, profile)
         client.commit(operation_id)
     except BaseException as exc:
-        if _codex_operation_failed_before_acceptance(client, operation_id, exc):
-            restore_mailbox_claim(mail_claim)
-            restore_brief(name, prior_brief)
-            try:
-                if prior_task is None:
-                    task_file_path(name).unlink(missing_ok=True)
-                else:
-                    task_file_path(name).write_bytes(prior_task)
-            except OSError:
-                pass
-            if (mail_claim is None or not mail_claim.exists()) and \
-                    _release_codex_rejected_worker(binding, operation_id):
-                raise FleetCliError(
-                    f"{name}: native Codex respawn thread/start rejected "
-                    "before acceptance; retry") from exc
+        if (_codex_operation_failed_before_acceptance(client, operation_id, exc)
+                and _release_codex_rejected_worker(
+                    binding, operation_id, mail_claim)):
+            raise FleetCliError(
+                f"{name}: native Codex respawn thread/start rejected "
+                "before acceptance; retry") from exc
         _freeze_codex_worker_operation(binding, operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -11965,7 +12036,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:11880` / `cmd_respawn:11149`, before
+    # resolution that runs from `cmd_kill:11951` / `cmd_respawn:11228`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -11996,9 +12067,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:11880` / `cmd_respawn:11149`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:11951` / `cmd_respawn:11228`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11170-11177` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11249-11256` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -16983,10 +17054,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1034`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1035`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:4963`) applies here too. An unreadable registry
+    rule for the view path (`:5041`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17057,10 +17128,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4065, :4100, :4130, :4169, :4206, :4268, :4348, :5372, :11983, :12145, :12413, :12640, :12676, :12918, :12919, :13008, :13018, :13029, :13127, :13649, :17009, :19974, :19986, :20135, :23160, :23161, :23265, :23332, :23380, :24342, :24344, :24382, :24891, :27349`).
+    sites that already key on the union (`:4143, :4178, :4208, :4247, :4284, :4346, :4426, :5450, :12054, :12216, :12484, :12711, :12747, :12989, :12990, :13079, :13089, :13100, :13198, :13720, :17080, :20045, :20057, :20206, :23231, :23232, :23336, :23403, :23451, :24413, :24415, :24453, :24981, :27439`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10439, :11023, :15289, :25827. This makes union identity
+    OWN prior sid alone: :10518, :11102, :15360, :25917. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17778,16 +17849,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10439, :11023, :15289,
-    # :25827) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10518, :11102, :15360,
+    # :25917) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1034`), which is a write. Routing the identity read
+        # file aside (`:1035`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:16983`).
+        # names this gate as its reason (`:17054`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -18157,7 +18228,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13620`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13691`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -24573,22 +24644,41 @@ def _dispatch_codex_supervisor_body(campaign, mode, model, *,
     except BaseException as exc:
         if (_codex_operation_failed_before_acceptance(
                 client, turn_operation_id, exc)):
+            # A pending claim with no boot turn is not actionable by any verb,
+            # so a proved rejection releases the incarnation, as preclaim
+            # recovery does. The empty thread stays unbound.
             with fleet_lock():
                 current_claim = read_incarnation()
                 data = load_registry()
                 current = data["workers"].get(name)
-                if (isinstance(current_claim, dict)
-                        and current_claim.get("incarnation_id") == incarnation_id
+                if (_codex_supervisor_holder_matches(
+                        current_claim, incarnation_id, authority)
                         and current_claim.get("state") == "pending"
+                        and current_claim.get("current_turn_id") is None
                         and current_claim.get("last_operation_id") == turn_operation_id
                         and isinstance(current, dict)
+                        and current.get("adapter_state") == "bound"
                         and current.get("last_operation_id") == turn_operation_id
                         and current.get("codex_turn_id") is None):
-                    current.update({"status": "idle", "adapter_state": "bound"})
+                    write_incarnation({
+                        "incarnation_id": incarnation_id,
+                        "lineage_id": current_claim.get("lineage_id"),
+                        "provider": "codex", "state": "released",
+                        "released_at": now_iso(),
+                        "rejected_operation_id": turn_operation_id,
+                        "reason": "turn/start rejected before provider acceptance",
+                    })
+                    current.update({
+                        "adapter_state": "rejected", "status": "dead",
+                        "last_activity": now_iso(),
+                    })
                     save_registry(data)
+                    _append_event_quiet("codex_host_rejected", name,
+                                        operation_id=turn_operation_id)
                     raise FleetCliError(
-                        f"{name}: native Codex supervisor turn/start rejected "
-                        "before acceptance; bound thread is idle; retry") from exc
+                        f"{name}: native Codex supervisor boot turn/start "
+                        "rejected before acceptance; claim released; rerun "
+                        "sup-spawn") from exc
         _freeze_codex_supervisor_preclaim(
             name, incarnation_id, turn_operation_id, exc)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):

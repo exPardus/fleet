@@ -542,9 +542,19 @@ the row and keeps the reservation for reconciliation.
 
 A correlated `HostRejected` is a clean preacceptance refusal only when the
 exact host operation journal is `failed`. Worker wake, steer, and respawn
-release their reservation and return unconsumed claimed mail to the queue in
-that case; supervisor send releases its claim reservation the same way. The
-error says to retry. An unreadable, prepared, accepted, or uncertain journal,
+release their reservation in that case; supervisor send releases its claim
+reservation the same way. Every row and claim check runs under `fleet.lock`
+before any mail moves. Claimed mail returns to the queue by an exclusive hard
+link, so newer mail is never overwritten: when newer mail already exists, both
+files stay and the row freezes for ordered recovery. A rejected send says the
+message is queued for the next delivery and must not be resent. A rejected
+respawn also restores the brief and task file bytes that its reservation
+recorded, and its error says to retry. A rejected initial spawn `turn/start`
+leaves an idle bound thread with no turn; the error names `fleet kill` and
+`fleet clean` before spawning again. A rejected supervisor boot `turn/start`
+releases the incarnation claim (`state: released`, `rejected_operation_id`)
+and marks the row `dead`/`rejected`, as preclaim recovery does, so the next
+`sup-spawn` proceeds. An unreadable, prepared, accepted, or uncertain journal,
 or a lost response, keeps the row frozen. An operation with a known
 `recovery.thread_id` blocks later mutations only on that thread. An intent
 without a trustworthy thread attribution continues to block globally.
@@ -555,7 +565,11 @@ codex-settle-rejected <worker> <operation-id> --expect-thread <thread-id>
 Interface-only recovery. It checks the exact failed journal, frozen row and
 operation pins, then reads the public thread and newest turn. A newer turn or
 ambiguous history refuses settlement. Once proved, it restores claimed mail
-and clears the reservation without a provider mutation.
+and clears the reservation without a provider mutation. A row whose
+reservation recorded no previous state settles to the public thread state, so
+a rejected steer on a running turn stays `working`. A respawn reservation
+without a brief snapshot refuses settlement until the brief again begins with
+the row's recorded brief, then removes the composed respawn task file.
 
 ### 8.3 Interrupt and terminal operations
 
