@@ -61,3 +61,22 @@ def test_ambiguous_anchor_refuses_without_writing(tmp_path):
     assert result.returncode == 1
     assert "ambiguous" in result.stdout
     assert copy.read_bytes() == before
+
+
+def test_write_is_idempotent_when_a_shift_lands_on_another_old_token(tmp_path):
+    """Shifted tokens (:A -> :B, :B -> :C) must not be shifted a second time."""
+    source = (ROOT / "bin" / "fleet.py").read_text(encoding="utf-8")
+    copy = tmp_path / "bin" / "fleet.py"
+    copy.parent.mkdir()
+    for path in (ROOT / "bin").glob("*.py"):
+        shutil.copy2(path, copy.parent / path.name)
+    lines = source.splitlines(keepends=True)
+    # Pad before every enumerated target so the union list shifts by 69, the
+    # same stride as its adjacent tokens (:4247 + 69 == :4316).
+    lines[4000:4000] = ["# pad\n"] * 69
+    copy.write_text("".join(lines), encoding="utf-8")
+    assert _run("--check", "--path", copy).returncode == 1
+    result = _run("--write", "--path", copy)
+    assert result.returncode == 0, result.stdout + result.stderr
+    again = _run("--check", "--path", copy)
+    assert again.returncode == 0, again.stdout + again.stderr

@@ -65,8 +65,15 @@ def _line_map(old: list[str], new: list[str]) -> dict[int, int]:
     return mapping
 
 
+def _site_targets(site, named: str | None) -> set[int]:
+    """Targets an enumerating site may legitimately cite (empty if not one)."""
+    if not site.exactly or named:
+        return set()
+    return set(pins.DERIVATIONS[site.exactly]())
+
+
 def _candidate(site, citing: int, old: int, named: str | None,
-               mapping: dict[int, int]) -> int:
+               mapping: dict[int, int], fresh: bool = False) -> int:
     span = pins._function_span(named) if named else None
     if named and span is None:
         raise ValueError(f"named function {named!r} does not exist")
@@ -87,6 +94,8 @@ def _candidate(site, citing: int, old: int, named: str | None,
         raise ValueError(f"{site.name}: anchor {site.anchor!r} is ambiguous in {named}")
     if len(candidates) == 1:
         return next(iter(candidates))
+    if fresh and old in candidates:
+        return old
     mapped = mapping.get(old)
     if mapped in candidates:
         return mapped
@@ -111,6 +120,15 @@ def refresh(path: Path, write: bool) -> tuple[int, list[str]]:
             issues.append(f"{path}:{line}: citation token count changed")
             continue
         replacements = []
+        # A line whose tokens already are exactly an enumerating site's target
+        # set is refreshed. Baseline mapping must not shift it again: a shifted
+        # token can equal another token's old value (:10 -> :20, :20 -> :30).
+        fresh_sites = set()
+        for site in {owners[0] for _, owners in entries if len(owners) == 1}:
+            targets = _site_targets(site, None)
+            olds = {o for o, owners in entries if owners and owners[0] is site}
+            if targets and olds == targets:
+                fresh_sites.add(site)
         # Entries preserve scanner order, including duplicate numbers.
         for match, (old, owners) in zip(matches, entries):
             if old != int(match.group(1)) or len(owners) != 1:
@@ -124,7 +142,8 @@ def refresh(path: Path, write: bool) -> tuple[int, list[str]]:
             if qualified:
                 named = qualified.group(1)
             try:
-                target = _candidate(site, line, old, named, mapping)
+                target = _candidate(site, line, old, named, mapping,
+                                    fresh=site in fresh_sites)
             except ValueError as exc:
                 issues.append(f"{path}:{line}: {exc}")
                 continue

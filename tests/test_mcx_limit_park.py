@@ -135,3 +135,72 @@ class TestResume:
         with pytest.raises(fleet.FleetCliError, match="resume-limited"):
             fleet.cmd_send(SimpleNamespace(
                 name="cx1", message="hi", nonce=None, force_band=False))
+
+
+class TestResumeClaim:
+    """Concurrent resume-limited never double-steers one mcx lane (w342)."""
+
+    _park = TestResume._park
+    _resume = TestResume._resume
+
+    def _count_steers(self, monkeypatch, during=None):
+        real = fleet._mcx_run
+        steers = []
+
+        def wrapped(rec, args, **kw):
+            if args and args[0] == "steer":
+                steers.append(args)
+                if during is not None and len(steers) == 1:
+                    during()
+            return real(rec, args, **kw)
+
+        monkeypatch.setattr(fleet, "_mcx_run", wrapped)
+        return steers
+
+    def test_racing_resumer_cannot_double_steer(self, codex_home, monkeypatch):
+        self._park(codex_home, "2020-01-01T00:00:00Z")
+        second = []
+
+        def race():
+            second.append(fleet._resume_one_limited(
+                "cx1", fleet.shutil.which, lambda s: None))
+
+        steers = self._count_steers(monkeypatch, during=race)
+        assert fleet._resume_one_limited(
+            "cx1", fleet.shutil.which, lambda s: None) is True
+        assert second == [False]
+        assert len(steers) == 1
+        row = fleet.load_registry()["workers"]["cx1"]
+        assert row["status"] == "working"
+        assert "limit_resume_claim" not in row
+        assert row["limit_reset_at"] is None
+
+    def test_failed_steer_restores_limited_and_drops_claim(
+            self, codex_home, monkeypatch):
+        self._park(codex_home, "2020-01-01T00:00:00Z")
+        monkeypatch.setattr(fleet, "_mcx_run", lambda rec, args, **kw:
+                            SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+        with pytest.raises(fleet.FleetCliError, match="stays limited"):
+            self._resume()
+        row = fleet.load_registry()["workers"]["cx1"]
+        assert row["status"] == "limited"
+        assert "limit_resume_claim" not in row
+
+    def test_row_change_after_steer_reports_launch(
+            self, codex_home, monkeypatch, capsys):
+        self._park(codex_home, "2020-01-01T00:00:00Z")
+
+        def change():
+            with fleet.fleet_lock():
+                data = fleet.load_registry()
+                data["workers"]["cx1"]["status"] = "dead"
+                data["workers"]["cx1"].pop("limit_resume_claim", None)
+                fleet.save_registry(data)
+
+        steers = self._count_steers(monkeypatch, during=change)
+        assert self._resume() == 0
+        assert len(steers) == 1
+        out = capsys.readouterr().out
+        assert "no longer limited" not in out
+        assert "launched" in out
+        assert fleet.load_registry()["workers"]["cx1"]["status"] == "dead"
