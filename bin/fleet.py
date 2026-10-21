@@ -950,27 +950,18 @@ def _quarantine_registry(path: Path):
 
 def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
-    Artifacts distinguish an unresolved incident from a fresh install. Readers use
-    three rules; absence classification must not weaken a presence-only refusal.
 
-    RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
-    os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:13877) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:14955) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:18418) -- legacy upgrades need complete records.
-
-    RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:4423) -- only a fresh absence proves no records;
-        healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:5149) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15205) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:18292) -- describe the incident-specific absence.
-
-    RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:8375) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:20046) -- render the release explanation.
-    Restore the artifact's contents before removing it to re-arm the readers.
-    """
+    An artifact marks an unresolved incident, not a fresh install. Readers:
+      * `_sweep_husks` (:13781) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:14857) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18289) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4377) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5085) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15105) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18168) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8303) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:19889) -- render the release explanation.
+    Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
 
@@ -1046,10 +1037,10 @@ def load_registry() -> dict:
 
 def read_registry_no_repair(hint: bool = True) -> dict:
     """Load the full registry without quarantine; missing yields {"workers": {}}.
-    Use the same validation and RegistryCorruptError contract as load_registry.
-    A distinct function name lets the AST census identify repair-capable callers.
-    Preserve sibling keys because a later save must not erase unprojected data.
-    `hint=False` lets doctor supply its own repair explanation without duplication.
+    Same validation and RegistryCorruptError contract as load_registry. A
+    distinct name lets the AST census identify repair-capable callers. Sibling
+    keys are preserved so a later save erases nothing. `hint=False` lets doctor
+    supply its own repair explanation.
     """
     path = registry_path()
     if not path.exists():
@@ -1145,13 +1136,10 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
     return {
         "session_id": session_id,
         "cwd": str(cwd),
-        # The lane branch the worker was dispatched on, kept beside `cwd` because
-        # the worktree directory is temporary by design: the routine tidy-up
-        # (`git worktree remove`) deletes it, and a join key the cleanup step
-        # deletes is the defect (queue item 16). `wave-close` joins a merge
-        # subject to this record by branch, so a landed lane stays attributable
-        # after its worktree is pruned. None on a non-git cwd and on records
-        # written before this field existed -- those fall back to the worktree.
+        # The lane branch the worker was dispatched on, kept beside `cwd`
+        # because the worktree is deleted by routine tidy-up. `wave-close` joins
+        # a merge subject to this record by branch. None on a non-git cwd and
+        # on older records, which fall back to the worktree.
         "branch": branch,
         # Share the cap with read_brief: equality means the snapshot may be truncated.
         "task": task[:LEGACY_TASK_SNAPSHOT_CHARS],
@@ -1664,10 +1652,9 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
                    context=None) -> tuple[str, Path | None, str]:
     """Compose preamble, optional context digests, drained mail, task and journal.
     Return (prompt, claim_path, drained_mail); sid=None skips claiming mail.
-    The caller restores the claim on failure or finalizes it after process start.
-    Returning the drained text lets resumed turns inline the same delivered mail.
-    Empty tasks add no task section. Resolve journal paths from the live home.
-    Index teaching and context use the dispatch target's cwd and are opt-in.
+    The caller restores the claim on failure or finalizes it after process
+    start; returning the drained text lets resumed turns inline the same mail.
+    Empty tasks add no task section. Index context is opt-in.
     """
     journal_target = journal_file_path(name).as_posix()
     parts = [_PREAMBLE_TEMPLATE.format(name=name, cwd=cwd, journal_target=journal_target)
@@ -2010,28 +1997,21 @@ def _ensure_claude_directory_trusted(directory) -> None:
 # ---------------------------------------------------------------------------
 # OpenRouter substrate (item 24): `--model openrouter:<slug>` dispatch.
 #
-# THE FORK (state/tasks/w93.md), settled by experiment on 2026-09-17: `--bg`
-# hands the session to the resident daemon's pre-warmed spare pool, not a
-# fresh child of the dispatching process. A probe env var set only on the
-# `claude --bg` invocation (mirroring `_worker_env`) never appeared inside
-# the session's own `env` output. A `--settings` `"env"` block DOES reach the
-# session's real process environment, but its values are literal strings --
-# `"$VAR"` is not expanded. `apiKeyHelper` is a shell command the session
-# executes itself at auth time; pointing it at the key file (never at the
-# key's value) proved out end-to-end against `stealth/union-alpha`, with the
-# model string the session itself reports in its own transcript as the
-# witness that OpenRouter, not Anthropic, served the turn.
+# THE FORK (state/tasks/w93.md): `--bg` hands the session to the resident
+# daemon's pre-warmed spare pool, so an env var set on the `claude --bg`
+# invocation never reaches the session. A `--settings` `"env"` block does, but
+# `"$VAR"` is not expanded. `apiKeyHelper` is a shell command the session runs
+# at auth time; point it at the key file (never the key's value). Proven
+# end-to-end against `stealth/union-alpha` (2026-09-17).
 # ---------------------------------------------------------------------------
 
 _OPENROUTER_MODEL_RE = re.compile(r"^openrouter:(?P<slug>.+)$")
 
 
 def openrouter_key_path() -> Path:
-    """~/.config/openrouter/env: `OPENROUTER_API_KEY=...`, mode 0600 (item 24
-    binding). Read here only to prove it exists and is readable; the value is
-    never loaded into a variable that outlives the read, logged, or written
-    to any file fleet touches -- apiKeyHelper (below) reads it again itself,
-    inside the dispatched session, at auth time.
+    """~/.config/openrouter/env: `OPENROUTER_API_KEY=...`, mode 0600. Read only
+    to prove it exists and is readable; the value is never kept, logged or
+    written -- apiKeyHelper reads it again inside the dispatched session.
     """
     return Path.home() / ".config" / "openrouter" / "env"
 
@@ -2101,13 +2081,10 @@ def _openrouter_settings_arg(settings_path, key_path: Path) -> str:
 
 def _openrouter_dispatch_args(model, settings_path):
     """(bare_model, settings_arg) for a dispatch's argv.
-
-    `bare_model` is `model` with any `openrouter:` prefix stripped (so it
-    lands in --model as the slug OpenRouter itself expects); `settings_arg`
-    is the inline merged-settings JSON when `model` names an OpenRouter
-    model, else `settings_path` unchanged (as a posix string). Non-OpenRouter
-    dispatch is untouched: same argv shape as before this feature existed.
-    Raises NativeDispatchError when the key file is missing or unreadable.
+    `bare_model` is `model` minus any `openrouter:` prefix; `settings_arg` is
+    the inline merged-settings JSON for an OpenRouter model, else
+    `settings_path` unchanged. Raises NativeDispatchError when the key file is
+    missing or unreadable.
     """
     slug = _openrouter_model_slug(model)
     if slug is None:
@@ -2125,28 +2102,20 @@ def _openrouter_substrate(model):
 # ---------------------------------------------------------------------------
 # Codex compatibility substrate: explicit `--codex-adapter mcx` dispatch.
 #
-# mcx (/home/user/projects/multi-codex, on PATH) spawns and steers Codex CLI
-# workers: `mcx spawn -m MODEL "instructions"` prints an 8-char worker id and
-# keeps one directory per worker under $MCX_DIR (default $PWD/.mcx) holding
-# `log`, `events.jsonl`, `result` and `state`. `mcx result <id>` exits 2 while
-# the run is live, 0 when done (result on stdout), 1 when stopped or unknown.
-# `mcx steer <id> -` stops the worker and relaunches it on the same Codex
-# thread -- steering RESTARTS the run. `mcx stop <id>` kills the process group.
+# mcx (on PATH) spawns and steers Codex CLI workers: `mcx spawn -m MODEL
+# "instructions"` prints an 8-char worker id and keeps one directory per worker
+# under $MCX_DIR holding `log`, `events.jsonl`, `result` and `state`.
+# `mcx result <id>` exits 2 while live, 0 when done, 1 when stopped or unknown.
+# `mcx steer <id> -` RESTARTS the run on the same Codex thread; `mcx stop <id>`
+# kills the process group.
 #
-# COMMIT VERDICT (2026-09-18, verified from the mcx launcher source; a live
-# probe was impossible -- the Codex weekly limit is exhausted until
-# 2026-09-20T18:16Z): mcx `_run` launches
-# `codex exec -a never --sandbox workspace-write`. Workspace-write confines
-# writes to the worker's cwd; a lane worktree's real gitdir lives under the
-# main repo's .git/worktrees/, OUTSIDE the cwd, so `git commit` cannot write
-# refs or objects. A Codex worker therefore CANNOT commit on this machine
-# under the default approval mode. `fleet land` already commits a dirty
-# worktree's listed files (`fleet_land._commit_dirty`), so it commits on the
-# worker's behalf; the asymmetry is documented in skills/fleet/SKILL.md.
+# A Codex worker CANNOT commit under mcx's `codex exec -a never --sandbox
+# workspace-write`: a lane worktree's gitdir lives under the main repo's
+# .git/worktrees/, outside the worker's cwd. `fleet land` commits a dirty
+# worktree's listed files on its behalf (`fleet_land._commit_dirty`).
 #
-# mcx state lives in the lane worktree's gitignored `.mcx/` directory: the
-# spawn runs with cwd=worktree and MCX_DIR pinned to <worktree>/.mcx, so every
-# later verb finds the job from the registry row's `mcx_id` alone.
+# mcx state lives in the lane worktree's gitignored `.mcx/` (MCX_DIR pinned),
+# so every later verb finds the job from the registry row's `mcx_id` alone.
 # ---------------------------------------------------------------------------
 
 _CODEX_MODEL_RE = re.compile(r"^codex:(?P<bare>.+)$")
@@ -2456,10 +2425,9 @@ def _codex_paged_thread_read(client, thread_id: str, generation: str,
                              prefix: str, *, hydrate_turn: str | None = None,
                              hydrate_active: bool = False):
     """Read thread metadata and the newest two turns without a rollout frame.
-
-    Item pages are assembled locally only for the exact bound turn. Active
-    observation skips hydration unless a lifecycle proof explicitly requests it. A page
-    whose single item exceeds IPC remains an explicit, closed failure.
+    Item pages are assembled locally only for the exact bound turn; active
+    observation skips hydration unless a lifecycle proof requests it. A single
+    item exceeding IPC remains an explicit, closed failure.
     """
     def call(method, params):
         observed = client.call({
@@ -3174,11 +3142,10 @@ def _release_codex_rejected_worker(binding, operation_id, claim_path=None, *,
                                    source=None, observed_state=None,
                                    prior_files=None) -> bool:
     """Restore one failed reservation, its unconsumed mail, and replaced files.
-
-    Every check runs under fleet.lock before any mail or file moves, so a
-    refused release leaves the claim exactly where the freeze reports it.
-    `observed_state` is the (status, adapter_state) a row reserved by an
-    earlier CLI, which recorded no previous state, settles to.
+    Every check runs under fleet.lock before any move, so a refused release
+    leaves the claim where the freeze reports it. `observed_state` is the
+    (status, adapter_state) an earlier CLI's row, with no recorded previous
+    state, settles to.
     """
     with fleet_lock():
         data = load_registry()
@@ -3644,10 +3611,7 @@ def _mcx_record_env(record) -> dict:
 
 def _mcx_reconcile_saved_settings(name: str, record: dict) -> None:
     """Refuse a steer when mcx's saved launch settings drifted from Fleet.
-
-    The mcx launcher reads these files when it restarts a job.  Environment
-    variables passed to ``mcx steer`` are therefore not authoritative for the
-    restarted Codex process.
+    The launcher reads these files on restart; ``mcx steer`` env is not authoritative.
     """
     expected = _mcx_record_env(record)
     mcx_id = record.get("mcx_id")
@@ -3799,10 +3763,8 @@ def _mcx_saved_result(record) -> str | None:
 def dispatch_codex(name, cwd, prompt_body, model, mode="dontask", effort="medium",
                    run=subprocess.run, which=shutil.which):
     """Dispatch a Codex worker through mcx for `--model codex:<model>`.
-
-    Same task-file bootstrap a native dispatch uses: the composed body goes to
-    the task file, the tiny argv prompt points at it. The mcx worker id is
-    captured from spawn stdout and returned for the registry row's `mcx_id`.
+    Same task-file bootstrap as native dispatch; the mcx worker id comes from
+    spawn stdout and is returned for the registry row's `mcx_id`.
     """
     if (not name or not NAME_RE.match(name) or _SID_SHAPE_RE.match(name)):
         raise NativeDispatchError(
@@ -3930,10 +3892,9 @@ def _int_cell(value, width: int) -> str:
 def _text_cell(value, width: int) -> str:
     """A left-aligned text column (NAME, STATUS), or `?`.
 
-    A non-string is not coerced with str(): a status of `7` or `None` is a
-    corrupt record, and printing `7` in the STATUS column would read as a
-    status the fleet actually has. Long values are clipped with an ellipsis so
-    a malformed or unusually long name cannot shift the columns to its right."""
+    A non-string is not coerced with str(): `7` or `None` is a corrupt record
+    and must not read as a real status. Long values are clipped with an
+    ellipsis so they cannot shift later columns."""
     if not isinstance(value, str):
         value = UNKNOWN_CELL
     elif len(value) > width:
@@ -3963,10 +3924,9 @@ def _native_cumulative_tokens(name: str) -> int:
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 # Local reset form: "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)".
-# Only fixed-UTC single-segment aliases are admitted. Other bare zone names can
-# mean fixed offsets or DST rules and yield an early reset for a colloquial zone.
-# Multi-segment Area/City names use ZoneInfo validation. Both the admission regex
-# and fixed-offset resolver derive their closed UTC alias set from this tuple.
+# Only fixed-UTC single-segment aliases are admitted; other bare zone names
+# can mean DST rules and yield an early reset. Area/City names use ZoneInfo
+# validation. The admission regex and resolver share this alias tuple.
 _LOCAL_UTC_ALIAS_NAMES = ("UTC", "UCT", "Universal", "Zulu", "Greenwich",
                           "GMT0", "GMT+0", "GMT-0")
 # Longest-first is defensive, not load-bearing: no member is a prefix of
@@ -3991,9 +3951,8 @@ _LIMIT_RESET_LOCAL_RE = re.compile(
 def _next_local_reset_utc(hour: int, minute: int, tz_name: str, *, now: datetime):
     """Return the next local reset as UTC, or None if it cannot be resolved.
     Require the message-time anchor. Fixed UTC aliases bypass optional tzdata;
-    other zones use zoneinfo. Missing data yields a conservative unknown horizon.
-    After day rollover, compare both folds in UTC and choose the later instant:
-    timedelta resets fold, and forcing fold=1 alone resolves spring gaps early.
+    other zones use zoneinfo. After day rollover, compare both folds in UTC and
+    take the later: forcing fold=1 alone resolves spring gaps early.
     """
     alias = tz_name.strip().lower() if isinstance(tz_name, str) else None
     if alias in _LOCAL_UTC_ALIAS_LOOKUP:
@@ -4372,15 +4331,10 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # The worker-turn claim gate uses registry identity (SPEC.md:204). The ceiling's
 # stamp-absence exemption has a separate limitation documented at its predicate.
 #
-# RATIFIED DOCTRINE -- claim-nonce §18:
-# The daemon substitutes the session environment wholesale, therefore no
-# FLEET_WORKER observation, present or absent, is evidence about this body.
-# The sid is trustworthy: the vendor stamps each hosted session's own sid over
-# the substituted environment, closed in the safe direction by counting, and
-# every other env observation on a hosted body is evidence about the daemon's
-# cold-starter, not about the body; the registry sid union is the only sound
-# identity channel.
-
+# RATIFIED DOCTRINE -- claim-nonce §18: The daemon substitutes the session
+# environment wholesale, therefore no FLEET_WORKER observation, present or
+# absent, is evidence about this body. The registry sid union is the only
+# sound identity channel.
 IDENTITY_RESOLVED = "resolved"
 IDENTITY_UNRESOLVED = "unresolved"
 IDENTITY_AMBIGUOUS = "ambiguous"
@@ -4405,9 +4359,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18418`), because legacy upgrades also require a complete registry.
+    (`:18289`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1042`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -4457,9 +4411,8 @@ def _acting_body_is_worker_turn(sid=None, registry=None, ident=None):
     """Return True for ordinary worker candidates, False for proven non-workers, else None.
     Uniform ambiguous candidates still answer by shape; mixed shapes abstain.
     A readable miss is False, allowing interface and dispatch-window callers.
-    The §6.5 gate refuses only True; the nonce-free §9 upgrade requires False.
-    This preserves supervisor recovery on unreadable state without granting an
-    unauthenticated upgrade on an abstention.
+    The §6.5 gate refuses only True; the nonce-free §9 upgrade requires False,
+    so an abstention on unreadable state grants no unauthenticated upgrade.
     """
     if ident is None:
         ident = _acting_worker_identity(sid=sid, registry=registry)
@@ -4527,14 +4480,9 @@ def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
     daemon substitutes its environment; this is a current limitation (§18.4).
     SPEC.md:204's worker-turn claim prohibition concerns the separate claim gate.
 
-    RATIFIED DOCTRINE -- claim-nonce §18:
-    The daemon substitutes the session environment wholesale, therefore no
-    FLEET_WORKER observation, present or absent, is evidence about this body.
-    The sid is trustworthy: the vendor stamps each hosted session's own sid over
-    the substituted environment, closed in the safe direction by counting, and
-    every other env observation on a hosted body is evidence about the daemon's
-    cold-starter, not about the body; the registry sid union is the only sound
-    identity channel.
+    RATIFIED DOCTRINE -- claim-nonce §18: The daemon substitutes the session
+    environment wholesale, therefore no FLEET_WORKER observation, present or
+    absent, is evidence about this body.
     The exemption and unknown-identity rule give opposite answers for an absent
     registry member; this function retains both behaviors pending their resolution.
     """
@@ -4658,12 +4606,9 @@ def _is_substantive_transcript_record(rec: dict) -> bool:
     return False
 
 
-# Transcript tails that prove a turn died mid-stream instead of finishing.
-# These are the stream deaths MEASURED on this host (tally of every
-# isApiErrorMessage record, 2026-09-19); the family is the OpenRouter/native
-# transport dying between the request and the response. Rate-limit (429),
-# credit (402) and model_not_found records are deliberately absent: each is a
-# different condition with its own verdict and its own recovery verb.
+# Transcript tails that prove a turn died mid-stream. These are the stream
+# deaths MEASURED on this host (2026-09-19); rate-limit (429), credit (402) and
+# model_not_found records are absent: each has its own verdict and recovery.
 STREAM_DEATH_MARKERS = (
     "stream closed before completion",
     "connection lost mid-response",
@@ -4674,10 +4619,9 @@ STREAM_DEATH_MARKERS = (
 
 def transcript_stream_death_scan(sid: str, transcript_path=None) -> bool:
     """Whether the transcript tail's newest qualifying record is an API stream death.
-    Walk newest-first past bookkeeping exactly as `transcript_limit_scan` does, so
-    a stale death cannot be read through newer chatter: the first error-shaped or
-    substantive record is the authoritative last thing that happened. Missing or
-    unreadable transcript access returns False -- absence never licenses the guess.
+    Walk newest-first past bookkeeping as `transcript_limit_scan` does: the first
+    error-shaped or substantive record is authoritative. Missing or unreadable
+    transcript access returns False -- absence never licenses the guess.
     An explicit path avoids repeating the caller's resolution.
     """
     try:
@@ -4763,9 +4707,8 @@ def recompute_worker_native(name: str, record: dict, roster_entries: list) -> di
     2. Keep sid-less launches working until claim expiry, then mark dead.
     3. Live roster busy/waiting means working; waiting carries a permission flag.
     4. Idle, dead or missing roster entries require a fresh outcome, else investigate.
-    Freshness checks sid and last_dispatch_at (else created), so a predecessor's or
-    prior turn's outcome cannot vouch for this turn. State-only startup entries use
-    the shared grace window before a dead-suspected verdict.
+    Freshness checks sid and last_dispatch_at (else created) so an earlier turn's
+    outcome cannot vouch for this one. Startup entries use the shared grace window.
     """
     updated = dict(record)
     updated.pop("waiting_for_permission", None)
@@ -5033,17 +4976,10 @@ _HEAD_REF_PREFIX = "ref: refs/heads/"
 
 def _worktree_branch(cwd) -> str | None:
     """Return the branch checked out at ``cwd``, or None if it has none.
-
-    Dispatched lanes are recorded with the branch they run on so `wave-close`
-    can join a merge subject to the lane's record without the worktree
-    directory that the tidy-up deletes (queue item 16).
-
-    Read from the worktree's own HEAD file rather than by running git: a
-    dispatch should not pay a subprocess for a record field, and the file is
-    exactly what `git symbolic-ref --short HEAD` reads. A linked worktree
-    keeps `.git` as a file naming its gitdir; a plain checkout keeps it as a
-    directory. A non-repository cwd, a detached HEAD and an unreadable file
-    all yield None -- absence must stay distinguishable from a branch name.
+    Recorded so `wave-close` can join a merge subject to the lane without the
+    worktree the tidy-up deletes. Read from the worktree's own HEAD file, not
+    by running git. A linked worktree keeps `.git` as a file naming its gitdir.
+    A non-repository cwd, detached HEAD and unreadable file all yield None.
     """
     dot_git = Path(cwd) / ".git"
     try:
@@ -5513,9 +5449,8 @@ def resolution_population(install=None) -> dict:
 def lookup_home_for_sid(sid, population=None, install=None) -> dict:
     """Look up sid membership with one lock-free registry snapshot per home.
     Return no_sid, hit, miss or ambiguous plus hits, unreadable homes and census.
-    Membership uses current/retired sid unions; spawned_by is the manager's identity
-    and grants no membership. Misses fall through, including newborn dispatches;
-    unreadable homes remain reported because their potential membership is unknown.
+    Membership uses current/retired sid unions; spawned_by grants none. Misses
+    fall through, including newborn dispatches; unreadable homes stay reported.
     Equivalent path spellings count as one hit.
     """
     pop = resolution_population(install) if population is None else population
@@ -5563,10 +5498,9 @@ def resolve_home(flag=None, sid=None, env=None, default_home=None,
                  install=None, population=None) -> dict:
     """Resolve explicit flag, sid membership, imported default home, then terminus.
     Return home, step, lookup and disagreement; ambiguous unflagged lookup refuses.
-    The default is the module global, preserving the path-helper isolation seam;
-    env labels whether that global came from environment or legacy install root.
-    An uninitialized named default terminates instead of silently retargeting the
-    install. Disagreement and terminus policy remain apply_resolved_home decisions.
+    The default is the module global (the path-helper isolation seam); env labels
+    its origin. An uninitialized named default terminates instead of retargeting.
+    Disagreement and terminus policy remain apply_resolved_home decisions.
     """
     if env is None:
         env = os.environ.get("FLEET_HOME")
@@ -5706,9 +5640,9 @@ VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
 #: admits.
 VERB_EFFECT_TIERS = ("ordinary", "disruptive", "destructive")
 
-# Residuals describe a flag-qualified verb when its destructive flag is absent.
-# Keep bare verbs out of the tuples: a missing flagged token must fail toward
-# unknown/destructive instead of falling back to a second ordinary row.
+# Residuals describe a flag-qualified verb when its destructive flag is absent;
+# bare verbs stay out of the tuples so a missing flagged token fails toward
+# unknown/destructive.
 #   * doctor: report-only without --repair.
 #   * sup-decision: show without writing flags.
 #   * homes: list without --add/--retire.
@@ -6155,12 +6089,12 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
     return snap
 
 
-# Shared tmux notification transport for keeper and supervisor verbs.
-# The keeper imports fleet; placing the sanitizer here keeps the dependency one-way.
-# Deliver only to the operator's registered fleet target (terminal-surface D7).
-# Sanitize at delivery: worker-writable newlines could submit extra prompt lines,
-# controls could obscure the text, and a leading dash could become a tmux option.
-# Prefix first, then sanitize and bound the entire delivered line.
+# Shared tmux notification transport for keeper and supervisor verbs; the
+# sanitizer lives here so the dependency stays one-way. Deliver only to the
+# registered fleet target (terminal-surface D7). Sanitize at delivery:
+# worker-writable newlines could submit prompt lines, controls could obscure
+# text, and a leading dash could become a tmux option. Prefix first, then
+# sanitize and bound the whole line.
 
 # Routing prefixes shared with skills/fleet/SKILL.md and both notification producers.
 KEEPER_LINE_PREFIX = "KEEPER: "
@@ -6181,11 +6115,8 @@ TMUX_TIMEOUT_SECONDS = 30
 
 def one_line(text, limit=INTERFACE_LINE_LIMIT):
     """Collapse `text` into one printable line of at most `limit` chars: ANSI
-    stripped, `\\r\\n\\t` and the other C0 controls folded to spaces,
-    whitespace collapsed, truncated with an ellipsis.
-
-    See this section's header for why each of those is load-bearing. The body
-    is `fleet_keeper._one_line`'s, moved verbatim."""
+    stripped, C0 controls folded to spaces, whitespace collapsed, ellipsis-truncated.
+    Body is `fleet_keeper._one_line`'s."""
     text = _ANSI_CSI_RE.sub("", str(text))
     text = "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
     text = " ".join(text.split())
@@ -7005,11 +6936,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     Pre-claim session_id=None under fleet_lock, dispatch outside it, then commit
     the joined sid with retries. A matching fast completion can establish an
     idle result even when roster join expires. Roll back only our own pre-claim.
-    If an already-launched turn cannot commit, retain its recovery record, print
-    its sid/short id and return nonzero rather than invite a second dispatch.
-    Events accompany registry mutations under the same lock. The sid-keyed token
-    ceiling can be written only after join; native dispatch rejects USD budgets.
-    The injectable clock bounds roster join without real waits in tests."""
+    If a launched turn cannot commit, retain its recovery record, print its sid
+    and return nonzero rather than invite a second dispatch. The sid-keyed token
+    ceiling is written only after join; native dispatch rejects USD budgets."""
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
     _ceiling_refusal = _ceiling_refuses_dispatch(
         "spawn",
@@ -8165,9 +8094,8 @@ def _pr_poll_json_output(stdout: str) -> dict:
 def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
     """Read a PR head SHA through gh and compare it with a recorded SHA.
 
-    This is deliberately a view: it never writes fleet state, takes the fleet
-    lock, or updates the recorded SHA. ``gh`` is the only network boundary and
-    is invoked once with a short timeout and a bounded response.
+    A view: it never writes fleet state, takes the lock, or updates the recorded
+    SHA. ``gh`` is the only network boundary (one short, bounded call).
     """
     recorded = getattr(args, "since", None)
     since_file = getattr(args, "since_file", None)
@@ -8210,7 +8138,7 @@ def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
     if getattr(proc, "returncode", 1) != 0:
         stderr = str(getattr(proc, "stderr", "") or "").strip()
         if len(stderr) > 2000:
-            stderr = stderr[:2000] + "..."
+            stderr = stderr[:1987] + "..."
         detail = f": {stderr}" if stderr else ""
         raise FleetCliError(f"pr-poll: gh pr view failed (exit {proc.returncode}){detail}")
 
@@ -9198,11 +9126,10 @@ def _cmd_send_native(name: str, message: str,
         after = recompute_worker_native(name, rec, roster_entries)
         status = after["status"]
 
-        # A raw working record may be another sender's in-flight pre-claim, even when
-        # roster recomputation disagrees. Respect it only without a fresh completion
-        # and before claim expiry: a stale working label also describes normal finished
-        # turns. Use the same last_dispatch_at/fallback anchors as recomputation to
-        # avoid double-dispatch without permanently queueing mail to a completed sid.
+        # A raw working record may be another sender's in-flight pre-claim.
+        # Respect it only without a fresh completion and before claim expiry
+        # (a stale working label also describes finished turns), using the same
+        # anchors as recomputation.
         if rec.get("status") == "working" and status != "working":
             raw_sid = rec.get("session_id")
             if raw_sid is None:
@@ -9394,12 +9321,9 @@ def _cmd_send_native(name: str, message: str,
 
 def _mint_wake_nonce(claim: dict, now=None) -> str:
     """Mint a fresh pending-nonce credential a woken supervisor body presents
-    to `sup-boot --nonce` to resume ITS OWN incarnation without a vendor fork
-    (Cut 1, w87). The caller here is fleet's own dispatch path, not the live
-    holder, so there is no earlier plaintext to reuse -- always replace any
-    outstanding pending value. Preserve the replaced hash in the prior slot
-    (the same slot ordinary resumes use) so a slower body presenting an
-    earlier pending value is not needlessly locked out.
+    to `sup-boot --nonce` to resume ITS OWN incarnation without a vendor fork.
+    Always replace any outstanding pending value; preserve the replaced hash in
+    the prior slot so a slower body presenting it is not locked out.
     """
     if now is None:
         now = datetime.now(timezone.utc)
@@ -9414,13 +9338,11 @@ def _mint_wake_nonce(claim: dict, now=None) -> str:
 
 def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str,
                                  message: str) -> str:
-    """Render the wake bootstrap for an idle supervisor body's fresh, unforked
-    turn (Cut 1, w87). No new generation is minted: sup-boot's own `resume`
-    verdict (claim-nonce doctrine) restamps THIS incarnation onto the new sid
-    once the presented nonce matches the pending value this dispatch just
-    minted -- the same continuity proof a human's manual resume presents.
-    Same nonce hygiene as `_render_successor_task`: redirect, slice-read,
-    then delete the bundle so the nonce leaves no second durable plaintext copy.
+    """Render the wake bootstrap for an idle supervisor body's fresh turn.
+    No new generation is minted: sup-boot's `resume` verdict restamps THIS
+    incarnation onto the new sid once the presented nonce matches the pending
+    value minted by this dispatch. Same nonce hygiene as
+    `_render_successor_task`: redirect, slice-read, then delete the bundle.
     """
     fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
     py = Path(sys.executable).as_posix()
@@ -9494,17 +9416,12 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
         claim = read_incarnation()
         if (claim is None or claim.get("incarnation_id") != incarnation_id
                 or claim.get("state") == "released"):
-            # Another body already changed this claim (handoff, seizure,
-            # release) since the roster snapshot that made this a WAKE --
-            # nothing here could ever resume it. Refuse loudly rather than
-            # dispatch a body whose continuity proof can never match. Do NOT
-            # also require claim["session_id"] == old_sid: it legitimately
-            # still names an EARLIER retired sid until the fresh body's own
-            # sup-boot call restamps it (a second wake can fire before that
-            # first boot turn runs) -- the wake_nonce, not sid equality, is
-            # the actual continuity proof. Defer both the rollback and the
-            # raise until the lock is released -- _rollback_pre_claim
-            # acquires it again and fleet_lock is not reentrant.
+            # Another body already changed this claim since the roster snapshot
+            # made this a WAKE, so nothing could resume it. Refuse loudly. Do NOT
+            # require claim["session_id"] == old_sid (it may name an EARLIER
+            # retired sid until the fresh body restamps); the wake_nonce is the
+            # continuity proof. Defer rollback and raise until the lock is
+            # released -- fleet_lock is not reentrant.
             claim_changed = True
         else:
             wake_nonce = _mint_wake_nonce(claim)
@@ -11126,14 +11043,11 @@ def cmd_release(args) -> int:
 def _dead_suspected_hung_stream(name: str, record: dict,
                                 roster_entries: list) -> bool:
     """Whether a roster-live row is a turn that died mid-stream, not a live turn.
-    The status probe and the respawn guard answer different questions about the
-    same record, and a stream death makes them disagree (queue item 31): the
-    session process outlives its stream, so the roster stays keyed while the
-    probe -- no fresh outcome, past dispatch grace, no limit wall -- concludes
-    dead-suspected. Accept that row without --force only when BOTH agree on a
-    hung turn: the probe's verdict is dead-suspected AND the transcript tail's
-    newest qualifying record is an API stream death. A genuinely running turn
-    (roster busy/waiting, or a tail that ends in chatter) keeps the refusal.
+    The session process outlives its stream, so the roster stays keyed while the
+    probe concludes dead-suspected. Accept that row without --force only when
+    BOTH the probe says dead-suspected AND the transcript tail's newest
+    qualifying record is an API stream death (queue item 31). A running turn
+    keeps the refusal.
     """
     if recompute_worker_native(name, record, roster_entries).get("status") != "dead-suspected":
         return False
@@ -11147,14 +11061,12 @@ def _dead_suspected_hung_stream(name: str, record: dict,
 def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.which,
                         sleep=time.sleep, clock=time.monotonic) -> int:
     """Reset context with a fresh native dispatch under the same worker name.
-    Use the roster running-turn predicate; ambiguous roster data refuses to
-    avoid two live sessions. --force stops a live sid and records a tombstone,
-    then rechecks the roster even when stop reports success. Allow one grace
-    recheck after reported success; any still-live result aborts the respawn.
-    Sweep the most recent sids being retired independently of current liveness.
-    Carry configuration/provenance/costs and prior retired_sids into a sid-less
-    pre-claim, compose task/journal/old mailbox, then commit the new sid/ceiling.
-    Dispatch failure restores the exact prior record instead of losing the name."""
+    Use the roster running-turn predicate; ambiguous roster data refuses.
+    --force stops a live sid and records a tombstone, then rechecks the roster
+    (one grace recheck; any still-live result aborts). Sweep the most recent
+    sids being retired. Carry configuration, provenance, costs and prior
+    retired_sids into a sid-less pre-claim, then commit the new sid/ceiling.
+    Dispatch failure restores the exact prior record."""
     # Apply the ceiling here as well as in cmd_respawn for direct callers.
     # --task starts new work; bare respawn remains permitted as over-ceiling recovery.
     if getattr(args, "task", None):
@@ -11875,7 +11787,7 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
         return 1
     if announce:
         # Supervisor recovery arms have their own terminal announcements
-        # (SPEC:1196-1198); generic killed output would conceal their different costs.
+        # (SPEC:1184-1186); generic killed output would conceal their different costs.
         print(f"{name}: killed")
     return 0
 
@@ -12178,7 +12090,7 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which,
 
 # Supervisor tombstone choreography (three-tier §10.4).
 # Both verbs resolve, refuse, steer and wait within a bound.
-# Kill falls through to stop with claim frozen (SPEC:1198).
+# Kill falls through to stop with claim frozen (SPEC:1186).
 # Respawn aborts before destructive work; delivered steering may remain in
 # flight, but context reset must not terminate the holder without a replacement.
 
@@ -12219,7 +12131,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12134` / `cmd_respawn:11411`, before
+    # resolution that runs from `cmd_kill:12046` / `cmd_respawn:11323`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12250,9 +12162,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12134` / `cmd_respawn:11411`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12046` / `cmd_respawn:11323`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11432-11439` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11344-11351` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12348,7 +12260,7 @@ def _refuse_launch_in_flight(verb, name, rec):
 
 
 def _steer_supervisor_release(name, reason, *, run, which, sleep):
-    """Deliver a holder-owned sup-release request (SPEC:1175-1179).
+    """Deliver a holder-owned sup-release request (SPEC:1163-1167).
     Return None on delivery or refusal text. The holder supplies its own nonce.
     Call the native send engine directly: target resolution and continuity gating
     already happened, and callers must interpret a refused steer themselves."""
@@ -12387,7 +12299,7 @@ def _await_claim_released(*, timeout, poll, clock, sleep):
 
 
 def _cmd_kill_supervisor(args, name, rec, claim, *, run, which, sleep, clock) -> int:
-    """Stop the supervisor and announce the recovery arm (SPEC:1196-1198).
+    """Stop the supervisor and announce the recovery arm (SPEC:1184-1186).
     Steer sup-release and wait: a release permits SUP-KILL-RELEASED after stop and
     tombstone. Otherwise stop anyway and report SUP-KILL-FROZEN, leaving claim
     and heartbeat untouched so they age naturally. Fleet cannot release for it."""
@@ -12499,7 +12411,7 @@ def _supervisor_abort(phase, reason, name, *, delivered):
 def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock) -> int:
     """Release, stop and replace a supervisor with a fresh gen-0 body.
     A fresh body has no generation; release enables immediate rule-1b boot rather
-    than waiting for seizure. Nonce transfer is forbidden (CN:1671-1675, §6.5).
+    than waiting for seizure. Nonce transfer is forbidden (CN:1658-1662, §6.5).
     After release steering/wait, stop and tombstone, verify caller-side B6, then
     dispatch. claim=None skips release for a husk but retains the boot ritual.
     Steer refusal/timeout aborts before destructive work; delivered steering can
@@ -12524,13 +12436,10 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
     campaign = (task_override if task_override is not None
                 else read_brief(name, rec))
 
-    # `interrupt` deliberately leaves a supervisor claim held while marking
-    # its body interrupted.  That body cannot receive the ordinary
-    # `sup-release` steer: `_cmd_send_native` correctly refuses every message
-    # to an interrupted worker, which used to make respawn point at itself.
-    # Reuse the same-incarnation wake path instead.  It mints a pending wake
-    # nonce, dispatches a fresh unforked turn, and lets `sup-boot` restamp the
-    # current sid while preserving the claim identity.
+    # `interrupt` leaves a supervisor claim held, and `_cmd_send_native` refuses
+    # every message to an interrupted worker, so the `sup-release` steer cannot
+    # land. Reuse the same-incarnation wake path: it mints a pending wake nonce
+    # and `sup-boot` restamps the current sid under the same claim.
     if claim is not None and rec.get("status") == "interrupted":
         if not old_sid:
             _supervisor_abort(
@@ -12661,7 +12570,7 @@ def _cmd_respawn_supervisor(args, name, rec, claim, *, run, which, sleep, clock)
         # Stop emits no Stop hook; fleet writes the stopped outcome.
         write_tombstone_outcome(name, old_sid, "stopped")
 
-        # CALLER-SIDE B6 GATE (SPEC:1224-1229): verify the whole sid union is gone
+        # CALLER-SIDE B6 GATE (SPEC:1212-1217): verify the whole sid union is gone
         # before dispatching. A successor's boot refusal is insufficient protection
         # for the caller that would create that second body.
         gate_sids = _record_sids(rec)
@@ -12881,14 +12790,12 @@ def _released_claim_body_sid(claim):
 
 def _clean_spares_released_body_evidence(record, released_by, live_sids) -> bool:
     """Whether deleting a record could change the released-claim wedge evidence.
-    A release tombstone lets B6 stand down; deleting its carrier while the body's
-    sid union remains roster-live can re-arm the wedge. Deleting an untombstoned
-    carrier can instead disarm a live wedge. Protect both until the body is gone.
-    Absence cannot substitute for a tombstone: unresolved/ambiguous identities
-    and unreadable registries legitimately leave no carrier, and must still fail
-    closed. Consult the full sid union to cover fork-steer restamping.
-    Unknown roster liveness spares evidence because deletion is irreversible.
-    Absent/unreadable claims do not establish a released-body wedge to protect."""
+    Deleting a release tombstone's carrier while the body's sid union is
+    roster-live re-arms the wedge; deleting an untombstoned carrier can disarm
+    a live one. Protect both until the body is gone. Absence cannot substitute
+    for a tombstone: unresolved identities and unreadable registries leave no
+    carrier and must fail closed. Unknown roster liveness spares evidence
+    because deletion is irreversible. Absent/unreadable claims protect nothing."""
     if not released_by:
         return False
     sids = _record_sids(record)
@@ -13659,14 +13566,11 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
                 as_autoclean_tier: bool = False) -> int:
     """Archive eligible native workers while retaining registry tombstones.
     Commit archived_at under the lock only if the eligibility snapshot still
-    matches; then move evidence and best-effort remove nonlive sids. Commit first
-    so interrupted moves leave frozen state and can resume into the same directory.
-    Suspicious rosters refuse the entire invocation, including dry-run. Dry-run
-    prints eligibility without mutations; pending moves remain already-archived.
-    The §7 caller gate applies to the archive verb, including previews. The
-    internal as_autoclean_tier argument preserves autoclean's structural exemption;
-    it is set only by cmd_autoclean and has no CLI flag. Sid-bearing autoclean
-    callers therefore remain exempt even while the supervisor claim is fresh."""
+    matches; then move evidence and best-effort remove nonlive sids, so an
+    interrupted move resumes into the same directory. Suspicious rosters refuse
+    the whole invocation, including dry-run. The §7 caller gate applies, even to
+    previews. The internal as_autoclean_tier argument (set only by cmd_autoclean,
+    no CLI flag) keeps autoclean's structural exemption while the claim is fresh."""
     if not as_autoclean_tier:
         _supervisor_gate("archive", nonce=getattr(args, "nonce", None))
     name = getattr(args, "name", None)
@@ -14488,12 +14392,10 @@ def _doctor_check_codex_adapters(workers: dict, which=shutil.which):
 def _reconcile_dead_suspected_codex_completions() -> list[str]:
     """Repair legacy native-Codex completion verdicts with a full-row CAS.
 
-    Snapshot only unarchived ``dead-suspected`` native worker rows under the
-    registry lock, release it for exact-turn evidence and host reads, then
-    commit the ordinary w129 verdict only when the complete row is unchanged.
-    A kill, resume reservation, or any other concurrent mutation therefore
-    wins. Missing, conflicting, non-completed, or unreadable evidence changes
-    nothing.
+    Snapshot unarchived ``dead-suspected`` native rows under the lock, release
+    it for exact-turn evidence and host reads, then commit the ordinary w129
+    verdict only if the row is unchanged. Concurrent mutations win; missing or
+    conflicting evidence changes nothing.
     """
     with fleet_lock():
         data = load_registry()
@@ -15026,12 +14928,10 @@ def _parse_daemon_log_ts(line: str):
 def _doctor_check_daemon_wedge(lock_path=None, log_path=None):
     """Fail when log refusals establish that the current daemon lock is stale.
     Only read daemon.lock and daemon.log: subprocess probes may start a daemon.
-    Match the lock pid and require refusals sufficiently after its startedAt;
-    signed age excludes older locks' evidence. One late refusal suffices because
-    refusals are demand-driven. No attempted dispatch means no detection.
+    Match the lock pid and require a refusal sufficiently after its startedAt;
+    refusals are demand-driven, so no attempted dispatch means no detection.
     If startedAt is unusable, require repeated refusals spanning the degraded
-    window instead. Other unknown evidence produces a PASS note. Never mutate
-    vendor state. Roster mtime is event-driven and cannot serve as a heartbeat.
+    window. Other unknown evidence passes with a note. Never mutate vendor state.
     """
     lock_path = Path(lock_path) if lock_path is not None else claude_daemon_lock_path()
     log_path = Path(log_path) if log_path is not None else claude_daemon_log_path()
@@ -15996,7 +15896,7 @@ SUPERVISOR_PARK_MAX_SECONDS = 24 * 3600.0
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
 
 # three-tier §10.4 T_release bounds the wait for a steered supervisor to release.
-# SPEC:1191 gives the handshake timeout as a shape precedent, not a shared
+# SPEC:1179 gives the handshake timeout as a shape precedent, not a shared
 # tunable: kill/respawn patience and handoff patience must remain independent.
 SUPERVISOR_RELEASE_TIMEOUT_SECONDS = 300.0
 # Divide the release window exactly so timeout fires at the bound.
@@ -16304,15 +16204,10 @@ def _enforce_tier_policy(role: str, explicit_model=None, policy: dict = None):
 
 
 def resolve_model_for_role(role: str, policy: dict = None):
-    """The `--model` tier alias for `role`, or None to OMIT --model (§3.3(d),
-    the honest provider-agnostic default). Resolves role -> the first tier it
-    binds to -> the operator's tier->alias mapping:
-
-      supervisor -> first mapped supervisor_chain tier (preference order, §3.5)
-      worker     -> first mapped worker_tiers tier (the supervisor overrides per-spawn)
-      interface  -> "top"                  (advisory: fleet never launches it, §3.1)
-
-    None when no chain tier has an operator-set alias -- fleet does not invent one."""
+    """The `--model` tier alias for `role`, or None to OMIT --model (§3.3(d)).
+    supervisor -> first mapped supervisor_chain tier (§3.5); worker -> first
+    mapped worker_tiers tier; interface -> "top" (advisory, §3.1). None when no
+    chain tier has an operator-set alias -- fleet does not invent one."""
     if policy is None:
         policy = read_tier_policy()
     if role == "supervisor":
@@ -16772,10 +16667,8 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
     """Decide stop, retire or refuse without IO.
     A HANDSHAKE must match the supplied handles. Otherwise require a unique
     pending match: stop a known sid; retire a replaced or stale sid-less entry;
-    refuse a joining entry. Force permits retirement only when a sid-less entry's
-    minted_at is unreadable, never a readable join still inside its window.
-    Ambiguous handles refuse and name rival incarnations; this is not a general
-    stop-any-sid operation. The abort flag is diagnostic, not identity evidence.
+    refuse a joining entry. Force retires only a sid-less entry whose minted_at
+    is unreadable. Ambiguous handles refuse. The abort flag is diagnostic.
     """
     if handshake is not None:
         hs_sid, hs_inc = handshake.get("session_id"), handshake.get("incarnation_id")
@@ -17041,14 +16934,11 @@ def _journal_roll_header_hint(line: str) -> bool:
 def roll_supervisor_journal(home=None) -> dict:
     """Losslessly roll old supervisor entries off the committed journal board.
 
-    The board is parsed as UTF-8 lines, but the moved and retained regions are
-    byte slices of the original file.  That makes the content-preservation
-    check independent of line counts and preserves line endings and non-ASCII
-    bytes exactly.  A malformed entry-looking heading raises before either
-    file is touched.
-
-    Returns counts and ``rolled`` status for the CLI.  The caller must hold
-    ``fleet_lock`` when this is used alongside another journal write.
+    Parsed as UTF-8 lines, but the moved and retained regions are byte slices
+    of the original, so the content check is independent of line counts and
+    keeps line endings and non-ASCII bytes. A malformed entry-looking heading
+    raises before either file is touched. The caller must hold ``fleet_lock``
+    alongside another journal write.
     """
     # wave-close can target a checkout other than runtime FLEET_HOME.
     board = (Path(home) / "supervisor" / "JOURNAL.md"
@@ -17237,10 +17127,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1035`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1026`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5137`) applies here too. An unreadable registry
+    rule for the view path (`:5073`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17311,10 +17201,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4227, :4262, :4292, :4331, :4368, :4430, :4510, :5546, :12237, :12399, :12667, :12894, :12930, :13172, :13173, :13262, :13272, :13283, :13381, :13903, :17263, :20202, :20214, :20363, :23401, :23402, :23506, :23573, :23621, :24581, :24583, :24621, :25149, :27607`).
+    sites that already key on the union (`:4186, :4221, :4251, :4290, :4327, :4384, :4463, :5481, :12149, :12311, :12576, :12801, :12837, :13079, :13080, :13169, :13179, :13190, :13288, :13807, :17153, :20043, :20055, :20204, :23242, :23243, :23345, :23410, :23458, :24416, :24418, :24456, :24984, :27427`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10628, :11285, :15543, :26085. This makes union identity
+    OWN prior sid alone: :10545, :11197, :15443, :25912. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17342,7 +17232,7 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
     if claim is None:
         return ("claim", "no existing claim -- fresh claim")
     if claim.get("state") == "released":
-        # B6 (three-tier-command.md :1184-1190): a released claim remains blocked while
+        # B6 (three-tier-command.md :1172-1178): a released claim remains blocked while
         # its releasing body is live. Share the comparison with the lifecycle gate so
         # boot and mutation agree on the release/stop window.
         released_by = claim.get("released_by_sid")
@@ -17481,12 +17371,8 @@ def _supervisor_standing_directives() -> list[str]:
             result.append(text)
             continue
         head = "\n".join(text.splitlines()[:24])
-        # Both markers are LINE-ANCHORED, and neither may be satisfied by
-        # prose. Unanchored, `\bDISCHARGED\b` matches the words "not
-        # discharged" and silently drops a live directive from the board --
-        # measured against state/tasks/20260911-computed-checkpoint.md, which
-        # is not a directive at all and was classified as a discharged one.
-        # A board that omits without saying so is worse than no board.
+        # Both markers are LINE-ANCHORED: unanchored, `\bDISCHARGED\b` matches
+        # "not discharged" and silently drops a live directive from the board.
         if not re.search(r"^#+.*\bSTANDING DIRECTIVE\b", head, re.I | re.M):
             continue
         # Only DISCHARGED discharges. `RULED` means the operator answered the
@@ -17542,12 +17428,9 @@ SUPERVISOR_IDLE_ROWS_LISTED = 12
 
 def _supervisor_lane_partition(snap: dict) -> tuple[list, list]:
     """Split non-supervisor, non-terminal snapshot rows into (live, idle).
-
-    A lane is live only while its session is busy (a turn is running or it is
-    attached) or it has unread mail waiting to start a turn. Every other
-    non-terminal row -- idle, interrupted, limited, dead-suspected -- runs no
-    process and holds no dispatch slot, so it is counted apart. Idle rows are
-    ordered most recently active first. Consumes snapshot fields only.
+    A lane is live only while busy (turn running or attached) or with unread
+    mail. Every other non-terminal row runs no process and holds no dispatch
+    slot. Idle rows are ordered most recently active first.
     """
     live, idle = [], []
     for row in snap.get("workers", []):
@@ -17646,14 +17529,10 @@ def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> l
 def _select_boot_journal_inline_indices(tail: list) -> set:
     """Which indices of the boot journal tail window get their body inlined.
 
-    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL/PARKED) entries
-    are eligible -- a terse bookkeeping entry (BOOT/SEIZED/...) is a pointer
-    regardless of position, including when it is the newest entry in the
-    window (a boot's own just-written BOOT entry must not crowd out the
-    checkpoints a resuming body needs to continue the campaign from). Walking
-    newest-first, at least `SUPERVISOR_BOOT_INLINE_MIN` eligible entries are
-    inlined; more are added while the cumulative per-entry-capped size stays
-    within `SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS`.
+    Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL/PARKED)
+    entries are eligible; terse bookkeeping entries stay pointers wherever they
+    sit. Walking newest-first, at least `SUPERVISOR_BOOT_INLINE_MIN` are
+    inlined, more while the size stays within `SUPERVISOR_JOURNAL_INLINE_BUDGET_CHARS`.
     """
     newest_first = [i for i in range(len(tail) - 1, -1, -1)
                     if tail[i]["kind"] in SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS]
@@ -17987,16 +17866,13 @@ gated verb, is a test failure and not a silently unreachable remedy."""
 def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     """Gate mutating lifecycle verbs for sid-bearing callers under a fresh held claim.
     Raise SupervisorClaimGateError unless the caller proves continuity. READ-ONLY:
-    no lock, no mint, no write. Views and authoritative reads never call this gate.
-    This is a continuity speed-bump, not a security boundary: a shell without a
-    caller sid bypasses it. Absent, legacy or stale claims disarm; unreadable
-    heartbeat or roster data fails open so the gate cannot brick maintenance.
-    A released claim with a live releaser arms independently of heartbeat and
-    has no nonce remedy; _wedged_release_gate owns that arm.
-    Autoclean's effect-based exemption crosses delegation via as_autoclean_tier:
-    the sweep performs no dispatch, steer or claim operation. Each reachable
-    frame must carry the exemption. Send to the current claim holder has its
-    own identity-checked mailbox carve-out below. Validation never rotates a nonce.
+    no lock, no mint, no write; views never call this gate. This is a continuity
+    speed-bump, not a security boundary: a shell without a caller sid bypasses
+    it. Absent, legacy or stale claims disarm; unreadable heartbeat or roster
+    data fails open. A released claim with a live releaser arms independently
+    (`_wedged_release_gate`). Autoclean's exemption crosses delegation via
+    as_autoclean_tier. Send to the current claim holder has its own carve-out
+    below. Validation never rotates a nonce.
     """
     caller = current_caller_session()
     if caller is None:
@@ -18032,16 +17908,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10628, :11285, :15543,
-    # :26085) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10545, :11197, :15443,
+    # :25912) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1035`), which is a write. Routing the identity read
+        # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17237`).
+        # names this gate as its reason (`:17127`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -18360,14 +18236,9 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # ambiguity refuses, while mixed ambiguity abstains. An unreadable registry
     # also abstains here so release can recover; legacy upgrade below requires
     # affirmative non-worker identity and a complete registry.
-    # RATIFIED DOCTRINE -- claim-nonce §18:
-    # The daemon substitutes the session environment wholesale, therefore no
-    # FLEET_WORKER observation, present or absent, is evidence about this body.
-    # The sid is trustworthy: the vendor stamps each hosted session's own sid over
-    #  the substituted environment, closed in the safe direction by counting, and
-    #  every other env observation on a hosted body is evidence about the daemon's
-    #  cold-starter, not about the body; the registry sid union is the only sound
-    #  identity channel. This is the registry-keyed gate SPEC.md:204 requires.
+    # RATIFIED DOCTRINE -- claim-nonce §18: The daemon substitutes the session
+    # environment wholesale, therefore no FLEET_WORKER observation, present or
+    # absent, is evidence about this body.
     ident = _acting_worker_identity(sid=caller)
     worker_turn = _acting_body_is_worker_turn(ident=ident)
     if worker_turn is True:
@@ -18411,7 +18282,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13874`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13778`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -18973,13 +18844,10 @@ def _wave_default_branches(repo, run=subprocess.run) -> set:
 def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     """Join a merge-subject lane token to its registry record and worktree.
 
-    The token is the lane BRANCH; the record keeps it beside ``cwd``, so the
-    join survives ``git worktree remove``. Order: ``--alias``, the recorded
-    branch, the worktree's ``cwd``, then a worker NAMED like the token whose
-    row records no branch or the default branch and no ``cwd`` but the home
-    root. Several candidates refuse.
-
-    Returns ``(worktree, name, record)``; all None means UNJOINED.
+    The token is the lane BRANCH, which the record keeps beside ``cwd`` so the
+    join survives ``git worktree remove``. Order: ``--alias``, recorded branch,
+    worktree ``cwd``, then a worker NAMED like the token. Several candidates
+    refuse. Returns ``(worktree, name, record)``; all None means UNJOINED.
     """
     if workers is None:
         workers = _wave_registry_workers(repo)
@@ -19044,11 +18912,9 @@ def _wave_aliases(repo, raw) -> dict:
 def _wave_unjoined_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Return the lanes that parsed from a merge subject but joined to nothing.
 
-    A parsed-but-unjoined lane is exactly as unattributable as an unparsed
-    merge: it has no substrate, no session and no token total, so every figure
-    derived from it would be a confident zero. `cmd_wave_close` refuses on this
-    list for the same reason it refuses on `unparsed` (queue item 14), and the
-    refusal names the lane instead of printing `unknown` (queue item 26).
+    Such a lane is as unattributable as an unparsed merge: every figure derived
+    from it would be a confident zero. `cmd_wave_close` refuses on this list
+    and names the lane instead of printing `unknown`.
     """
     if not lanes:
         return []
@@ -19102,14 +18968,10 @@ def _wave_record_substrate(repo, worktree, record=None):
 def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
     """Return full SHAs of lane-internal base-sync merges in ``base..HEAD``.
 
-    A lane that merges the base branch into itself (`merge: sync master`,
-    git's own `Merge branch 'master' into <lane>`) lands that merge commit
-    inside the wave range alongside its real `merge(<lane>):` landing. It
-    is identified structurally, not by subject: it is off the first-parent
-    mainline, and every non-first parent is an ancestor of the first parent
-    of the mainline merge that brought it in -- i.e. it only merged in
-    what the base branch already had. A merge of anything else (another
-    unlanded branch, a mainline merge with a foreign subject) is not one.
+    Identified structurally, not by subject: off the first-parent mainline,
+    with every non-first parent an ancestor of the first parent of the
+    mainline merge that brought it in -- it only merged in what the base
+    already had.
     """
     listing = _wave_git(repo, "rev-list", "--first-parent", "--parents",
                         f"{base}..HEAD", run=run, check=False)
@@ -19141,16 +19003,11 @@ def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
 def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
 
-    ``lanes`` holds every worker merge whose subject matches the
-    `merge(<lane>):` convention, with its worktree-derived substrate.
-    ``merge(hotfix/<name>): ...`` bookkeeping is intentionally omitted from
-    ``lanes`` and reported separately by ``_wave_hotfix_merges``. ``unparsed`` holds the
-    short SHAs of merges that did not -- e.g. git's own default
-    ``Merge <branch> into <branch>`` subject -- and a caller must never fold
-    those into a lane count it then reports as MEASURED: they are a range it
-    could not attribute, not lanes that landed nothing. A lane-internal
-    base-sync merge (`_wave_sync_merges`) is neither: it is part of the lane
-    its `merge(<lane>):` landing already attributes, so it is skipped.
+    ``lanes`` holds every worker merge whose subject matches `merge(<lane>):`,
+    with its worktree-derived substrate; ``merge(hotfix/<name>):`` bookkeeping
+    is reported by ``_wave_hotfix_merges``. ``unparsed`` holds short SHAs of
+    merges that did not match; a caller must never fold those into a MEASURED
+    lane count. A lane-internal base-sync merge (`_wave_sync_merges`) is skipped.
     """
     result = _wave_git(repo, "log", "--merges", "--format=%H%x09%s",
                        f"{base}..HEAD", run=run)
@@ -19208,13 +19065,10 @@ def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run, aliases=None) -> li
     """Write lane_state=landed on each landed lane's registry record.
 
     A merged branch alone is not landing evidence for the reap predicate
-    (SUPERVISOR_REAP_RULE); this is the writer. Joins lane branch ->
-    registry record by the branch the record keeps, falling back to the
-    worktree table for records written before that field existed, since a
-    lane's worker name is not otherwise recoverable from the merge subject
-    and the worktree the old join needed is deleted by the routine tidy-up
-    (queue item 16). Caller must hold fleet_lock(). Skips lanes that join to
-    no record, or to a record already lane_state landed/abandoned.
+    (SUPERVISOR_REAP_RULE); this is the writer. Joins lane branch -> record by
+    the recorded branch, falling back to the worktree table for older records.
+    Caller must hold fleet_lock(). Skips lanes that join to no record, or to a
+    record already lane_state landed/abandoned.
     """
     if not lanes:
         return []
@@ -19235,14 +19089,11 @@ def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run, aliases=None) -> li
 
 
 def _wave_stop_landed_sessions(landed_names, run=subprocess.run, which=shutil.which):
-    """Stop the native session of each just-landed lane through the sanctioned
-    `claude stop` path, so the reap that follows can reach `_reap_eligible`'s
-    lane arm -- `_reap_protection`'s live-PID veto (`roster-live`) applies
-    until the stop actually clears the roster entry. Must never run under
-    `fleet_lock()`: each stop call can block up to its timeout. A
-    `daemon-transient` outcome (or any other non-ok outcome) is not a stop and
-    is reported, not silently dropped. Reads the registry read-only -- this
-    runs after the lock that wrote lane_state has already released.
+    """Stop the native session of each just-landed lane through `claude stop`,
+    so the reap can reach `_reap_eligible`'s lane arm (the live-PID veto holds
+    until the roster entry clears). Never run under `fleet_lock()`: each stop
+    can block up to its timeout. A non-ok outcome is reported, not dropped.
+    Reads the registry read-only.
     """
     if not landed_names:
         return [], []
@@ -19829,15 +19680,10 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "wave-close: git has no committer identity in this repo -- set "
             "`git config user.name` and `user.email` before closing a wave")
 
-    # Attribute every merge in range before the claim, the reap, or the
-    # interpreter floor -- all mutating or expensive -- so a range this
-    # regex cannot attribute is refused up front rather than after paying
-    # for a close it can never legitimately finish. Zero merges in range is
-    # the legitimate no-lanes wave and falls through to close cleanly; this
-    # is different -- merges DID land and one or more do not match the
-    # `merge(<lane>):` subject convention, so every figure this function
-    # would derive from the lane list (workers, tokens, external_lines,
-    # tokens_per_bin_line) is a confident zero it never measured.
+    # Attribute every merge in range before the claim, the reap, or the floor,
+    # so an unattributable range is refused before a close that cannot finish.
+    # Zero merges is the legitimate no-lanes wave; merges that do not match the
+    # `merge(<lane>):` convention would make every derived figure a false zero.
     aliases = _wave_aliases(repo, getattr(args, "alias", None))
     lanes, unparsed_merges = _wave_merge_audit(repo, base, run=run, aliases=aliases)
     hotfixes = _wave_hotfix_merges(repo, base, run=run)
@@ -19853,12 +19699,9 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "skills/fleet/SKILL.md#wave-boundary) and retry.")
 
     # A lane that PARSED but joins to nothing is as unattributable as an
-    # unparsed merge: no substrate, no session, no token total, so every
-    # figure below would be a confident zero for it. Wave 86 published
-    # `workers: 2 (w93: unknown, w92: unknown); tokens: 0; ... reaped: 0` on a
-    # 701-line wave for exactly this reason (queue items 25 and 26). Refuse
-    # here, beside the unparsed refusal and before the claim, the reap and the
-    # floor, rather than after paying for a close that cannot be honest.
+    # unparsed merge: every figure below would be a confident zero for it
+    # (wave 86 published `workers: 2 (w93: unknown, ...); tokens: 0`). Refuse
+    # here, before the claim, the reap and the floor.
     stray = sorted(set(aliases) - {lane for lane, _substrate, _sha in lanes})
     if stray:
         raise FleetCliError(
@@ -20124,15 +19967,13 @@ def _cmd_codex_sup_release(args) -> int:
 
 def cmd_sup_release(args, run=subprocess.run, which=shutil.which) -> int:
     """Release the claim, carry pending handoffs, then tombstone the caller.
-    Write the released claim from an explicit key set: carrying session_id or
-    nonce fields could let the legacy branch resurrect it. Pending handoffs
-    are carried explicitly because release must retain in-flight attempts.
-    Validate without minting: a nonce for the departing claim would be unusable.
-    Both writes hold fleet_lock. Release must commit before the tombstone: a
-    crash between writes leaves a released claim with a live releaser, which B6
-    refuses until that body exits. Reversing them could freeze a held claim
-    whose owner fleet has already retired. Release retains INCARNATION so boot
-    can distinguish an orderly stand-down from an absent claim."""
+    Write the released claim from an explicit key set so the legacy branch
+    cannot resurrect session_id or nonce fields; carry pending handoffs
+    explicitly. Validate without minting. Both writes hold fleet_lock. Release
+    must commit before the tombstone: a crash between them leaves a released
+    claim with a live releaser, which B6 refuses until that body exits, whereas
+    the reverse could freeze a held claim. Release retains INCARNATION so boot
+    can tell an orderly stand-down from an absent claim."""
     if _claim_uses_native_codex():
         return _cmd_codex_sup_release(args)
     with fleet_lock():
@@ -23407,10 +23248,8 @@ def _seize_settled_by_a_heartbeat(claim):
     """True once the seizing body has beaten at least once after claiming.
 
     `sup-boot` writes `claimed_at` and `heartbeat_at` together, so they are
-    equal for exactly one moment: the seizure. Any later beat moves
-    `heartbeat_at` past it and settles the takeover -- the body proved it is
-    the holder. After that the claim is ordinary and the stale/idle rules
-    decide; a seize hours old is not evidence about now.
+    equal only at the seizure. Any later beat settles the takeover; after that
+    the stale/idle rules decide.
     """
     claimed, beat = claim.get("claimed_at"), claim.get("heartbeat_at")
     if not claimed or not beat:
@@ -23545,11 +23384,9 @@ def _sup_guard_row_in_home(row, registry=None):
 def _fork_took_over_rows(entries):
     """Live rows that also prove a fork TOOK OVER, not merely that it exists.
 
-    Stricter than `_sup_guard_live_rows` on purpose. The guard asks "can this
-    body be reached", where a `state: done` bg-spare host with a live pid is a
-    yes. Retirement asks "has the replacement actually assumed the work", and a
-    `done` fork answers no -- retiring the parent on that evidence is how the
-    addendum's "never retire on the strength of the send alone" gets violated.
+    Stricter than `_sup_guard_live_rows`: a `state: done` bg-spare host with a
+    live pid is reachable but has not assumed the work, and retiring the parent
+    on that evidence would violate "never retire on the strength of the send".
     """
     return {sid: rows for sid, rows in _sup_guard_live_rows(entries).items()
             if any(r.get("state") != "done" for r in rows)}
@@ -24293,16 +24130,14 @@ def _cmd_interface_register_codex(args, root: Path) -> int:
 def cmd_sup_decision(args) -> int:
     """`fleet sup-decision` -- three-tier §8 operator-gate routing.
 
-      --raise QUESTION [--context-ref REF]   supervisor routes a decision (the
-          claim-holder only) and PARKS. Refuses if one is already open: one
-          decision at a time.
-      --answer TEXT                          the interface tier writes the
-          operator's decision. NOT claim-gated -- the interface holds no claim
-          by design (§3.1), so requiring continuity here would be wrong.
-      --clear                                remove the open decision (consumed).
+      --raise QUESTION [--context-ref REF]   claim-holder routes a decision and
+          PARKS; refuses if one is already open.
+      --answer TEXT                          interface tier writes the operator's
+          decision. NOT claim-gated: the interface holds no claim (§3.1).
+      --clear                                remove the open decision.
       (no flag)                              show the current decision.
 
-    The supervisor never writes its own answer (§8). This file is ROUTING, not
+    The supervisor never writes its own answer (§8). This is ROUTING, not
     authorization: operator gates stay human under an unattended supervisor."""
     raising = getattr(args, "question", None) is not None
     answering = getattr(args, "answer", None) is not None
@@ -25623,14 +25458,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
     operator-visible abort flag. Validate executable and instance settings
     before the lock so missing prerequisites leave no partial handoff state.
     This launch builds its own --bg argv: incarnation ids fail dispatch_bg's
-    name guard, its task file is already journaled at a handoff-specific path,
-    and dispatch_bg's wedge retry could spawn two successors for one attempt.
-    Carry --settings for hooks and _worker_env to strip the predecessor's sid;
-    a successor inheriting that sid could produce a false HANDSHAKE identity.
-    Inherit the holder's model, permission mode and setting_sources when the
-    flag is omitted; persist the effective values for the next handoff. No
-    --add-dir: the task file is inside cwd=FLEET_HOME. A missing predecessor
-    setting refuses instead of selecting the unrestricted bypass mode."""
+    name guard, and its wedge retry could spawn two successors per attempt.
+    Carry --settings and strip the predecessor's sid via _worker_env. Inherit
+    the holder's model, permission mode and setting_sources when the flag is
+    omitted; a missing predecessor setting refuses rather than select bypass."""
     # Empty values from a quoted `--model ""` are equivalent to omission;
     # normalise before either handoff policy branch evaluates the model.
     args.model = _normalise_model(getattr(args, "model", None))
@@ -25948,14 +25779,10 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 data["workers"][name] = succ_rec
                 save_registry(data)
                 append_event("spawned", name, cwd=str(FLEET_HOME), mode=succ_mode)
-                # Record turn_started beside the turns=1 registry stamp. The other initial
-                # dispatch sites are cmd_spawn, _cmd_respawn_native and
-                # _dispatch_supervisor_body, each in fast-completion and joined arms.
-                # spawned has no session_id, so this event keeps ownership discoverable
-                # even if completion never runs and clean later removes the registry row.
-                # It proves dispatch, not successful boot; completion emits its own event.
-                # Best effort: an event-log error must not hide SUCCESSOR-SID after dispatch
-                # and registry commit, because abort needs that handle.
+                # Record turn_started beside the turns=1 registry stamp: spawned has
+                # no session_id, so this keeps ownership discoverable if completion
+                # never runs. Best effort -- an event-log error must not hide
+                # SUCCESSOR-SID, which abort needs.
                 _append_event_quiet("turn_started", name, session_id=successor_sid)
 
         print(f"SUCCESSOR-INC: {successor_inc}")
@@ -27327,10 +27154,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_supha = sub.add_parser("sup-handoff-abort", help="abort a handoff: stop the limbo successor, resume duty")
     # R3: EITHER handle. `--successor-sid` stops a recorded session;
     # `--successor-inc` also retires an entry that aged out of the join window
-    # without ever recording one (nothing is stopped on that path, and the verb
-    # says so). Not `required=True` on either, not a mutually-exclusive group:
-    # passing both is legitimate and means "this sid AND this inc", which
-    # `handoff_entry_matching` requires to agree.
+    # without a sid. Passing both is legitimate and means "this sid AND this
+    # inc", which `handoff_entry_matching` requires to agree.
     p_supha.add_argument("--successor-sid", dest="successor_sid",
                          help="sid of the limbo successor to stop")
     p_supha.add_argument("--successor-inc", dest="successor_inc",
@@ -27381,16 +27206,11 @@ def _absorb_minted_flag_values(argv: list) -> list:
 def _wake_incarnation(name: str, old_sid: str) -> str:
     """The incarnation a wake of supervisor row `name` must resume.
 
-    A seize keeps the body's sid but mints a new incarnation id, and it never
-    renames the roster row. Taken from the row name alone, the incarnation
-    names a dead generation for the rest of the seized one, so every wake
-    refused with `claim changed since the wake decision` while mailbox
-    delivery to the same body, mid-turn, kept working (queue item 27a,
-    MEASURED 2026-09-18). When the live claim's holder record IS this body,
-    the claim's incarnation is the one to resume. A claim held by any other
-    sid keeps the row-name value, and `_wake_supervisor_native` still refuses
-    it under the lock. Defined here, after every cited line, so the fix
-    shifts no self-citation.
+    A seize keeps the body's sid but mints a new incarnation id and never
+    renames the roster row, so the row name alone names a dead generation. When
+    the live claim's holder record IS this body, the claim's incarnation wins;
+    otherwise the row-name value stands and `_wake_supervisor_native` refuses
+    under the lock. Defined after every cited line so it shifts no self-citation.
     """
     incarnation_id = name.split("|")[1]
     live_claim = read_incarnation()
