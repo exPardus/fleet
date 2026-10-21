@@ -540,6 +540,23 @@ creates no send reservation. A known-local mailbox failure before the provider
 call releases its reservation; only a possibly accepted provider call freezes
 the row and keeps the reservation for reconciliation.
 
+A correlated `HostRejected` is a clean preacceptance refusal only when the
+exact host operation journal is `failed`. Worker wake, steer, and respawn
+release their reservation and return unconsumed claimed mail to the queue in
+that case; supervisor send releases its claim reservation the same way. The
+error says to retry. An unreadable, prepared, accepted, or uncertain journal,
+or a lost response, keeps the row frozen. An operation with a known
+`recovery.thread_id` blocks later mutations only on that thread. An intent
+without a trustworthy thread attribution continues to block globally.
+
+For rows frozen by an earlier CLI, `fleet --fleet-home <exact-home>
+codex-settle-rejected <worker> <operation-id> --expect-thread <thread-id>
+--expect-turn <turn-id|none> --expect-generation <generation>` is an
+Interface-only recovery. It checks the exact failed journal, frozen row and
+operation pins, then reads the public thread and newest turn. A newer turn or
+ambiguous history refuses settlement. Once proved, it restores claimed mail
+and clears the reservation without a provider mutation.
+
 ### 8.3 Interrupt and terminal operations
 
 `respawn` also accepts a `systemError` thread (for example after a
