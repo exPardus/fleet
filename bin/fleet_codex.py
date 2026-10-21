@@ -1752,11 +1752,26 @@ class OperationJournal:
 
     def unresolved_predecessor(self, operation_id: str) -> dict[str, Any] | None:
         """Return unfinished intent that must settle before a fresh mutation."""
+        try:
+            target = self.load(operation_id)
+        except HostRejected:
+            target = None
+        recovery = target.get("recovery") if target is not None else None
+        thread_id = recovery.get("thread_id") if isinstance(recovery, dict) else None
         for record in self.records():
             if (record.get("operation_id") != operation_id
                     and record.get("state") in {
                         "prepared", "accepted", "observed", "uncertain"}):
-                return record
+                predecessor = record.get("recovery")
+                predecessor_thread = (predecessor.get("thread_id")
+                                      if isinstance(predecessor, dict) else None)
+                # An unattributed operation can affect any thread. A known
+                # different thread has its own independent mutation fence.
+                if (not isinstance(thread_id, str) or not thread_id
+                        or not isinstance(predecessor_thread, str)
+                        or not predecessor_thread
+                        or predecessor_thread == thread_id):
+                    return record
         return None
 
     def permits_observed_resume_policy_restore(

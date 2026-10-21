@@ -625,6 +625,25 @@ def test_thread_journal_failure_freezes_bound_claim_without_booting(
         "thread/start"]
 
 
+def test_host_failed_supervisor_thread_start_releases_preclaim(
+        supervisor_home, monkeypatch):
+    from fleet_codex import HostRejected, OperationJournal
+
+    class RejectedClient(FakeSupervisorClient):
+        def call(self, operation, timeout):
+            journal = OperationJournal(supervisor_home, self.generation)
+            journal.prepare(operation)
+            journal.fail(operation["operation_id"], "blocked by predecessor")
+            raise HostRejected("blocked by predecessor")
+
+    monkeypatch.setattr(fleet, "_codex_native_client",
+                        lambda _home: RejectedClient(supervisor_home))
+    with pytest.raises(fleet.FleetCliError, match="rejected.*retry"):
+        fleet.cmd_sup_spawn(_args())
+    assert fleet.read_incarnation() is None
+    assert fleet.read_registry_no_repair()["workers"] == {}
+
+
 def test_stale_predecessor_cannot_authorize_mutation_after_handoff(
         supervisor_home):
     client = FakeSupervisorClient(supervisor_home)
@@ -802,6 +821,43 @@ def test_native_send_steers_only_the_claimed_active_turn(
     assert "pending_operation" not in fleet.read_incarnation()
     assert len(client.commits) == 1
     assert not (supervisor_home / "mailbox" / f"{THREAD_ID}.md").exists()
+
+
+@pytest.mark.parametrize("thread_status,method", [
+    ("active", "turn/steer"), ("idle", "turn/start"),
+])
+def test_host_failed_supervisor_send_restores_claim_and_mail(
+        supervisor_home, monkeypatch, thread_status, method):
+    from fleet_codex import HostRejected, OperationJournal
+    name, _inc = _seed_native_supervisor(supervisor_home)
+
+    class RejectedClient(FakeLifecycleClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == method:
+                journal = OperationJournal(supervisor_home, self.generation)
+                journal.prepare(operation)
+                journal.fail(operation["operation_id"], "blocked by predecessor")
+                raise HostRejected("blocked by predecessor")
+            return super().call(operation, timeout)
+
+    client = RejectedClient(
+        supervisor_home, thread_status=thread_status,
+        turn_status=("completed" if thread_status == "idle" else "inProgress"))
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    original_claim = fleet.read_incarnation()
+    original_row = fleet.read_registry_no_repair()["workers"][name]
+    with pytest.raises(fleet.FleetCliError, match="rejected before acceptance.*retry"):
+        fleet._cmd_send_codex_supervisor(name, "try this again")
+    claim = fleet.read_incarnation()
+    row = fleet.read_registry_no_repair()["workers"][name]
+    assert claim.get("pending_operation") is None
+    assert claim["state"] == original_claim["state"]
+    assert claim.get("last_operation_id") == original_claim.get("last_operation_id")
+    assert row["adapter_state"] == original_row["adapter_state"]
+    assert row["status"] == original_row["status"]
+    assert "try this again" in (supervisor_home / "mailbox" /
+                                f"{THREAD_ID}.md").read_text()
+    assert not list((supervisor_home / "mailbox").glob("*.claimed.*"))
 
 
 def test_stale_native_predecessor_cannot_wake_or_steer(

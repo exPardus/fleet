@@ -1529,6 +1529,98 @@ def test_native_worker_send_steers_busy_or_wakes_idle_same_thread(
     assert record["status"] == "working"
 
 
+@pytest.mark.parametrize("provider_status,method", [
+    ("idle", "turn/start"), ("active", "turn/steer"),
+])
+def test_host_failed_send_restores_mail_and_actionable_row(
+        native_home, monkeypatch, provider_status, method):
+    from fleet_codex import HostRejected, OperationJournal
+    home, lane = native_home
+    status = "idle" if provider_status == "idle" else "working"
+    original = _install_record(lane, status=status,
+                               adapter_state=provider_status)
+
+    class RejectedClient(WorkerVerbClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == method:
+                journal = OperationJournal(home, self.generation)
+                journal.prepare(operation)
+                journal.fail(operation["operation_id"], "blocked by predecessor")
+                raise HostRejected("blocked by predecessor")
+            return super().call(operation, timeout)
+
+    client = RejectedClient(lane, provider_status=provider_status,
+                            turn_status=("completed" if status == "idle"
+                                         else "inProgress"))
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    with pytest.raises(fleet.FleetCliError, match="rejected before acceptance.*retry"):
+        fleet._cmd_send_codex("cx-native", "retry this")
+    row = fleet.read_registry_no_repair()["workers"]["cx-native"]
+    assert row["status"] == status
+    assert row["adapter_state"] == provider_status
+    assert row.get("pending_operation") is None
+    assert row.get("last_operation_id") == original.get("last_operation_id")
+    assert "retry this" in (home / "mailbox" / f"{THREAD_ID}.md").read_text()
+    assert not list((home / "mailbox").glob("*.claimed.*"))
+
+
+def test_settle_old_frozen_rejection_requires_failed_journal_and_no_new_turn(
+        native_home, monkeypatch):
+    from fleet_codex import OperationJournal
+    home, lane = native_home
+    row = _install_record(lane, status="idle", adapter_state="idle")
+    operation_id = "worker-send-frozen-rejection"
+    row.update({"status": "dead-suspected", "adapter_state": "uncertain",
+                "last_operation_id": operation_id,
+                "pending_operation": {"operation_id": operation_id,
+                                      "kind": "turn/start"}})
+    data = fleet.read_registry_no_repair()
+    data["workers"]["cx-native"] = row
+    fleet.save_registry(data)
+    journal = OperationJournal(home, "host-generation-1")
+    journal.prepare({"operation_id": operation_id, "method": "rpc",
+                     "payload": {"method": "turn/start", "params": {
+                         "threadId": THREAD_ID, "input": []}},
+                     "recovery": {"kind": "worker/turn/start",
+                                  "fleet_name": "cx-native", "thread_id": THREAD_ID,
+                                  "previous_turn_id": TURN_ID,
+                                  "canonical_cwd": str(lane)}})
+    journal.fail(operation_id, "blocked by predecessor")
+    client = WorkerVerbClient(lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    source = {"kind": "codex", "claim_id": "interface-1"}
+    monkeypatch.setattr(fleet, "_registered_interface_mail_source", lambda: source)
+    monkeypatch.setattr(fleet, "_mail_source_is_current", lambda _source: True)
+    args = SimpleNamespace(name="cx-native", operation_id=operation_id,
+                           expect_thread=THREAD_ID, expect_turn=TURN_ID,
+                           expect_generation="host-generation-1",
+                           _fleet_home_explicit=True)
+    original_call = client.call
+    def paged_call(operation, timeout):
+        if operation["payload"]["method"] == "thread/turns/list":
+            return SimpleNamespace(
+                generation=client.generation,
+                result={"data": list(reversed(
+                    client._thread()["thread"]["turns"])),
+                        "nextCursor": None})
+        return original_call(operation, timeout)
+    client.call = paged_call
+    client._thread = lambda: {"thread": {
+        "id": THREAD_ID, "cwd": str(lane),
+        "status": {"type": "idle", "activeFlags": []},
+        "turns": [{"id": TURN_ID, "status": "completed"},
+                  {"id": NEXT_TURN_ID, "status": "completed"}]}}
+    with pytest.raises(fleet.FleetCliError, match="newer or ambiguous turn"):
+        fleet.cmd_codex_settle_rejected(args)
+    assert fleet.read_registry_no_repair()["workers"]["cx-native"] == row
+    client._thread = lambda: WorkerVerbClient._thread(client)
+    assert fleet.cmd_codex_settle_rejected(args) == 0
+    settled = fleet.read_registry_no_repair()["workers"]["cx-native"]
+    assert settled["status"] == "idle"
+    assert settled["adapter_state"] == "idle"
+    assert settled.get("pending_operation") is None
+
+
 @pytest.mark.parametrize("flags", [[], ["waitingOnApproval"]])
 def test_active_metadata_does_not_demote_or_read_durable_items(
         native_home, monkeypatch, flags):
@@ -2481,6 +2573,43 @@ def test_native_worker_respawn_uses_fresh_thread_after_old_terminal_proof(
     prompt = fleet.task_file_path("cx-native").read_text(encoding="utf-8")
     assert "preserve the full worker brief" in prompt
     assert "checkpoint from the previous thread" in prompt
+
+
+def test_host_failed_respawn_thread_restores_old_row_brief_and_mail(
+        native_home, monkeypatch):
+    from fleet_codex import HostRejected, OperationJournal
+    home, lane = native_home
+    original = _install_record(lane, status="idle", adapter_state="idle")
+    fleet.write_brief("cx-native", "original worker brief")
+    fleet.task_file_path("cx-native").parent.mkdir(parents=True, exist_ok=True)
+    fleet.task_file_path("cx-native").write_text("original task file")
+    mailbox = home / "mailbox" / f"{THREAD_ID}.md"
+    mailbox.write_text("unconsumed direction")
+
+    class RejectedClient(WorkerVerbClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == "thread/start":
+                journal = OperationJournal(home, self.generation)
+                journal.prepare(operation)
+                journal.fail(operation["operation_id"], "blocked by predecessor")
+                raise HostRejected("blocked by predecessor")
+            return super().call(operation, timeout)
+
+    client = RejectedClient(lane, provider_status="idle", turn_status="completed")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+    monkeypatch.setattr(fleet, "_codex_native_client", lambda _home: client)
+    args = SimpleNamespace(name="cx-native", task=None, force=False,
+                           setting_sources=None, token_ceiling=None,
+                           max_budget_usd=None, force_band=False)
+    with pytest.raises(fleet.FleetCliError, match="rejected.*retry"):
+        fleet._cmd_respawn_codex(args, original)
+    row = fleet.read_registry_no_repair()["workers"]["cx-native"]
+    assert row["status"] == "idle" and row["adapter_state"] == "idle"
+    assert row.get("pending_operation") is None
+    assert row["codex_thread_id"] == THREAD_ID
+    assert fleet.read_brief("cx-native", row) == "original worker brief"
+    assert fleet.task_file_path("cx-native").read_text() == "original task file"
+    assert mailbox.read_text().strip() == "unconsumed direction"
 
 
 def test_native_worker_respawn_resumes_old_generation_before_fresh_thread(
