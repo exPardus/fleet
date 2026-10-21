@@ -8138,7 +8138,7 @@ def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
     if getattr(proc, "returncode", 1) != 0:
         stderr = str(getattr(proc, "stderr", "") or "").strip()
         if len(stderr) > 2000:
-            stderr = stderr[:1987] + "..."
+            stderr = stderr[:2000] + "..."
         detail = f": {stderr}" if stderr else ""
         raise FleetCliError(f"pr-poll: gh pr view failed (exit {proc.returncode}){detail}")
 
