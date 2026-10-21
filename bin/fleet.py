@@ -955,20 +955,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:13860) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:14938) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:18401) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:13877) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:14955) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:18418) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:4414) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:4423) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:5132) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15188) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:18275) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:5149) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15205) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:18292) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:8358) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:20055) -- render the release explanation.
+      * `_print_snapshot_table` (:8375) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:20046) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3202,10 +3202,19 @@ def _release_codex_rejected_worker(binding, operation_id, claim_path=None, *,
         if not _restore_rejected_codex_claim(claim_path):
             return False
         files = pending.get("prior_files")
-        if isinstance(files, dict):
-            _restore_codex_prior_files(binding.name, files)
-        elif prior_files is not None:
-            _restore_codex_prior_files(binding.name, prior_files)
+        if not isinstance(files, dict):
+            files = prior_files
+        failed = _restore_codex_prior_files(binding.name, files) if files else []
+        if failed:
+            # Keep the unrestored bytes reserved so a later settle can retry.
+            pending["prior_files"] = {key: files[key] for key in failed}
+            record["status"] = "dead-suspected"
+            record["adapter_state"] = "uncertain"
+            record["uncertain_reason"] = (
+                "prior files not restored: " + ", ".join(failed))
+            record["last_activity"] = now_iso()
+            save_registry(data)
+            return False
         record.pop("pending_operation", None)
         if "previous_status" in pending or observed_state is None:
             record["status"] = pending.get("previous_status") or "idle"
@@ -4396,7 +4405,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18401`), because legacy upgrades also require a complete registry.
+    (`:18418`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1042`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4879,6 +4888,14 @@ def recompute_worker_codex(name: str, record: dict,
     verdict = _mcx_probe(record, run=run, which=which)
     if verdict is None:
         return updated
+    if record.get("limit_resume_claim"):
+        # A resume claim precedes the steer; the job still reads failed until
+        # mcx runs it. Re-parking would let a second resumer steer again.
+        if (verdict in ("limited", "dead") and status == "working"
+                and not _launch_claim_expired(record.get("last_activity"))):
+            return updated
+        if verdict != "working":
+            updated.pop("limit_resume_claim", None)
     updated["status"] = verdict
     if verdict == "limited":
         signal = _mcx_limit_signal(record) or {}
@@ -12202,7 +12219,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12117` / `cmd_respawn:11394`, before
+    # resolution that runs from `cmd_kill:12134` / `cmd_respawn:11411`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12233,9 +12250,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12117` / `cmd_respawn:11394`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12134` / `cmd_respawn:11411`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11415-11422` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11432-11439` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -17223,7 +17240,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1035`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5120`) applies here too. An unreadable registry
+    rule for the view path (`:5137`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17294,10 +17311,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4218, :4253, :4283, :4322, :4359, :4421, :4501, :5529, :12220, :12382, :12650, :12877, :12913, :13155, :13156, :13245, :13255, :13266, :13364, :13886, :17246, :20211, :20223, :20372, :23407, :23408, :23512, :23579, :23627, :24589, :24591, :24629, :25157, :27615`).
+    sites that already key on the union (`:4227, :4262, :4292, :4331, :4368, :4430, :4510, :5546, :12237, :12399, :12667, :12894, :12930, :13172, :13173, :13262, :13272, :13283, :13381, :13903, :17263, :20202, :20214, :20363, :23401, :23402, :23506, :23573, :23621, :24581, :24583, :24621, :25149, :27607`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10611, :11268, :15526, :26093. This makes union identity
+    OWN prior sid alone: :10628, :11285, :15543, :26085. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18015,8 +18032,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10611, :11268, :15526,
-    # :26093) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10628, :11285, :15543,
+    # :26085) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18024,7 +18041,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1035`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17220`).
+        # names this gate as its reason (`:17237`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -18394,7 +18411,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13857`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13874`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19047,15 +19064,10 @@ def _wave_unjoined_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
 
 def _wave_record_substrate(repo, worktree, record=None):
     """Read a substrate only from a record tied to ``worktree``.
-
-    The fleet registry is the source for native worker records when it carries
-    the explicit field. mcx records live in the lane worktree; their saved
-    ``cwd`` plus the ``codex`` executable marker is the mcx record. Neither a
-    branch name nor commit-message trailers are evidence of the substrate.
-
-    ``record`` is the record a caller already joined to the lane by branch;
-    it is read first so a lane whose worktree has been pruned still reports
-    its substrate.
+    Native rows carry an explicit field; an mcx record in the lane worktree is
+    its saved ``cwd`` plus the ``codex`` executable marker. Branch names and
+    commit trailers are not evidence. A caller-joined ``record`` is read first,
+    so a pruned worktree still reports its substrate.
     """
     if record is not None:
         substrate = _wave_substrate_of_record(record)
@@ -19307,15 +19319,10 @@ def _wave_registry_mcx_ids(repo, worktree) -> set:
 
 def _wave_codex_tokens(repo, lanes=None, run=subprocess.run, aliases=None):
     """Sum Codex usage from mcx records in the landed lane worktrees.
-
-    Completed mcx jobs conventionally leave a text ``result`` plus an
-    ``events.jsonl`` containing the final usage object.  Prefer the result and
-    consult its event log only when the result has no machine-readable usage,
-    so one job cannot be counted twice.  ``lanes`` is the already-resolved
-    landed-lane list; using its worktree join is essential because the main
-    checkout's ``.mcx`` is not where lane jobs live.  Job ids come from the
-    landed lane's registry row (item 29); the ``.mcx/*/result`` glob remains
-    only as a fallback for rows with no recorded ``mcx_id``.
+    Prefer a job's ``result``; read ``events.jsonl`` only when the result has
+    no usage, so no job counts twice. Lane jobs live in the landed worktrees,
+    not the main checkout. Job ids come from each lane's registry row; the
+    ``.mcx/*/result`` glob is the fallback for rows with no ``mcx_id``.
     """
     if lanes is None:
         roots = [Path(repo)]
@@ -19419,20 +19426,11 @@ def _wave_codex_tokens(repo, lanes=None, run=subprocess.run, aliases=None):
 
 def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run, aliases=None):
     """Sum Claude outcome usage for the landed lanes in this wave.
-
-    The roster has no usage field, so this reads ``state/outcomes``.  It is
-    bounded to the current wave by first joining each landed Claude lane to
-    its current registry record by branch (worktree as the fallback), then
-    accepting only outcome rows whose ``session_id`` equals that record's
-    current session id. Historical rows from other workers and retired
-    session ids are excluded.
-
-    A lane whose substrate could not be read at all is not evidence of zero
-    Claude tokens: it may have been a Claude lane whose usage this function
-    then cannot see, so the total is UNMEASURED. Only a lane list in which
-    every lane names a non-Claude substrate is a measured zero (queue item
-    26: `tokens: 0` on an unattributable wave is the same lie `MEASURED 0`
-    was).
+    The roster has no usage field, so read ``state/outcomes``: join each landed
+    Claude lane to its registry record by branch (worktree fallback) and accept
+    only rows whose ``session_id`` is that record's current session id.
+    An unreadable substrate may hide a Claude lane, so the total is UNMEASURED;
+    only lanes that all name a non-Claude substrate measure zero.
     """
     unreadable = [lane for lane, substrate, _sha in lanes
                   if substrate == "unknown"]
@@ -19495,18 +19493,11 @@ def _wave_outcomes_claude_tokens(repo, lanes, run=subprocess.run, aliases=None):
 
 def _wave_external_lines(repo, lanes, base, run=subprocess.run, aliases=None):
     """Count lines this wave's lanes landed in repositories other than ``repo``.
-
-    Git's numstat is repository-scoped, so it can never see another repository.
-    The durable join is ``git worktree list``, which enumerates the worktrees of
-    THIS repository and nothing else: a lane ``_wave_lane_worktree`` resolves is
-    by construction a worktree of this repository, so its lines landed here --
-    even though the worktree directory is a SIBLING of the repository root, not
-    a child of it.  A lane whose worktree has been pruned is still this repo's
-    lane when its registry record keeps the branch the merge subject names, so
-    the count survives the routine tidy-up (queue item 16). A lane that joins
-    to neither a worktree nor a record either worked in another repository or
-    was never registered here, and those two are indistinguishable from here,
-    so that lane leaves the count UNMEASURED rather than counted as zero.
+    Git numstat is repository-scoped. A lane `_wave_lane_worktree` resolves via
+    ``git worktree list`` is a worktree of this repository, even as a sibling
+    directory; a pruned lane still counts here when its record keeps the merged
+    branch. A lane joining neither landed elsewhere or was never registered, so
+    the count is UNMEASURED rather than zero.
     """
     if not lanes:
         return "0 (MEASURED: no lanes landed this wave)"
@@ -20992,9 +20983,12 @@ def _restore_rejected_codex_mail(claimed: Path, thread_id: str) -> None:
         claimed.unlink()
     except OSError as exc:
         # Drop the new link so only the claim remains; appends through the
-        # link landed in the shared inode, so the claim still holds them.
+        # link landed in the shared inode. Never unlink mail that replaced it.
         try:
-            target.unlink()
+            if os.path.samefile(claimed, target):
+                target.unlink()
+        except FileNotFoundError:
+            pass
         except OSError as rollback_exc:
             raise FleetCliError(
                 f"native Codex claimed mail unlink failed and rollback failed; "
@@ -24308,10 +24302,8 @@ def cmd_sup_decision(args) -> int:
       --clear                                remove the open decision (consumed).
       (no flag)                              show the current decision.
 
-    The supervisor never writes its own answer (§8): `--raise` sets `answer` to
-    None and `--answer` is the interface's verb. This file is ROUTING, not
-    authorization -- it never lets the supervisor act on the operator's behalf;
-    it is how "operator gates stay human" survives an unattended supervisor."""
+    The supervisor never writes its own answer (§8). This file is ROUTING, not
+    authorization: operator gates stay human under an unattended supervisor."""
     raising = getattr(args, "question", None) is not None
     answering = getattr(args, "answer", None) is not None
     clearing = bool(getattr(args, "clear", False))

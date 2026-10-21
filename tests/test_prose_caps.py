@@ -87,7 +87,7 @@ def _fleet_prose_lines():
 
 def test_fleet_py_docstring_and_comment_cap():
     # The 4,000-line cap predates the extracted sibling modules; their prose
-    # is included in this aggregate, which currently measures 4,173 lines.
+    # is included in this aggregate, which currently measures 4,196 lines.
     assert _fleet_prose_lines() <= 4200
 
 

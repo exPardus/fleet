@@ -204,3 +204,42 @@ class TestResumeClaim:
         assert "no longer limited" not in out
         assert "launched" in out
         assert fleet.load_registry()["workers"]["cx1"]["status"] == "dead"
+
+
+class TestReprobeClaim:
+    """A probing status between claim and steer keeps the claim (w343)."""
+
+    _park = TestResume._park
+    _count_steers = TestResumeClaim._count_steers
+
+    def test_status_probe_between_claim_and_steer_cannot_double_steer(
+            self, codex_home, monkeypatch):
+        worktree, rec = self._park(codex_home, "2020-01-01T00:00:00Z")
+        _events(worktree, rec["mcx_id"], _failed(LIMIT_MESSAGE))
+        second, probed = [], []
+
+        def probe_then_race():
+            fleet.cmd_status(SimpleNamespace(
+                name="cx1", all=False, stale_ok=False, json=False))
+            probed.append(fleet.load_registry()["workers"]["cx1"]["status"])
+            second.append(fleet._resume_one_limited(
+                "cx1", fleet.shutil.which, lambda s: None))
+
+        steers = self._count_steers(monkeypatch, during=probe_then_race)
+        assert fleet._resume_one_limited(
+            "cx1", fleet.shutil.which, lambda s: None) is True
+        assert len(steers) == 1
+        assert probed == ["working"] and second == [False]
+        row = fleet.load_registry()["workers"]["cx1"]
+        assert row["status"] == "working"
+        assert "limit_resume_claim" not in row
+
+    def test_expired_claim_reparks_and_drops_claim(self, codex_home):
+        worktree, rec = _spawn(codex_home)
+        _set_state(worktree, rec["mcx_id"], "failed")
+        _events(worktree, rec["mcx_id"], _failed(LIMIT_MESSAGE))
+        rec.update(status="working", limit_resume_claim="crashed",
+                   last_activity="2020-01-01T00:00:00Z")
+        out = fleet.recompute_worker_codex("cx1", rec)
+        assert out["status"] == "limited"
+        assert "limit_resume_claim" not in out
