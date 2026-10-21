@@ -759,7 +759,10 @@ def test_the_capped_registry_snapshot_has_no_readers_outside_the_brief_store():
     rebuilds a supervisor CAMPAIGN). Both are gone. A third would be the same
     defect wearing a new name, so the reader set is pinned, not the fix."""
     readers = _call_sites('.get("task"') | _call_sites('["task"]')
-    assert readers <= {"_recovered_brief", "read_brief", "new_worker_record"}, (
+    # cmd_codex_settle_rejected only checks the brief still starts with the
+    # snapshot (provenance) and refuses on mismatch; it never dispatches it.
+    assert readers <= {"_recovered_brief", "read_brief", "new_worker_record",
+                       "cmd_codex_settle_rejected"}, (
         f"a new reader of the capped registry snapshot appeared: "
         f"{sorted(readers)}. That field is PROVENANCE -- 200 chars, cut "
         f"mid-sentence for any real task. Read the brief via `read_brief`, "
