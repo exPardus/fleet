@@ -196,6 +196,9 @@ ALLOWED = {
     # w334: `_release_codex_rejected_worker` restores one failed reservation
     # inside `fleet_lock()` and pairs the load with save_registry + an event.
     "_release_codex_rejected_worker",
+    # w340: `_resume_one_limited_mcx` re-checks the limited mcx row inside
+    # `fleet_lock()` after the steer and pairs the load with save_registry + an event.
+    "_resume_one_limited_mcx",
     # w103: the native Codex kill half marks the row dead inside `fleet_lock()`.
     "_cmd_kill_codex_native",
     # `codex-reobserve-active` reads the row via `read_registry_no_repair`, then

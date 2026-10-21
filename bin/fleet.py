@@ -955,20 +955,20 @@ def _quarantine_artifacts() -> list:
 
     RULE 1: unresolved incident, registry present or not. Refuse on presence alone:
     os.rename preserves mtime, so comparing against a recreated registry is unsafe.
-      * `_sweep_husks` (:13694) -- hidden records can still own roster sessions.
-      * `_doctor_check_autoclean` (:14772) -- report a sweep blocked by an artifact.
-      * `_require_claim_holder`'s §9 arm (:18235) -- legacy upgrades need complete records.
+      * `_sweep_husks` (:13818) -- hidden records can still own roster sessions.
+      * `_doctor_check_autoclean` (:14896) -- report a sweep blocked by an artifact.
+      * `_require_claim_holder`'s §9 arm (:18359) -- legacy upgrades need complete records.
 
     RULE 2: absent registry with an artifact means incident, not fresh install.
-      * `_acting_worker_identity` (:4339) -- only a fresh absence proves no records;
+      * `_acting_worker_identity` (:4408) -- only a fresh absence proves no records;
         healthy reads must still identify workers for the §6.5 gate.
-      * `_read_registry_readonly` (:5053) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15022) -- do not grade a renamed-away path readable.
-      * `_identity_abstention_note` (:18109) -- describe the incident-specific absence.
+      * `_read_registry_readonly` (:5126) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15146) -- do not grade a renamed-away path readable.
+      * `_identity_abstention_note` (:18233) -- describe the incident-specific absence.
 
     RULE 3: name the artifact after absence has already been classified.
-      * `_print_snapshot_table` (:8279) -- render the stale-ok status explanation.
-      * `_tombstone_releasing_body` (:19889) -- render the release explanation.
+      * `_print_snapshot_table` (:8352) -- render the stale-ok status explanation.
+      * `_tombstone_releasing_body` (:20013) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.
     """
     return _quarantine_artifacts_at(state_dir())
@@ -3673,8 +3673,72 @@ def _mcx_run(record, args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(f"mcx {args[0] if args else ''} failed: {exc}") from exc
 
 
+MCX_LIMIT_TAIL_BYTES = 262144
+_MCX_LIMIT_MESSAGE_RE = re.compile(r"usage limit", re.IGNORECASE)
+_MCX_LIMIT_RESET_RE = re.compile(
+    r"try again at\s+(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|"
+    r"june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?"
+    r"\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(am|pm)", re.IGNORECASE)
+_MCX_MONTHS = {m: i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun",
+     "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+
+
+def _mcx_parse_limit_reset(text: str):
+    """UTC reset instant from "try again at Oct 27th, 2026 12:37 PM", else
+    None. Codex prints the host's local clock, so read it as local time; any
+    shape this cannot resolve leaves an unknown horizon, never a guess."""
+    m = _MCX_LIMIT_RESET_RE.search(text or "")
+    if not m:
+        return None
+    mon, day, year, hour, minute, ampm = m.groups()
+    month = _MCX_MONTHS.get(mon.lower()[:3])
+    hour, minute = int(hour), int(minute)
+    if month is None or not 1 <= hour <= 12 or minute > 59:
+        return None
+    hour24 = (0 if hour == 12 else hour) + (12 if ampm.lower() == "pm" else 0)
+    try:
+        local = datetime(int(year), month, int(day), hour24, minute)
+        return local.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _mcx_limit_signal(record):
+    """None unless the job's newest failure event is a usage-limit error;
+    else {"reset_at": <UTC ISO or None>}. Reads only the events.jsonl tail."""
+    mcx_id = record.get("mcx_id")
+    if not mcx_id:
+        return None
+    path = _mcx_dir(record) / mcx_id / "events.jsonl"
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - MCX_LIMIT_TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") not in {
+                "turn.failed", "error"}:
+            continue
+        err = event.get("error")
+        message = err.get("message") if isinstance(err, dict) else (
+            err if isinstance(err, str) else event.get("message"))
+        if not isinstance(message, str) or not _MCX_LIMIT_MESSAGE_RE.search(message):
+            return None
+        return {"reset_at": _mcx_parse_limit_reset(message)}
+    return None
+
+
 def _mcx_probe(record, run=subprocess.run, which=shutil.which):
-    """'working' | 'idle' | 'dead' from `mcx result`'s exit code (2 live, 0
+    """'working' | 'idle' | 'limited' | 'dead' from `mcx result`'s exit code (2 live, 0
     done, 1 stopped/unknown); None when the probe itself could not run -- never
     assume dead on ambiguity."""
     mcx_id = record.get("mcx_id")
@@ -3692,13 +3756,18 @@ def _mcx_probe(record, run=subprocess.run, which=shutil.which):
         return "working"
     if state in {"done", "completed", "complete", "idle"}:
         return "idle"
-    if state in {"stopped", "dead", "failed", "error"}:
+    if state in {"failed", "error"}:
+        # A usage-limit failure is a recoverable park, never a death.
+        return "limited" if _mcx_limit_signal(record) is not None else "dead"
+    if state in {"stopped", "dead"}:
         return "dead"
     try:
         proc = _mcx_run(record, ["result", mcx_id], run=run, which=which)
     except FleetCliError:
         return None
-    return {2: "working", 0: "idle"}.get(proc.returncode, "dead")
+    if proc.returncode in (0, 2):
+        return {2: "working", 0: "idle"}[proc.returncode]
+    return "limited" if _mcx_limit_signal(record) is not None else "dead"
 
 
 def _mcx_saved_result(record) -> str | None:
@@ -4321,7 +4390,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18235`), because legacy upgrades also require a complete registry.
+    (`:18359`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1042`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4805,6 +4874,10 @@ def recompute_worker_codex(name: str, record: dict,
     if verdict is None:
         return updated
     updated["status"] = verdict
+    if verdict == "limited":
+        signal = _mcx_limit_signal(record) or {}
+        updated["limit_kind"] = "usage_limit"
+        updated["limit_reset_at"] = signal.get("reset_at")
     if verdict == "idle":
         result_text = _mcx_saved_result(record)
         if result_text is not None:
@@ -10428,6 +10501,20 @@ def _cmd_send_codex(name: str, message: str,
         raise FleetCliError(
             f"{name}: turn running -- codex steering RESTARTS the run; wait "
             f"for idle, or `fleet interrupt {name}` first")
+    if verdict == "limited":
+        signal = _mcx_limit_signal(rec) or {}
+        with fleet_lock():
+            data = load_registry()
+            r = data["workers"].get(name)
+            if r is not None and r.get("status") not in _NATIVE_STICKY:
+                r["status"] = "limited"
+                r["limit_kind"] = "usage_limit"
+                r["limit_reset_at"] = signal.get("reset_at")
+                save_registry(data)
+                append_event("status_changed", name,
+                             old=rec.get("status"), new="limited")
+        raise FleetCliError(
+            f"{name}: worker is limited -- run `fleet resume-limited {name}`")
     if verdict == "dead":
         with fleet_lock():
             data = load_registry()
@@ -10575,10 +10662,46 @@ def _resume_one_limited_codex(name: str, rec: dict) -> bool:
     return True
 
 
+def _resume_one_limited_mcx(name: str, rec: dict, run, which) -> bool:
+    """Restart a limited mcx lane on its same Codex thread via `mcx steer`.
+    A failed steer leaves the row limited; success clears the limit fields
+    only while the row still names the same mcx job."""
+    if not rec.get("mcx_id"):
+        raise FleetCliError(f"{name}: no mcx worker id recorded -- cannot resume")
+    _mcx_reconcile_saved_settings(name, rec)
+    body = ("The usage-limit reset horizon has passed. Continue the task "
+            "from where you left off.\n\n"
+            + _compose_codex_worker_continuation(name, rec.get("cwd") or "", ""))
+    proc = _mcx_run(rec, ["steer", rec["mcx_id"], "-"],
+                    run=run, which=which, input_text=body)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise FleetCliError(
+            f"{name}: mcx resume failed, row stays limited -- {detail[:300]}")
+    with fleet_lock():
+        data = load_registry()
+        r = data["workers"].get(name)
+        if (r is None or r.get("mcx_id") != rec["mcx_id"]
+                or r.get("status") != "limited"):
+            return False
+        r["status"] = "working"
+        r.pop("mcx_result_id", None)
+        r.pop("mcx_result_text", None)
+        r["limit_reset_at"] = None
+        r["limit_kind"] = None
+        r["last_dispatch_at"] = now_iso()
+        r["last_activity"] = now_iso()
+        r["turns"] = r.get("turns", 0) + 1
+        save_registry(data)
+        _append_event_quiet("limit_resumed", name, mcx_id=rec["mcx_id"])
+    return True
+
+
 def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
     """Claim and fork-steer one still-limited worker.
     Re-check limited under the lock so concurrent sweeps cannot double-dispatch.
     Return False if it has moved on, True if launched; a vanished name refuses."""
+    mcx_limited = None
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
@@ -10593,13 +10716,16 @@ def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
             if route == "native":
                 native_codex = dict(rec)
             else:
-                raise FleetCliError(
-                    f"{name}: mcx Codex resume-limited is not supported; "
-                    "the row was left unchanged")
+                if rec.get("status") != "limited":
+                    return False
+                mcx_limited = dict(rec)
+                native_codex = None
         else:
             native_codex = None
         if native_codex is not None:
             # Provider calls and waits must never occur under fleet.lock.
+            pass
+        elif mcx_limited is not None:
             pass
         else:
             # Recheck limited under the claiming lock; another sweep may already own the launch.
@@ -10618,6 +10744,8 @@ def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
             category = rec.get("category")
             token_ceiling = rec.get("token_ceiling")
 
+    if mcx_limited is not None:
+        return _resume_one_limited_mcx(name, mcx_limited, run=run, which=which)
     if native_codex is not None:
         if native_codex.get("status") != "limited":
             return False
@@ -10659,10 +10787,6 @@ def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
                 raise FleetCliError(
                     f"{name}: invalid mixed Codex record; refusing resume-limited "
                     "without mutation")
-            if route == "mcx":
-                raise FleetCliError(
-                    f"{name}: mcx Codex resume-limited is not supported; "
-                    "no workers were resumed")
 
     resumed, skipped = [], []
     for name in names:
@@ -12036,7 +12160,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:11951` / `cmd_respawn:11228`, before
+    # resolution that runs from `cmd_kill:12075` / `cmd_respawn:11352`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12067,9 +12191,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:11951` / `cmd_respawn:11228`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12075` / `cmd_respawn:11352`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11249-11256` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11373-11380` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -17057,7 +17181,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1035`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5041`) applies here too. An unreadable registry
+    rule for the view path (`:5114`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17128,10 +17252,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4143, :4178, :4208, :4247, :4284, :4346, :4426, :5450, :12054, :12216, :12484, :12711, :12747, :12989, :12990, :13079, :13089, :13100, :13198, :13720, :17080, :20045, :20057, :20206, :23231, :23232, :23336, :23403, :23451, :24413, :24415, :24453, :24981, :27439`).
+    sites that already key on the union (`:4212, :4247, :4277, :4316, :4353, :4415, :4495, :5523, :12178, :12340, :12608, :12835, :12871, :13113, :13114, :13203, :13213, :13224, :13322, :13844, :17204, :20169, :20181, :20330, :23355, :23356, :23460, :23527, :23575, :24537, :24539, :24577, :25105, :27563`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10518, :11102, :15360, :25917. This makes union identity
+    OWN prior sid alone: :10605, :11226, :15484, :26041. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17849,8 +17973,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10518, :11102, :15360,
-    # :25917) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10605, :11226, :15484,
+    # :26041) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17858,7 +17982,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1035`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17054`).
+        # names this gate as its reason (`:17178`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -18228,7 +18352,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13691`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13815`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
