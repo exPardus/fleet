@@ -1030,6 +1030,10 @@ class CodexPublicEvidenceStore:
                 code = _public_error_code(error.get("codexErrorInfo"))
                 if code is not None:
                     current["error_code"] = code
+                message = error.get("message")
+                if isinstance(message, str) and message:
+                    # Bounded: the reset horizon of a usage limit lives here.
+                    current["error_message"] = message[:2000]
             items = turn.get("items", [])
             if not isinstance(items, list):
                 raise ValueError("turn/completed items are malformed")
