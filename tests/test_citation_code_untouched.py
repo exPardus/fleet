@@ -51,7 +51,7 @@ def test_repoint_self_citations_leaves_code_slices_and_dict_literals(tmp_path):
                  tmp_path / "tools" / "repoint_self_citations.py")
     base = _with_probes((ROOT / "bin" / "fleet.py").read_text(encoding="utf-8"))
     fleet_py.write_text(base, encoding="utf-8")
-    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    git = ["git", "-c", "user.name=t", "-c", "user.email=tests@example.com"]
     for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "base"]):
         subprocess.run(git + cmd, cwd=tmp_path, check=True, capture_output=True)
     fleet_py.write_text("# pad\n" * PAD + base, encoding="utf-8")
