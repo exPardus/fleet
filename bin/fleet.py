@@ -6999,7 +6999,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
         )
 
-    task = _read_task_arg(args.task)
+    task = _spawn_task_arg(args.name, args.task, cwd)
 
     # Compose before pre-claiming so context/index I/O cannot leave a phantom
     # working record. Report ordinary compose failures, but preserve Ctrl-C:
@@ -27808,6 +27808,29 @@ def _format_process_age(seconds):
     if seconds >= 60:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def _spawn_task_arg(name: str, task_arg: str, cwd) -> str:
+    path = task_file_path(name)
+    try:
+        head = path.read_bytes()[:512].decode("utf-8", errors="replace")
+    except OSError:
+        head = None
+    if head is not None and not head.startswith(f"You are fleet worker `{name}`"):
+        raise FleetCliError(
+            f"{name}: {path} exists and spawn did not write it; rename it to "
+            f"{name}-task.md and pass --task @<path>; nothing was registered")
+    token = task_arg.strip()
+    if token and not task_arg.startswith("@") and not any(c.isspace() for c in token):
+        try:
+            is_file = Path(token).is_file() or (Path(cwd) / token).is_file()
+        except (OSError, ValueError):
+            is_file = False
+        if is_file:
+            raise FleetCliError(
+                f"{name}: --task {token!r} names an existing file but takes the "
+                f"task TEXT; use --task @{token}; nothing was registered")
+    return _read_task_arg(task_arg)
 
 
 if __name__ == "__main__":
