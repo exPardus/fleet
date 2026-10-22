@@ -118,6 +118,7 @@ UNENFORCED = {
     # built, or descriptions of surfaces outside this repo, so there is nothing
     # of fleet's own behaviour to reproduce. Declared rather than left
     # unclassified, so adding a receipt to one is a deliberate act.
+    "codex-footer-adapter.md",  # prose; pinned by tests/test_codex_statusline.py
     "multi-fleet.md",
     "phase-2-watchtower.md",
     "phase-3-telegram.md",
