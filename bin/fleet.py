@@ -17251,10 +17251,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12196, :12358, :12623, :12848, :12884, :13126, :13127, :13216, :13226, :13237, :13335, :13854, :17203, :20093, :20105, :20254, :23292, :23293, :23395, :23460, :23508, :24466, :24468, :24506, :25034, :27477`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12196, :12358, :12623, :12848, :12884, :13126, :13127, :13216, :13226, :13237, :13335, :13854, :17203, :20093, :20105, :20254, :23292, :23293, :23395, :23460, :23508, :24468, :24470, :24508, :25036, :27481`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10592, :11244, :15493, :25962. This makes union identity
+    OWN prior sid alone: :10592, :11244, :15493, :25964. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17959,7 +17959,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10592, :11244, :15493,
-    # :25962) -- so union identity cannot make one body answer for another.
+    # :25964) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -19872,7 +19872,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(f"wave-close: push failed after {attempts} attempts: {push_failures}")
 
     pruned = _wave_prune_landed_worktrees(repo, "HEAD", run=run)
-    notify_args = argparse.Namespace(text=throughput, tmux_session="work", window="fleet",
+    notify_args = argparse.Namespace(text=throughput, tmux_session=None, window="fleet",
                                      dry_run=False, sid=getattr(args, "sid", None),
                                      nonce=getattr(args, "nonce", None))
     cmd_sup_notify(notify_args, run=run)
@@ -23971,7 +23971,9 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
 
     Dry-run precedes claim work; normal calls commit the heartbeat before tmux.
     """
-    target = f"{args.tmux_session}:{args.window}"
+    tmux_session = _resolve_notify_session(
+        getattr(args, "tmux_session", None), args.window, run)
+    target = f"{tmux_session}:{args.window}"
     if args.dry_run:
         print(f"[dry-run] would type into {target}: "
               f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
@@ -23989,7 +23991,7 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         raise FleetCliError(
             f"sup-notify: tmux would not deliver the line to {target} -- the "
             f"interface has NOT been told. Check that the tmux server and the "
-            f"window exist (`tmux list-windows -t {args.tmux_session}`); the "
+            f"window exist (`tmux list-windows -t {tmux_session}`); the "
             f"claim is untouched apart from this call's own restamp, so "
             f"re-running this verb is safe.")
     append_interface_log("RELAY", args.text)
@@ -27158,8 +27160,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_supnotify.add_argument("text",
                              help="the line's text -- prefixed with `SUPERVISOR: ` "
                                   "and sanitised to one printable line before it is typed")
-    p_supnotify.add_argument("--tmux-session", dest="tmux_session", default="work",
-                             help="tmux session holding the interface window (default: work)")
+    p_supnotify.add_argument("--tmux-session", dest="tmux_session", default=None,
+                             help="tmux session holding the interface window (default: "
+                                  "`work` if it has the window, else the one session "
+                                  "that has it; none or several fails closed)")
     p_supnotify.add_argument("--window", default="fleet",
                              help="tmux window name (default: fleet)")
     p_supnotify.add_argument("--dry-run", dest="dry_run", action="store_true",
@@ -27831,6 +27835,41 @@ def _spawn_task_arg(name: str, task_arg: str, cwd) -> str:
                 f"{name}: --task {token!r} names an existing file but takes the "
                 f"task TEXT; use --task @{token}; nothing was registered")
     return _read_task_arg(task_arg)
+
+
+NOTIFY_DEFAULT_TMUX_SESSION = "work"
+
+
+def _resolve_notify_session(session, window, run=subprocess.run) -> str:
+    """Return the tmux session for a sup-notify target.
+
+    An explicit session is returned untouched. Otherwise prefer the default
+    session when it holds `window`, else the one session that does; none or
+    several fail closed, naming the candidates.
+    """
+    if session is not None:
+        return session
+    try:
+        proc = run(["tmux", "list-windows", "-a", "-F",
+                    "#{session_name}:#{window_name}"],
+                   capture_output=True, text=True, timeout=10)
+        listing = proc.stdout if proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        listing = ""
+    matches = []
+    for row in (listing or "").splitlines():
+        name, _, win = row.rpartition(":")
+        if name and win == window and name not in matches:
+            matches.append(name)
+    if NOTIFY_DEFAULT_TMUX_SESSION in matches:
+        return NOTIFY_DEFAULT_TMUX_SESSION
+    if len(matches) == 1:
+        return matches[0]
+    found = ", ".join(f"{m}:{window}" for m in matches) or "none"
+    raise FleetCliError(
+        f"sup-notify: tmux would not deliver the line -- cannot choose the "
+        f"interface window `{window}` (candidates: {found}); pass "
+        f"--tmux-session explicitly; the interface has NOT been told.")
 
 
 if __name__ == "__main__":

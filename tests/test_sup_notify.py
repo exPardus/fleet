@@ -541,7 +541,8 @@ class TestSupNotifyIsWiredIntoTheCLI:
         parser = fleet.build_parser()
         args = parser.parse_args(["sup-notify", "hello"])
         assert args.command == "sup-notify"
-        assert (args.tmux_session, args.window) == ("work", "fleet")
+        # None = resolve at call time (tests/test_sup_notify_target.py).
+        assert (args.tmux_session, args.window) == (None, "fleet")
         assert args.dry_run is False
         assert args.nonce is None
 
@@ -551,5 +552,6 @@ class TestSupNotifyIsWiredIntoTheCLI:
         reading."""
         keeper = k._parser().parse_args(["--once"])
         fleet_args = fleet.build_parser().parse_args(["sup-notify", "x"])
-        assert (fleet_args.tmux_session, fleet_args.window) == (
+        assert (fleet.NOTIFY_DEFAULT_TMUX_SESSION, fleet_args.window) == (
             keeper.tmux_session, keeper.window)
+        assert fleet_args.tmux_session is None
