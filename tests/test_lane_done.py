@@ -225,3 +225,25 @@ def test_codex_idle_observation_retries_failed_send(home, monkeypatch):
     assert fleet.cmd_status(args) == 0  # same idle state retries
     assert fleet.cmd_status(args) == 0  # delivered marker suppresses a duplicate
     assert calls == [(PARENT, "LANE-DONE lane idle none")] * 2
+
+
+def test_busy_parent_queue_collapses_repeat_stops(home, monkeypatch):
+    """A lane re-woken by background tasks ends many turns; each Stop mints a
+    new assistant uuid. The busy parent's unread mailbox must hold one copy."""
+    data = fleet.load_registry()
+    data["workers"][PARENT]["status"] = "working"
+    fleet.save_registry(data)
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        lambda **_: (True, [{"sessionId": PARENT_SID,
+                                              "status": "working", "state": "working",
+                                              "pid": 123}]))
+    monkeypatch.setattr(fleet, "_wake_supervisor_native", lambda *a, **k: None)
+    tail = []
+    monkeypatch.setattr(fleet, "_last_assistant_uuid", lambda n, s: tail[-1])
+    git = lambda *a, **k: SimpleNamespace(returncode=0, stdout="abc1234\n")
+    for i in range(1, 4):
+        tail.append(f"uuid-{i}")
+        fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
+    mail = (home / "mailbox" / f"{PARENT_SID}.md").read_text()
+    assert mail.count("LANE-DONE lane idle abc1234") == 1
+    assert fleet.load_registry()["workers"]["lane"]["lane_done_notified"][-1] == "uuid-3"
