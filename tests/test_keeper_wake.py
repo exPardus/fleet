@@ -69,11 +69,10 @@ def test_stale_idle_pid_sends_once_without_page(tick):
     assert len(commands) == 1 and '--do' in commands[0]
 
 
-def test_stale_idle_no_pid_pages_never_spawns(tick):
+def test_stale_idle_no_pid_wakes_never_spawns(tick):
     invoke, pages, sends, _, _ = tick
     invoke(pid=None)
-    assert not sends and len(pages) == 1
-    assert 'sup-spawn' in pages[0]
+    assert len(sends) == 1 and not pages
 
 
 @pytest.mark.parametrize('status', ['idle', 'busy'])
