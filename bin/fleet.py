@@ -17251,10 +17251,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12196, :12358, :12623, :12848, :12884, :13126, :13127, :13216, :13226, :13237, :13335, :13854, :17203, :20093, :20105, :20254, :23292, :23293, :23395, :23460, :23508, :24468, :24470, :24508, :25036, :27481`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12196, :12358, :12623, :12848, :12884, :13126, :13127, :13216, :13226, :13237, :13335, :13854, :17203, :20093, :20105, :20254, :23292, :23293, :23395, :23460, :23508, :24465, :24467, :24505, :25033, :27479`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10592, :11244, :15493, :25964. This makes union identity
+    OWN prior sid alone: :10592, :11244, :15493, :25961. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17959,7 +17959,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10592, :11244, :15493,
-    # :25964) -- so union identity cannot make one body answer for another.
+    # :25961) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -23967,10 +23967,7 @@ def cmd_sup_context(args) -> int:
 
 
 def cmd_sup_notify(args, run=subprocess.run) -> int:
-    """Notify the interface after non-minting claim validation.
-
-    Dry-run precedes claim work; normal calls commit the heartbeat before tmux.
-    """
+    """Notify the interface; dry-run skips claim work, else heartbeat before tmux."""
     tmux_session = _resolve_notify_session(
         getattr(args, "tmux_session", None), args.window, run)
     target = f"{tmux_session}:{args.window}"
@@ -27168,7 +27165,8 @@ def build_parser() -> argparse.ArgumentParser:
                              help="tmux window name (default: fleet)")
     p_supnotify.add_argument("--dry-run", dest="dry_run", action="store_true",
                              help="print the exact bytes and stop: no lock, no claim "
-                                  "read, no write, no tmux")
+                                  "read, no write, no tmux send (an omitted --tmux-session "
+                                  "is still resolved via read-only `tmux list-windows`)")
     p_supnotify.add_argument("--sid", help="override caller session id")
     p_supnotify.add_argument("--nonce", help=NONCE_ARG_HELP)
 
@@ -27841,12 +27839,7 @@ NOTIFY_DEFAULT_TMUX_SESSION = "work"
 
 
 def _resolve_notify_session(session, window, run=subprocess.run) -> str:
-    """Return the tmux session for a sup-notify target.
-
-    An explicit session is returned untouched. Otherwise prefer the default
-    session when it holds `window`, else the one session that does; none or
-    several fail closed, naming the candidates.
-    """
+    """Explicit session, else `work` if it has `window`, else the sole holder."""
     if session is not None:
         return session
     try:
