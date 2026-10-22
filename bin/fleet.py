@@ -27575,6 +27575,13 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
             pass
     message = f"LANE-DONE {name} {status} {head}"
     try:
+        if claim.get("provider") != "codex" and _lane_done_queued(parent_name, message):
+            _settle_lane_done(name, sid, turn_key,
+                              expected_mcx_id=expected_mcx_id,
+                              expected_status=expected_status,
+                              expected_last_dispatch_at=expected_last_dispatch_at,
+                              delivered=True)
+            return False
         for attempt in (1, 2):
             try:
                 with redirect_stdout(io.StringIO()):
@@ -27869,6 +27876,19 @@ def _resolve_notify_session(session, window, run=subprocess.run) -> str:
         f"sup-notify: tmux would not deliver the line -- cannot choose the "
         f"interface window `{window}` (candidates: {found}); pass "
         f"--tmux-session explicitly; the interface has NOT been told.")
+
+
+def _lane_done_queued(parent_name: str, message: str) -> bool:
+    """True when the parent's unread mailbox already holds this exact message."""
+    rec = read_registry_no_repair()["workers"].get(parent_name) or {}
+    sid = rec.get("session_id")
+    if not sid:
+        return False
+    try:
+        text = (mailbox_dir() / f"{sid}.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return message in text.splitlines()
 
 
 if __name__ == "__main__":
