@@ -2663,6 +2663,36 @@ def test_native_worker_interrupt_lost_response_is_uncertain_and_not_retried(
     assert stored["adapter_state"] == "uncertain"
 
 
+def test_host_failed_interrupt_releases_row_to_working_not_uncertain(
+        native_home, monkeypatch):
+    from fleet_codex import HostRejected, OperationJournal
+    home, lane = native_home
+    record = _install_record(lane)
+    original = fleet.load_registry()["workers"]["cx-native"]
+
+    class RejectedClient(WorkerVerbClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == "turn/interrupt":
+                journal = OperationJournal(home, self.generation)
+                journal.prepare(operation)
+                journal.fail(operation["operation_id"],
+                             "blocked by unresolved predecessor operation")
+                raise HostRejected("blocked by unresolved predecessor")
+            return super().call(operation, timeout)
+
+    client = RejectedClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="rejected before acceptance; retry"):
+        fleet._cmd_interrupt_codex("cx-native", record)
+
+    row = fleet.read_registry_no_repair()["workers"]["cx-native"]
+    assert row["status"] == original["status"]
+    assert row["adapter_state"] == original["adapter_state"]
+    assert row.get("pending_operation") is None
+    assert "uncertain_reason" not in row
+
+
 def test_native_worker_resume_limited_records_provider_horizon_and_starts_one_turn(
         native_home, monkeypatch):
     _home, lane = native_home

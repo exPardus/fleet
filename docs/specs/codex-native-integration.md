@@ -559,6 +559,11 @@ or a lost response, keeps the row frozen. An operation with a known
 `recovery.thread_id` blocks later mutations only on that thread. An intent
 without a trustworthy thread attribution continues to block globally.
 
+`fleet interrupt` on a native worker follows the same rule: a host rejection
+proved by a failed journal releases the reservation and the row returns to its
+previous state (`rejected before acceptance; retry`). Transport loss or an
+unknown outcome still freezes the row as uncertain.
+
 For rows frozen by an earlier CLI, `fleet --fleet-home <exact-home>
 codex-settle-rejected <worker> <operation-id> --expect-thread <thread-id>
 --expect-turn <turn-id|none> --expect-generation <generation>` is an
