@@ -670,6 +670,13 @@ plain-character burst window. Failed buffer creation or paste never sends
 Enter; failed paste deletes its temporary buffer. Failed submission remains
 undelivered, so callers do not record the page as delivered.
 
+`sup-notify` target: an explicit `--tmux-session` is used as given. When it is
+omitted, `_resolve_notify_session` lists `tmux list-windows -a` and uses the
+`work` session if it has the window; otherwise the single session that has the
+window. No match or several matches fail closed with the existing error,
+naming the candidates. `wave-close` relays its accounting line the same way.
+`--dry-run` resolves through tmux but takes no lock.
+
 Heartbeat primitive: in-session `ScheduleWakeup` self-rearm, confirmed real (G7); `claude stop` permanently kills a scheduled wake — a stopped supervisor never self-resumes.
 
 ## 13. Doctor roster — as it is today
