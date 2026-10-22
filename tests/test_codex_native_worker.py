@@ -3156,3 +3156,212 @@ def test_doctor_repair_leaves_non_terminal_system_error_uncertain(
 
     assert fleet._reconcile_dead_suspected_codex_system_errors() == []
     assert fleet.load_registry()["workers"]["cx-native"] == original
+
+
+# Native Codex usage-limit park (w359): a turn that fails on a usage limit
+# parks `limited` with the horizon parsed from the provider's own message.
+
+LIMIT_MESSAGE = (
+    "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage "
+    "to purchase more credits or try again at Oct 27th, 2026 12:37 PM.")
+
+
+def _limit_reset_utc():
+    from datetime import datetime, timezone
+    return datetime(2026, 10, 27, 12, 37).astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+class LimitTurnClient(WorkerVerbClient):
+    """Public turn error carrying the provider's message, as 0.162.0 sends it."""
+
+    def __init__(self, lane, *, error_message=LIMIT_MESSAGE, **kwargs):
+        kwargs.setdefault("provider_status", "systemError")
+        kwargs.setdefault("turn_status", "failed")
+        kwargs.setdefault("error_code", "usageLimitExceeded")
+        kwargs.setdefault("rate_result", {"rateLimits": {"primary": None}})
+        super().__init__(lane, **kwargs)
+        self.error_message = error_message
+
+    def _thread(self):
+        result = super()._thread()
+        turn = result["thread"]["turns"][0]
+        if "error" in turn and self.error_message is not None:
+            turn["error"]["message"] = self.error_message
+        return result
+
+
+def _write_failed_limit_evidence(home, *, with_message=True):
+    evidence = {
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "turn_status": "failed", "error_code": "usageLimitExceeded",
+        "observed_at": 1792643935.4,
+    }
+    if with_message:
+        evidence["error_message"] = LIMIT_MESSAGE
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps(evidence), encoding="utf-8")
+    return evidence
+
+
+@pytest.mark.parametrize("provider_status", ["systemError", "idle"])
+def test_native_worker_usage_limit_failure_parks_limited_with_parsed_reset(
+        native_home, monkeypatch, provider_status):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = LimitTurnClient(lane, provider_status=provider_status)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "limited"
+    assert updated["adapter_state"] == "idle"
+    assert updated["limit_kind"] == "usage_limit"
+    assert updated["limit_reset_at"] == _limit_reset_utc()
+    assert updated["codex_error_code"] == "usageLimitExceeded"
+
+
+def test_native_worker_usage_limit_unparseable_reset_is_unknown(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = LimitTurnClient(lane, error_message="You've hit your usage limit.")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "limited"
+    assert updated["limit_kind"] == "usage_limit"
+    assert updated["limit_reset_at"] is None
+
+
+def test_native_worker_usage_limit_reset_falls_back_to_durable_message(
+        native_home, monkeypatch):
+    home, lane = native_home
+    record = _install_record(lane)
+    _write_failed_limit_evidence(home)
+    client = LimitTurnClient(lane, error_message=None)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "limited"
+    assert updated["limit_reset_at"] == _limit_reset_utc()
+
+
+@pytest.mark.parametrize("provider_status,expected", [
+    ("systemError", "dead-suspected"), ("idle", "dead")])
+def test_native_worker_failed_non_limit_turn_is_unchanged(
+        native_home, monkeypatch, provider_status, expected):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = LimitTurnClient(
+        lane, provider_status=provider_status,
+        error_code="internalServerError", error_message="boom")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == expected
+    assert updated.get("limit_kind") is None
+
+
+def test_public_evidence_store_carries_turn_error_message(tmp_path):
+    from fleet_codex import CodexPublicEvidenceStore
+
+    store = CodexPublicEvidenceStore(tmp_path)
+    result = store.record({"method": "turn/completed", "params": {
+        "threadId": THREAD_ID, "turn": {
+            "id": TURN_ID, "status": "failed", "items": [],
+            "error": {"message": LIMIT_MESSAGE,
+                      "codexErrorInfo": "usageLimitExceeded"},
+        }}})
+
+    assert result["turn_status"] == "failed"
+    assert result["error_code"] == "usageLimitExceeded"
+    assert result["error_message"] == LIMIT_MESSAGE
+    assert "usage" not in result
+
+
+def test_native_worker_result_on_usage_limit_failure_is_not_malformed(
+        native_home, capsys):
+    home, lane = native_home
+    record = _install_record(
+        lane, status="limited", adapter_state="idle",
+        limit_kind="usage_limit", limit_reset_at=_limit_reset_utc())
+    _write_failed_limit_evidence(home)
+
+    assert fleet._cmd_result_codex("cx-native", record) == 1
+
+    err = capsys.readouterr().err
+    assert "malformed" not in err
+    assert "usage limit" in err
+    assert _limit_reset_utc() in err
+    assert "resume-limited" in err
+
+
+def test_native_worker_result_on_failed_turn_without_usage_reports_failure(
+        native_home, capsys):
+    home, lane = native_home
+    record = _install_record(lane, status="dead", adapter_state="idle")
+    _write_turn_evidence(home, turn_status="failed")
+
+    assert fleet._cmd_result_codex("cx-native", record) == 1
+
+    err = capsys.readouterr().err
+    assert "malformed" not in err
+    assert "ended by failed" in err
+
+
+def test_native_worker_peek_shows_usage_limit_failure(native_home, capsys):
+    home, lane = native_home
+    record = _install_record(
+        lane, status="limited", adapter_state="idle",
+        limit_kind="usage_limit", limit_reset_at=_limit_reset_utc())
+    _write_failed_limit_evidence(home)
+
+    assert fleet._cmd_peek_codex("cx-native", record, 20) == 0
+
+    out = capsys.readouterr().out
+    assert "usageLimitExceeded" in out
+    assert "try again at Oct 27th, 2026 12:37 PM" in out
+
+
+def test_doctor_settles_dead_suspected_usage_limit_turn_as_limited(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain",
+                    provider_status="systemError")
+    client = LimitTurnClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_system_errors() == [
+        "cx-native"]
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "limited"
+    assert stored["adapter_state"] == "idle"
+    assert stored["limit_kind"] == "usage_limit"
+    assert stored["limit_reset_at"] == _limit_reset_utc()
+
+
+def test_native_worker_resume_limited_past_parsed_horizon_starts_turn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(
+        lane, status="limited", adapter_state="idle",
+        provider_status="systemError", limit_kind="usage_limit",
+        limit_reset_at="2020-01-01T00:00:00Z")
+    client = LimitTurnClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._resume_one_limited(
+        "cx-native", lambda *_: None, lambda *_: None) is True
+
+    methods = [op["payload"]["method"] for op in client.operations]
+    assert methods == ["account/rateLimits/read", "thread/read", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "working"
+    assert stored["codex_turn_id"] == NEXT_TURN_ID

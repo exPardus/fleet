@@ -952,15 +952,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:13781) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:14857) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18289) -- upgrades need complete records.
-      * `_acting_worker_identity` (:4377) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5085) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15105) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18168) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8303) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:19889) -- render the release explanation.
+      * `_sweep_husks` (:13828) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:14907) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18339) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5114) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15155) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18218) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8332) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:19939) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -2421,6 +2421,12 @@ def _codex_error_code(turn: dict) -> str | None:
     return None
 
 
+def _codex_error_message(turn: dict) -> str | None:
+    error = turn.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    return message[:2000] if isinstance(message, str) and message else None
+
+
 def _codex_paged_thread_read(client, thread_id: str, generation: str,
                              prefix: str, *, hydrate_turn: str | None = None,
                              hydrate_active: bool = False):
@@ -2602,6 +2608,7 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
         "turn_status": turn_status, "items_view": items_view,
         "result_item_id": result_item_id, "result_text": result_text,
         "error_code": _codex_error_code(turn),
+        "error_message": _codex_error_message(turn),
     }
 
 
@@ -2628,15 +2635,43 @@ def _codex_worker_status(observed):
     turn = observed["turn_status"]
     if provider == "active":
         return "working", ("waiting" if observed["active_flags"] else "active")
+    if _codex_limit_failed(observed):
+        return "limited", "idle"
     if provider != "idle":
         return "dead-suspected", "uncertain"
     if turn == "completed":
         return "idle", "idle"
     if turn == "interrupted":
         return "interrupted", "idle"
-    if observed.get("error_code") in _CODEX_LIMIT_ERRORS:
-        return "limited", "idle"
     return "dead", "idle"
+
+
+def _codex_limit_failed(observed) -> bool:
+    return (observed["provider_status"] in {"idle", "systemError"}
+            and observed["turn_status"] == "failed"
+            and observed.get("error_code") in _CODEX_LIMIT_ERRORS)
+
+
+def _codex_worker_limit_fields(binding: CodexWorkerBinding, observed) -> dict:
+    code = observed.get("error_code")
+    message = observed.get("error_message")
+    if message is None:
+        try:
+            evidence = _codex_public_evidence_file(binding)
+        except FleetCliError:
+            evidence = None
+        if isinstance(evidence, dict) and isinstance(
+                evidence.get("error_message"), str):
+            message = evidence["error_message"]
+    try:
+        allowed, rate_reset = _codex_rate_limit_state(observed["client"])
+    except (FleetCliError, OSError, ValueError):
+        allowed, rate_reset = None, None
+    return {
+        "limit_kind": "usage_limit" if code == "usageLimitExceeded" else code,
+        "ordinary_usage_allowed": allowed,
+        "limit_reset_at": _mcx_parse_limit_reset(message or "") or rate_reset,
+    }
 
 
 def _codex_active_reobserve_journal(binding: CodexWorkerBinding) -> None:
@@ -4359,7 +4394,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18289`), because legacy upgrades also require a complete registry.
+    (`:18339`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4804,13 +4839,7 @@ def recompute_worker_codex(name: str, record: dict,
         if observed["active_flags"] or current_waits:
             updated["waiting_for_permission"] = True
         if status == "limited":
-            updated["limit_kind"] = error_code
-            try:
-                allowed, reset_at = _codex_rate_limit_state(observed["client"])
-            except (FleetCliError, OSError, ValueError):
-                allowed, reset_at = None, None
-            updated["ordinary_usage_allowed"] = allowed
-            updated["limit_reset_at"] = reset_at
+            updated.update(_codex_worker_limit_fields(binding, observed))
         return updated
     if route != "mcx":
         updated["status"] = "dead-suspected"
@@ -8510,6 +8539,11 @@ def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
         else:
             print(f"(turn {evidence.get('turn_status', 'unknown')}; "
                   "no durable agent message)")
+        code = evidence.get("error_code")
+        if isinstance(code, str):
+            message = evidence.get("error_message")
+            print(f"[error] {code}" + (
+                f": {_truncate(message, 200)}" if isinstance(message, str) else ""))
         return 0
     _require_mcx_codex_record(name, rec, "peek")
     mcx_id = rec.get("mcx_id")
@@ -8644,7 +8678,9 @@ def _validate_codex_worker_result_evidence(
     if evidence.get("turn_status") not in {"completed", "failed", "interrupted"}:
         raise FleetCliError(f"{binding.name}: durable turn status is malformed")
     usage = evidence.get("usage")
-    if (not isinstance(usage, dict)
+    if usage is None and evidence["turn_status"] != "completed":
+        pass
+    elif (not isinstance(usage, dict)
             or not _CODEX_USAGE_FIELDS.issubset(usage)
             or any(not isinstance(usage.get(key), int)
                    or isinstance(usage.get(key), bool)
@@ -8794,6 +8830,15 @@ def _cmd_result_codex(name: str, rec: dict,
                   "Codex turn", file=sys.stderr)
             return 1
         _validate_codex_worker_result_evidence(binding, evidence)
+        code = evidence.get("error_code")
+        if evidence["turn_status"] == "failed" and code in _CODEX_LIMIT_ERRORS:
+            reset = rec.get("limit_reset_at") or _mcx_parse_limit_reset(
+                evidence.get("error_message") or "")
+            print(f"{name}: last native Codex turn hit a usage limit ({code}) "
+                  f"-- resets {reset or 'unknown'}; no result. Run "
+                  f"`fleet resume-limited {name}` past the horizon",
+                  file=sys.stderr)
+            return 1
         if evidence["turn_status"] != "completed":
             print(f"{name}: last native Codex turn ended by "
                   f"{evidence['turn_status']} -- no result", file=sys.stderr)
@@ -10280,11 +10325,13 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
         raise FleetCliError(
             f"{name}: native Codex worker has an unresolved current callback; "
             "no turn was started")
-    if provider in {"notLoaded", "systemError"} or observed["active_flags"]:
+    limit_restart = allow_limited and _codex_limit_failed(observed)
+    if ((provider in {"notLoaded", "systemError"} and not limit_restart)
+            or observed["active_flags"]):
         raise FleetCliError(
             f"{name}: native Codex worker is not steerable ({provider}); "
             "no turn was started")
-    if provider not in {"active", "idle"}:
+    if provider not in {"active", "idle"} and not limit_restart:
         raise FleetCliError(f"{name}: native Codex worker state is ambiguous")
     if (provider == "idle" and not allow_limited
             and observed.get("error_code") in _CODEX_LIMIT_ERRORS):
@@ -10586,7 +10633,7 @@ def _resume_one_limited_codex(name: str, rec: dict) -> bool:
                 or record.get("codex_turn_id") != binding.turn_id):
             return False
         record["ordinary_usage_allowed"] = allowed
-        record["limit_reset_at"] = reset_at
+        record["limit_reset_at"] = reset_at or record.get("limit_reset_at")
         save_registry(data)
         current = dict(record)
     if allowed is False:
@@ -12131,7 +12178,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12046` / `cmd_respawn:11323`, before
+    # resolution that runs from `cmd_kill:12093` / `cmd_respawn:11370`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12162,9 +12209,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12046` / `cmd_respawn:11323`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12093` / `cmd_respawn:11370`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11344-11351` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11391-11398` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -14489,6 +14536,9 @@ def _reconcile_dead_suspected_codex_system_errors() -> list[str]:
             "provider_status": observed["provider_status"],
             "last_activity": now_iso(),
         })
+        if _codex_limit_failed(observed):
+            updated.update(status="limited", adapter_state="idle")
+            updated.update(_codex_worker_limit_fields(binding, observed))
         if observed.get("error_code") is not None:
             updated["codex_error_code"] = observed["error_code"]
         prepared[name] = (before, updated, _codex_system_error_evidence(observed))
@@ -17130,7 +17180,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1026`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5073`) applies here too. An unreadable registry
+    rule for the view path (`:5102`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17201,10 +17251,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4186, :4221, :4251, :4290, :4327, :4384, :4463, :5481, :12149, :12311, :12576, :12801, :12837, :13079, :13080, :13169, :13179, :13190, :13288, :13807, :17153, :20043, :20055, :20204, :23242, :23243, :23345, :23410, :23458, :24416, :24418, :24456, :24984, :27427`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12196, :12358, :12623, :12848, :12884, :13126, :13127, :13216, :13226, :13237, :13335, :13854, :17203, :20093, :20105, :20254, :23292, :23293, :23395, :23460, :23508, :24466, :24468, :24506, :25034, :27477`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10545, :11197, :15443, :25912. This makes union identity
+    OWN prior sid alone: :10592, :11244, :15493, :25962. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17908,8 +17958,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10545, :11197, :15443,
-    # :25912) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10592, :11244, :15493,
+    # :25962) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17917,7 +17967,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17127`).
+        # names this gate as its reason (`:17177`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -18282,7 +18332,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13778`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13825`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
