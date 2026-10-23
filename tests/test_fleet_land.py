@@ -324,3 +324,54 @@ def test_result_requires_a_command_for_every_claim(tmp_path):
     }), encoding="utf-8")
     with pytest.raises(fleet.FleetCliError, match=r"claims\[0\] has no command"):
         fleet_land._validate_result("w1", tmp_path)
+
+
+def _commit_all(repo, message):
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", message)
+
+
+def test_registration_gate_runs_when_a_lane_adds_a_bin_module(tmp_path, monkeypatch):
+    repo, lane, base = _repo(tmp_path)
+    (lane / "bin").mkdir()
+    (lane / "bin" / "fleet_new.py").write_text("X = 1\n", encoding="utf-8")
+    _commit_all(lane, "add module")
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label:
+                        seen.append((label, command)) or 0)
+    fleet_land._check_commands(lane, [], home_root=repo,
+                               files_changed=["bin/fleet_new.py"], base=base)
+    command = dict(seen)["registration"]
+    for name in ("test_fleet_sources.py", "test_index_split.py",
+                 "test_round7_defect_pins.py"):
+        assert f"tests/{name}" in command
+
+
+def test_registration_gate_runs_when_a_lane_adds_a_parser_verb(tmp_path, monkeypatch):
+    repo, lane, base = _repo(tmp_path)
+    (lane / "bin").mkdir()
+    (lane / "bin" / "fleet.py").write_text("x = 1\n", encoding="utf-8")
+    _commit_all(lane, "seed")
+    base = _git(lane, "rev-parse", "HEAD").stdout.strip()
+    (lane / "bin" / "fleet.py").write_text(
+        'x = 1\nsub.add_parser("newverb", help="h")\n', encoding="utf-8")
+    _commit_all(lane, "verb")
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label: seen.append(label) or 0)
+    fleet_land._check_commands(lane, [], home_root=repo,
+                               files_changed=["bin/fleet.py"], base=base)
+    assert "registration" in seen
+
+
+def test_registration_gate_skips_an_edit_that_adds_neither(tmp_path, monkeypatch):
+    repo, lane, base = _repo(tmp_path)
+    (lane / "README.md").write_text("changed\n", encoding="utf-8")
+    _commit_all(lane, "edit")
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label: seen.append(label) or 0)
+    fleet_land._check_commands(lane, [], home_root=repo,
+                               files_changed=["README.md"], base=base)
+    assert "registration" not in seen

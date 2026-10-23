@@ -960,7 +960,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_registry` (:15178) -- a renamed-away path is not readable.
       * `_identity_abstention_note` (:18240) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8339) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:19962) -- render the release explanation.
+      * `_tombstone_releasing_body` (:19959) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -17274,10 +17274,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12218, :12381, :12646, :12871, :12907, :13149, :13150, :13239, :13249, :13260, :13358, :13877, :17226, :20116, :20128, :20277, :24054, :24055, :24157, :24222, :24270, :25227, :25229, :25267, :25795, :28424`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12218, :12381, :12646, :12871, :12907, :13149, :13150, :13239, :13249, :13260, :13358, :13877, :17226, :20113, :20125, :20274, :24051, :24052, :24154, :24219, :24267, :25224, :25226, :25264, :25792, :28421`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10608, :11266, :15516, :26728. This makes union identity
+    OWN prior sid alone: :10608, :11266, :15516, :26725. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17984,7 +17984,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10608, :11266, :15516,
-    # :26728) -- so union identity cannot make one body answer for another.
+    # :26725) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18960,6 +18960,10 @@ def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
         elsewhere = bool(cwd) and not _wave_same_path(cwd, repo)
         if not elsewhere and (not branch or branch in _wave_default_branches(repo, run=run)):
             return joined(lane)
+    prefixed = [name for name, record in rows.items()
+                if record.get("branch") == f"fleet/{lane}"]
+    if len(prefixed) == 1:
+        return joined(prefixed[0])
     # A worktree with no record: the lane is this repo's, its substrate is not.
     return worktree, None, None
 
@@ -19615,20 +19619,7 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
             for number, half in enumerate(halves, 1):
                 if not half:
                     continue
-                env = os.environ.copy()
-                for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE",
-                            "FLEET_WORKER"):
-                    env.pop(key, None)
-                if config["uv_offline"]:
-                    env["UV_OFFLINE"] = "1"
-                else:
-                    env.pop("UV_OFFLINE", None)
-                env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
-                for key, value in config["env"].items():
-                    if value is None:
-                        env.pop(key, None)
-                    else:
-                        env[key] = value
+                env = _wave_floor_env(config)
                 # uv supplies pytest and the selected interpreter. Resolve the interpreter
                 # first so a missing local installation fails instead of downloading one.
                 uv_args = [version if arg == "{python}" else arg
@@ -19661,10 +19652,15 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
         if any(result["failures"] != first["failures"] for result in results.values()):
             raise FleetCliError(
                 f"wave-close: floor failure sets differ between interpreters: {results}")
-        if set(first["failures"]) != set(config["expected_failures"]):
+        unexpected = sorted(set(first["failures"]) - set(config["expected_failures"]))
+        if unexpected:
             raise FleetCliError(
                 "wave-close: floor failure set differs from the expected host "
-                f"assumptions: {first['failures']}")
+                f"assumptions: unexpected {unexpected}")
+        fixed = sorted(set(config["expected_failures"]) - set(first["failures"]))
+        if fixed:
+            print(f"wave-close: {len(fixed)} expected failure(s) now pass "
+                  f"(informational): {', '.join(fixed)}")
         return results, _wave_git(clone, "rev-parse", "HEAD", run=run).stdout.strip()
     finally:
         shutil.rmtree(clone_parent, ignore_errors=True)
@@ -19744,7 +19740,6 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "wave-close: CHANGELOG coverage missing for merge commit(s) since "
             f"{base}: {', '.join(gaps)}")
     floor_config, floor_source = _wave_floor_config(repo)
-    # Check committer identity before the expensive reap and interpreter floor.
     identity = run(["git", "-C", str(repo), "var", "GIT_COMMITTER_IDENT"],
                    capture_output=True, text=True, encoding="utf-8",
                    errors="replace")
@@ -19752,6 +19747,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(
             "wave-close: git has no committer identity in this repo -- set "
             "`git config user.name` and `user.email` before closing a wave")
+
+    _wave_floor_preflight(repo, floor_config, run=run, which=which)
 
     # Attribute every merge in range before the claim, the reap, or the floor,
     # so an unattributable range is refused before a close that cannot finish.
@@ -19805,13 +19802,13 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     _deliver_notices(notices)
 
     wave_id = _wave_id(repo, run=run)
+    floor, tree = _wave_floor(repo, wave_id, run=run, which=which,
+                              config=floor_config)
     reap_stats = {}
     reap_count, reap_error = _supervisor_reap(caller_sid=caller,
                                               reap_stats=reap_stats)
     if reap_error:
         print(f"wave-close: reap note: {reap_error}", file=sys.stderr)
-    floor, tree = _wave_floor(repo, wave_id, run=run, which=which,
-                              config=floor_config)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
     roster_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
@@ -29113,3 +29110,51 @@ class _HideSuppressedFormatter(argparse.HelpFormatter):
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def _wave_floor_env(config):
+    env = os.environ.copy()
+    for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE", "FLEET_WORKER"):
+        env.pop(key, None)
+    if config["uv_offline"]:
+        env["UV_OFFLINE"] = "1"
+    else:
+        env.pop("UV_OFFLINE", None)
+    env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
+    for key, value in config["env"].items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
+def _wave_floor_preflight(repo, config, run=subprocess.run, which=shutil.which):
+    uv = which("uv")
+    if uv is None:
+        raise FleetCliError(
+            "wave-close: `uv` is required to run the floor -- no interpreter on "
+            "PATH has pytest importable (CLAUDE.md)")
+    env = _wave_floor_env(config)
+    for version in config["interpreters"]:
+        if which(f"python{version}") is None:
+            raise FleetCliError(
+                f"wave-close: required interpreter python{version} is unavailable")
+        argv = [uv, "run", *[version if arg == "{python}" else arg
+                             for arg in config["uv_run_args"]],
+                "python", "-c", "import pytest"]
+        proc = run(argv, cwd=str(repo), env=env, capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
+        if proc.returncode == 0:
+            continue
+        lines = [line.strip() for line in (proc.stderr or proc.stdout or "").splitlines()
+                 if line.strip()]
+        detail = next((line for line in lines if "error" in line.lower()
+                       or "no solution" in line.lower()), lines[0] if lines else "no output")
+        warm_env = {key: value for key, value in env.items()
+                    if key in ("UV_CACHE_DIR",)}
+        warm = shlex.join(["env", *[f"{k}={v}" for k, v in warm_env.items()],
+                           "uv", *argv[1:]])
+        raise FleetCliError(
+            f"wave-close: python{version} floor env cannot import pytest "
+            f"(uv rc={proc.returncode}): {detail}. Warm it: {warm} -- then retry.")

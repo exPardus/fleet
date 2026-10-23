@@ -642,6 +642,8 @@ class TestTheFloorActuallyRuns:
                 (dest / "tests").mkdir(parents=True, exist_ok=True)
                 (dest / "tests" / "test_a.py").write_text("", encoding="utf-8")
                 return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, "tree-sha\n", "")
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, stdout, "")
         return fake_run
@@ -654,13 +656,11 @@ class TestTheFloorActuallyRuns:
         `uv` supplies the interpreter and the dependency both (CLAUDE.md)."""
         calls = []
         summary = "1 passed in 0.01s\n"
-        # The stub's clean run will not match the expected host-failure set, and
-        # that refusal is correct -- it is the argv this test is about.
-        with pytest.raises(fleet.FleetCliError):
-            fleet._wave_floor(tmp_path, 99,
-                              run=self._clone_stub(tmp_path, calls, summary),
-                              which=lambda name: f"/usr/bin/{name}",
-                              log_root=tmp_path / "logs")
+        # A clean run passes: expected failures that pass are informational.
+        fleet._wave_floor(tmp_path, 99,
+                          run=self._clone_stub(tmp_path, calls, summary),
+                          which=lambda name: f"/usr/bin/{name}",
+                          log_root=tmp_path / "logs")
         assert calls, "the floor ran no pytest at all"
         for argv in calls:
             assert argv[0].endswith("uv"), f"floor did not go through uv: {argv}"
@@ -1389,3 +1389,109 @@ class TestRenamedLaneJoins:
         args = fleet.build_parser().parse_args([
             "wave-close", "--changelog", "x", "--alias", "a=b", "--alias", "c=d"])
         assert args.alias == ["a=b", "c=d"]
+
+
+class TestWaveCloseHardening:
+    """w390: wave 90's close took four runs; each run exposed one defect."""
+
+    @staticmethod
+    def _clone_run(calls, outcome):
+        def fake_run(argv, **kwargs):
+            if "clone" in argv[:3]:
+                dest = pathlib.Path(argv[-1])
+                for rel in ("tests/test_a.py", "tests/test_b.py"):
+                    (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (dest / rel).write_text("", encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, "tree-sha\n", "")
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, outcome(argv), "")
+        return fake_run
+
+    def test_an_expected_failure_that_now_passes_is_informational(self, tmp_path, capsys):
+        expected = sorted(fleet.WAVE_CLOSE_EXPECTED_FAILURES)
+        kept, fixed = expected[:-1], expected[-1]
+
+        def outcome(argv):
+            if "tests/test_a.py" in argv:
+                lines = [f"FAILED {node} - x" for node in kept]
+                return "\n".join(lines + [f"{len(kept)} failed, 1 passed in 0.1s"]) + "\n"
+            return "1 passed in 0.1s\n"
+
+        results, _tree = fleet._wave_floor(
+            tmp_path, 99, run=self._clone_run([], outcome),
+            which=lambda name: f"/usr/bin/{name}", log_root=tmp_path / "logs")
+        assert results["python3.10"]["failures"] == kept
+        out = capsys.readouterr().out
+        assert "now pass" in out and fixed in out
+
+    def test_a_failure_outside_the_expected_set_still_refuses(self, tmp_path):
+        expected = sorted(fleet.WAVE_CLOSE_EXPECTED_FAILURES)
+
+        def outcome(argv):
+            lines = [f"FAILED {node} - x" for node in expected]
+            lines.append("FAILED tests/test_a.py::test_new - boom")
+            return "\n".join(lines + [f"{len(lines)} failed in 0.1s"]) + "\n"
+
+        with pytest.raises(fleet.FleetCliError, match="test_new"):
+            fleet._wave_floor(tmp_path, 99, run=self._clone_run([], outcome),
+                              which=lambda name: f"/usr/bin/{name}",
+                              log_root=tmp_path / "logs")
+
+    def test_preflight_refuses_a_cold_offline_cache_with_the_warm_command(self, tmp_path):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append((argv, kwargs.get("env") or {}))
+            return subprocess.CompletedProcess(
+                argv, 2, "", "error: No solution found when resolving tool "
+                "dependencies:\n  Because pytest was not found and network was disabled\n")
+
+        config, _source = fleet._wave_floor_config(tmp_path)
+        with pytest.raises(fleet.FleetCliError) as excinfo:
+            fleet._wave_floor_preflight(tmp_path, config, run=run,
+                                        which=lambda name: f"/usr/bin/{name}")
+        message = str(excinfo.value)
+        assert "python3.10" in message
+        assert "No solution found" in message
+        assert "UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache" in message
+        assert "uv run --no-project --python 3.10 --with pytest" in message
+        assert "UV_OFFLINE" not in message.split("Warm it:")[1]
+        assert seen[0][1]["UV_OFFLINE"] == "1"
+
+    def test_preflight_passes_a_warm_cache_for_every_interpreter(self, tmp_path):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        config, _source = fleet._wave_floor_config(tmp_path)
+        fleet._wave_floor_preflight(tmp_path, config, run=run,
+                                    which=lambda name: f"/usr/bin/{name}")
+        assert [argv[argv.index("--python") + 1] for argv in calls] == ["3.10", "3.12"]
+        assert all(argv[-2:] == ["-c", "import pytest"] for argv in calls)
+
+    def test_the_floor_runs_before_any_reap_or_session_stop(self):
+        import inspect
+        src = inspect.getsource(fleet.cmd_wave_close)
+        first_reap = src.index("_supervisor_reap(")
+        assert src.index("_wave_floor(repo") < first_reap
+        assert src.index("_wave_floor_preflight(") < src.index("with fleet_lock():")
+        assert src.index("_wave_floor(repo") < src.index("_wave_stop_landed_sessions(")
+
+    def test_a_bare_worker_token_joins_the_row_recording_fleet_prefix(self, tmp_path):
+        TestRenamedLaneJoins._registry(tmp_path, {
+            "w390-x": {"branch": "fleet/w390-x", "substrate": "claude"},
+            "other": {"branch": "fleet/other", "substrate": "claude"}})
+        run = TestRenamedLaneJoins._run(tmp_path / "none", "unrelated")
+        assert fleet._wave_lane_join(tmp_path, "w390-x", run=run)[1] == "w390-x"
+        assert fleet._wave_unjoined_lanes(
+            tmp_path, [("w390-x", "claude", "abc")], run=run) == []
+
+    def test_a_fleet_prefix_match_must_be_unique(self, tmp_path):
+        TestRenamedLaneJoins._registry(tmp_path, {
+            "a": {"branch": "fleet/lane"}, "b": {"branch": "fleet/lane"}})
+        run = TestRenamedLaneJoins._run(tmp_path / "none", "unrelated")
+        assert fleet._wave_lane_join(tmp_path, "lane", run=run) == (None, None, None)

@@ -310,6 +310,27 @@ def _run_shell(command: str, cwd: Path, log_dir: Path,
     return result.returncode
 
 
+_REGISTRATION_TESTS = ("tests/test_fleet_sources.py", "tests/test_index_split.py",
+                       "tests/test_round7_defect_pins.py")
+_REGISTRATION_COMMAND = ("uv run --no-project --python 3.10 --with pytest "
+                         "python -m pytest -q " + " ".join(_REGISTRATION_TESTS))
+
+
+def _adds_registration(worktree: Path, base: str | None,
+                       files_changed: list[str]) -> bool:
+    """True when the lane adds a bin/*.py module or a parser verb."""
+    if not base:
+        return any(re.fullmatch(r"bin/[^/]+\.py", item) for item in files_changed)
+    added = _git(worktree, "diff", "--diff-filter=A", "--name-only",
+                 f"{base}..HEAD", "--", "bin/*.py", check=False)
+    if (added.stdout or "").strip():
+        return True
+    diff = _git(worktree, "diff", "-U0", f"{base}..HEAD", "--", "bin/fleet.py",
+                check=False)
+    return any(line.startswith("+") and ".add_parser(" in line
+               for line in (diff.stdout or "").splitlines())
+
+
 def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str, str]]:
     """Resolve the named landing gates declared by the home.
 
@@ -334,6 +355,7 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
             ("receipts", f"{python} tools/verify_receipts.py --strict "
              "--skip-volatile docs/specs/*.md"),
             ("citations", f"{python} tools/refresh_citations.py --check"),
+            ("registration", _REGISTRATION_COMMAND),
         ]
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FleetCliError(f"land: cannot read {path}: {exc}") from exc
@@ -371,7 +393,8 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
 
 
 def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = None,
-                    files_changed: list[str] | None = None) \
+                    files_changed: list[str] | None = None,
+                    base: str | None = None) \
         -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
     checks = []
@@ -380,6 +403,9 @@ def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = 
             item["command"], worktree, log_dir, f"test-{index}")))
     for name, command in _land_gates(worktree, home_root=home_root):
         if name == "citations" and "bin/fleet.py" not in (files_changed or []):
+            continue
+        if name == "registration" and not _adds_registration(
+                worktree, base, files_changed or []):
             continue
         checks.append((name, _run_shell(command, worktree, log_dir, name)))
     return checks
@@ -403,9 +429,10 @@ def cmd_land(args) -> int:
     home_override = getattr(args, "_fleet_home", None)
     checks = (_check_commands(worktree, payload["tests"],
                               home_root=Path(home_override),
-                              files_changed=payload["files_changed"])
+                              files_changed=payload["files_changed"], base=base)
               if home_override else _check_commands(
-                  worktree, payload["tests"], files_changed=payload["files_changed"]))
+                  worktree, payload["tests"], files_changed=payload["files_changed"],
+                  base=base))
     tip = _git_output(repo, "rev-parse", f"refs/heads/{lane_branch}")
     stat = _git_output(repo, "diff", "--shortstat", f"{base}..{tip}") or "0 files changed"
     red = [name for name, rc in checks if rc != 0]
