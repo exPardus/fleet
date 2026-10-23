@@ -17257,7 +17257,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12202, :12364, :12629, :12854, :12890, :13132, :13133, :13222, :13232, :13243, :13341, :13860, :17209, :20099, :20111, :20260, :23298, :23299, :23401, :23466, :23514, :24471, :24473, :24511, :25039, :27505`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12202, :12364, :12629, :12854, :12890, :13132, :13133, :13222, :13232, :13243, :13341, :13860, :17209, :20099, :20111, :20260, :23298, :23299, :23401, :23466, :23514, :24471, :24473, :24511, :25039, :27516`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :10592, :11250, :15499, :25967. This makes union identity
@@ -26621,7 +26621,8 @@ def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
     parser = argparse.ArgumentParser(
-        prog="fleet", description="claude-fleet manager CLI",
+        prog="fleet", formatter_class=_HideSuppressedFormatter,
+        description="claude-fleet manager CLI",
         epilog="global: --fleet-home <PATH> selects which fleet home to act on "
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -26670,7 +26671,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
-                         help="Codex reasoning effort when --model is codex:<model>")
+                         help="legacy mcx reasoning effort; ignored by the native "
+                              "Codex adapter")
     p_spawn.add_argument(
         "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
@@ -26823,7 +26825,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
-    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach = sub.add_parser("attach", help=argparse.SUPPRESS)
     p_attach.add_argument("name")
     p_attach.add_argument("--force", action="store_true")
 
@@ -27106,7 +27108,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile = sub.add_parser(
         "sup-reconcile",
         help="explicitly reconcile a native Codex supervisor after host restart; "
-             "never creates a thread or turn")
+             "never creates a thread or turn",
+        description=("Choose at most one reconciliation action. Evidence and "
+                     "expectation options may accompany that action."))
     policy_restore = p_supreconcile.add_mutually_exclusive_group()
     policy_restore.add_argument(
         "--prepare-recorded-policy-restore", action="store_true",
@@ -27253,6 +27257,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+
+    hidden_commands = {
+        choice.dest for choice in sub._choices_actions
+        if choice.help == argparse.SUPPRESS
+    }
+    sub.metavar = "{" + ",".join(
+        name for name in sub.choices if name not in hidden_commands) + "}"
     return parser
 
 
@@ -28138,6 +28149,13 @@ def cmd_mailman(args) -> int:
     return fleet_mailman.cmd_run(
         home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
         dry_run=args.dry_run, include_reported=args.include_reported)
+
+
+class _HideSuppressedFormatter(argparse.HelpFormatter):
+    def _format_action(self, action):
+        if action.help == argparse.SUPPRESS:
+            return ""
+        return super()._format_action(action)
 
 
 if __name__ == "__main__":
