@@ -3395,3 +3395,104 @@ def test_native_worker_resume_limited_past_parsed_horizon_starts_turn(
     stored = fleet.load_registry()["workers"]["cx-native"]
     assert stored["status"] == "working"
     assert stored["codex_turn_id"] == NEXT_TURN_ID
+
+
+# --- Live Codex lanes are never dead-suspected on missing records ---
+
+def _rollout(codex_home, thread_id=THREAD_ID, *, age=2.0):
+    """A rollout jsonl filed the way Codex files it: under its creation date."""
+    import time
+    from datetime import datetime
+    import uuid as uuid_mod
+    created = datetime.fromtimestamp((uuid_mod.UUID(thread_id).int >> 80) / 1000)
+    folder = (codex_home / "sessions" / f"{created:%Y}" / f"{created:%m}"
+              / f"{created:%d}")
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"rollout-{created:%Y-%m-%dT%H-%M-%S}-{thread_id}.jsonl"
+    path.write_text('{"type":"event_msg"}\n', encoding="utf-8")
+    stamp = time.time() - age
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.fixture
+def codex_home(tmp_path, monkeypatch):
+    path = tmp_path / "codex-home"
+    path.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(path))
+    return path
+
+
+class _ObserveFails(WorkerVerbClient):
+    """Live same-generation host whose bounded read fails non-transiently."""
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") == "thread/turns/list":
+            raise fleet.FleetCliError("cx-native: public turn is malformed")
+        return super().call(operation, timeout)
+
+
+def test_live_rollout_keeps_unobservable_lane_working(
+        native_home, codex_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane, provider_status="active")
+    _rollout(codex_home, age=2.0)
+    client = _ObserveFails(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "working"
+    assert not [f for f in fleet._worker_flags(updated)
+                if f.startswith("investigate")]
+
+
+def test_silent_provider_is_dead_suspected_with_provider_wording(
+        native_home, codex_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane, provider_status="active")
+    _rollout(codex_home, age=fleet.CODEX_ACTIVITY_FRESH_SECONDS + 60)
+    client = _ObserveFails(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "dead-suspected"
+    flags = fleet._worker_flags(updated)
+    assert "investigate: no provider activity" in flags
+    assert "investigate: no outcome record" not in flags
+
+
+def test_host_absent_with_fresh_public_evidence_stays_working(
+        native_home, codex_home, monkeypatch):
+    import time
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(json.dumps({
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "observed_at": time.time() - 5,
+    }), encoding="utf-8")
+    from fleet_codex import HostUnavailable
+    monkeypatch.setattr(
+        fleet, "_codex_existing_client",
+        lambda _home: (_ for _ in ()).throw(HostUnavailable("host down")))
+
+    assert fleet.recompute_worker_codex("cx-native", record)["status"] \
+        == "working"
+
+
+def test_active_provider_with_unreadable_wait_is_working_not_dead(
+        native_home, codex_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: WorkerVerbClient(lane))
+    monkeypatch.setattr(fleet, "_codex_wait_summaries",
+                        lambda _rec: [{"state": "unreadable", "detail": "x"}])
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "working"
+    assert updated["adapter_state"] == "uncertain"

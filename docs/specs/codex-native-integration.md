@@ -517,6 +517,7 @@ keeps that reservation and retained mail instead of retrying.
 | `systemError` with missing or disagreeing completion evidence | `dead-suspected`/PAGE |
 | `systemError` thread whose exact newest turn is `failed` or `interrupted` in the full public read, settled by `fleet doctor --repair` | `dead` (`interrupted` if so) with adapter state `terminal-failed`; event `status_changed` carries thread id, turn id, turn status, error kind |
 | host loss, schema mismatch, wrong cwd, or conflicting turn | `dead-suspected`/PAGE |
+| any `dead-suspected` row above, or an unreadable wait or failed read, while a Codex rollout write or exact-turn public evidence is under 600 s old | `working`/`uncertain`; flag `investigate: no provider activity` only when the provider is silent |
 | limit error + authoritative future reset | `limited` |
 | limit error without authoritative recovery evidence | `limited` with no reset horizon; resume refuses |
 
