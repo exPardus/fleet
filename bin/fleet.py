@@ -17257,7 +17257,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12202, :12364, :12629, :12854, :12890, :13132, :13133, :13222, :13232, :13243, :13341, :13860, :17209, :20099, :20111, :20260, :24031, :24032, :24134, :24199, :24247, :25204, :25206, :25244, :25772, :28237`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5510, :12202, :12364, :12629, :12854, :12890, :13132, :13133, :13222, :13232, :13243, :13341, :13860, :17209, :20099, :20111, :20260, :24031, :24032, :24134, :24199, :24247, :25204, :25206, :25244, :25772, :28261`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :10592, :11250, :15499, :26700. This makes union identity
@@ -27549,6 +27549,26 @@ def build_parser() -> argparse.ArgumentParser:
                             help="exact prior turn ID, or none for an empty bound thread")
     p_rejected.add_argument("--expect-generation", required=True)
 
+    p_failed_client = sub.add_parser(
+        "codex-recover-failed-client",
+        help="stage exact-home native Codex recovery after a failed host client")
+    p_failed_client.add_argument(
+        "recovery_action", choices=("prepare", "decision", "shutdown",
+                                    "verify-exit", "boot", "adopt-boot", "rebind",
+                                    "settle-rebind", "finish",
+                                    "status"))
+    p_failed_client.add_argument("--generation")
+    p_failed_client.add_argument("--host-pid", type=int)
+    p_failed_client.add_argument("--host-start")
+    p_failed_client.add_argument("--child-pid", type=int)
+    p_failed_client.add_argument("--child-start")
+    p_failed_client.add_argument("--incarnation")
+    p_failed_client.add_argument("--thread")
+    p_failed_client.add_argument("--turn")
+    p_failed_client.add_argument("--codex-executable")
+    p_failed_client.add_argument("--decision-file")
+    p_failed_client.add_argument("--name")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -28112,6 +28132,10 @@ def main(argv=None) -> int:
             return cmd_codex_decline_fixed(args)
         if args.command == "codex-reobserve-active":
             return cmd_codex_reobserve_active(args)
+        if args.command == "codex-recover-failed-client":
+            import fleet_codex_failed_client_recovery
+            return fleet_codex_failed_client_recovery.cmd_recover(
+                sys.modules[__name__], args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":

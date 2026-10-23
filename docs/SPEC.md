@@ -470,6 +470,29 @@ checks before its single registry update. A waiting approval remains waiting
 and uses its exact response path. An unattributed accepted mutation or unknown
 callback cannot be cleared by this command.
 
+An exact-home registered Codex Interface can stage a failed-client host
+recovery with `codex-recover-failed-client`. This Linux-only procedure pins the
+old host and app-server PID/start identities, held claim, all same-generation
+rows, committed operation inventory, recorded approval inventory, target mail,
+supervisor queue/journal, and affected worktree heads and lane receipts. Its
+replacement Codex executable is also pinned by absolute path, file identity,
+digest and the old host's exact version, so a newer PATH binary is not used. Its
+durable home barrier blocks mutations through the reviewed client and
+replacement host while recovery is incomplete. The already loaded old host
+cannot enforce new source; the Interface must coordinate its callers and
+recheck pinned evidence across the old-host shutdown.
+It refuses an unresolved old-generation operation or callback before staging;
+absence of a recorded callback does not prove that the failed child has no
+undrained callback. The exact Interface must separately record a founder
+decision accepting interruption of possibly active turns and unknown external
+effects before the one authenticated `host/shutdown`. A lost reply is never
+retried. Exact old host, child and known descendants must be absent, and the
+old heartbeat stale, before a reviewed new host may start. The new host only
+rebounds each old thread ID with its recorded effective policy and no new turn;
+an uncertain resume remains fenced. The original journals and mail remain in
+place. The command is a staged recovery mechanism, not a quiescence proof;
+`docs/specs/codex-failed-client-recovery.md` gives its stage/refusal contract.
+
 The wave-close row's per-home configuration also owns landing gates: a missing
 `supervisor/wave-close.json` preserves the fleet home's `docs-currency` and
 `receipts`, and conditional `citations` gates, while a configured foreign home defaults to no fleet-specific

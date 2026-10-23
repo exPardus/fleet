@@ -119,6 +119,7 @@ UNENFORCED = {
     # of fleet's own behaviour to reproduce. Declared rather than left
     # unclassified, so adding a receipt to one is a deliberate act.
     "codex-footer-adapter.md",  # prose; pinned by tests/test_codex_statusline.py
+    "codex-failed-client-recovery.md",  # prose; pinned by tests/test_codex_failed_client_recovery.py
     "multi-fleet.md",
     "phase-2-watchtower.md",
     "phase-3-telegram.md",
