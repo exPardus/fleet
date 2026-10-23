@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -17274,7 +17274,7 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12218, :12381, :12646, :12871, :12907, :13149, :13150, :13239, :13249, :13260, :13358, :13877, :17226, :20116, :20128, :20277, :23321, :23322, :23424, :23489, :23537, :24494, :24496, :24534, :25062, :27617`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12218, :12381, :12646, :12871, :12907, :13149, :13150, :13239, :13249, :13260, :13358, :13877, :17226, :20116, :20128, :20277, :23321, :23322, :23424, :23489, :23537, :24494, :24496, :24534, :25062, :27648`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
     OWN prior sid alone: :10608, :11266, :15516, :25995. This makes union identity
@@ -26664,7 +26664,8 @@ def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
     parser = argparse.ArgumentParser(
-        prog="fleet", description="claude-fleet manager CLI",
+        prog="fleet", formatter_class=_HideSuppressedFormatter,
+        description="claude-fleet manager CLI",
         epilog="global: --fleet-home <PATH> selects which fleet home to act on "
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -26713,7 +26714,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
-                         help="Codex reasoning effort when --model is codex:<model>")
+                         help="legacy mcx reasoning effort; ignored by the native "
+                              "Codex adapter")
     p_spawn.add_argument(
         "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
@@ -26866,7 +26868,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
-    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach = sub.add_parser("attach", help=argparse.SUPPRESS)
     p_attach.add_argument("name")
     p_attach.add_argument("--force", action="store_true")
 
@@ -27065,6 +27067,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
+    p_mailman = sub.add_parser(
+        "mailman", help="sort the home inbox; wake only for mail needing the interface")
+    mailman_sub = p_mailman.add_subparsers(dest="mailman_command", required=True)
+    mailman_sub.add_parser("init", help="seed mailman.json in the home").add_argument(
+        "--force", action="store_true", help="overwrite an existing mailman.json")
+    p_mm_run = mailman_sub.add_parser(
+        "run", help="block until a mail needs the interface (exit 0) or timeout (3)")
+    p_mm_run.add_argument("--timeout", type=_watch_timeout_arg, default=None)
+    p_mm_run.add_argument("--interval", type=_watch_interval_arg,
+                          default=fleet_mailman.DEFAULT_INTERVAL)
+    p_mm_run.add_argument("--dry-run", action="store_true",
+                          help="print verdicts; mutate nothing")
+    p_mm_run.add_argument("--include-reported", action="store_true",
+                          help="also print wake mails already reported")
+    mailman_sub.add_parser("digest", help="rollup of filed mail").add_argument(
+        "--since", default=fleet_mailman.DIGEST_DEFAULT_SINCE, metavar="WHEN",
+        help="<n>m|h|d or ISO UTC timestamp (default 24h)")
+
     p_relay = sub.add_parser(
         "relay-ack", help="append an interface relay and acknowledge one mail file")
     p_relay.add_argument("--mail", required=True, metavar="FILE")
@@ -27131,7 +27151,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile = sub.add_parser(
         "sup-reconcile",
         help="explicitly reconcile a native Codex supervisor after host restart; "
-             "never creates a thread or turn")
+             "never creates a thread or turn",
+        description=("Choose at most one reconciliation action. Evidence and "
+                     "expectation options may accompany that action."))
     policy_restore = p_supreconcile.add_mutually_exclusive_group()
     policy_restore.add_argument(
         "--prepare-recorded-policy-restore", action="store_true",
@@ -27278,6 +27300,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+
+    hidden_commands = {
+        choice.dest for choice in sub._choices_actions
+        if choice.help == argparse.SUPPRESS
+    }
+    sub.metavar = "{" + ",".join(
+        name for name in sub.choices if name not in hidden_commands) + "}"
     return parser
 
 
@@ -27530,6 +27559,8 @@ def main(argv=None) -> int:
             return cmd_interface_register(args)
         if args.command == "relay-ack":
             return cmd_relay_ack(args)
+        if args.command == "mailman":
+            return cmd_mailman(args)
         if args.command == "wave-close":
             return cmd_wave_close(args)
         if args.command == "sup-heartbeat":
@@ -28271,6 +28302,37 @@ def _codex_recent_activity(record: dict, name: str, now=None) -> bool:
         return False
     age = (time.time() if now is None else now) - max(stamps)
     return age <= CODEX_ACTIVITY_FRESH_SECONDS
+
+
+def _mailman_prims():
+    return fleet_mailman.Prims(
+        append=lambda path, data: _atomic_append_bytes(path, data),
+        write_json=lambda path, obj: _write_json_atomic(path, obj),
+        replace=lambda a, b: _replace_with_retry(a, b),
+        read_cursor=lambda home: _watch_read_cursor(home),
+        write_cursor=lambda home, cursor: _watch_write_cursor(home, cursor),
+        now=now_iso)
+
+
+def cmd_mailman(args) -> int:
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("mailman requires an explicit --fleet-home")
+    home = Path(FLEET_HOME)
+    sub = args.mailman_command
+    if sub == "init":
+        return fleet_mailman.cmd_init(home, _mailman_prims(), force=args.force)
+    if sub == "digest":
+        return fleet_mailman.cmd_digest(home, since=args.since)
+    return fleet_mailman.cmd_run(
+        home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
+        dry_run=args.dry_run, include_reported=args.include_reported)
+
+
+class _HideSuppressedFormatter(argparse.HelpFormatter):
+    def _format_action(self, action):
+        if action.help == argparse.SUPPRESS:
+            return ""
+        return super()._format_action(action)
 
 
 if __name__ == "__main__":
