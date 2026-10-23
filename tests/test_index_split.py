@@ -91,8 +91,10 @@ def test_modules_use_only_stdlib_and_approved_siblings(module):
         # fleet_lock is the shared lock module imported by the facade (index split).
         # fleet_codex is the synchronous Codex adapter fleet.py drives
         # (docs/specs/codex-native-integration.md §5); it is stdlib-only too.
+        # fleet_codex_failed_client_recovery is imported lazily by its verb
+        # (docs/specs/codex-failed-client-recovery.md).
         "fleet": {"fleet_index", "fleet_errors", "fleet_codex", "fleet_lock",
-                  "fleet_platform"},
+                  "fleet_platform", "fleet_codex_failed_client_recovery"},
         "fleet_index": {"fleet_errors"},
         "fleet_errors": set(),
         "fleet_codex": {"fleet_errors", "fleet_platform"},

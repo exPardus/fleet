@@ -571,12 +571,18 @@ RATIFIED_BUT_UNBUILT = ()
 # row proved rejected before acceptance (restores claimed mail, clears the
 # reservation) without a provider mutation, and refuses without an explicit
 # `--fleet-home`; it waits here under the same fail-safe default.
+# `codex-recover-failed-client` (PR #44) stages exact host recovery: it can
+# shut down and reboot the home's Codex host and rebind a worker thread, so it
+# waits here under the fail-safe default. `mailman` (PR #48) appends sorted
+# mail digests and a cursor in the home and refuses without an explicit
+# `--fleet-home`; its tier is operator-owned and waits here too.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
                                      "lane-done", "sup-reconcile", "codex-respond",
                                      "codex-decline-fixed",
                                      "codex-reobserve-active",
                                      "codex-settle-preaccept",
-                                     "codex-settle-rejected")
+                                     "codex-settle-rejected",
+                                     "codex-recover-failed-client", "mailman")
 
 
 def _classified_verbs():
