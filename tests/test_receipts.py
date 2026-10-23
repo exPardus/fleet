@@ -72,6 +72,7 @@ FOUNDING_GUTTER_FENCES = {519, 523, 783, 787, 909, 914, 954, 958}
 # `test_receipts_reproduce` only asserts that whatever WAS extracted reproduces.
 # `test_every_enforced_spec_has_a_receipt_floor` keeps this dict exhaustive.
 RECEIPT_FLOOR = {
+    "mailman.md": 4,
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
