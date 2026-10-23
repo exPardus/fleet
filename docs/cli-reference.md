@@ -42,6 +42,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet codex-reobserve-active`](#fleet-codex-reobserve-active) — settle one cached native Codex active-read failure from exact public evidence
 - [`fleet codex-settle-preaccept`](#fleet-codex-settle-preaccept) — settle one reviewed native worker thread/start authentication rejection
 - [`fleet codex-settle-rejected`](#fleet-codex-settle-rejected) — release a frozen native worker operation proved failed before acceptance
+- [`fleet codex-recover-failed-client`](#fleet-codex-recover-failed-client) — stage exact-home native Codex recovery after a failed host client
 - [`fleet interrupt`](#fleet-interrupt) — kill a worker's running turn
 - [`fleet release`](#fleet-release) — release an attached worker back to idle
 - [`fleet respawn`](#fleet-respawn) — fresh session for a worker (context-reset lever)
@@ -465,6 +466,39 @@ options:
   --expect-turn EXPECT_TURN
                         exact prior turn ID, or none for an empty bound thread
   --expect-generation EXPECT_GENERATION
+```
+
+### fleet codex-recover-failed-client
+
+```text
+usage: fleet codex-recover-failed-client [-h] [--generation GENERATION]
+                                         [--host-pid HOST_PID]
+                                         [--host-start HOST_START]
+                                         [--child-pid CHILD_PID]
+                                         [--child-start CHILD_START]
+                                         [--incarnation INCARNATION]
+                                         [--thread THREAD] [--turn TURN]
+                                         [--codex-executable CODEX_EXECUTABLE]
+                                         [--decision-file DECISION_FILE]
+                                         [--name NAME]
+                                         {prepare,decision,shutdown,verify-exit,boot,adopt-boot,rebind,settle-rebind,finish,status}
+
+positional arguments:
+  {prepare,decision,shutdown,verify-exit,boot,adopt-boot,rebind,settle-rebind,finish,status}
+
+options:
+  -h, --help            show this help message and exit
+  --generation GENERATION
+  --host-pid HOST_PID
+  --host-start HOST_START
+  --child-pid CHILD_PID
+  --child-start CHILD_START
+  --incarnation INCARNATION
+  --thread THREAD
+  --turn TURN
+  --codex-executable CODEX_EXECUTABLE
+  --decision-file DECISION_FILE
+  --name NAME
 ```
 
 ### fleet interrupt
@@ -1020,7 +1054,8 @@ options:
 
 Constraint: At most one of `--prepare-recorded-policy-restore` or `--restore-recorded-
   policy` or `--prepare-restored-continuation` or `--shutdown-restored-continuation` or
-  `--reattach-restored-continuation` may be used.
+  `--reattach-restored-continuation` or `--cancel-pending-approval` or `--prepare-
+  cancelled-approval-resume` or `--resume-cancelled-approval` may be used.
 
 ```text
 usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore]
@@ -1030,9 +1065,19 @@ usage: fleet sup-reconcile [-h] [--prepare-recorded-policy-restore]
                            [--reattach-restored-continuation]
                            [--preserve-retired-history-evidence OWNER_ONLY_JSON]
                            [--expect-history-sha256 SHA256]
+                           [--cancel-pending-approval]
+                           [--prepare-cancelled-approval-resume]
+                           [--resume-cancelled-approval]
                            [--expect-inc EXPECT_INC]
                            [--expect-thread EXPECT_THREAD]
                            [--expect-turn EXPECT_TURN]
+                           [--expect-host-generation EXPECT_HOST_GENERATION]
+                           [--expect-cancel-op EXPECT_CANCEL_OP]
+                           [--expect-request-id EXPECT_REQUEST_ID]
+                           [--expect-item-id EXPECT_ITEM_ID]
+                           [--expect-method EXPECT_METHOD]
+                           [--expect-command EXPECT_COMMAND]
+                           [--expect-request-cwd EXPECT_REQUEST_CWD]
                            [--expect-resume-op EXPECT_RESUME_OP]
                            [--expect-restore-op EXPECT_RESTORE_OP]
                            [--expect-observed-generation EXPECT_NEW_GENERATION]
@@ -1067,9 +1112,26 @@ options:
   --expect-history-sha256 SHA256
                         exact raw SHA-256 of the explicit owner-only history
                         evidence
+  --cancel-pending-approval
+                        interrupt one exact pending native supervisor approval
+                        turn on its existing host; retain an uncertain claim
+                        until cold resume
+  --prepare-cancelled-approval-resume
+                        pin fresh terminal callback, host, claim, row, and
+                        mail evidence before exact-host shutdown
+  --resume-cancelled-approval
+                        cold resume the same cancelled supervisor thread under
+                        its recorded accept policy after exact-host shutdown
   --expect-inc EXPECT_INC
   --expect-thread EXPECT_THREAD
   --expect-turn EXPECT_TURN
+  --expect-host-generation EXPECT_HOST_GENERATION
+  --expect-cancel-op EXPECT_CANCEL_OP
+  --expect-request-id EXPECT_REQUEST_ID
+  --expect-item-id EXPECT_ITEM_ID
+  --expect-method EXPECT_METHOD
+  --expect-command EXPECT_COMMAND
+  --expect-request-cwd EXPECT_REQUEST_CWD
   --expect-resume-op EXPECT_RESUME_OP
   --expect-restore-op EXPECT_RESTORE_OP
   --expect-observed-generation EXPECT_NEW_GENERATION, --expect-new-generation EXPECT_NEW_GENERATION
