@@ -577,5 +577,5 @@ class TestTheRefusalNeverNamesAnUnreachableRemedy:
         with pytest.raises(fleet.SupervisorClaimGateError) as exc:
             fleet._supervisor_gate("archive")
         msg = str(exc.value)
-        assert "--nonce <value>" in msg
+        assert "`--nonce`" in msg and "<value>" not in msg
         assert "REPORT IT" not in msg
