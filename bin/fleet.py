@@ -28510,14 +28510,16 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
                 head = candidate
         except (OSError, subprocess.SubprocessError):
             pass
+    settle = dict(expected_mcx_id=expected_mcx_id, expected_status=expected_status,
+                  expected_last_dispatch_at=expected_last_dispatch_at)
+    if head != "none" and (head in (rec.get("lane_done_shas") or [])
+                           or _lane_tree_dirty(cwd, run)):
+        _settle_lane_done(name, sid, turn_key, delivered=False, **settle)
+        return False
     message = f"LANE-DONE {name} {status} {head}"
     try:
         if claim.get("provider") != "codex" and _lane_done_queued(parent_name, message):
-            _settle_lane_done(name, sid, turn_key,
-                              expected_mcx_id=expected_mcx_id,
-                              expected_status=expected_status,
-                              expected_last_dispatch_at=expected_last_dispatch_at,
-                              delivered=True)
+            _settle_lane_done(name, sid, turn_key, delivered=True, head=head, **settle)
             return False
         for attempt in (1, 2):
             try:
@@ -28540,17 +28542,13 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
                           expected_last_dispatch_at=expected_last_dispatch_at,
                           delivered=False)
         raise
-    _settle_lane_done(name, sid, turn_key,
-                      expected_mcx_id=expected_mcx_id,
-                      expected_status=expected_status,
-                      expected_last_dispatch_at=expected_last_dispatch_at,
-                      delivered=True)
+    _settle_lane_done(name, sid, turn_key, delivered=True, head=head, **settle)
     return True
 
 
 def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
                       expected_status=None, expected_last_dispatch_at=None,
-                      delivered):
+                      delivered, head=None):
     with fleet_lock():
         data = read_registry_no_repair()
         current = data["workers"].get(name)
@@ -28575,6 +28573,9 @@ def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
             return
         if not owns_pending and not delivered:
             return
+        if delivered and head and head != "none":
+            shas = [x for x in (current.get("lane_done_shas") or []) if x != head]
+            current["lane_done_shas"] = (shas + [head])[-LANE_DONE_SHA_KEEP:]
         if delivered and _lane_done_turn_key(name, current) == turn_key:
             current["lane_done_notified"] = turn_key
         if owns_pending or delivered:
@@ -29102,6 +29103,18 @@ def cmd_mailman(args) -> int:
     return fleet_mailman.cmd_run(
         home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
         dry_run=args.dry_run, include_reported=args.include_reported)
+
+
+LANE_DONE_SHA_KEEP = 32
+
+
+def _lane_tree_dirty(cwd, run) -> bool:
+    try:
+        proc = run(["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+                   capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
 class _HideSuppressedFormatter(argparse.HelpFormatter):

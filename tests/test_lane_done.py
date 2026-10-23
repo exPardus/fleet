@@ -36,11 +36,19 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
+def _git_runner(head, dirty=False):
+    def run(argv, **kw):
+        if "status" in argv:
+            return SimpleNamespace(returncode=0, stdout=" M f.py\n" if dirty else "")
+        return SimpleNamespace(returncode=0, stdout=f"{head['sha']}\n")
+    return run
+
+
 def test_idle_completion_sends_once(home, monkeypatch):
     sends = []
     monkeypatch.setattr(fleet, "_cmd_send_native",
                         lambda name, message: sends.append((name, message)) or 0)
-    git = lambda *a, **k: SimpleNamespace(returncode=0, stdout="abc1234\n")
+    git = _git_runner({"sha": "abc1234"})
     assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
     assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
     assert sends == [(PARENT, "LANE-DONE lane idle abc1234")]
@@ -240,10 +248,51 @@ def test_busy_parent_queue_collapses_repeat_stops(home, monkeypatch):
     monkeypatch.setattr(fleet, "_wake_supervisor_native", lambda *a, **k: None)
     tail = []
     monkeypatch.setattr(fleet, "_last_assistant_uuid", lambda n, s: tail[-1])
-    git = lambda *a, **k: SimpleNamespace(returncode=0, stdout="abc1234\n")
+    git = _git_runner({"sha": "abc1234"})
     for i in range(1, 4):
         tail.append(f"uuid-{i}")
         fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
     mail = (home / "mailbox" / f"{PARENT_SID}.md").read_text()
     assert mail.count("LANE-DONE lane idle abc1234") == 1
-    assert fleet.load_registry()["workers"]["lane"]["lane_done_notified"][-1] == "uuid-3"
+    assert fleet.load_registry()["workers"]["lane"]["lane_done_shas"] == ["abc1234"]
+
+
+def test_same_sha_delivers_once_across_new_turns(home, monkeypatch):
+    sends = []
+    monkeypatch.setattr(fleet, "_cmd_send_native",
+                        lambda name, message: sends.append(message) or 0)
+    tail = []
+    monkeypatch.setattr(fleet, "_last_assistant_uuid", lambda n, s: tail[-1])
+    git = _git_runner({"sha": "abc1234"})
+    for i in range(4):
+        tail.append(f"uuid-{i}")
+        fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
+    assert sends == ["LANE-DONE lane idle abc1234"]
+
+
+def test_dirty_lane_sends_nothing_then_clean_fires(home, monkeypatch):
+    sends = []
+    monkeypatch.setattr(fleet, "_cmd_send_native",
+                        lambda name, message: sends.append(message) or 0)
+    assert not fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
+                                      run=_git_runner({"sha": "abc1234"}, dirty=True))
+    assert sends == []
+    assert "lane_done_pending" not in fleet.load_registry()["workers"]["lane"]
+    assert fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
+                                  run=_git_runner({"sha": "abc1234"}))
+    assert sends == ["LANE-DONE lane idle abc1234"]
+
+
+def test_new_sha_fires_once_more(home, monkeypatch):
+    sends = []
+    monkeypatch.setattr(fleet, "_cmd_send_native",
+                        lambda name, message: sends.append(message) or 0)
+    tail = []
+    monkeypatch.setattr(fleet, "_last_assistant_uuid", lambda n, s: tail[-1])
+    head = {"sha": "aaaa111"}
+    for sha in ("aaaa111", "aaaa111", "bbbb222", "bbbb222", "aaaa111"):
+        head["sha"] = sha
+        tail.append(f"uuid-{len(tail)}")
+        fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
+                               run=_git_runner(head))
+    assert sends == ["LANE-DONE lane idle aaaa111", "LANE-DONE lane idle bbbb222"]
