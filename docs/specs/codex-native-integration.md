@@ -907,6 +907,57 @@ publishes only the exact shutdown receipt after the irrevocable stop fence.
 Other host paths retain the writer-free module boundary. Structural closure
 and fresh-interpreter import audits enforce this exception.
 
+An existing native supervisor command approval on a host predating the
+supervisor response reservation cannot be answered through a newer CLI: the
+running host lacks that boundary. For an explicitly abandoned approval turn,
+the registered Codex Interface may instead use `sup-reconcile
+--cancel-pending-approval` with explicit home and exact incarnation, thread,
+turn, old host generation, request ID, item ID, method, raw command and cwd.
+Fleet requires the recorded `accept` policy, one durable pending callback on
+the bound active turn, `waitingOnApproval`, no other unresolved host journal,
+and the exact live old host and child. This cancellation is permitted only
+when that **running** host reports Codex `0.155.1` and schema SHA-256
+`f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3`.
+Fleet pins both values in the old host identity, cancellation journal, and
+prepared proof; a different reviewed Codex version refuses before reservation.
+A full claim/row reservation blocks
+ordinary competing supervisor mutations. The old host's existing journaled
+`turn/interrupt` carries the exact thread and turn IDs. Codex 0.155.1 aborts
+pending per-thread callbacks on `TurnAborted`; Fleet requires the specific
+record to become `resolved` with no response fields, an exact observed
+interrupt journal, and a newest `interrupted`/idle public turn. Any ambiguous
+effect retains the reservation and is never retried. The successful path
+leaves the claim uncertain and fenced: it does not create a turn or consume
+queued mail.
+
+`--prepare-cancelled-approval-resume` records a five-minute proof of that
+terminal callback, committed interrupt, source, old host and child identities,
+complete supervisor claim and row, target inbox/claimed-mail contents, and
+the complete exact-home native worker inventory. A native row with a missing
+or divergent host generation, invalid binding, or invalid route cannot be
+treated as unrelated and blocks preparation. An explicit `codex-app-server`
+dispatch marker remains native-shaped even if its substrate and thread fields
+are corrupt. Every proved same-host worker turn
+must be publicly idle or unloaded with terminal turns and no active flags;
+the host must have no unresolved callbacks or journal operations. Any
+native inventory drift after preparation refuses shutdown or cold resume.
+After the exact old host and app-server child exit with a stale heartbeat,
+`--resume-cancelled-approval` requires the same explicit pins and proof before
+host creation and provider dispatch. The new generation must prove the
+supervisor approval reservation capability before any resume; this keeps a
+later `accept`-mode request serviceable through the reviewed one-shot
+`codex-respond supervisor` route. It creates one
+distinct cold `thread/resume` intent on the **same** thread, with
+`excludeTurns=true`, canonical cwd, recorded model, `approvalPolicy=on-request`,
+`approvalsReviewer=user`, and `sandbox=workspace-write`. The effective response
+must equal the original recorded policy in full, and the newest turn must
+still be interrupted and idle. Settlement uses exact claim/row/mail/source,
+callback, old/new journal and host checks. Unrelated product rows may progress;
+their requests and mail are not edited. Other active workers or unresolved
+requests prevent a safe host shutdown until separately settled. A lost or
+ambiguous interrupt or resume response leaves its intent fenced, with no
+automatic provider replay.
+
 ### 10.4 Retiring an absent legacy Claude claim
 
 From the **current registered native Codex Interface process**, use
