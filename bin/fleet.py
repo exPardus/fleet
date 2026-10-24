@@ -24403,14 +24403,14 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         since = body_record.get("last_dispatch_at") or body_record.get("created")
         if sid and has_fresh_outcome(body_name, sid, since):
             body_status = "idle"
-    # Idle holder rows are resumable between turns.
-    idle_resumable_holder = bool(
-        isinstance(body_record, dict)
-        and body_status == "idle"
-        and not body_record.get("archived_at"))
     # Fleet and native projections may supply park status without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
                  and row.get("sessionId") in (sids or [])]
+    # Idle holders resume between turns; a pid-less idle roster row counts too.
+    idle_resumable_holder = bool(
+        isinstance(body_record, dict) and not body_record.get("archived_at")
+        and (body_status == "idle" or (body_rows and all(
+            r.get("status") == "idle" for r in body_rows))))
     projected = snapshot.get("workers") if isinstance(snapshot, dict) else None
     projected_rows = [row for row in projected if isinstance(row, dict)
                       and row.get("name") == body_name] if isinstance(projected, list) else []

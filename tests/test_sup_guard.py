@@ -482,9 +482,34 @@ def test_windows_process_tree_filters_each_parent_and_caps_nodes(monkeypatch):
     assert kwargs["timeout"] == fleet_platform.PROCESS_TREE_TIMEOUT_SECONDS
 
 
-def test_pidless_listed_body_can_dispatch_when_stale(home, monkeypatch, capsys):
+@pytest.mark.parametrize("stored", ["working", "dead-suspected"])
+def test_pidless_idle_roster_holder_with_stale_heartbeat_wakes(
+        home, monkeypatch, capsys, stored):
+    data = fleet.load_registry()
+    data["workers"][BODY]["status"] = stored
+    fleet.save_registry(data)
     run_guard(monkeypatch, snapshot(), [row(SID, pid=None)])
+    assert capsys.readouterr().out == f"WAKE {BODY}\n"
+
+
+@pytest.mark.parametrize("rows", [[], [row(SID, pid=None, status="dead")]])
+def test_unresumable_stale_holder_dispatches(home, monkeypatch, capsys, rows):
+    run_guard(monkeypatch, snapshot(), rows)
     assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_released_claim_with_pidless_idle_row_still_dispatches(
+        home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(state="released", released_by_sid=SID)
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(state="released"), [row(SID, pid=None)])
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_busy_stale_holder_still_pages(home, monkeypatch, capsys):
+    run_guard(monkeypatch, snapshot(), [row(SID, status="busy")])
+    assert capsys.readouterr().out.startswith("PAGE roster says busy")
 
 
 def test_fresh_claim_with_missing_body_pages(home, monkeypatch, capsys):
@@ -788,7 +813,7 @@ def test_do_reverifies_wake_before_send(home, monkeypatch, capsys, second):
     calls = []
     snapshots = iter([snapshot(), snapshot(age=10) if second == 'fresh' else snapshot()])
     rows = iter([[row(SID)], [row(SID, status='busy')] if second == 'busy'
-                 else [row(SID, pid=None)] if second == 'no-pid' else [row(SID)]])
+                 else [row(SID, pid=None, status='dead')] if second == 'no-pid' else [row(SID)]])
     monkeypatch.setattr(fleet, 'cmd_send', lambda args: calls.append(args) or 0)
     monkeypatch.setattr(fleet, 'cmd_sup_spawn', lambda _: pytest.fail('spawn forbidden'))
     assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
