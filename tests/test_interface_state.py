@@ -147,3 +147,55 @@ def test_board_lists_only_unruled_non_lens_tasks(tmp_path):
     (tasks / "lens" / "brief.md").write_text("# Research\n", encoding="utf-8")
 
     assert fleet._interface_pending_rulings(tmp_path) == "state/tasks/pending.md"
+
+
+def _write_registry(home, workers):
+    state = home / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "fleet.json").write_text(
+        json.dumps({"workers": workers}), encoding="utf-8")
+
+
+def test_board_skips_machine_task_files(tmp_path):
+    tasks = tmp_path / "state" / "tasks"
+    (tasks / "done").mkdir(parents=True)
+    _write_registry(tmp_path, {
+        "w1-alpha": {"status": "dead", "branch": "fleet/w1-alpha-branch"}})
+    (tasks / "ask.md").write_text("# Question\n", encoding="utf-8")
+    (tasks / "done" / "old.md").write_text("# Old\n", encoding="utf-8")
+    (tasks / "w1-alpha.md").write_text("# Brief\n", encoding="utf-8")
+    (tasks / "w1-alpha-task.md").write_text("# Task\n", encoding="utf-8")
+    (tasks / "w1-alpha-branch.md").write_text("# Brief\n", encoding="utf-8")
+    (tasks / "w9-gone-task.md").write_text("# Task\n", encoding="utf-8")
+
+    assert fleet._interface_pending_rulings(tmp_path) == "state/tasks/ask.md"
+
+
+def test_board_unreadable_registry_is_unmeasured(tmp_path):
+    tasks = tmp_path / "state" / "tasks"
+    tasks.mkdir(parents=True)
+    (tasks / "ask.md").write_text("# Question\n", encoding="utf-8")
+    (tmp_path / "state" / "fleet.json").write_text("{broken", encoding="utf-8")
+
+    assert fleet._interface_pending_rulings(tmp_path) == "UNMEASURED"
+
+
+def test_last_relayed_wave_is_last_line_not_max(tmp_path):
+    log = tmp_path / "state" / "interface" / "log.md"
+    log.parent.mkdir(parents=True)
+    log.write_text("RELAY wave 343\nnoise\nRELAY wave 94\n", encoding="utf-8")
+
+    assert fleet._interface_last_relayed(tmp_path) == "94"
+
+
+def test_last_throughput_is_last_in_journal_order(tmp_path):
+    sup = tmp_path / "supervisor"
+    (sup / "journal-history").mkdir(parents=True)
+    (sup / "journal-history" / "a.md").write_text(
+        "THROUGHPUT wave 300 old\n", encoding="utf-8")
+    (sup / "journal-history" / "b.md").write_text(
+        "THROUGHPUT wave 310 mid\n", encoding="utf-8")
+    (sup / "JOURNAL.md").write_text(
+        "THROUGHPUT wave 5 newest\n", encoding="utf-8")
+
+    assert fleet._interface_last_throughput(tmp_path) == "THROUGHPUT wave 5 newest"
