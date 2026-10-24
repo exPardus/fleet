@@ -482,9 +482,34 @@ def test_windows_process_tree_filters_each_parent_and_caps_nodes(monkeypatch):
     assert kwargs["timeout"] == fleet_platform.PROCESS_TREE_TIMEOUT_SECONDS
 
 
-def test_pidless_listed_body_can_dispatch_when_stale(home, monkeypatch, capsys):
+@pytest.mark.parametrize("stored", ["working", "dead-suspected"])
+def test_pidless_idle_roster_holder_with_stale_heartbeat_wakes(
+        home, monkeypatch, capsys, stored):
+    data = fleet.load_registry()
+    data["workers"][BODY]["status"] = stored
+    fleet.save_registry(data)
     run_guard(monkeypatch, snapshot(), [row(SID, pid=None)])
+    assert capsys.readouterr().out == f"WAKE {BODY}\n"
+
+
+@pytest.mark.parametrize("rows", [[], [row(SID, pid=None, status="dead")]])
+def test_unresumable_stale_holder_dispatches(home, monkeypatch, capsys, rows):
+    run_guard(monkeypatch, snapshot(), rows)
     assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_released_claim_with_pidless_idle_row_still_dispatches(
+        home, monkeypatch, capsys):
+    claim = fleet.read_incarnation()
+    claim.update(state="released", released_by_sid=SID)
+    fleet.write_incarnation(claim)
+    run_guard(monkeypatch, snapshot(state="released"), [row(SID, pid=None)])
+    assert capsys.readouterr().out == "DISPATCH\n"
+
+
+def test_busy_stale_holder_still_pages(home, monkeypatch, capsys):
+    run_guard(monkeypatch, snapshot(), [row(SID, status="busy")])
+    assert capsys.readouterr().out.startswith("PAGE roster says busy")
 
 
 def test_fresh_claim_with_missing_body_pages(home, monkeypatch, capsys):
@@ -788,7 +813,7 @@ def test_do_reverifies_wake_before_send(home, monkeypatch, capsys, second):
     calls = []
     snapshots = iter([snapshot(), snapshot(age=10) if second == 'fresh' else snapshot()])
     rows = iter([[row(SID)], [row(SID, status='busy')] if second == 'busy'
-                 else [row(SID, pid=None)] if second == 'no-pid' else [row(SID)]])
+                 else [row(SID, pid=None, status='dead')] if second == 'no-pid' else [row(SID)]])
     monkeypatch.setattr(fleet, 'cmd_send', lambda args: calls.append(args) or 0)
     monkeypatch.setattr(fleet, 'cmd_sup_spawn', lambda _: pytest.fail('spawn forbidden'))
     assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
@@ -982,3 +1007,55 @@ def test_doctor_reports_missing_local_seeds(home):
     assert not ok and "supervisor/briefs/wake.md" in detail
     fleet._initialize_local_home_files(home)
     assert fleet._doctor_check_local_seeds()[1]
+
+
+def _put_mail(home, sid, age_seconds):
+    path = home / "mailbox" / f"{sid}.md"
+    path.write_text("[from interface] authenticated note\n")
+    stamp = datetime.now(timezone.utc).timestamp() - age_seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_fresh_idle_holder_with_aged_unread_mail_wakes(home, monkeypatch, capsys):
+    _put_mail(home, SID, fleet.SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS + 60)
+    run_guard(monkeypatch, snapshot(age=10), [row(SID, status="idle")])
+    assert capsys.readouterr().out == f"WAKE {BODY}\n"
+
+
+def test_fresh_idle_holder_with_aged_mail_on_retired_sid_wakes(
+        home, monkeypatch, capsys):
+    _put_mail(home, RETIRED, fleet.SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS + 60)
+    run_guard(monkeypatch, snapshot(age=10), [row(SID, status="idle")])
+    assert capsys.readouterr().out == f"WAKE {BODY}\n"
+
+
+def test_fresh_idle_holder_with_young_unread_mail_is_ok(home, monkeypatch, capsys):
+    _put_mail(home, SID, 1)
+    run_guard(monkeypatch, snapshot(age=10), [row(SID, status="idle")])
+    assert capsys.readouterr().out == "OK\n"
+
+
+def test_fresh_busy_holder_with_aged_unread_mail_is_ok(home, monkeypatch, capsys):
+    _put_mail(home, SID, fleet.SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS + 60)
+    run_guard(monkeypatch, snapshot(age=10), [row(SID, status="busy")])
+    assert capsys.readouterr().out == "OK\n"
+
+
+def test_unread_mail_wake_is_read_only_without_do(home, monkeypatch, capsys):
+    _put_mail(home, SID, fleet.SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS + 60)
+    monkeypatch.setattr(fleet, "cmd_send", lambda *a, **k: pytest.fail("send"))
+    run_guard(monkeypatch, snapshot(age=10), [row(SID, status="idle")])
+    assert (home / "mailbox" / f"{SID}.md").exists()
+
+
+def test_do_sends_wake_for_unread_mail(home, monkeypatch, capsys):
+    _put_mail(home, SID, fleet.SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS + 60)
+    sent = []
+    monkeypatch.setattr(fleet, "cmd_send",
+                        lambda ns: sent.append(ns.name) or 0)
+    assert fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True),
+                               snapshot_fn=lambda: snapshot(age=10),
+                               roster_fn=roster(row(SID, status="idle"))) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["verdict"] == f"WAKE {BODY}"
+    assert result["sent"] is True and sent == [fleet.SUPERVISOR_BODY_NAME]

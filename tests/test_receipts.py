@@ -72,6 +72,7 @@ FOUNDING_GUTTER_FENCES = {519, 523, 783, 787, 909, 914, 954, 958}
 # `test_receipts_reproduce` only asserts that whatever WAS extracted reproduces.
 # `test_every_enforced_spec_has_a_receipt_floor` keeps this dict exhaustive.
 RECEIPT_FLOOR = {
+    "mailman.md": 4,
     "claim-nonce.md": 59,
     "three-tier-command.md": 39,
     "native-substrate.md": 6,
@@ -118,6 +119,8 @@ UNENFORCED = {
     # built, or descriptions of surfaces outside this repo, so there is nothing
     # of fleet's own behaviour to reproduce. Declared rather than left
     # unclassified, so adding a receipt to one is a deliberate act.
+    "codex-footer-adapter.md",  # prose; pinned by tests/test_codex_statusline.py
+    "codex-failed-client-recovery.md",  # prose; pinned by tests/test_codex_failed_client_recovery.py
     "multi-fleet.md",
     "phase-2-watchtower.md",
     "phase-3-telegram.md",

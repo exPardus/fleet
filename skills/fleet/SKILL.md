@@ -76,7 +76,7 @@ the selected fleet home:
 
 ### Interface rules
 
-- Never run `sup-spawn` over a live supervisor body; run `fleet sup-guard --fleet-home <path>` first. Only the interface acts on `DISPATCH` with `sup-spawn`. For `WAKE`, `sup-guard --do` re-verifies and sends `@supervisor/briefs/wake.md`; it never spawns. `PAGE` needs an interface report; `OK` means a fresh heartbeat with a live busy or idle body and needs no page or wake.
+- Never run `sup-spawn` over a live supervisor body; run `fleet sup-guard --fleet-home <path>` first. Only the interface acts on `DISPATCH` with `sup-spawn`. For `WAKE`, `sup-guard --do` re-verifies and sends `@supervisor/briefs/wake.md`; it never spawns. `PAGE` needs an interface report; `OK` means a fresh heartbeat with a live busy body, or an idle body with no unread mail older than 120 s, and needs no page or wake; an idle body with older unread mail yields `WAKE`.
 - Never tick an operator gate; carry open decisions to the operator and record the ruling with its task file.
 - Ask the operator before every destructive verb, including `kill`, `clean`, `archive`, repair, release, retirement, and home registration changes.
 - When more than one home is listed, pass `--fleet-home <path>` on every mutating verb.
@@ -115,7 +115,7 @@ the selected fleet home:
 
 ## Codex lanes
 
-Dispatch a Codex lane with `fleet spawn --model codex:<model> [--effort low|medium|high|xhigh]`; new rows use the native app-server adapter. Use explicit `--codex-adapter mcx` only for the legacy compatibility route; persisted rows always keep their recorded adapter.
+Dispatch a native Codex lane with `fleet spawn --model codex:<model>`; new rows use the native app-server adapter. `--effort low|medium|high|xhigh` applies only with explicit `--codex-adapter mcx` and is ignored by the native adapter. Persisted rows always keep their recorded adapter.
 Fleet routes `status`, `peek`, `result`, `send`, `interrupt`, `kill`, `respawn`,
 and wave accounting through that recorded adapter. Do not drive app-server or
 mcx by hand for a lane Fleet dispatched. On the explicit mcx route, Fleet maps
@@ -147,8 +147,8 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet wait NAME... [--any|--all] [--timeout SECONDS]`: wait for one or more turns to finish.
 - `fleet send NAME MESSAGE [--force-band]`: deliver a worker message or start its next turn.
 - `fleet interrupt NAME`: stop the worker's current turn.
-- `fleet attach NAME [--force]`: attach an interactive terminal to a worker.
 - `fleet release NAME`: release an attached worker to idle.
+- `fleet abandon NAME --reason TEXT [--force] [--nonce VALUE]`: record lane_state=abandoned for an idle lane with no commits to land; refuses a busy lane or a branch ahead of HEAD (unless `--force`); removes no worktree or branch.
 - `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
 - `fleet kill NAME [--yes]`: interrupt a worker and mark it dead.
@@ -170,6 +170,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet journal-roll`: roll older supervisor journal entries into the archive.
 - `fleet interface-register`: register the current tmux pane as the interface.
 - `fleet watch [--fleet-home PATH ...] [--mcx-dir DIR ...] [--mem-floor-mb MB] [--disk-floor-gb GB] [--interval S] [--timeout S]`: wait for the first mail, fleet/mcx lane transition, low-memory, or low-disk event; exits 3 on timeout.
+- `fleet mailman init|run|digest --fleet-home PATH`: seed wake rules, classify inbox mail, file low-signal messages, and wait for interface mail. The seed catches `READY:` and both `do-not-merge` and `do not merge`; missing or invalid config wakes on every mail. Filing checks the same inode and content through the link/unlink boundary. The command remains fail-safe destructive pending an effect-tier ruling.
 - `fleet relay-ack --fleet-home PATH --mail FILE --line TEXT [--mirror-log PATH ...]`: append one UTC relay line, move the acknowledged mail to `mailbox/done/`, and persist it in the watch cursor.
 - `fleet wave-close --base SHA --changelog TEXT [--alias MERGE_LANE=WORKER] [--nonce VALUE]`: close one wave by reaping, flooring, accounting, landing, pushing, notifying, then stopping each newly landed lane's session and reaping again so its slot frees in the same run.
 - `fleet land <lane>`: validate, commit, rebase and verify one structured lane result.
@@ -178,7 +179,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet sup-heartbeat [--nonce VALUE]`: refresh the supervisor claim heartbeat without a journal entry.
 - `fleet sup-release [--reason TEXT] [--nonce VALUE]`: release the supervisor claim and stop the releasing body.
 - `fleet sup-status [--json]`: read supervisor claim, handshake, and handoff state; `body` names the holder's registry model and substrate (e.g. `openrouter/<slug>`) when the row records them.
-- `fleet sup-guard [--do] [--json]`: verify the two-live-body guard: fresh heartbeat + live busy/idle PID → `OK` (no page or wake), stale + live idle PID → `WAKE <body>`, stale + no live PID → `WAKE <body>` when the holder's registry row is idle and unarchived, otherwise `DISPATCH`, fresh + no live PID or unreadable registry/roster → `PAGE`. A stale busy holder pages with up to three long-running descendant executable basenames and their ages, never arguments. Existing ambiguity checks still page, and a live body never permits `DISPATCH`. `--do` re-verifies and sends the wake brief only on `WAKE`; `OK` and `PAGE` perform no action. `DISPATCH` pages the interface, which alone owns `sup-spawn`; neither guard nor keeper spawns.
+- `fleet sup-guard [--do] [--json]`: verify the two-live-body guard: fresh heartbeat + live busy PID, or live idle PID with no unread mail older than 120 s → `OK` (no page or wake), fresh heartbeat + live idle PID + unread mail older than 120 s → `WAKE <body>`, stale + live idle PID → `WAKE <body>`, stale + no live PID → `WAKE <body>` when the holder's registry row is idle and unarchived, otherwise `DISPATCH`, fresh + no live PID or unreadable registry/roster → `PAGE`. A stale busy holder pages with up to three long-running descendant executable basenames and their ages, never arguments. Existing ambiguity checks still page, and a live body never permits `DISPATCH`. `--do` re-verifies and sends the wake brief only on `WAKE`; `OK` and `PAGE` perform no action. `DISPATCH` pages the interface, which alone owns `sup-spawn`; neither guard nor keeper spawns.
 - `fleet sup-context [--sid SID] [--json]`: report this session's context occupancy against its tier band.
 - `fleet sup-decision [--raise QUESTION|--answer TEXT|--clear] [--context-ref REF] [--json] [--nonce VALUE]`: route an operator-only decision.
 - `fleet sup-notify TEXT [--tmux-session SESSION] [--window WINDOW] [--dry-run] [--nonce VALUE]`: notify the interface through its tmux window.
@@ -195,7 +196,7 @@ reconcile every required nested review before accepting the parent. An allowed w
 collaboration, `send_message` only queues delivery; use `followup_task` to wake
 an idle or completed agent. This differs from `fleet send supervisor`.
 
-- Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. Omitting it on one of these is refused as a continuity failure naming a second body, which reads like an incident and is not one.
+- Present the latest printed `NONCE` to every mutating verb that accepts `--nonce`; do not invent or reuse an earlier generation. The claim-holding verbs that accept it are `sup-boot`, `sup-spawn`, `sup-checkpoint`, `sup-heartbeat`, `sup-release`, `sup-decision`, `sup-notify`, `wave-close`, and the three `sup-handoff-*` verbs; the worker verbs `init`, `spawn`, `send`, `interrupt`, `release`, `respawn`, `resume-limited`, `kill`, `clean` and `archive` accept it too. A placeholder-looking `--nonce` or `--handoff-token` is refused before command dispatch changes state. After a continuity refusal, end that body's turn and follow the exact Interface wake and successor-handle steps printed in the refusal.
 - Treat `sup-boot` exit 0 as a held or transferred claim, exit 2 as refusal, exit 3 as freeze, exit 4=continuity refusal, and exit 5 as handoff refusal.
 - Reconcile `fleet status` outcomes before dispatching; do not treat a limited worker as dead.
 - Context bands are supervisor 350–400k and worker 250–300k; the supervisor enters its band at **350k** and reaches its hard ceiling at **400k**, while the worker enters its band at **250k** and reaches **300k**. Entering the supervisor band REFUSES `spawn`, `send`, `respawn` and `sup-spawn` with a one-line reason; `--force-band` overrides that soft refusal for one call and **cannot** override the 400k hard ceiling. The handoff verbs are never refused.
@@ -223,21 +224,24 @@ The floor runs in a fresh clone of the home. With no config it is the fleet repo
 }
 ```
 
-`{python}` is replaced by each interpreter and must be present. `expected_failures` defaults to empty once a config exists. `env` names must be identifiers; a `null` value unsets that variable (the floor otherwise pins `UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache`). One interpreter skips the cross-interpreter comparison; two or more must agree on totals and failures. Unknown keys or malformed values refuse the close before the claim.
+`{python}` is replaced by each interpreter and must be present. `expected_failures` defaults to empty once a config exists. `env` names must be identifiers; a `null` value unsets that variable (the floor otherwise pins `UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache`). One interpreter skips the cross-interpreter comparison; two or more must agree on totals and failures. Unknown keys or malformed values refuse the close before the claim, as does an interpreter whose uv env cannot import pytest (the refusal names the uv error and the warm command). Only failures outside `expected_failures` refuse; an expected failure that now passes is reported informationally. The floor runs before any reap or session stop.
 
 The same file owns landing gates. With no `supervisor/wave-close.json` (the
-fleet home), `fleet land` runs `docs-currency`, `receipts`, and `citations`.
+fleet home), `fleet land` runs `docs-currency`, `receipts`, and `citations`,
+plus `registration` (`test_fleet_sources`, `test_index_split`,
+`test_round7_defect_pins`) when the lane adds a `bin/*.py` file or a parser verb.
 The `citations` gate runs `tools/refresh_citations.py --check` only when the
 lane changes `bin/fleet.py`; `--write` refreshes unambiguous line pins before
-landing. A configured home runs no fleet-specific gate by default; set `gates` to
-an explicit list of built-in gate names or `{name, command}` objects for that
+landing. A configured home runs no fleet-specific gate by default (`fleet land`
+notes this on stderr); set `gates` to an explicit list of built-in gate names
+(`docs-currency`, `receipts`, `citations`, `registration`) or `{name, command}` objects for that
 home's own checks.
 
 `<lane>` is the lane **branch**, not its short name: `merge(w99/lane-join)`, never `merge(w99)`. `wave-close` resolves that token as a branch to join the lane to its registry record, and the worker record keeps the branch it was dispatched on, so the join survives `git worktree remove`. `fleet land` prints the exact command to run, in that form. A lane that parses but resolves to no record and no worktree is refused with `UNJOINED: N of M`, exactly as an unparsed subject is: a lane it cannot join has no substrate, no session and no token total, and publishing a zero for it is the lie wave 86 told on a 701-line wave. A merge named `merge(hotfix/<name>): ...` is interface/supervisor bookkeeping, not a worker lane: it is listed in the throughput line, contributes workers `0`, and does not require a registry row. A lane merged under its worker name joins that worker's row only when the row records no branch or the default branch, and no `cwd` other than the home root; for any other rename or re-dispatch, or when several rows match, pass `--alias <merge-lane>=<worker>` (repeatable) rather than editing the row.
 
 ## Handoff
 
-When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin --complete-timeout 300 --nonce <value>`; it dispatches the successor, waits lock-free for its token-backed handshake, and completes or aborts in one process using that single nonce presentation. Every pre-transfer exception aborts; a changed claim refuses completion but still stops the token/incarnation-proven successor without writing the new claim. The separate `sup-handoff-begin` then `sup-handoff-complete` sequence remains available. Run `sup-release` only when the handoff is stillborn, then stop.
+When approaching a context band, checkpoint, notify the interface with `sup-notify`, and run `sup-handoff-begin --complete-timeout 300 --nonce` followed by the exact most recent `NONCE:` value; it dispatches the successor, waits lock-free for its token-backed handshake, and completes or aborts in one process using that single nonce presentation. Every pre-transfer exception aborts; a changed claim refuses completion but still stops the token/incarnation-proven successor without writing the new claim. The separate `sup-handoff-begin` then `sup-handoff-complete` sequence remains available. Run `sup-release` only when the handoff is stillborn, then stop.
 
 ## Safety
 

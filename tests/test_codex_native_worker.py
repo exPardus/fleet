@@ -2663,6 +2663,36 @@ def test_native_worker_interrupt_lost_response_is_uncertain_and_not_retried(
     assert stored["adapter_state"] == "uncertain"
 
 
+def test_host_failed_interrupt_releases_row_to_working_not_uncertain(
+        native_home, monkeypatch):
+    from fleet_codex import HostRejected, OperationJournal
+    home, lane = native_home
+    record = _install_record(lane)
+    original = fleet.load_registry()["workers"]["cx-native"]
+
+    class RejectedClient(WorkerVerbClient):
+        def call(self, operation, timeout):
+            if operation["payload"]["method"] == "turn/interrupt":
+                journal = OperationJournal(home, self.generation)
+                journal.prepare(operation)
+                journal.fail(operation["operation_id"],
+                             "blocked by unresolved predecessor operation")
+                raise HostRejected("blocked by unresolved predecessor")
+            return super().call(operation, timeout)
+
+    client = RejectedClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    with pytest.raises(fleet.FleetCliError, match="rejected before acceptance; retry"):
+        fleet._cmd_interrupt_codex("cx-native", record)
+
+    row = fleet.read_registry_no_repair()["workers"]["cx-native"]
+    assert row["status"] == original["status"]
+    assert row["adapter_state"] == original["adapter_state"]
+    assert row.get("pending_operation") is None
+    assert "uncertain_reason" not in row
+
+
 def test_native_worker_resume_limited_records_provider_horizon_and_starts_one_turn(
         native_home, monkeypatch):
     _home, lane = native_home
@@ -3156,3 +3186,313 @@ def test_doctor_repair_leaves_non_terminal_system_error_uncertain(
 
     assert fleet._reconcile_dead_suspected_codex_system_errors() == []
     assert fleet.load_registry()["workers"]["cx-native"] == original
+
+
+# Native Codex usage-limit park (w359): a turn that fails on a usage limit
+# parks `limited` with the horizon parsed from the provider's own message.
+
+LIMIT_MESSAGE = (
+    "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage "
+    "to purchase more credits or try again at Oct 27th, 2026 12:37 PM.")
+
+
+def _limit_reset_utc():
+    from datetime import datetime, timezone
+    return datetime(2026, 10, 27, 12, 37).astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+class LimitTurnClient(WorkerVerbClient):
+    """Public turn error carrying the provider's message, as 0.162.0 sends it."""
+
+    def __init__(self, lane, *, error_message=LIMIT_MESSAGE, **kwargs):
+        kwargs.setdefault("provider_status", "systemError")
+        kwargs.setdefault("turn_status", "failed")
+        kwargs.setdefault("error_code", "usageLimitExceeded")
+        kwargs.setdefault("rate_result", {"rateLimits": {"primary": None}})
+        super().__init__(lane, **kwargs)
+        self.error_message = error_message
+
+    def _thread(self):
+        result = super()._thread()
+        turn = result["thread"]["turns"][0]
+        if "error" in turn and self.error_message is not None:
+            turn["error"]["message"] = self.error_message
+        return result
+
+
+def _write_failed_limit_evidence(home, *, with_message=True):
+    evidence = {
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "turn_status": "failed", "error_code": "usageLimitExceeded",
+        "observed_at": 1792643935.4,
+    }
+    if with_message:
+        evidence["error_message"] = LIMIT_MESSAGE
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(
+        json.dumps(evidence), encoding="utf-8")
+    return evidence
+
+
+@pytest.mark.parametrize("provider_status", ["systemError", "idle"])
+def test_native_worker_usage_limit_failure_parks_limited_with_parsed_reset(
+        native_home, monkeypatch, provider_status):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = LimitTurnClient(lane, provider_status=provider_status)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "limited"
+    assert updated["adapter_state"] == "idle"
+    assert updated["limit_kind"] == "usage_limit"
+    assert updated["limit_reset_at"] == _limit_reset_utc()
+    assert updated["codex_error_code"] == "usageLimitExceeded"
+
+
+def test_native_worker_usage_limit_unparseable_reset_is_unknown(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = LimitTurnClient(lane, error_message="You've hit your usage limit.")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "limited"
+    assert updated["limit_kind"] == "usage_limit"
+    assert updated["limit_reset_at"] is None
+
+
+def test_native_worker_usage_limit_reset_falls_back_to_durable_message(
+        native_home, monkeypatch):
+    home, lane = native_home
+    record = _install_record(lane)
+    _write_failed_limit_evidence(home)
+    client = LimitTurnClient(lane, error_message=None)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "limited"
+    assert updated["limit_reset_at"] == _limit_reset_utc()
+
+
+@pytest.mark.parametrize("provider_status,expected", [
+    ("systemError", "dead-suspected"), ("idle", "dead")])
+def test_native_worker_failed_non_limit_turn_is_unchanged(
+        native_home, monkeypatch, provider_status, expected):
+    _home, lane = native_home
+    record = _install_record(lane)
+    client = LimitTurnClient(
+        lane, provider_status=provider_status,
+        error_code="internalServerError", error_message="boom")
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == expected
+    assert updated.get("limit_kind") is None
+
+
+def test_public_evidence_store_carries_turn_error_message(tmp_path):
+    from fleet_codex import CodexPublicEvidenceStore
+
+    store = CodexPublicEvidenceStore(tmp_path)
+    result = store.record({"method": "turn/completed", "params": {
+        "threadId": THREAD_ID, "turn": {
+            "id": TURN_ID, "status": "failed", "items": [],
+            "error": {"message": LIMIT_MESSAGE,
+                      "codexErrorInfo": "usageLimitExceeded"},
+        }}})
+
+    assert result["turn_status"] == "failed"
+    assert result["error_code"] == "usageLimitExceeded"
+    assert result["error_message"] == LIMIT_MESSAGE
+    assert "usage" not in result
+
+
+def test_native_worker_result_on_usage_limit_failure_is_not_malformed(
+        native_home, capsys):
+    home, lane = native_home
+    record = _install_record(
+        lane, status="limited", adapter_state="idle",
+        limit_kind="usage_limit", limit_reset_at=_limit_reset_utc())
+    _write_failed_limit_evidence(home)
+
+    assert fleet._cmd_result_codex("cx-native", record) == 1
+
+    err = capsys.readouterr().err
+    assert "malformed" not in err
+    assert "usage limit" in err
+    assert _limit_reset_utc() in err
+    assert "resume-limited" in err
+
+
+def test_native_worker_result_on_failed_turn_without_usage_reports_failure(
+        native_home, capsys):
+    home, lane = native_home
+    record = _install_record(lane, status="dead", adapter_state="idle")
+    _write_turn_evidence(home, turn_status="failed")
+
+    assert fleet._cmd_result_codex("cx-native", record) == 1
+
+    err = capsys.readouterr().err
+    assert "malformed" not in err
+    assert "ended by failed" in err
+
+
+def test_native_worker_peek_shows_usage_limit_failure(native_home, capsys):
+    home, lane = native_home
+    record = _install_record(
+        lane, status="limited", adapter_state="idle",
+        limit_kind="usage_limit", limit_reset_at=_limit_reset_utc())
+    _write_failed_limit_evidence(home)
+
+    assert fleet._cmd_peek_codex("cx-native", record, 20) == 0
+
+    out = capsys.readouterr().out
+    assert "usageLimitExceeded" in out
+    assert "try again at Oct 27th, 2026 12:37 PM" in out
+
+
+def test_doctor_settles_dead_suspected_usage_limit_turn_as_limited(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(lane, status="dead-suspected", adapter_state="uncertain",
+                    provider_status="systemError")
+    client = LimitTurnClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._reconcile_dead_suspected_codex_system_errors() == [
+        "cx-native"]
+
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "limited"
+    assert stored["adapter_state"] == "idle"
+    assert stored["limit_kind"] == "usage_limit"
+    assert stored["limit_reset_at"] == _limit_reset_utc()
+
+
+def test_native_worker_resume_limited_past_parsed_horizon_starts_turn(
+        native_home, monkeypatch):
+    _home, lane = native_home
+    _install_record(
+        lane, status="limited", adapter_state="idle",
+        provider_status="systemError", limit_kind="usage_limit",
+        limit_reset_at="2020-01-01T00:00:00Z")
+    client = LimitTurnClient(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    assert fleet._resume_one_limited(
+        "cx-native", lambda *_: None, lambda *_: None) is True
+
+    methods = [op["payload"]["method"] for op in client.operations]
+    assert methods == ["account/rateLimits/read", "thread/read", "turn/start"]
+    stored = fleet.load_registry()["workers"]["cx-native"]
+    assert stored["status"] == "working"
+    assert stored["codex_turn_id"] == NEXT_TURN_ID
+
+
+# --- Live Codex lanes are never dead-suspected on missing records ---
+
+def _rollout(codex_home, thread_id=THREAD_ID, *, age=2.0):
+    """A rollout jsonl filed the way Codex files it: under its creation date."""
+    import time
+    from datetime import datetime
+    import uuid as uuid_mod
+    created = datetime.fromtimestamp((uuid_mod.UUID(thread_id).int >> 80) / 1000)
+    folder = (codex_home / "sessions" / f"{created:%Y}" / f"{created:%m}"
+              / f"{created:%d}")
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"rollout-{created:%Y-%m-%dT%H-%M-%S}-{thread_id}.jsonl"
+    path.write_text('{"type":"event_msg"}\n', encoding="utf-8")
+    stamp = time.time() - age
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.fixture
+def codex_home(tmp_path, monkeypatch):
+    path = tmp_path / "codex-home"
+    path.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(path))
+    return path
+
+
+class _ObserveFails(WorkerVerbClient):
+    """Live same-generation host whose bounded read fails non-transiently."""
+
+    def call(self, operation, timeout):
+        if operation.get("payload", {}).get("method") == "thread/turns/list":
+            raise fleet.FleetCliError("cx-native: public turn is malformed")
+        return super().call(operation, timeout)
+
+
+def test_live_rollout_keeps_unobservable_lane_working(
+        native_home, codex_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane, provider_status="active")
+    _rollout(codex_home, age=2.0)
+    client = _ObserveFails(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "working"
+    assert not [f for f in fleet._worker_flags(updated)
+                if f.startswith("investigate")]
+
+
+def test_silent_provider_is_dead_suspected_with_provider_wording(
+        native_home, codex_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane, provider_status="active")
+    _rollout(codex_home, age=fleet.CODEX_ACTIVITY_FRESH_SECONDS + 60)
+    client = _ObserveFails(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client", lambda _home: client)
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "dead-suspected"
+    flags = fleet._worker_flags(updated)
+    assert "investigate: no provider activity" in flags
+    assert "investigate: no outcome record" not in flags
+
+
+def test_host_absent_with_fresh_public_evidence_stays_working(
+        native_home, codex_home, monkeypatch):
+    import time
+    home, lane = native_home
+    record = _install_record(lane)
+    evidence_dir = home / "state" / "codex" / "public-evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / f"{THREAD_ID}.{TURN_ID}.json").write_text(json.dumps({
+        "schema": 1, "thread_id": THREAD_ID, "turn_id": TURN_ID,
+        "observed_at": time.time() - 5,
+    }), encoding="utf-8")
+    from fleet_codex import HostUnavailable
+    monkeypatch.setattr(
+        fleet, "_codex_existing_client",
+        lambda _home: (_ for _ in ()).throw(HostUnavailable("host down")))
+
+    assert fleet.recompute_worker_codex("cx-native", record)["status"] \
+        == "working"
+
+
+def test_active_provider_with_unreadable_wait_is_working_not_dead(
+        native_home, codex_home, monkeypatch):
+    _home, lane = native_home
+    record = _install_record(lane)
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: WorkerVerbClient(lane))
+    monkeypatch.setattr(fleet, "_codex_wait_summaries",
+                        lambda _rec: [{"state": "unreadable", "detail": "x"}])
+
+    updated = fleet.recompute_worker_codex("cx-native", record)
+
+    assert updated["status"] == "working"
+    assert updated["adapter_state"] == "uncertain"

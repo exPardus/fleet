@@ -28,3 +28,4 @@ docs/PLAN-PROGRESS.md
 # Finger bench working copies: one regenerable per-model checkout of bench-template.
 # The measured table it produced lives in state/tasks/20260916-openrouter-roster.md.
 tools/fingers/bench-out/
+mailman.json

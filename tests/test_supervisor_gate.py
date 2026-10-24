@@ -321,7 +321,7 @@ class TestGateExitCode:
 # --- every mutating lifecycle verb is behind the gate ----------------------
 
 GATED_VERBS = ["spawn", "sup-spawn", "send", "respawn", "kill", "clean",
-               "interrupt", "archive", "resume-limited", "release", "init"]
+               "interrupt", "archive", "resume-limited", "release", "init", "abandon"]
 
 
 def _gated_argv(verb, home):
@@ -342,6 +342,7 @@ def _gated_argv(verb, home):
             "archive": ["archive"],
             "resume-limited": ["resume-limited"],
             "release": ["release", "w"],
+            "abandon": ["abandon", "w", "--reason", "x"],
             "init": ["init"]}[verb]
 
 
@@ -577,5 +578,5 @@ class TestTheRefusalNeverNamesAnUnreachableRemedy:
         with pytest.raises(fleet.SupervisorClaimGateError) as exc:
             fleet._supervisor_gate("archive")
         msg = str(exc.value)
-        assert "--nonce <value>" in msg
+        assert "`--nonce`" in msg and "<value>" not in msg
         assert "REPORT IT" not in msg

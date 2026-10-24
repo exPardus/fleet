@@ -179,6 +179,7 @@ ALLOWED = {
     # --- lifecycle verbs and their native halves: mutate under the lock ---
     "cmd_spawn", "cmd_send", "_cmd_send_native", "_wake_supervisor_native",
     "cmd_kill", "_cmd_kill_native",
+    "_resume_terminal_quota_codex",  # settles its turn/start reservation under fleet_lock
     "cmd_respawn", "_cmd_respawn_native", "cmd_interrupt", "_cmd_interrupt_native",
     # item 29: the codex (mcx) halves of the same verbs -- every load_registry
     # call in them sits inside `with fleet_lock():`, same as the native halves.
@@ -228,7 +229,7 @@ ALLOWED = {
     "_reconcile_dead_suspected_codex_system_errors",
     "_freeze_codex_predecessor_retirement",
     "_finalize_codex_predecessor_retirement",
-    "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
+    "cmd_attach", "cmd_release", "cmd_abandon", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",
     "_sweep_husks", "_expire_tombstones",
     # --- supervisor lifecycle: all inside `fleet_lock()` ---

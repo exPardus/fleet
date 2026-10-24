@@ -1529,6 +1529,33 @@ reading a runbook and an agent reading stderr are different audiences with
 different capabilities; this is the one place where the absence of a privilege boundary is worked
 around by an **audience** boundary, and it is a convention, not a mechanism.
 
+**FOUNDER OVERRIDE (2026-10-08) of the audience rule above.** A handoff stalled when a holder
+copied the literal `<value>` from a printed `--nonce <value>` recipe; the refusal named no way out
+and the claim went unowned until an operator recovered it by hand. The founder overrode the
+audience boundary for this path. Binding from 2026-10-08:
+
+- A continuity refusal (`_continuity_refusal`) now appends exact recovery steps: end the turn;
+  once the holder row is idle (the refusal shows its current status), the Interface or operator
+  runs the exact `send supervisor` command printed, which wakes the same incarnation with a fresh
+  nonce; and the exact `sup-handoff-abort --successor-sid` / `--successor-inc` handle of each
+  pending successor. Refusal, status, and handoff-recovery text never repeats a live generation:
+  the woken body takes it from its own `sup-boot` output, then presents it to the printed abort
+  handle. The private wake bootstrap still carries its one-time wake proof so that boot can resume
+  the same incarnation.
+- No string fleet prints carries an identity placeholder token (`<value>`, `<nonce>`, `<sid>`,
+  `<inc>`, ...). A holder recipe ends at a bare `--nonce`, which argparse refuses verbatim with no
+  state change, and adjacent prose names the holder body's most recent `NONCE:` output as the
+  credential source (promotion can make the boot generation stale). It never embeds a presented or
+  freshly minted generation. `tests/test_no_placeholder.py`
+  scans every printed string and every verb's help and exercises refusal stderr and exceptions for
+  credential leakage; the handoff seam also pins stdout.
+- A placeholder-looking `--nonce` or `--handoff-token` (empty, whitespace-only, anything with
+  `<` or `>`, or the bare words value/nonce/token in any case) is refused before any lock, log
+  append, rotation or dispatch, with an error naming the recovery path. Minted values are
+  url-safe base64, so no real value is refused.
+
+The convention paragraph above is kept as history; where they differ, this override governs.
+
 **Accepted cost, stated plainly:** without a registered Interface, or while its holder remains busy, a
 supervisor that loses its nonce catastrophically is locked out of `sup-*` for up to an hour. §5.4(b)
 removes the common causes; compaction remains. Shortening

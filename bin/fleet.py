@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -656,8 +656,8 @@ def task_file_path(name: str) -> Path:
 
 def briefs_dir() -> Path:
     """Store authoritative briefs outside the worker-authorized task directory.
-    `dispatch_bg` grants tasks_dir() wholesale. This separation restricts access
-    under permission-checking modes; bypass mode grants no such protection.
+    `dispatch_bg` grants a worker only its own task and journal files. Briefs
+    stay unreachable by rule; bypass mode grants no such protection.
     """
     return state_dir() / "briefs"
 
@@ -952,15 +952,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:13781) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:14857) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18289) -- upgrades need complete records.
-      * `_acting_worker_identity` (:4377) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5085) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15105) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18168) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8303) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:19889) -- render the release explanation.
+      * `_sweep_husks` (:13937) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15016) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18448) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5121) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15264) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18326) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8344) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20045) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -1127,7 +1127,7 @@ a whole one must not fail at all."""
 def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
                        max_budget_usd=None, setting_sources=None, token_ceiling=None,
                        spawned_by=None, dispatch_kind=None, category=None,
-                       spawned_by_lineage=None, substrate=None, branch=None) -> dict:
+                       spawned_by_lineage=None, substrate=None, branch=None):
     """Build a SPEC §4 worker record.
     Persist launch budgets and settings sources so every subsequent dispatch uses
     the same policy. Nullable additive fields preserve compatibility on reads.
@@ -1155,10 +1155,8 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # A later body may own its lineage's workers only after proving continuity
         # in this invocation. Missing lineage falls back to spawned_by ownership.
         "spawned_by_lineage": spawned_by_lineage,
-        # Write-once per record: fork-steer retains created; respawn mints a fresh value.
-        # _releaser_live_sids compares created to released_at to bound its union arm.
-        # Carrying created across respawn would falsely keep the releaser-live gate armed
-        # and refuse successors even after the releaser has been replaced.
+        # Write-once: fork-steer keeps created, respawn mints it. _releaser_live_sids
+        # compares it to released_at; a carried value would keep that gate armed.
         "created": created,
         "status": "working",
         "attached_since": None,
@@ -1178,9 +1176,8 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # Explicit non-Claude substrate marker (item 24), e.g. "openrouter/<slug>".
         # None here falls back to dispatch_kind=="bg" => "claude" (_wave_record_substrate).
         "substrate": substrate,
-        # The CLI-captured short id supports the gone-to-success inference. Fast
-        # completion instead derives it from the sid; that provenance depends on the
-        # vendor id format. See _native_job_ref before using it as a removal reference.
+        # CLI-captured short id for gone-to-success inference; fast completion derives
+        # it from the sid instead. See _native_job_ref before using it for removal.
         "native_short_id": None,
         # Codex substrate (item 29): the mcx worker id captured from
         # `mcx spawn` stdout; the job lives at <cwd>/.mcx/<mcx_id>.
@@ -1649,7 +1646,7 @@ Do not leave servers or watchers running past the end of the turn without record
 
 
 def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None,
-                   context=None) -> tuple[str, Path | None, str]:
+                   context=None, spec_section=None) -> tuple[str, Path | None, str]:
     """Compose preamble, optional context digests, drained mail, task and journal.
     Return (prompt, claim_path, drained_mail); sid=None skips claiming mail.
     The caller restores the claim on failure or finalizes it after process
@@ -1679,6 +1676,9 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
 
     if task:
         parts.append(task)
+
+    if spec_section:
+        parts.append(spec_section)
 
     if journal_path is not None:
         journal_path = Path(journal_path)
@@ -2421,6 +2421,12 @@ def _codex_error_code(turn: dict) -> str | None:
     return None
 
 
+def _codex_error_message(turn: dict) -> str | None:
+    error = turn.get("error")
+    message = error.get("message") if isinstance(error, dict) else None
+    return message[:2000] if isinstance(message, str) and message else None
+
+
 def _codex_paged_thread_read(client, thread_id: str, generation: str,
                              prefix: str, *, hydrate_turn: str | None = None,
                              hydrate_active: bool = False):
@@ -2597,11 +2603,12 @@ def _codex_worker_observe(binding: CodexWorkerBinding, client=None,
                 raise FleetCliError(f"{binding.name}: public result text is malformed")
             result_item_id, result_text = item_id, item["text"]
     return {
-        "binding": binding, "client": client,
+        "binding": binding, "client": client, "thread_model": thread.get("model"),
         "provider_status": provider_status, "active_flags": list(flags),
         "turn_status": turn_status, "items_view": items_view,
         "result_item_id": result_item_id, "result_text": result_text,
         "error_code": _codex_error_code(turn),
+        "error_message": _codex_error_message(turn),
     }
 
 
@@ -2628,15 +2635,43 @@ def _codex_worker_status(observed):
     turn = observed["turn_status"]
     if provider == "active":
         return "working", ("waiting" if observed["active_flags"] else "active")
+    if _codex_limit_failed(observed):
+        return "limited", "idle"
     if provider != "idle":
         return "dead-suspected", "uncertain"
     if turn == "completed":
         return "idle", "idle"
     if turn == "interrupted":
         return "interrupted", "idle"
-    if observed.get("error_code") in _CODEX_LIMIT_ERRORS:
-        return "limited", "idle"
     return "dead", "idle"
+
+
+def _codex_limit_failed(observed) -> bool:
+    return (observed["provider_status"] in {"idle", "systemError"}
+            and observed["turn_status"] == "failed"
+            and observed.get("error_code") in _CODEX_LIMIT_ERRORS)
+
+
+def _codex_worker_limit_fields(binding: CodexWorkerBinding, observed) -> dict:
+    code = observed.get("error_code")
+    message = observed.get("error_message")
+    if message is None:
+        try:
+            evidence = _codex_public_evidence_file(binding)
+        except FleetCliError:
+            evidence = None
+        if isinstance(evidence, dict) and isinstance(
+                evidence.get("error_message"), str):
+            message = evidence["error_message"]
+    try:
+        allowed, rate_reset = _codex_rate_limit_state(observed["client"])
+    except (FleetCliError, OSError, ValueError):
+        allowed, rate_reset = None, None
+    return {
+        "limit_kind": "usage_limit" if code == "usageLimitExceeded" else code,
+        "ordinary_usage_allowed": allowed,
+        "limit_reset_at": _mcx_parse_limit_reset(message or "") or rate_reset,
+    }
 
 
 def _codex_active_reobserve_journal(binding: CodexWorkerBinding) -> None:
@@ -4359,7 +4394,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18289`), because legacy upgrades also require a complete registry.
+    (`:18448`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4780,18 +4815,23 @@ def recompute_worker_codex(name: str, record: dict,
             observed = _codex_worker_observe(
                 binding, hydrate_items=not metadata_only)
         except (FleetCliError, OSError, ValueError):
-            updated["status"] = "dead-suspected"
+            updated["status"] = ("working" if _codex_recent_activity(record, name)
+                                 else "dead-suspected")
             updated["adapter_state"] = "uncertain"
             return updated
         status, adapter_state = _codex_worker_status(observed)
         if status == "dead-suspected" and completed_evidence and observed["turn_status"] == "completed":
             status, adapter_state = "idle", "idle"
+        elif status == "dead-suspected" and _codex_recent_activity(record, name):
+            status = "working"
         current_waits = _codex_current_waits(record)
+        unsure = ("working" if observed["provider_status"] == "active"
+                  or _codex_recent_activity(record, name) else "dead-suspected")
         if metadata_only and (observed["active_flags"] or current_waits):
-            status, adapter_state = "dead-suspected", "uncertain"
+            status, adapter_state = unsure, "uncertain"
         elif any(wait.get("state") in {"unknown", "unreadable"}
                  for wait in current_waits):
-            status, adapter_state = "dead-suspected", "uncertain"
+            status, adapter_state = unsure, "uncertain"
         elif observed["provider_status"] == "active" and current_waits:
             status, adapter_state = "working", "waiting"
         updated["status"] = status
@@ -4804,13 +4844,7 @@ def recompute_worker_codex(name: str, record: dict,
         if observed["active_flags"] or current_waits:
             updated["waiting_for_permission"] = True
         if status == "limited":
-            updated["limit_kind"] = error_code
-            try:
-                allowed, reset_at = _codex_rate_limit_state(observed["client"])
-            except (FleetCliError, OSError, ValueError):
-                allowed, reset_at = None, None
-            updated["ordinary_usage_allowed"] = allowed
-            updated["limit_reset_at"] = reset_at
+            updated.update(_codex_worker_limit_fields(binding, observed))
         return updated
     if route != "mcx":
         updated["status"] = "dead-suspected"
@@ -4911,7 +4945,9 @@ def _worker_flags(record: dict) -> list:
     # M-B T5: dead-suspected is a native-only, non-sticky verdict -- surface
     # it as an operator prompt to look, never an auto-respawn trigger.
     if status == "dead-suspected":
-        flags.append("investigate: no outcome record")
+        flags.append("investigate: no provider activity"
+                     if _codex_record_route(record) == "native"
+                     else "investigate: no outcome record")
     # M-B T5: recompute_worker_native sets this transient field (never part
     # of new_worker_record's base schema) when the roster reports the native
     # session paused on a permission prompt.
@@ -5629,7 +5665,8 @@ VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
                            # Bare init creates only its target home and uses the ordinary residual.
                            "init --home", "journal-roll", "relay-ack")
 VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
-                          "resume-limited", "sup-heartbeat", "interface-register")
+                          "resume-limited", "sup-heartbeat", "interface-register",
+                          "abandon")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                         "home", "knowledge", "attach", "wait", "sup-status",
                         "sup-context", "sup-guard", "q", "index", "address", "watch",
@@ -6970,15 +7007,18 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
         )
 
-    task = _read_task_arg(args.task)
+    task = _spawn_task_arg(args.name, args.task, cwd)
+    binding = spec_binding_for_spawn(getattr(args, "spec", None),
+                                     getattr(args, "slice", None))
+    spec_baseline = current_head_sha(cwd) if binding["record"] else None
 
-    # Compose before pre-claiming so context/index I/O cannot leave a phantom
-    # working record. Report ordinary compose failures, but preserve Ctrl-C:
-    # there is no registry claim to roll back yet.
+    # Compose before pre-claiming: compose I/O cannot leave a phantom record, and
+    # Ctrl-C propagates because there is no registry claim to roll back yet.
     try:
         prompt, _claim, _mail = compose_prompt(args.name, cwd, task, None,
                                         context=fleet_index.parse_context_arg(
-                                            getattr(args, "context", None)))
+                                            getattr(args, "context", None)),
+                                        **binding["compose"])
     except FleetCliError:
         raise
     except Exception as exc:
@@ -7012,9 +7052,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 if codex_slug is not None else "bg"),
             category=args.category,
             substrate=_substrate_for_model(args.model),
-            # Item 16: the lane branch is the durable join key for wave-close;
-            # the worktree it is read from is the part that gets deleted.
+            # Item 16: the lane branch, not the deletable worktree, joins wave-close.
             branch=_worktree_branch(cwd))
+        if binding["record"]:
+            record.update(binding["record"], spec_baseline_sha=spec_baseline)
         if codex_slug is not None and codex_adapter == "mcx":
             record["mcx_approval"] = _mcx_approval(args.mode)
             record["mcx_effort"] = getattr(args, "effort", None) or "medium"
@@ -7053,7 +7094,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             args.name, cwd, prompt, args.mode, model=args.model,
             category=args.category, hint=task,
             setting_sources=record.get("setting_sources"),
-            run=run, which=which, sleep=sleep, clock=clock,
+            run=run, which=which, sleep=sleep, clock=clock, **binding["dispatch"],
         )
     except NativeDispatchError as exc:
         # The exception's short id finds sid-keyed fast-completion outcomes.
@@ -8510,6 +8551,11 @@ def _cmd_peek_codex(name: str, rec: dict, n: int) -> int:
         else:
             print(f"(turn {evidence.get('turn_status', 'unknown')}; "
                   "no durable agent message)")
+        code = evidence.get("error_code")
+        if isinstance(code, str):
+            message = evidence.get("error_message")
+            print(f"[error] {code}" + (
+                f": {_truncate(message, 200)}" if isinstance(message, str) else ""))
         return 0
     _require_mcx_codex_record(name, rec, "peek")
     mcx_id = rec.get("mcx_id")
@@ -8644,7 +8690,9 @@ def _validate_codex_worker_result_evidence(
     if evidence.get("turn_status") not in {"completed", "failed", "interrupted"}:
         raise FleetCliError(f"{binding.name}: durable turn status is malformed")
     usage = evidence.get("usage")
-    if (not isinstance(usage, dict)
+    if usage is None and evidence["turn_status"] != "completed":
+        pass
+    elif (not isinstance(usage, dict)
             or not _CODEX_USAGE_FIELDS.issubset(usage)
             or any(not isinstance(usage.get(key), int)
                    or isinstance(usage.get(key), bool)
@@ -8794,6 +8842,15 @@ def _cmd_result_codex(name: str, rec: dict,
                   "Codex turn", file=sys.stderr)
             return 1
         _validate_codex_worker_result_evidence(binding, evidence)
+        code = evidence.get("error_code")
+        if evidence["turn_status"] == "failed" and code in _CODEX_LIMIT_ERRORS:
+            reset = rec.get("limit_reset_at") or _mcx_parse_limit_reset(
+                evidence.get("error_message") or "")
+            print(f"{name}: last native Codex turn hit a usage limit ({code}) "
+                  f"-- resets {reset or 'unknown'}; no result. Run "
+                  f"`fleet resume-limited {name}` past the horizon",
+                  file=sys.stderr)
+            return 1
         if evidence["turn_status"] != "completed":
             print(f"{name}: last native Codex turn ended by "
                   f"{evidence['turn_status']} -- no result", file=sys.stderr)
@@ -9337,7 +9394,7 @@ def _mint_wake_nonce(claim: dict, now=None) -> str:
 
 
 def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str,
-                                 message: str) -> str:
+                                 message: str, pending_handles=()) -> str:
     """Render the wake bootstrap for an idle supervisor body's fresh turn.
     No new generation is minted: sup-boot's `resume` verdict restamps THIS
     incarnation onto the new sid once the presented nonce matches the pending
@@ -9349,6 +9406,9 @@ def _render_supervisor_wake_task(name: str, incarnation_id: str, wake_nonce: str
     home = FLEET_HOME.as_posix()
     bundle = boot_bundle_path(name).as_posix()
     mail_block = f"<MANAGER MESSAGE>\n{message.strip()}\n</MANAGER MESSAGE>\n\n" if message.strip() else ""
+    aborts = "".join(
+        f'   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort {h} --nonce {wake_nonce}\n'
+        for h in pending_handles) or "   (none recorded at wake time)\n"
     return f"""You are the claude-fleet supervisor, incarnation {incarnation_id}, woken from idle
 by `fleet send`. This is NOT a new generation -- you are the SAME incarnation continuing on a
 fresh session; never a successor, never a fork.
@@ -9377,8 +9437,9 @@ fresh session; never a successor, never a fork.
    file.
 4. Before any campaign action, run:
    "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
-   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE:
-   "{py}" "{fleet_py}" --fleet-home "{home}" sup-handoff-abort --successor-inc <inc> [--successor-sid <sid>] --nonce <CURRENT-NONCE>
+   Abort every pending handoff successor until status shows no pending successor or HANDSHAKE.
+   Run exactly these first; each presents the wake nonce, which step 1 made your live generation:
+{aborts}   For any other successor status lists, run the same command with its exact handle.
    If a sid-less attempt is still inside its join window, wait until it becomes resolvable, then retry. Run each nonce-minting
    verb directly: never pipe or filter its output, and record every newly printed NONCE before the
    next abort. A lost-nonce wake must not leave a successor able to take over afterward.
@@ -9426,6 +9487,10 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
         else:
             wake_nonce = _mint_wake_nonce(claim)
             write_incarnation(claim)
+            pending_handles = [
+                f"--successor-sid {e['successor_sid']}" if e.get("successor_sid")
+                else f"--successor-inc {e['successor_inc']}"
+                for e in handoff_pending_entries(claim)]
     if claim_changed:
         _rollback_pre_claim()
         raise FleetCliError(
@@ -9433,7 +9498,8 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
             f"{incarnation_id}) -- refusing to dispatch a wake that "
             f"cannot resume it; another body may already hold the claim")
 
-    prompt_body = _render_supervisor_wake_task(name, incarnation_id, wake_nonce, mail)
+    prompt_body = _render_supervisor_wake_task(name, incarnation_id, wake_nonce, mail,
+                                               pending_handles=pending_handles)
     try:
         result = dispatch_bg(
             name, cwd, prompt_body, mode, model=model,
@@ -10280,11 +10346,13 @@ def _cmd_send_codex_native(name, message, rec, *, allow_limited=False):
         raise FleetCliError(
             f"{name}: native Codex worker has an unresolved current callback; "
             "no turn was started")
-    if provider in {"notLoaded", "systemError"} or observed["active_flags"]:
+    limit_restart = allow_limited and _codex_limit_failed(observed)
+    if ((provider in {"notLoaded", "systemError"} and not limit_restart)
+            or observed["active_flags"]):
         raise FleetCliError(
             f"{name}: native Codex worker is not steerable ({provider}); "
             "no turn was started")
-    if provider not in {"active", "idle"}:
+    if provider not in {"active", "idle"} and not limit_restart:
         raise FleetCliError(f"{name}: native Codex worker state is ambiguous")
     if (provider == "idle" and not allow_limited
             and observed.get("error_code") in _CODEX_LIMIT_ERRORS):
@@ -10586,7 +10654,7 @@ def _resume_one_limited_codex(name: str, rec: dict) -> bool:
                 or record.get("codex_turn_id") != binding.turn_id):
             return False
         record["ordinary_usage_allowed"] = allowed
-        record["limit_reset_at"] = reset_at
+        record["limit_reset_at"] = reset_at or record.get("limit_reset_at")
         save_registry(data)
         current = dict(record)
     if allowed is False:
@@ -10740,6 +10808,12 @@ def cmd_resume_limited(args, which=shutil.which, sleep=time.sleep,
     _supervisor_gate("resume-limited", nonce=getattr(args, "nonce", None))
     _require_instance_settings()
     force_now = bool(getattr(args, "force_now", False))
+    if getattr(args, "terminal_quota", False):
+        if not args.name:
+            raise FleetCliError("resume-limited --terminal-quota requires a single named lane")
+        if force_now:
+            raise FleetCliError("resume-limited --terminal-quota cannot combine with --force-now")
+        return _resume_terminal_quota_codex(args.name)
 
     with fleet_lock():
         data = load_registry()
@@ -10907,6 +10981,12 @@ def _cmd_interrupt_codex(name: str, rec: dict,
                     f"{name}: interrupt returned without terminal public proof")
             client.commit(operation_id)
         except BaseException as exc:
+            if (_codex_operation_failed_before_acceptance(
+                    client, operation_id, exc)
+                    and _release_codex_rejected_worker(binding, operation_id)):
+                raise FleetCliError(
+                    f"{name}: native Codex turn/interrupt rejected before "
+                    "acceptance; retry") from exc
             _freeze_codex_worker_operation(binding, operation_id, exc)
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -11018,6 +11098,76 @@ def cmd_attach(args) -> int:
     )
 
 
+def _abandon_unlanded_commits(branch, run=subprocess.run):
+    try:
+        result = run(["git", "rev-list", "--count", f"HEAD..refs/heads/{branch}"],
+                     cwd=str(Path.cwd()), capture_output=True, text=True,
+                     encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    if result.returncode != 0:
+        probe = run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                    cwd=str(Path.cwd()), capture_output=True, text=True)
+        if probe.returncode == 1:
+            return 0, None
+        return None, (result.stderr or result.stdout or "git failed").strip()[:200]
+    try:
+        return int(result.stdout.strip()), None
+    except ValueError:
+        return None, f"unparseable rev-list output {result.stdout.strip()[:40]!r}"
+
+
+def cmd_abandon(args, run=subprocess.run) -> int:
+    _supervisor_gate("abandon", nonce=getattr(args, "nonce", None))
+    reason = (args.reason or "").strip()
+    if not reason:
+        raise FleetCliError("abandon: --reason must be non-empty")
+    name = _resolve_worker_target(args.name)
+    force = bool(getattr(args, "force", False))
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if not isinstance(rec, dict):
+            raise FleetCliError(f"unknown worker: {name!r}")
+        refuse_if_archived(name, rec, "abandon")
+        if rec.get("lane_state") in ("landed", "abandoned"):
+            print(f"{name}: already lane_state={rec['lane_state']} -- nothing to do")
+            return 0
+        if rec.get("status") in SUPERVISOR_BUSY_LANE_STATUSES:
+            raise FleetCliError(
+                f"abandon: {name} is {rec['status']} -- interrupt it first")
+        if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+            raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
+        branch = rec.get("branch")
+        ahead = 0
+        if isinstance(branch, str) and branch:
+            ahead, err = _abandon_unlanded_commits(branch, run=run)
+            if err is not None and not force:
+                raise FleetCliError(
+                    f"abandon: cannot check {branch} against HEAD ({err}); "
+                    "pass --force to abandon anyway")
+            if ahead and not force:
+                raise FleetCliError(
+                    f"abandon: {branch} has {ahead} commit(s) not on HEAD -- land "
+                    "them, or pass --force to abandon and discard")
+        rec["lane_state"] = "abandoned"
+        rec["abandoned_reason"] = reason
+        rec["abandoned_at"] = now_iso()
+        data["workers"][name] = rec
+        save_registry(data)
+        sid = rec.get("session_id")
+        if sid:
+            append_outcome(name, {"ts": now_iso(), "session_id": sid,
+                                  "kind": "abandoned", "result_text": reason})
+        append_event("abandoned", name, reason=reason, forced=force,
+                     unlanded_commits=ahead or 0)
+    print(f"{name}: lane_state=abandoned ({reason})")
+    print("next reap (supervisor boot, handoff, release) removes the row once its "
+          "session is idle with no unread mail; the worktree and branch are left "
+          "in place")
+    return 0
+
+
 def cmd_release(args) -> int:
     """Apply the continuity gate and change attached to idle; otherwise warn/no-op."""
     _supervisor_gate("release", nonce=getattr(args, "nonce", None))
@@ -11108,6 +11258,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     spawned_by = before.get("spawned_by")
     # Carry ownership provenance unchanged; respawn must not transfer it to its caller.
     spawned_by_lineage = before.get("spawned_by_lineage")
+    binding = spec_binding_for_respawn(before)
+    spec_baseline = current_head_sha(cwd) if binding["record"] else None
 
     roster_ok, entries = _fetch_agents_roster(which=which, run=run)
     if not roster_ok:
@@ -11196,6 +11348,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         new_record["cost_baseline"] = cost_usd
         new_record["retired_sids"] = prior_retired + [old_sid]
         new_record["last_dispatch_at"] = now_iso()
+        if binding["record"]:
+            carry_spec_binding(before, new_record, spec_baseline)
         data["workers"][name] = new_record
         save_registry(data)
         append_event("respawned", name, old_session_id=old_sid, new_session_id=None,
@@ -11211,7 +11365,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     journal_path = journal_file_path(name)
     # A fresh non-resume session has no cached pointer content, so no inline
     # resumed-turn payload is needed.
-    prompt, claim, _mail = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
+    prompt, claim, _mail = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path,
+                                          **binding["compose"])
     prior_brief = brief_snapshot(name)
     try:
         # Write a task override inside the rollback envelope. Abort must restore it
@@ -11225,7 +11380,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model, category=category,
             hint=task_for_record, setting_sources=setting_sources,
-            run=run, which=which, sleep=sleep, clock=clock,
+            run=run, which=which, sleep=sleep, clock=clock, **binding["dispatch"],
         )
         finalize_mailbox_claim(claim)
     except NativeDispatchError as exc:
@@ -12131,7 +12286,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12046` / `cmd_respawn:11323`, before
+    # resolution that runs from `cmd_kill:12201` / `cmd_respawn:11478`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12162,9 +12317,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12046` / `cmd_respawn:11323`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12201` / `cmd_respawn:11478`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11344-11351` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11499-11506` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -12272,8 +12427,9 @@ def _steer_supervisor_release(name, reason, *, run, which, sleep):
         f"Stop what you are doing. Release the supervisor claim yourself -- fleet "
         f"cannot do it for you (three-tier §10.4 B5: `sup-release` requires YOUR "
         f"current generation, which only you hold).\n\n"
-        f"Run exactly this, presenting your own nonce:\n"
-        f'  "{py}" "{fleet_py}" sup-release --reason "{reason}" --nonce <your nonce>\n\n'
+        f"Run this, appending a space and your current generation (the exact value "
+        f"after your last `NONCE:` line) after the final --nonce:\n"
+        f'  "{py}" "{fleet_py}" sup-release --reason "{reason}" --nonce\n\n'
         f"Then take NO further fleet actions and END YOUR TURN. The body is stopped "
         f"as soon as the claim reads `released`.")
     try:
@@ -14489,6 +14645,9 @@ def _reconcile_dead_suspected_codex_system_errors() -> list[str]:
             "provider_status": observed["provider_status"],
             "last_activity": now_iso(),
         })
+        if _codex_limit_failed(observed):
+            updated.update(status="limited", adapter_state="idle")
+            updated.update(_codex_worker_limit_fields(binding, observed))
         if observed.get("error_code") is not None:
             updated["codex_error_code"] = observed["error_code"]
         prepared[name] = (before, updated, _codex_system_error_evidence(observed))
@@ -14627,7 +14786,7 @@ def _doctor_check_orphaned_claims(workers=None):
                               if p.is_file() and not p.name.endswith(".tmp") and p.name not in known_sids)
         if orphan_ceils:
             parts.append(
-                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings/<sid> matching no "
+                f"{len(orphan_ceils)} orphaned ceiling file(s) (state/ceilings/ files whose sid matches no "
                 f"registered worker; run `fleet clean` or remove manually): {', '.join(orphan_ceils)}")
     if parts:
         return ("orphaned-claims", True, " | ".join(parts))
@@ -15708,10 +15867,9 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
                 setting_sources=None, inline_kind=None, inline_body="",
                 run=subprocess.run, which=shutil.which, sleep=time.sleep,
-                roster_fetch=None, clock=time.monotonic):
-    # Validate names at this dispatch boundary too: direct callers must not escape
-    # tasks_dir(). Supervisor names are admitted here, while fleet spawn's NAME_RE
-    # rejects their pipe-delimited shape.
+                roster_fetch=None, clock=time.monotonic, extra_add_dirs=()):
+    # Validate here too so direct callers cannot escape tasks_dir(); supervisor
+    # names pass here although fleet spawn's NAME_RE rejects their pipe shape.
     if (not name or not (NAME_RE.match(name) or _is_supervisor_shaped(name))
             or _SID_SHAPE_RE.match(name)):
         raise NativeDispatchError(
@@ -15756,11 +15914,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]
-    argv += ["-n", rendered, "--settings", settings_arg]
-    # Preauthorize task and journal directories: headless workers cannot answer
-    # prompts for protocol-required files outside their cwd. Do not grant the whole home.
-    argv += ["--add-dir", tasks_dir().as_posix(),
-             "--add-dir", journals_dir().as_posix()]
+    # Own-file grants only: no worker may write another's task file.
+    grants = ",".join(_worker_path_grants(name))
+    argv += ["-n", rendered, "--allowedTools", grants,
+             "--settings", settings_arg]
+    for extra_dir in extra_add_dirs:
+        argv += ["--add-dir", Path(extra_dir).as_posix()]
     # Forward persisted setting sources to the native dispatch.
     if setting_sources:
         argv += ["--setting-sources", setting_sources]
@@ -15890,6 +16049,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 # HANDSHAKE. Claim writes hold fleet_lock and replace atomically; successors
 # write HANDSHAKE separately because only the claim holder may write the journal.
 
+SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS = 120.0
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
 # Bounded claim-local marker suppresses stalled-body pages without probing.
 SUPERVISOR_PARK_MAX_SECONDS = 24 * 3600.0
@@ -15998,7 +16158,7 @@ _SUPERVISOR_JOURNAL_SEED = """# Supervisor Journal
 
 Append-only checkpoint log (spec §4). Single writer: the current claim
 holder, via `fleet sup-*` commands only. Never edit or delete entries.
-Entry header format: `## <utc-iso> <KIND> inc=<incarnation-id> sid=<session-id>`
+Entry header format: `## UTC-ISO KIND inc=INCARNATION-ID sid=SESSION-ID`
 plus an optional trailing ` substrate=<substrate>` when the body's registry row
 records one (item 28, e.g. `substrate=openrouter/stealth/union-alpha`).
 Kinds: BOOT, CHECKPOINT, PROPOSAL, PARKED, SEIZED, RELEASED, LIMIT-TRANSFER, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
@@ -16691,7 +16851,7 @@ def resolve_handoff_abort(claim, handshake, successor_sid=None, successor_inc=No
             f"successors answer to it ("
             + ", ".join(f"{e.get('successor_inc')}" for e in rivals)
             + "). Refusing to guess which session to stop; name one with "
-              "`--successor-inc <inc>`")}
+            + " or ".join(f"`--successor-inc {e.get('successor_inc')}`" for e in rivals))}
     entry = rivals[0] if rivals else None
     if entry is None:
         named = successor_sid or successor_inc
@@ -17130,7 +17290,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1026`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5073`) applies here too. An unreadable registry
+    rule for the view path (`:5109`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17201,10 +17361,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4186, :4221, :4251, :4290, :4327, :4384, :4463, :5481, :12149, :12311, :12576, :12801, :12837, :13079, :13080, :13169, :13179, :13190, :13288, :13807, :17153, :20043, :20055, :20204, :23242, :23243, :23345, :23410, :23458, :24416, :24418, :24456, :24984, :27427`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20199, :20211, :20360, :24137, :24138, :24240, :24305, :24367, :25331, :25333, :25371, :25899, :28805`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10545, :11197, :15443, :25912. This makes union identity
+    OWN prior sid alone: :10613, :11349, :15602, :26832. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17549,7 +17709,7 @@ def _select_boot_journal_inline_indices(tail: list) -> set:
 
 
 def _render_boot_bundle(roster_entries: list, snap: dict, journal_entries: list,
-                        caller_sid=None, run=subprocess.run) -> str:
+                        caller_sid=None, run=subprocess.run):
     """Render GOALS, journal tail, knowledge index, roster and fleet status.
     Registry verdicts come from status_snapshot.
     """
@@ -17629,6 +17789,7 @@ def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
     path (morning / post-reboot / post-handoff, spec §4). Epoch check runs
     BEFORE the claim decision; the roster subprocess runs OUTSIDE fleet_lock
     (F4 doctrine: never hold the lock across a subprocess)."""
+    _refuse_ph(args)
     caller_sid = getattr(args, "sid", None) or current_caller_session()
     if not caller_sid:
         raise FleetCliError("sup-boot: caller session unknown -- run from a Claude "
@@ -17833,7 +17994,7 @@ def _wedged_release_gate(verb, claim):
 
 GATE_VERBS_ACCEPTING_NONCE = frozenset({
     "init", "spawn", "send", "resume-limited", "interrupt", "release",
-    "respawn", "kill", "clean", "archive", "sup-spawn",
+    "respawn", "kill", "clean", "archive", "sup-spawn", "abandon",
 })
 """The gated verbs whose parser actually declares `--nonce`, i.e. the ones the
 refusal below may honestly name that flag to (R2, ruling 2026-07-26: **a named
@@ -17874,6 +18035,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     as_autoclean_tier. Send to the current claim holder has its own carve-out
     below. Validation never rotates a nonce.
     """
+    _refuse_ph(nonce=nonce)
     caller = current_caller_session()
     if caller is None:
         return
@@ -17908,8 +18070,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10545, :11197, :15443,
-    # :25912) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10613, :11349, :15602,
+    # :26832) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17917,8 +18079,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17127`).
-        # Unreadable or malformed records provide no holder proof and leave the gate armed.
+        # names this gate as its reason (`:17287`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -17929,9 +18090,9 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Only offer --nonce when the actual entry point accepts it; the gate frame
     # label can differ from the command the caller ran.
     if verb in GATE_VERBS_ACCEPTING_NONCE:
-        remedy = ("Present the current generation with `--nonce <value>` "
-                  "(the value the last `sup-*` verb printed), or escalate to "
-                  "the supervisor session.")
+        remedy = ("Present the current generation with `--nonce`: the exact "
+                  "value the last `sup-*` verb printed after `NONCE:`. Or "
+                  "escalate to the supervisor session.")
     else:
         remedy = (f"THERE IS NOTHING YOU CAN PRESENT: `fleet {verb}` declares no "
                   f"`--nonce` flag, so this refusal cannot be satisfied by any "
@@ -18117,15 +18278,12 @@ def _acknowledge_pending(claim: dict) -> None:
 
 
 def _continuity_refusal(verb, claim: dict) -> FleetCliError:
-    """Build an agent-facing refusal naming ambiguity and human escalation.
-    Do not name a unilateral recovery lever: either indistinguishable body may
-    be legitimate. Human recovery instructions live in the supervisor runbook.
-    """
+    """Refusal naming ambiguity, escalation and exact recovery (§5.7 override)."""
     return SupervisorContinuityError(
         f"{verb}: continuity proof failed (expected generation "
         f"{claim.get('nonce_seq', '?')}) -- a second body of your lineage may be "
         f"acting. STOP: take no further supervisor actions and escalate to the "
-        f"operator.")
+        f"operator." + _recovery_steps(claim))
 
 
 SPEED_BUMP_NOTE = (
@@ -18226,6 +18384,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
     # Resolve caller identity once, including --sid, for role and continuity checks.
     # SPEC.md:281 makes refused the doctor alarm kind, so role classification must
     # use the same caller whose continuity is being tested.
+    _refuse_ph(nonce=nonce)
     caller = sid_override or current_caller_session()
     if not caller:
         raise FleetCliError("caller session unknown -- pass --sid or run from a Claude session")
@@ -18282,7 +18441,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13778`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13934`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -18887,6 +19046,10 @@ def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
         elsewhere = bool(cwd) and not _wave_same_path(cwd, repo)
         if not elsewhere and (not branch or branch in _wave_default_branches(repo, run=run)):
             return joined(lane)
+    prefixed = [name for name, record in rows.items()
+                if record.get("branch") == f"fleet/{lane}"]
+    if len(prefixed) == 1:
+        return joined(prefixed[0])
     # A worktree with no record: the lane is this repo's, its substrate is not.
     return worktree, None, None
 
@@ -19542,20 +19705,7 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
             for number, half in enumerate(halves, 1):
                 if not half:
                     continue
-                env = os.environ.copy()
-                for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE",
-                            "FLEET_WORKER"):
-                    env.pop(key, None)
-                if config["uv_offline"]:
-                    env["UV_OFFLINE"] = "1"
-                else:
-                    env.pop("UV_OFFLINE", None)
-                env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
-                for key, value in config["env"].items():
-                    if value is None:
-                        env.pop(key, None)
-                    else:
-                        env[key] = value
+                env = _wave_floor_env(config)
                 # uv supplies pytest and the selected interpreter. Resolve the interpreter
                 # first so a missing local installation fails instead of downloading one.
                 uv_args = [version if arg == "{python}" else arg
@@ -19588,10 +19738,15 @@ def _wave_floor(repo, wave_id, run=subprocess.run, which=shutil.which,
         if any(result["failures"] != first["failures"] for result in results.values()):
             raise FleetCliError(
                 f"wave-close: floor failure sets differ between interpreters: {results}")
-        if set(first["failures"]) != set(config["expected_failures"]):
+        unexpected = sorted(set(first["failures"]) - set(config["expected_failures"]))
+        if unexpected:
             raise FleetCliError(
                 "wave-close: floor failure set differs from the expected host "
-                f"assumptions: {first['failures']}")
+                f"assumptions: unexpected {unexpected}")
+        fixed = sorted(set(config["expected_failures"]) - set(first["failures"]))
+        if fixed:
+            print(f"wave-close: {len(fixed)} expected failure(s) now pass "
+                  f"(informational): {', '.join(fixed)}")
         return results, _wave_git(clone, "rev-parse", "HEAD", run=run).stdout.strip()
     finally:
         shutil.rmtree(clone_parent, ignore_errors=True)
@@ -19671,7 +19826,6 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
             "wave-close: CHANGELOG coverage missing for merge commit(s) since "
             f"{base}: {', '.join(gaps)}")
     floor_config, floor_source = _wave_floor_config(repo)
-    # Check committer identity before the expensive reap and interpreter floor.
     identity = run(["git", "-C", str(repo), "var", "GIT_COMMITTER_IDENT"],
                    capture_output=True, text=True, encoding="utf-8",
                    errors="replace")
@@ -19679,6 +19833,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(
             "wave-close: git has no committer identity in this repo -- set "
             "`git config user.name` and `user.email` before closing a wave")
+
+    _wave_floor_preflight(repo, floor_config, run=run, which=which)
 
     # Attribute every merge in range before the claim, the reap, or the floor,
     # so an unattributable range is refused before a close that cannot finish.
@@ -19732,13 +19888,13 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     _deliver_notices(notices)
 
     wave_id = _wave_id(repo, run=run)
+    floor, tree = _wave_floor(repo, wave_id, run=run, which=which,
+                              config=floor_config)
     reap_stats = {}
     reap_count, reap_error = _supervisor_reap(caller_sid=caller,
                                               reap_stats=reap_stats)
     if reap_error:
         print(f"wave-close: reap note: {reap_error}", file=sys.stderr)
-    floor, tree = _wave_floor(repo, wave_id, run=run, which=which,
-                              config=floor_config)
     buckets, changed_paths = _wave_numstat(repo, base, run=run)
     roster_ok, roster = _fetch_agents_roster(which=which, run=run)
     roster_tokens = (_wave_roster_claude_tokens(roster) if roster_ok else
@@ -19822,7 +19978,7 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
         raise FleetCliError(f"wave-close: push failed after {attempts} attempts: {push_failures}")
 
     pruned = _wave_prune_landed_worktrees(repo, "HEAD", run=run)
-    notify_args = argparse.Namespace(text=throughput, tmux_session="work", window="fleet",
+    notify_args = argparse.Namespace(text=throughput, tmux_session=None, window="fleet",
                                      dry_run=False, sid=getattr(args, "sid", None),
                                      nonce=getattr(args, "nonce", None))
     cmd_sup_notify(notify_args, run=run)
@@ -21232,11 +21388,28 @@ def _codex_restore_one_predecessor(journal, original_id) -> None:
 def _codex_restore_host_identity(client) -> dict:
     return {
         "generation": client.generation,
+        "codex_version": getattr(client, "codex_version", None),
+        "schema_digest": getattr(client, "schema_digest", None),
         "host_pid": client.host_pid,
         "host_process_identity": client.host_process_identity,
         "app_server_pid": client.app_server_pid,
         "app_server_process_identity": client.app_server_process_identity,
     }
+
+
+_CODEX_CANCEL_VERSION = "0.155.1"
+_CODEX_CANCEL_SCHEMA = (
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3")
+
+
+def _codex_cancel_pinned_old_host(client) -> dict:
+    identity = _codex_restore_host_identity(client)
+    if (identity["codex_version"] != _CODEX_CANCEL_VERSION
+            or identity["schema_digest"] != _CODEX_CANCEL_SCHEMA):
+        raise FleetCliError(
+            "approval cancellation requires running Codex 0.155.1 and its "
+            "exact reviewed schema")
+    return identity
 
 
 def _codex_restore_claim_without_proof(claim: dict) -> dict:
@@ -22737,6 +22910,716 @@ def _restored_continuation_context_original_link(binding, link):
             fleet_name=binding.name,
             incarnation_id=binding.incarnation_id,
             thread_id=binding.authority.value) == link
+def _codex_cancel_approval_store(generation):
+    from fleet_codex import CodexApprovalStore
+
+    directory = FLEET_HOME / "state" / "codex" / "approvals"
+    if directory.is_symlink() or not directory.is_dir():
+        raise FleetCliError("existing approval store is missing or unsafe")
+    return CodexApprovalStore(FLEET_HOME, generation)
+
+
+def _codex_cancel_approval_record(client, binding, args, *, terminal=False,
+                                  host_check=True):
+    records = client.pending_approvals(binding.authority.value) \
+        if host_check else None
+    if host_check:
+        if terminal:
+            if records:
+                raise FleetCliError("cancelled supervisor callback remains unresolved")
+        elif (len(records) != 1 or records[0].get("state") != "pending"):
+            raise FleetCliError(
+                "exact supervisor turn must have one pending callback only")
+    store = _codex_cancel_approval_store(binding.host_generation)
+    matches = [record for record in store.records()
+               if str(record.get("request_id")) == str(args.expect_request_id)
+               and record.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        raise FleetCliError("exact supervisor callback is missing or ambiguous")
+    record = matches[0]
+    params = record.get("params")
+    if (record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or not isinstance(params, dict)
+            or params.get("threadId") != binding.authority.value
+            or params.get("turnId") != binding.current_turn_id
+            or params.get("itemId") != args.expect_item_id
+            or params.get("command") != args.expect_command
+            or params.get("cwd") != args.expect_request_cwd
+            or record.get("item_id") != args.expect_item_id
+            or args.expect_method != record.get("method")
+            or record.get("state") != ("resolved" if terminal else "pending")
+            or any(key in record for key in (
+                "response", "responding_at", "responded_at", "uncertain_at"))):
+        raise FleetCliError(
+            "exact supervisor callback identity or no-response proof disagrees")
+    if host_check and not terminal and records[0] != record:
+        raise FleetCliError("host pending callback differs from durable record")
+    return record
+
+
+def _codex_cancel_expectations(args, binding, generation, operation_id=None):
+    if (not getattr(args, "_fleet_home_explicit", False)
+            or args.expect_inc != binding.incarnation_id
+            or args.expect_thread != binding.authority.value
+            or args.expect_turn != binding.current_turn_id
+            or args.expect_host_generation != generation
+            or (operation_id is not None
+                and args.expect_cancel_op != operation_id)):
+        raise FleetCliError(
+            "cancelled supervisor approval requires explicit exact home, "
+            "incarnation, thread, turn, host generation, and operation pins")
+
+
+def _codex_cancel_original_policy(binding):
+    profile = _codex_permission_profile(binding.record.get("mode"))
+    effective = binding.record.get("permission_effective")
+    if (binding.record.get("mode") != "accept"
+            or not isinstance(effective, dict)
+            or effective.get("approvalPolicy") != "on-request"
+            or effective.get("approvalsReviewer") != "user"
+            or not isinstance(effective.get("sandbox"), dict)
+            or effective["sandbox"].get("type") != "workspaceWrite"):
+        raise FleetCliError(
+            "cancelled approval recovery requires the exact recorded accept policy")
+    return profile
+
+
+def _codex_cancel_public_status(binding, client, *, terminal=False):
+    observed = _codex_supervisor_observe(binding, client=client)
+    expected = ("idle", "interrupted", []) if terminal else (
+        "active", "inProgress", ["waitingOnApproval"])
+    if ((observed["provider_status"], observed["turn_status"],
+         observed["active_flags"]) != expected):
+        raise FleetCliError(
+            "exact supervisor public turn is not in the required "
+            + ("terminal" if terminal else "approval-wait") + " state")
+    return observed
+
+
+def _cancel_codex_supervisor_approval(args) -> int:
+    from fleet_codex import OperationJournal, _digest
+
+    if (not isinstance(args.expect_request_id, str)
+            or not args.expect_request_id
+            or not isinstance(args.expect_item_id, str)
+            or not args.expect_item_id
+            or not isinstance(args.expect_command, str)
+            or not args.expect_command
+            or not isinstance(args.expect_request_cwd, str)
+            or not args.expect_request_cwd):
+        raise FleetCliError(
+            "approval cancellation requires exact request, item, command, "
+            "and cwd pins")
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    data = read_registry_no_repair()
+    binding = _codex_supervisor_binding(claim, data, allowed_states={"held"})
+    _codex_cancel_original_policy(binding)
+    client = _codex_existing_client(FLEET_HOME)
+    old_host = _codex_cancel_pinned_old_host(client)
+    _codex_cancel_expectations(args, binding, client.generation)
+    if client.generation != binding.host_generation:
+        raise FleetCliError("pending callback belongs to another host generation")
+    if not client._owner_live() or not client._app_server_live():
+        raise FleetCliError("original callback host and app-server are not live")
+    _codex_cancel_public_status(binding, client)
+    record = _codex_cancel_approval_record(client, binding, args)
+    if any(item.get("state") == "unknown"
+           for item in client.pending_approvals(None)):
+        raise FleetCliError("unknown old-host callback blocks cancellation")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in OperationJournal(FLEET_HOME, client.generation).records()):
+        raise FleetCliError("original host has another unresolved operation")
+    operation_id = f"supervisor-approval-cancel-{uuid.uuid4()}"
+    recovery = {
+        "kind": "supervisor/approval-turn-cancel",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "request_id": record["request_id"],
+        "request_digest": _digest("pending-approval", record),
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+        "old_host": old_host,
+    }
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/interrupt", "params": {
+            "threadId": binding.authority.value,
+            "turnId": binding.current_turn_id}},
+        "recovery": recovery,
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME))
+                != old_host
+                or _codex_cancel_approval_record(
+                    client, binding, args, host_check=False) != record):
+            raise FleetCliError(
+                "supervisor claim, row, source, host, or callback changed "
+                "before cancellation reservation")
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-turn-cancel",
+            "previous_turn_id": binding.current_turn_id,
+            "previous_claim_operation_id": live.get("last_operation_id"),
+            "previous_record_operation_id": binding.record.get("last_operation_id"),
+            "request_id": record["request_id"],
+            "request_digest": recovery["request_digest"],
+            "old_host": old_host,
+        }
+        live["last_operation_id"] = operation_id
+        registry["workers"][binding.name]["last_operation_id"] = operation_id
+        registry["workers"][binding.name]["adapter_state"] = "mutating"
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "approval-cancel-row", registry["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "approval-cancel-claim", live)
+        write_incarnation(live)
+        save_registry(registry)
+    try:
+        _codex_cancel_public_status(binding, client)
+        if _codex_cancel_approval_record(client, binding, args) != record:
+            raise FleetCliError("approval callback changed after reservation")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            _codex_cancel_reserved_state(live, registry["workers"].get(binding.name),
+                                         binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_restore_host_identity(
+                        _codex_existing_client(FLEET_HOME))
+                    != old_host
+                    or _codex_cancel_approval_record(
+                        client, binding, args, host_check=False) != record):
+                raise FleetCliError("approval cancellation changed before provider dispatch")
+        client.call(operation, timeout=30)
+        terminal_deadline = time.monotonic() + 5.0
+        while True:
+            _codex_cancel_public_status(binding, client, terminal=True)
+            outstanding = client.pending_approvals(binding.authority.value)
+            if not outstanding:
+                terminal_record = _codex_cancel_approval_record(
+                    client, binding, args, terminal=True,
+                    host_check=False)
+                break
+            if (len(outstanding) != 1 or outstanding[0].get("key") !=
+                    record.get("key") or outstanding[0].get("state") != "pending"):
+                raise FleetCliError(
+                    "approval callback changed during terminal settlement")
+            if time.monotonic() >= terminal_deadline:
+                raise FleetCliError(
+                    "approval callback resolution was not observed; "
+                    "interrupt will not be replayed")
+            time.sleep(0.05)
+        journal = OperationJournal(FLEET_HOME, client.generation)
+        observed = journal.load(operation_id)
+        if (observed.get("state") != "observed"
+                or observed.get("public_method") != "turn/interrupt"
+                or observed.get("payload_digest") != _digest(
+                    "rpc", operation["payload"])
+                or observed.get("recovery") != recovery):
+            raise FleetCliError("approval cancellation lacks exact observed journal")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            row = registry["workers"].get(binding.name)
+            _codex_cancel_reserved_state(live, row, binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_restore_host_identity(
+                        _codex_existing_client(FLEET_HOME))
+                    != old_host
+                    or _codex_cancel_approval_record(
+                        client, binding, args, terminal=True,
+                        host_check=False) != terminal_record
+                    or journal.load(operation_id) != observed):
+                raise FleetCliError("approval cancellation evidence changed at settlement")
+            journal.commit(operation_id)
+            live["state"] = "uncertain"
+            live["uncertainty"] = (
+                "approval callback cancelled; exact cold resume required")
+            live["pending_operation"]["kind"] = "approval-cancelled/cold-resume"
+            live["pending_operation"]["terminal_request_digest"] = _digest(
+                "resolved-approval", terminal_record)
+            live["pending_operation"].pop("reserved_claim_digest")
+            live["pending_operation"].pop("reserved_row_digest")
+            row["adapter_state"] = "uncertain"
+            row["status"] = "idle"
+            row["provider_status"] = "idle"
+            live["provider_status"] = "idle"
+            write_incarnation(live)
+            save_registry(registry)
+    except BaseException:
+        raise
+    print("native Codex supervisor approval turn interrupted; callback resolved "
+          "without response; claim remains fenced pending exact cold resume "
+          f"(operation {operation_id})")
+    return 0
+
+
+def _codex_cancel_reserved_state(claim, row, thread_id):
+    from fleet_codex import _digest
+
+    if not isinstance(claim, dict) or not isinstance(row, dict):
+        raise FleetCliError("approval cancellation reservation is missing")
+    pending = claim.get("pending_operation")
+    if not isinstance(pending, dict) or pending.get("kind") != "approval-turn-cancel":
+        raise FleetCliError("approval cancellation reservation changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "approval-cancel-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "approval-cancel-row", row)
+            or pending.get("previous_turn_id") != claim.get("current_turn_id")
+            or claim.get("holder", {}).get("thread_id") != thread_id):
+        raise FleetCliError("approval cancellation claim or row changed")
+
+
+def _codex_cancelled_context(args, *, require_live):
+    from fleet_codex import OperationJournal, _digest
+
+    source = _codex_recovery_interface_source()
+    claim = read_incarnation()
+    registry = read_registry_no_repair()
+    binding = _codex_supervisor_binding(
+        claim, registry, allowed_states={"uncertain"})
+    _codex_cancel_original_policy(binding)
+    pending = claim.get("pending_operation")
+    if (not isinstance(pending, dict)
+            or pending.get("kind") != "approval-cancelled/cold-resume"
+            or pending.get("operation_id") != claim.get("last_operation_id")
+            or pending.get("operation_id") != binding.record.get("last_operation_id")
+            or binding.record.get("adapter_state") != "uncertain"):
+        raise FleetCliError("exact cancelled approval is not awaiting cold resume")
+    operation_id = pending["operation_id"]
+    _codex_cancel_expectations(
+        args, binding, binding.host_generation, operation_id)
+    old_client = _codex_existing_client(FLEET_HOME)
+    _codex_cancel_pinned_old_host(old_client)
+    if (old_client.generation != binding.host_generation
+            or _codex_restore_host_identity(old_client) != pending.get("old_host")):
+        raise FleetCliError("cancelled approval old-host identity changed")
+    if require_live and (not old_client._owner_live()
+                         or not old_client._app_server_live()):
+        raise FleetCliError("cancelled approval old host is not fully live")
+    store = _codex_cancel_approval_store(binding.host_generation)
+    matches = [record for record in store.records()
+               if str(record.get("request_id")) == str(pending.get("request_id"))
+               and record.get("generation") == binding.host_generation]
+    if len(matches) != 1:
+        raise FleetCliError("cancelled approval record is missing or ambiguous")
+    record = matches[0]
+    if (record.get("state") != "resolved"
+            or record.get("thread_id") != binding.authority.value
+            or record.get("turn_id") != binding.current_turn_id
+            or record.get("method") != "item/commandExecution/requestApproval"
+            or any(key in record for key in (
+                "response", "responding_at", "responded_at", "uncertain_at"))
+            or pending.get("terminal_request_digest") != _digest(
+                "resolved-approval", record)):
+        raise FleetCliError("cancelled callback lacks exact no-response terminal proof")
+    expected_recovery = {
+        "kind": "supervisor/approval-turn-cancel",
+        "fleet_name": binding.name,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "request_id": record["request_id"],
+        "request_digest": pending.get("request_digest"),
+        "canonical_cwd": str(FLEET_HOME.resolve()),
+        "old_host": pending.get("old_host"),
+    }
+    payload = {"method": "turn/interrupt", "params": {
+        "threadId": binding.authority.value,
+        "turnId": binding.current_turn_id}}
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    original = journal.load(operation_id)
+    if (original.get("state") != "committed"
+            or original.get("home") != str(FLEET_HOME.resolve())
+            or original.get("generation") != binding.host_generation
+            or original.get("method") != "rpc"
+            or original.get("public_method") != "turn/interrupt"
+            or original.get("payload_digest") != _digest("rpc", payload)
+            or original.get("recovery") != expected_recovery):
+        raise FleetCliError("cancelled approval has no exact committed interrupt")
+    return source, claim, binding, pending, old_client, record, journal, original
+
+
+def _codex_cancel_claim_without_preflight(claim):
+    value = json.loads(json.dumps(claim))
+    pending = value.get("pending_operation")
+    if not isinstance(pending, dict):
+        raise FleetCliError("cancelled approval pending claim is malformed")
+    pending.pop("approval_resume_preflight", None)
+    return value
+
+
+def _codex_cancel_preflight_state(proof, claim, row, thread_id,
+                                  record, original, registry,
+                                  supervisor_name):
+    from fleet_codex import _digest
+
+    if (not isinstance(proof, dict)
+            or proof.get("claim_digest") != _digest(
+                "cancelled-approval-claim",
+                _codex_cancel_claim_without_preflight(claim))
+            or proof.get("row_digest") != _digest(
+                "cancelled-approval-row", row)
+            or proof.get("mail") != _codex_restore_mail_snapshot(thread_id)
+            or proof.get("request_digest") != _digest(
+                "resolved-approval", record)
+            or proof.get("journal_digest") != _digest(
+                "committed-cancel", original)
+            or proof.get("host_worker_rows") != _codex_cancel_host_worker_rows(
+                registry, claim.get("host_generation"),
+                supervisor_name=supervisor_name)):
+        raise FleetCliError(
+            "cancelled approval prepared claim, row, mail, request, "
+            "or journal changed")
+
+
+def _codex_cancel_host_worker_rows(registry, generation, *, supervisor_name):
+    from fleet_codex import _digest
+
+    workers = registry.get("workers") if isinstance(registry, dict) else None
+    if not isinstance(workers, dict):
+        raise FleetCliError("Apps host worker inventory is unavailable")
+    result = []
+    for name, row in sorted(workers.items()):
+        if name == supervisor_name:
+            continue
+        if not isinstance(row, dict):
+            raise FleetCliError("Apps worker inventory contains a malformed row")
+        route = _codex_record_route(row)
+        has_native_fields = (row.get("dispatch_kind") == "codex-app-server"
+                             or any(row.get(key) is not None for key in (
+                                 "codex_thread_id", "codex_turn_id",
+                                 "codex_host_generation")))
+        if route is None and not has_native_fields:
+            continue
+        if route == "mcx" and not has_native_fields:
+            continue
+        if route != "native":
+            raise FleetCliError("Apps native worker row has an invalid route")
+        if row.get("codex_host_generation") != generation:
+            raise FleetCliError(
+                "Apps native worker host generation is missing or ambiguous")
+        if row.get("pending_operation") is not None:
+            raise FleetCliError("another Apps worker has a pending operation")
+        binding = _codex_worker_binding(name, row)
+        result.append({
+            "name": name, "thread_id": binding.thread_id,
+            "turn_id": binding.turn_id,
+            "row_digest": _digest("exact-home-native-worker-row", row),
+        })
+    return result
+
+
+def _codex_cancel_public_host_quiescence(binding, client, registry):
+    rows = _codex_cancel_host_worker_rows(
+        registry, client.generation, supervisor_name=binding.name)
+    if client.pending_approvals(None):
+        raise FleetCliError(
+            "old Apps host still has an unrelated unresolved callback")
+    for item in rows:
+        row = registry["workers"][item["name"]]
+        worker = _codex_worker_binding(item["name"], row)
+        observed = _codex_worker_observe(worker, client=client)
+        if (observed["provider_status"] not in {"idle", "notLoaded"}
+                or observed["turn_status"] == "inProgress"
+                or observed["active_flags"]):
+            raise FleetCliError("another Apps worker is active on old host")
+    return rows
+
+
+def _prepare_codex_cancelled_approval_resume(args) -> int:
+    from fleet_codex import _digest
+
+    source, claim, binding, pending, old_client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=True)
+    _codex_cancel_public_status(binding, old_client, terminal=True)
+    if old_client.pending_approvals(binding.authority.value):
+        raise FleetCliError("cancelled supervisor callback is still unresolved")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in journal.records()):
+        raise FleetCliError("old Apps host has another unresolved operation")
+    host_worker_rows = _codex_cancel_public_host_quiescence(
+        binding, old_client, read_registry_no_repair())
+    proof = {
+        "host": _codex_restore_host_identity(old_client),
+        "source": source,
+        "incarnation_id": binding.incarnation_id,
+        "thread_id": binding.authority.value,
+        "turn_id": binding.current_turn_id,
+        "operation_id": pending["operation_id"],
+        "request_digest": _digest("resolved-approval", record),
+        "journal_digest": _digest("committed-cancel", original),
+        "provider_status": "idle", "turn_status": "interrupted",
+        "host_worker_rows": host_worker_rows,
+        "observed_at": time.time(),
+    }
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(pending["operation_id"]) != original
+                or _codex_cancel_host_worker_rows(
+                    registry, old_client.generation,
+                    supervisor_name=binding.name) != host_worker_rows):
+            raise FleetCliError("cancelled approval changed before cold proof")
+        proof["claim_digest"] = _digest(
+            "cancelled-approval-claim",
+            _codex_cancel_claim_without_preflight(live))
+        proof["row_digest"] = _digest(
+            "cancelled-approval-row", registry["workers"][binding.name])
+        proof["mail"] = _codex_restore_mail_snapshot(binding.authority.value)
+        live["pending_operation"]["approval_resume_preflight"] = proof
+        write_incarnation(live)
+    print("native Codex cancelled approval preflight recorded; prove no other "
+          "Apps worker or request needs this host, then shut down only its "
+          "exact generation and prove host and child exit")
+    return 0
+
+
+def _codex_cancel_resumed_state(claim, row, thread_id):
+    from fleet_codex import _digest
+
+    pending = claim.get("pending_operation") if isinstance(claim, dict) else None
+    if not isinstance(pending, dict) or pending.get("kind") != \
+            "approval-cancelled/resume":
+        raise FleetCliError("cancelled approval cold-resume reservation changed")
+    reduced = json.loads(json.dumps(claim))
+    reduced["pending_operation"].pop("reserved_claim_digest", None)
+    if (pending.get("reserved_claim_digest") != _digest(
+                "cancelled-resume-claim", reduced)
+            or pending.get("reserved_row_digest") != _digest(
+                "cancelled-resume-row", row)
+            or pending.get("prepared_mail") != _codex_restore_mail_snapshot(thread_id)):
+        raise FleetCliError("cancelled approval cold-resume state changed")
+
+
+def _resume_codex_cancelled_approval(args) -> int:
+    from fleet_codex import OperationJournal, _digest
+
+    source, claim, binding, pending, old_client, record, journal, original = \
+        _codex_cancelled_context(args, require_live=False)
+    proof = pending.get("approval_resume_preflight")
+    if (not isinstance(proof, dict)
+            or proof.get("host") != _codex_restore_host_identity(old_client)
+            or proof.get("source") != source
+            or proof.get("incarnation_id") != binding.incarnation_id
+            or proof.get("thread_id") != binding.authority.value
+            or proof.get("turn_id") != binding.current_turn_id
+            or proof.get("operation_id") != pending["operation_id"]
+            or proof.get("provider_status") != "idle"
+            or proof.get("turn_status") != "interrupted"
+            or isinstance(proof.get("observed_at"), bool)
+            or not isinstance(proof.get("observed_at"), (int, float))
+            or not 0 <= time.time() - proof["observed_at"] <= 300):
+        raise FleetCliError("cancelled approval lacks fresh exact cold preflight")
+    _codex_cancel_preflight_state(
+        proof, claim, binding.record, binding.authority.value,
+        record, original, read_registry_no_repair(), binding.name)
+    if (old_client._owner_live() or old_client._app_server_live()
+            or not old_client._metadata_stale()):
+        raise FleetCliError("cancelled approval old host and child must fully exit "
+                            "with stale heartbeat")
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in journal.records()):
+        raise FleetCliError("old Apps host has another unresolved operation")
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_restore_host_identity(
+                    _codex_existing_client(FLEET_HOME)) != proof["host"]
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before cold host creation")
+        _codex_cancel_preflight_state(
+            proof, live, registry["workers"][binding.name],
+            binding.authority.value, record, original, registry,
+            binding.name)
+    client = _codex_native_client(FLEET_HOME)
+    if (client.generation == old_client.generation
+            or getattr(client, "_launched_process", None) is None):
+        raise FleetCliError("cancelled approval requires a newly launched host")
+    try:
+        if not client.supervisor_approval_reservation_supported():
+            raise FleetCliError("new host lacks supervisor approval fence")
+    except Exception as exc:
+        raise FleetCliError(
+            "cancelled approval cold resume requires the reviewed supervisor "
+            "approval fence on the new host") from exc
+    profile = _codex_cancel_original_policy(binding)
+    _validate_codex_managed_requirements(client.config_requirements(), profile)
+    model = _codex_model_slug(binding.record.get("model"))
+    if model is None:
+        raise FleetCliError("cancelled approval recorded model is missing")
+    params = {
+        "threadId": binding.authority.value, "excludeTurns": True,
+        "cwd": str(FLEET_HOME.resolve()), "model": model,
+        "approvalPolicy": "on-request", "approvalsReviewer": "user",
+        "sandbox": "workspace-write",
+    }
+    operation_id = f"supervisor-cancel-resume-{uuid.uuid4()}"
+    with fleet_lock():
+        live = read_incarnation()
+        registry = read_registry_no_repair()
+        if (live != claim
+                or registry["workers"].get(binding.name) != binding.record
+                or _registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(pending["operation_id"]) != original):
+            raise FleetCliError("cancelled approval changed before resume reservation")
+        _codex_cancel_preflight_state(
+            proof, live, registry["workers"][binding.name],
+            binding.authority.value, record, original, registry,
+            binding.name)
+        live["pending_operation"] = {
+            "operation_id": operation_id,
+            "kind": "approval-cancelled/resume",
+            "cancel_operation_id": pending["operation_id"],
+            "old_generation": binding.host_generation,
+            "old_host": proof["host"],
+            "new_generation": client.generation,
+            "previous_turn_id": binding.current_turn_id,
+            "prepared_mail": proof["mail"],
+            "prepared_host_worker_rows": proof["host_worker_rows"],
+            "old_request_digest": proof["request_digest"],
+            "old_journal_digest": proof["journal_digest"],
+        }
+        live["last_operation_id"] = operation_id
+        live["uncertainty"] = "explicit cancelled-approval cold resume pending"
+        registry["workers"][binding.name]["last_operation_id"] = operation_id
+        live["pending_operation"]["reserved_row_digest"] = _digest(
+            "cancelled-resume-row", registry["workers"][binding.name])
+        live["pending_operation"]["reserved_claim_digest"] = _digest(
+            "cancelled-resume-claim", live)
+        write_incarnation(live)
+        save_registry(registry)
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "thread/resume", "params": params},
+        "recovery": {
+            "kind": "supervisor/cancelled-approval-cold-resume",
+            "fleet_name": binding.name,
+            "incarnation_id": binding.incarnation_id,
+            "thread_id": binding.authority.value,
+            "turn_id": binding.current_turn_id,
+            "previous_host_generation": binding.host_generation,
+            "previous_host": proof["host"],
+            "cancel_operation_id": pending["operation_id"],
+            "canonical_cwd": str(FLEET_HOME.resolve()),
+        },
+    }
+
+    def guard_reserved(live_claim):
+        registry = read_registry_no_repair()
+        _codex_cancel_resumed_state(
+            live_claim, registry["workers"].get(binding.name),
+            binding.authority.value)
+        if (_registered_interface_mail_source() != source
+                or _codex_existing_client(FLEET_HOME).generation != client.generation
+                or journal.load(pending["operation_id"]) != original
+                or _codex_cancel_host_worker_rows(
+                    registry, binding.host_generation,
+                    supervisor_name=binding.name) != proof["host_worker_rows"]
+                or _digest("resolved-approval", record) !=
+                _codex_cancel_record_digest(binding, pending["request_id"])):
+            raise FleetCliError("cancelled approval changed before provider resume")
+
+    try:
+        reply = _call_codex_supervisor_claimed(
+            client, binding.incarnation_id, binding.authority,
+            operation, timeout=30, allowed_states={"uncertain"},
+            pre_call_guard=guard_reserved)
+        result = reply.result
+        thread = result.get("thread") if isinstance(result, dict) else None
+        if (not isinstance(thread, dict)
+                or thread.get("id") != binding.authority.value
+                or {thread.get("cwd"), result.get("cwd")} != {
+                    str(FLEET_HOME.resolve())}):
+            raise FleetCliError("cancelled approval cold resume returned wrong thread")
+        _validate_codex_thread_effective(
+            result, model, profile, verb="thread/resume")
+        if {key: result.get(key) for key in (
+                "approvalPolicy", "approvalsReviewer", "sandbox")} != \
+                binding.record["permission_effective"]:
+            raise FleetCliError("cold resume differs from recorded accept policy")
+        rebound = CodexSupervisorBinding(
+            name=binding.name, incarnation_id=binding.incarnation_id,
+            authority=binding.authority,
+            current_turn_id=binding.current_turn_id,
+            host_generation=client.generation, record=binding.record)
+        _codex_cancel_public_status(rebound, client, terminal=True)
+        new_journal = OperationJournal(FLEET_HOME, client.generation)
+        observed = new_journal.load(operation_id)
+        if (observed.get("state") != "observed"
+                or observed.get("public_method") != "thread/resume"
+                or observed.get("payload_digest") != _digest(
+                    "rpc", operation["payload"])
+                or observed.get("recovery") != operation["recovery"]):
+            raise FleetCliError("cold resume lacks exact observed journal")
+        with fleet_lock():
+            live = read_incarnation()
+            registry = read_registry_no_repair()
+            row = registry["workers"].get(binding.name)
+            _codex_cancel_resumed_state(live, row, binding.authority.value)
+            if (_registered_interface_mail_source() != source
+                    or _codex_existing_client(FLEET_HOME).generation != client.generation
+                    or journal.load(pending["operation_id"]) != original
+                    or _codex_cancel_host_worker_rows(
+                        registry, binding.host_generation,
+                        supervisor_name=binding.name) != proof["host_worker_rows"]
+                    or new_journal.load(operation_id) != observed
+                    or _digest("resolved-approval", record) !=
+                    _codex_cancel_record_digest(binding, pending["request_id"])):
+                raise FleetCliError("cancelled approval changed at resume settlement")
+            new_journal.commit(operation_id)
+            live["state"] = "held"
+            live.pop("pending_operation", None)
+            live.pop("uncertainty", None)
+            live["host_generation"] = client.generation
+            live["provider_status"] = "idle"
+            live["last_operation_id"] = operation_id
+            row["adapter_state"] = "active"
+            row["status"] = "idle"
+            row["provider_status"] = "idle"
+            row["codex_host_generation"] = client.generation
+            row["last_operation_id"] = operation_id
+            write_incarnation(live)
+            save_registry(registry)
+    except BaseException:
+        raise
+    print("native Codex supervisor reattached on the same thread and incarnation "
+          "with exact recorded accept policy; no turn was created")
+    return 0
+
+
+def _codex_cancel_record_digest(binding, request_id):
+    from fleet_codex import _digest
+
+    records = [record for record in _codex_cancel_approval_store(
+        binding.host_generation).records()
+        if str(record.get("request_id")) == str(request_id)
+        and record.get("generation") == binding.host_generation]
+    if len(records) != 1:
+        raise FleetCliError("cancelled approval record changed or disappeared")
+    return _digest("resolved-approval", records[0])
 
 
 def cmd_sup_reconcile(args) -> int:
@@ -22751,6 +23634,12 @@ def cmd_sup_reconcile(args) -> int:
                      or getattr(args, "reattach_restored_continuation", False))):
         raise FleetCliError(
             "preserved-history evidence applies only to explicit continuation")
+    if getattr(args, "cancel_pending_approval", False):
+        return _cancel_codex_supervisor_approval(args)
+    if getattr(args, "prepare_cancelled_approval_resume", False):
+        return _prepare_codex_cancelled_approval_resume(args)
+    if getattr(args, "resume_cancelled_approval", False):
+        return _resume_codex_cancelled_approval(args)
     if getattr(args, "prepare_recorded_policy_restore", False):
         return _prepare_codex_supervisor_policy(args)
     if getattr(args, "restore_recorded_policy", False):
@@ -23181,7 +24070,9 @@ def cmd_sup_status(args) -> int:
     for entry in info["incarnation"].get(HANDOFF_PENDING_KEY, []) if info["incarnation"] else []:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry['successor_inc']}")
-        recipe = (f"abort with `fleet sup-handoff-abort {handle} --nonce <value>`")
+        recipe = (f"abort with `fleet sup-handoff-abort {handle} --nonce` followed "
+                  f"by the generation from that holder body's most recent "
+                  f"`NONCE:` output (not necessarily `sup-boot`; it is not repeated here)")
         if entry.get("state") == HANDOFF_JOINING and not entry.get("successor_sid"):
             try:
                 minted = _parse_iso(entry.get("minted_at"))
@@ -23191,15 +24082,19 @@ def cmd_sup_status(args) -> int:
                 recipe = (f"NOT retirable by age -- its minted_at "
                           f"({entry.get('minted_at')!r}) cannot be read, so it will "
                           f"never age out: `fleet sup-handoff-abort {handle} --force "
-                          f"--nonce <value>`")
+                          f"--nonce` followed by the generation from that holder "
+                          f"body's most recent `NONCE:` output (not necessarily "
+                          f"`sup-boot`; it is not repeated here)")
             else:
                 when = (minted + timedelta(
                     seconds=SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS)
                         ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 recipe = (f"still joining -- retirable at {when}, then `fleet "
-                          f"sup-handoff-abort {handle} --nonce <value>` "
-                          f"(before that the abort is refused: a join in progress is "
-                          f"not a dead successor)")
+                          f"sup-handoff-abort {handle} --nonce` followed by the "
+                          f"generation from that holder body's most recent `NONCE:` "
+                          f"output (not necessarily `sup-boot`; it is not repeated here)"
+                          + " (before that the abort is refused: a join in progress "
+                          "is not a dead successor)")
         print(f"pending successor: {entry.get('successor_inc')} [{entry.get('state')}]"
               f" minted {entry.get('minted_at')} -- {recipe}")
     if info["abort_flag"]:
@@ -23412,6 +24307,20 @@ def _sup_guard_body_name(sids, holder_sid=None, registry=None):
     return None
 
 
+def _sup_guard_unread_mail_age(sids):
+    """Oldest unread ``mailbox/<sid>.md`` age in seconds (stat only), else None."""
+    now = time.time()
+    ages = []
+    for sid in sids or []:
+        try:
+            st = (mailbox_dir() / f"{sid}.md").stat()
+        except OSError:
+            continue
+        if st.st_size > 0:
+            ages.append(max(0.0, now - st.st_mtime))
+    return max(ages, default=None)
+
+
 def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
     """Collect the read-only inputs for one two-live-body decision."""
     snapshot_fn = snapshot_fn or status_snapshot
@@ -23493,14 +24402,14 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         since = body_record.get("last_dispatch_at") or body_record.get("created")
         if sid and has_fresh_outcome(body_name, sid, since):
             body_status = "idle"
-    # Idle holder rows are resumable between turns.
-    idle_resumable_holder = bool(
-        isinstance(body_record, dict)
-        and body_status == "idle"
-        and not body_record.get("archived_at"))
     # Fleet and native projections may supply park status without a PID.
     body_rows = [row for row in entries if isinstance(row, dict)
                  and row.get("sessionId") in (sids or [])]
+    # Idle holders resume between turns; a pid-less idle roster row counts too.
+    idle_resumable_holder = bool(
+        isinstance(body_record, dict) and not body_record.get("archived_at")
+        and (body_status == "idle" or (body_rows and all(
+            r.get("status") == "idle" for r in body_rows))))
     projected = snapshot.get("workers") if isinstance(snapshot, dict) else None
     projected_rows = [row for row in projected if isinstance(row, dict)
                       and row.get("name") == body_name] if isinstance(projected, list) else []
@@ -23535,6 +24444,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         "pending": pending,
         "body_name": body_name,
         "idle_resumable_holder": idle_resumable_holder,
+        "unread_mail_age_seconds": _sup_guard_unread_mail_age(sids),
         "limited": bool(limited_rows),
         "limit_reset_at": max(horizons, default=None),
         "context_occupancy": claim.get("context_occupancy") if isinstance(claim, dict) else None,
@@ -23561,7 +24471,8 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
          "parked_wake_condition", "parked_age_seconds", "parked_active",
-         "parked_expired", "parked_finished_lanes", "busy_children")
+         "parked_expired", "parked_finished_lanes", "busy_children",
+         "unread_mail_age_seconds")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -23653,6 +24564,11 @@ def _sup_guard_decide(observation):
         age = obs.get("heartbeat_age_seconds")
         if not isinstance(age, (int, float)):
             return "PAGE", "claim heartbeat unreadable", detail
+        mail_age = obs.get("unread_mail_age_seconds")
+        if (age <= SUPERVISOR_CLAIM_STALE_SECONDS and statuses == {"idle"}
+                and isinstance(mail_age, (int, float))
+                and mail_age > SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS):
+            return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         if (age <= SUPERVISOR_CLAIM_STALE_SECONDS
                 and ("busy" in statuses or statuses == {"idle"})):
             detail["quiet"] = True
@@ -23917,11 +24833,10 @@ def cmd_sup_context(args) -> int:
 
 
 def cmd_sup_notify(args, run=subprocess.run) -> int:
-    """Notify the interface after non-minting claim validation.
-
-    Dry-run precedes claim work; normal calls commit the heartbeat before tmux.
-    """
-    target = f"{args.tmux_session}:{args.window}"
+    """Notify the interface; dry-run skips claim work, else heartbeat before tmux."""
+    tmux_session = _resolve_notify_session(
+        getattr(args, "tmux_session", None), args.window, run)
+    target = f"{tmux_session}:{args.window}"
     if args.dry_run:
         print(f"[dry-run] would type into {target}: "
               f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
@@ -23939,7 +24854,7 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         raise FleetCliError(
             f"sup-notify: tmux would not deliver the line to {target} -- the "
             f"interface has NOT been told. Check that the tmux server and the "
-            f"window exist (`tmux list-windows -t {args.tmux_session}`); the "
+            f"window exist (`tmux list-windows -t {tmux_session}`); the "
             f"claim is untouched apart from this call's own restamp, so "
             f"re-running this verb is safe.")
     append_interface_log("RELAY", args.text)
@@ -24321,8 +25236,8 @@ Do exactly this, in order:
      SUP-BOOT-FROZEN <reason>
 5. After a successful claim: proceed per skills/fleet/supervisor.md -- with the boot bundle
    content you read in step 3 (GOALS, journal tail, knowledge index, fleet status), run an early
-   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "<note>" --nonce <YOUR-NONCE>, substituting the NONCE
-   value from step 2, then begin the campaign brief below. The flag is not optional: every
+   "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "boot: campaign start" --nonce
+   with a space and the exact NONCE value from step 2 appended, then begin the campaign brief below. The flag is not optional: every
    `sup-*` holder verb is refused without it.
 
 --- CAMPAIGN BRIEF ---
@@ -24948,8 +25863,8 @@ Do exactly this, in order:
 4. Take NO spawn/respawn/send/kill/clean actions before claim transfer -- spec §4's double-spawn guard.
 5. Poll every ~30s (up to 10 minutes): "{py}" "{fleet_py}" --fleet-home "{home}" sup-status --json
    - When incarnation.incarnation_id == "{successor_inc}": the claim is yours. Run:
-     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce <YOUR-NONCE>
-     substituting the NONCE value step 2 printed. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
+     "{py}" "{fleet_py}" --fleet-home "{home}" sup-checkpoint "claim received via handoff from {old_inc}" --nonce
+     with a space and the exact NONCE value step 2 printed appended. THE FLAG IS NOT OPTIONAL: `sup-checkpoint`
      is a `_require_claim_holder` verb, so without it this call is REFUSED and the refusal
      files a false second-body row in `fleet doctor` -- a permanently-red row trains the
      operator to ignore the row that will one day be real.
@@ -25822,13 +26737,18 @@ def cmd_sup_handoff_begin(args, which=shutil.which, run=subprocess.run,
                 proof_snap=handoff_proof_snapshot,
                 token=handoff_token, holder_inc=holder_inc,
                 run=run, which=which)
-    # Both recipes present --nonce because both verbs require continuity.
     print(f"Next: wait for supervisor/HANDSHAKE (timeout "
           f"{SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS:.0f}s), then run:\n"
           f"  fleet sup-handoff-complete --expect-inc {successor_inc} "
-          f"--expect-sid {successor_sid} --nonce <value>\n"
-          f"On timeout/failure instead run:\n"
-          f"  fleet sup-handoff-abort --successor-sid {successor_sid} --nonce <value>")
+          f"--expect-sid {successor_sid} --nonce followed by the generation from "
+          f"that holder body's most recent `NONCE:` output (not necessarily "
+          f"`sup-boot`; it is not repeated here)\n"
+          f"On timeout/failure, end this turn. Once the holder row is idle, run exactly:\n"
+          f"  {_wake_cmd()}\n"
+          f"That wakes the same incarnation. The nonce comes from the woken body's "
+          f"own `sup-boot` output and is intentionally not repeated here. Then run:\n"
+          f"  fleet sup-handoff-abort --successor-sid {successor_sid} --nonce "
+          f"followed by that output's generation")
     return 0
 
 
@@ -25947,13 +26867,23 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
             verb="sup-handoff-abort --retire-all")
         hs = read_handshake()
         if hs is not None:
+            successor_handle = (f"--successor-sid {hs.get('session_id')}"
+                                if hs.get("session_id")
+                                else f"--successor-inc {hs.get('incarnation_id')}")
             raise FleetCliError(
                 f"supervisor/HANDSHAKE is present (inc={hs.get('incarnation_id')} "
                 f"sid={hs.get('session_id')}) -- a successor got far enough to write "
-                f"one, so this succession is still live. Complete it "
-                f"(`sup-handoff-complete --expect-inc {hs.get('incarnation_id')} "
-                f"--nonce <value>`) or abort it by handle first; --retire-all is for "
-                f"attempts no session answers for")
+                f"one, so this succession is still live. Complete it (`fleet "
+                f"sup-handoff-complete --expect-inc {hs.get('incarnation_id')} "
+                f"--nonce` followed by that holder body's own `sup-boot` output). "
+                f"To abort instead, end this turn. Once the holder row is idle, "
+                  "run exactly:\n  " + _wake_cmd()
+                + "\nThat wakes the same incarnation. The nonce comes from the woken "
+                  "body's own `sup-boot` output and is intentionally not repeated "
+                  "here. Then run:\n  "
+                + f"fleet sup-handoff-abort {successor_handle} --nonce followed "
+                  "by that output's generation"
+                + ". --retire-all is for attempts no session answers for")
         now = datetime.now(timezone.utc)
         torn = handoff_pending_torn(claim)
         retirable, standing = [], []
@@ -25974,7 +26904,7 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
                 for e, s in standing) or "none recorded"
             raise FleetCliError(
                 f"nothing to retire: {detail}. An entry bearing a sid is stopped by "
-                f"handle (`--successor-sid <sid>`); one still inside the join window "
+                f"its own `--successor-sid` handle (sid above); one in the join window "
                 f"becomes retirable when it ages out. --force adds only entries whose "
                 f"minted_at cannot be read at all -- it is not a way out of the join "
                 f"window, and forcing one would unlink a still-joining successor's "
@@ -26012,8 +26942,9 @@ def _cmd_sup_handoff_retire_all(args, force=False) -> int:
     for entry, state in standing:
         handle = (f"--successor-sid {entry['successor_sid']}" if entry.get("successor_sid")
                   else f"--successor-inc {entry.get('successor_inc')}")
-        print(f"STILL STANDING: {entry.get('successor_inc')} [{state}] -- "
-              f"`fleet sup-handoff-abort {handle} --nonce <value>`")
+        print(f"STILL STANDING: {entry.get('successor_inc')} [{state}] -- `fleet "
+              f"sup-handoff-abort {handle} --nonce` followed by the generation "
+              f"printed by that holder body's own `sup-boot` output")
     _deliver_notices(notices)
     return 0
 
@@ -26469,11 +27400,14 @@ def _doctor_check_supervisor_handoff():
         torn = handoff_pending_torn(claim)
         # Retirement needs a holder; after release, tell the operator to boot
         # before presenting a generation to --retire-all.
-        recipe = ("`fleet sup-handoff-abort --retire-all --nonce <value>`"
+        nonce_recipe = ("`fleet sup-handoff-abort --retire-all --nonce` followed "
+                        "by the generation printed by that holder body's own "
+                        "`sup-boot` output (it is not repeated here)")
+        recipe = (nonce_recipe
                   if not (isinstance(claim, dict) and claim.get("state") == "released")
                   else "`fleet sup-boot` (the claim is RELEASED -- there is no holder to "
-                       "present a nonce to), then `fleet sup-handoff-abort --retire-all "
-                       "--nonce <value>`")
+                       "present a nonce to), then "
+                       + nonce_recipe)
         if stranded:
             ok = False
             parts.append(
@@ -26527,7 +27461,8 @@ def _doctor_check_supervisor_handoff():
                 f"({', '.join(sorted(orphans))}) -- residue from a handoff that "
                 f"crashed before unlinking. Each carries a handoff token that is still "
                 f"LIVE if the claim still holds its hash; delete them (claim-nonce §5.9), "
-                f"and prefer `fleet sup-handoff-abort --successor-inc <inc>`, which "
+                f"and prefer `fleet sup-handoff-abort --successor-inc` with the inc in "
+                f"the file name, which "
                 f"retires the pending entry and the token hash with the file")
     except OSError:
         pass
@@ -26562,11 +27497,254 @@ def _watch_timeout_arg(value: str) -> float:
     return timeout
 
 
+SpecFormatError = fleet_spec.SpecFormatError
+_SPEC_REV_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_./^~@{}-]*$")
+_NO_SPEC_BINDING = {"compose": {}, "record": {}, "dispatch": {}}
+
+
+def config_path() -> Path:
+    return state_dir() / "config.json"
+
+
+def sdd_enabled() -> bool:
+    env = (os.environ.get("FLEET_SDD") or "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes", "on")
+    try:
+        data = json.loads(config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    sdd = data.get("sdd") if isinstance(data, dict) else None
+    return isinstance(sdd, dict) and sdd.get("enabled") is True
+
+
+def campaign_specs_dir() -> Path:
+    return state_dir() / "specs"
+
+
+def spec_path(campaign: str) -> Path:
+    return campaign_specs_dir() / f"{fleet_spec.check_campaign_name(campaign)}.md"
+
+
+def verify_stamp_path(campaign: str) -> Path:
+    return state_dir() / "spec-verify" / f"{fleet_spec.check_campaign_name(campaign)}.json"
+
+
+def _read_spec_text(campaign: str) -> str:
+    path = spec_path(campaign)
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise SpecFormatError(f"no spec at {path}") from exc
+    except OSError as exc:
+        raise SpecFormatError(f"cannot read {path}: {exc}") from exc
+
+
+def load_spec(campaign: str) -> dict:
+    return fleet_spec.parse_spec(_read_spec_text(campaign))
+
+
+def write_spec(campaign: str, data: dict, body: str) -> None:
+    path = spec_path(campaign)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(fleet_spec.render_spec(campaign, data, body), encoding="utf-8")
+    _replace_with_retry(str(tmp), str(path))
+
+
+def spec_actor(args=None) -> str:
+    return (getattr(args, "actor", None) or os.environ.get("FLEET_ACTOR") or "").strip()
+
+
+def _require_sdd(verb: str) -> None:
+    if not sdd_enabled():
+        raise FleetCliError(
+            f"spec {verb}: SDD is disabled -- set FLEET_SDD=1 or "
+            f"{config_path()} {{\"sdd\": {{\"enabled\": true}}}}")
+
+
+def assert_spec_bindable(campaign: str) -> dict:
+    data = load_spec(campaign)
+    if data.get("status") != "accepted":
+        raise SpecFormatError(
+            f"refusing to bind: spec {campaign!r} is {data.get('status')!r}, not accepted")
+    if data.get("accepted_digest") != fleet_spec.spec_digest(data):
+        raise SpecFormatError(f"refusing to bind: spec {campaign!r} changed since accept")
+    return data
+
+
+def current_head_sha(cwd) -> str | None:
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip() or None
+
+
+def carry_spec_binding(before: dict, after: dict, new_baseline) -> None:
+    after["spec"] = before.get("spec")
+    after["spec_slice"] = before.get("spec_slice")
+    after["spec_baseline_sha"] = new_baseline
+
+
+def spec_section_for(campaign: str, slice_name, data: dict) -> str:
+    allow, deny = fleet_spec.effective_scope(data, slice_name)
+    lines = ["## BINDING SPEC",
+             f"Contract: {spec_path(campaign).as_posix()} (slice: {slice_name or 'whole-spec'})",
+             "Re-read this file at the start of every turn. Your work is verified",
+             f"against it deterministically by `fleet spec verify {campaign}`.",
+             f"Allowed paths: {', '.join(allow) or '(any)'}",
+             f"Forbidden paths: {', '.join(deny) or '(none)'}",
+             "Criteria you own:"]
+    for crit in fleet_spec.criteria_for(data, slice_name):
+        lines.append(f"- {crit.get('id')} [{crit.get('kind')}]: {crit.get('ears', '')}")
+    return "\n".join(lines) + "\n"
+
+
+def spec_binding_for_spawn(campaign, slice_name) -> dict:
+    if campaign is None and slice_name is None:
+        return _NO_SPEC_BINDING
+    if not campaign:
+        raise FleetCliError("--slice requires --spec")
+    _require_sdd("bind")
+    try:
+        data = assert_spec_bindable(campaign)
+    except SpecFormatError as exc:
+        raise FleetCliError(f"--spec {campaign}: {exc}") from exc
+    if slice_name and slice_name not in (data.get("slices") or {}):
+        raise FleetCliError(f"--spec {campaign}: no slice named {slice_name!r}")
+    return {"compose": {"spec_section": spec_section_for(campaign, slice_name, data)},
+            "record": {"spec": campaign, "spec_slice": slice_name},
+            "dispatch": {"extra_add_dirs": (campaign_specs_dir(),)}}
+
+
+def spec_binding_for_respawn(before: dict) -> dict:
+    if not before.get("spec"):
+        return _NO_SPEC_BINDING
+    if not sdd_enabled():
+        return {"compose": {}, "record": {"spec": before["spec"]}, "dispatch": {}}
+    return spec_binding_for_spawn(before["spec"], before.get("spec_slice"))
+
+
+def cmd_spec_new(args) -> int:
+    _require_sdd("new")
+    actor = spec_actor(args)
+    if not actor:
+        raise FleetCliError("spec new: name the author with --actor or FLEET_ACTOR")
+    path = spec_path(args.campaign)
+    if path.exists():
+        raise FleetCliError(f"spec new: {path} already exists")
+    data = {"spec": args.campaign, "status": "proposed", "author": actor,
+            "accepted_by": "", "reviewed_by": "", "accepted_digest": "", "links": [],
+            "scope_allow": [], "scope_deny": [], "slices": {}, "criteria": []}
+    write_spec(args.campaign, data, "## Context\n\n## Decision\n\n## Consequences\n\n"
+                                    "## Requirements (EARS)\n")
+    append_event("spec_created", args.campaign, author=actor)
+    print(f"created {path} (status=proposed, author={actor})")
+    return 0
+
+
+def cmd_spec_accept(args) -> int:
+    _require_sdd("accept")
+    actor = spec_actor(args)
+    if not actor:
+        raise FleetCliError("spec accept: name the acceptor with --actor or FLEET_ACTOR")
+    with fleet_lock():
+        try:
+            text = _read_spec_text(args.campaign)
+            data = fleet_spec.parse_spec(text)
+        except SpecFormatError as exc:
+            print(f"fleet: spec accept: {exc}", file=sys.stderr)
+            return 2
+        author = str(data.get("author") or "").strip()
+        reviewed = str(data.get("reviewed_by") or "").strip()
+        if data.get("status") != "proposed":
+            raise FleetCliError(f"spec accept: {args.campaign} is {data.get('status')!r}, not 'proposed'")
+        if not author or actor == author:
+            raise FleetCliError("spec accept: the author may not accept its own spec")
+        if not reviewed or reviewed == author:
+            raise FleetCliError("spec accept: reviewed_by must name a review by someone other than the author")
+        problems = fleet_spec.check_slice_scopes(data)
+        if problems:
+            for problem in problems:
+                print(f"fleet: spec accept: {problem}", file=sys.stderr)
+            return 2
+        data["status"] = "accepted"
+        data["accepted_by"] = actor
+        data["accepted_digest"] = fleet_spec.spec_digest(data)
+        write_spec(args.campaign, data, fleet_spec.spec_body(text))
+        append_event("spec_accepted", args.campaign, accepted_by=actor,
+                     digest=data["accepted_digest"])
+    print(f"accepted {args.campaign} by {actor} (digest {data['accepted_digest'][:12]})")
+    return 0
+
+
+def _spec_verify_refusal(message: str) -> int:
+    print(f"fleet: spec verify: {message}", file=sys.stderr)
+    return 2
+
+
+def cmd_spec_verify(args, run=None, git_run=None) -> int:
+    if not sdd_enabled():
+        return _spec_verify_refusal("SDD is disabled")
+    try:
+        data = load_spec(args.campaign)
+    except SpecFormatError as exc:
+        return _spec_verify_refusal(str(exc))
+    if data.get("status") != "accepted":
+        return _spec_verify_refusal(f"{args.campaign} is {data.get('status')!r}; only an accepted spec is verifiable")
+    digest = fleet_spec.spec_digest(data)
+    if data.get("accepted_digest") != digest:
+        return _spec_verify_refusal("TAMPER: executable fields changed since accept")
+    problems = fleet_spec.check_slice_scopes(data)
+    if problems:
+        return _spec_verify_refusal("; ".join(problems))
+    cwd, base, slice_name = Path.cwd(), getattr(args, "base", None), None
+    worker = getattr(args, "worker", None)
+    if worker:
+        ok, reason, registry = _read_registry_readonly()
+        if not ok:
+            return _spec_verify_refusal(f"registry is {reason}")
+        rec = dict(registry["workers"].get(worker) or {})
+        if not rec:
+            return _spec_verify_refusal(f"unknown worker {worker!r}")
+        if rec.get("spec") != args.campaign:
+            return _spec_verify_refusal(f"{worker} is bound to {rec.get('spec')!r}, not {args.campaign!r}")
+        cwd = Path(rec["cwd"])
+        slice_name = rec.get("spec_slice")
+        base = base or rec.get("spec_baseline_sha")
+    if base is not None and not _SPEC_REV_RE.match(base):
+        return _spec_verify_refusal(f"invalid base revision {base!r}")
+    if not cwd.is_dir():
+        return _spec_verify_refusal(f"worker cwd {cwd} does not exist")
+    results = fleet_spec.run_criteria(data, slice_name, cwd, base, run=run, git_run=git_run)
+    overall = fleet_spec.overall_status(results)
+    stamp = {"ts": now_iso(), "spec": args.campaign, "spec_status": data.get("status"),
+             "digest": digest, "worker": worker, "slice": slice_name, "cwd": str(cwd),
+             "base": base, "overall": overall,
+             "per_criterion": [{"id": r.id, "status": r.status, "detail": r.detail}
+                               for r in results]}
+    _write_json_atomic(verify_stamp_path(args.campaign), stamp)
+    for r in results:
+        print(f"{r.status:5} {r.id}: {r.detail}")
+    print(f"overall: {overall}")
+    return fleet_spec.EXIT_FOR[overall]
+
+
+def cmd_spec(args) -> int:
+    return {"new": cmd_spec_new, "accept": cmd_spec_accept,
+            "verify": cmd_spec_verify}[args.spec_command](args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
     parser = argparse.ArgumentParser(
-        prog="fleet", description="claude-fleet manager CLI",
+        prog="fleet", formatter_class=_HideSuppressedFormatter,
+        description="claude-fleet manager CLI",
         epilog="global: --fleet-home <PATH> selects which fleet home to act on "
                "(accepted in any position; see docs/specs/multi-fleet.md §5)")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -26615,7 +27793,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--mode", choices=list(MODE_FLAGS), default="dontask")
     p_spawn.add_argument("--model", default=None)
     p_spawn.add_argument("--effort", choices=MCX_EFFORT_CHOICES, default="medium",
-                         help="Codex reasoning effort when --model is codex:<model>")
+                         help="legacy mcx reasoning effort; ignored by the native "
+                              "Codex adapter")
     p_spawn.add_argument(
         "--codex-adapter", choices=("native", "mcx"), default="native",
         dest="codex_adapter",
@@ -26632,6 +27811,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
     # Use the default fleet category when dispatch receives no explicit category.
     p_spawn.add_argument("--category", default=None)
+    p_spawn.add_argument("--spec", default=None, metavar="CAMPAIGN",
+                         help="bind to an accepted SDD campaign spec (requires sdd.enabled)")
+    p_spawn.add_argument("--slice", default=None, metavar="NAME",
+                         help="the spec slice that narrows this worker's scope")
     # Resolve context sources against worker --dir and prepend complete digests.
     p_spawn.add_argument("--context", default=None,
                          help="comma-separated source paths under --dir whose "
@@ -26761,6 +27944,26 @@ def build_parser() -> argparse.ArgumentParser:
                             help="exact prior turn ID, or none for an empty bound thread")
     p_rejected.add_argument("--expect-generation", required=True)
 
+    p_failed_client = sub.add_parser(
+        "codex-recover-failed-client",
+        help="stage exact-home native Codex recovery after a failed host client")
+    p_failed_client.add_argument(
+        "recovery_action", choices=("prepare", "decision", "shutdown",
+                                    "verify-exit", "boot", "adopt-boot", "rebind",
+                                    "settle-rebind", "finish",
+                                    "status"))
+    p_failed_client.add_argument("--generation")
+    p_failed_client.add_argument("--host-pid", type=int)
+    p_failed_client.add_argument("--host-start")
+    p_failed_client.add_argument("--child-pid", type=int)
+    p_failed_client.add_argument("--child-start")
+    p_failed_client.add_argument("--incarnation")
+    p_failed_client.add_argument("--thread")
+    p_failed_client.add_argument("--turn")
+    p_failed_client.add_argument("--codex-executable")
+    p_failed_client.add_argument("--decision-file")
+    p_failed_client.add_argument("--name")
+
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
 
@@ -26768,13 +27971,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_interrupt.add_argument("name")
     p_interrupt.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
-    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
+    p_attach = sub.add_parser("attach", help=argparse.SUPPRESS)
     p_attach.add_argument("name")
     p_attach.add_argument("--force", action="store_true")
 
     p_release = sub.add_parser("release", help="release an attached worker back to idle")
     p_release.add_argument("name")
     p_release.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+
+    p_abandon = sub.add_parser(
+        "abandon", help="record a lane with nothing to land as lane_state=abandoned")
+    p_abandon.add_argument("name")
+    p_abandon.add_argument("--reason", required=True)
+    p_abandon.add_argument("--force", action="store_true",
+                           help="abandon although the branch has commits not on HEAD")
+    p_abandon.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_respawn = sub.add_parser("respawn", help="fresh session for a worker (context-reset lever)")
     p_respawn.add_argument("name")
@@ -26797,6 +28008,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume.add_argument("name", nargs="?", default=None)
     p_resume.add_argument("--force-now", action="store_true", dest="force_now",
                           help="resume a named worker even before its horizon / with an unknown horizon")
+    p_resume.add_argument("--terminal-quota", action="store_true", dest="terminal_quota",
+                          help="resume one named Codex lane parked on a terminal quota turn")
     p_resume.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
     p_kill = sub.add_parser("kill", help="interrupt (if running) and mark a worker dead")
@@ -26886,6 +28099,23 @@ def build_parser() -> argparse.ArgumentParser:
                      help="never write anything: stale and orphan hits are "
                           "withheld rather than repaired")
 
+    p_spec = sub.add_parser("spec", help="SDD campaign spec gate (requires sdd.enabled)")
+    spec_sub = p_spec.add_subparsers(dest="spec_command", required=True)
+    p_spec_new = spec_sub.add_parser("new", help="scaffold a proposed campaign spec")
+    p_spec_accept = spec_sub.add_parser(
+        "accept", help="accept a reviewed spec; the author may not accept it")
+    p_spec_verify = spec_sub.add_parser(
+        "verify", help="run the acceptance gate: exit 0 pass, 1 fail, 2 harness or tamper")
+    for p_sp in (p_spec_new, p_spec_accept, p_spec_verify):
+        p_sp.add_argument("campaign")
+    for p_sp in (p_spec_new, p_spec_accept):
+        p_sp.add_argument("--actor", default=None,
+                          help="durable actor identity (default: FLEET_ACTOR)")
+    p_spec_verify.add_argument("--worker", default=None,
+                               help="verify a bound worker's slice in its registered cwd")
+    p_spec_verify.add_argument("--base", default=None, metavar="REV",
+                               help="diff base (default: the worker's spec baseline)")
+
     p_doctor = sub.add_parser("doctor", help="run fleet health checks")
     p_doctor.add_argument(
         "--repair", action="store_true",
@@ -26967,6 +28197,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
+    p_mailman = sub.add_parser(
+        "mailman", help="sort the home inbox; wake only for mail needing the interface")
+    mailman_sub = p_mailman.add_subparsers(dest="mailman_command", required=True)
+    mailman_sub.add_parser("init", help="seed mailman.json in the home").add_argument(
+        "--force", action="store_true", help="overwrite an existing mailman.json")
+    p_mm_run = mailman_sub.add_parser(
+        "run", help="block until a mail needs the interface (exit 0) or timeout (3)")
+    p_mm_run.add_argument("--timeout", type=_watch_timeout_arg, default=None)
+    p_mm_run.add_argument("--interval", type=_watch_interval_arg,
+                          default=fleet_mailman.DEFAULT_INTERVAL)
+    p_mm_run.add_argument("--dry-run", action="store_true",
+                          help="print verdicts; mutate nothing")
+    p_mm_run.add_argument("--include-reported", action="store_true",
+                          help="also print wake mails already reported")
+    mailman_sub.add_parser("digest", help="rollup of filed mail").add_argument(
+        "--since", default=fleet_mailman.DIGEST_DEFAULT_SINCE, metavar="WHEN",
+        help="<n>m|h|d or ISO UTC timestamp (default 24h)")
+
     p_relay = sub.add_parser(
         "relay-ack", help="append an interface relay and acknowledge one mail file")
     p_relay.add_argument("--mail", required=True, metavar="FILE")
@@ -27033,7 +28281,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile = sub.add_parser(
         "sup-reconcile",
         help="explicitly reconcile a native Codex supervisor after host restart; "
-             "never creates a thread or turn")
+             "never creates a thread or turn",
+        description=("Choose at most one reconciliation action. Evidence and "
+                     "expectation options may accompany that action."))
     policy_restore = p_supreconcile.add_mutually_exclusive_group()
     policy_restore.add_argument(
         "--prepare-recorded-policy-restore", action="store_true",
@@ -27062,9 +28312,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_supreconcile.add_argument(
         "--expect-history-sha256", metavar="SHA256",
         help="exact raw SHA-256 of the explicit owner-only history evidence")
+    policy_restore.add_argument(
+        "--cancel-pending-approval", action="store_true",
+        help="interrupt one exact pending native supervisor approval turn "
+             "on its existing host; retain an uncertain claim until cold resume")
+    policy_restore.add_argument(
+        "--prepare-cancelled-approval-resume", action="store_true",
+        help="pin fresh terminal callback, host, claim, row, and mail evidence "
+             "before exact-host shutdown")
+    policy_restore.add_argument(
+        "--resume-cancelled-approval", action="store_true",
+        help="cold resume the same cancelled supervisor thread under its "
+             "recorded accept policy after exact-host shutdown")
     p_supreconcile.add_argument("--expect-inc")
     p_supreconcile.add_argument("--expect-thread")
     p_supreconcile.add_argument("--expect-turn")
+    p_supreconcile.add_argument("--expect-host-generation")
+    p_supreconcile.add_argument("--expect-cancel-op")
+    p_supreconcile.add_argument("--expect-request-id")
+    p_supreconcile.add_argument("--expect-item-id")
+    p_supreconcile.add_argument("--expect-method")
+    p_supreconcile.add_argument("--expect-command")
+    p_supreconcile.add_argument("--expect-request-cwd")
     p_supreconcile.add_argument("--expect-resume-op")
     p_supreconcile.add_argument("--expect-restore-op")
     p_supreconcile.add_argument(
@@ -27108,13 +28377,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_supnotify.add_argument("text",
                              help="the line's text -- prefixed with `SUPERVISOR: ` "
                                   "and sanitised to one printable line before it is typed")
-    p_supnotify.add_argument("--tmux-session", dest="tmux_session", default="work",
-                             help="tmux session holding the interface window (default: work)")
+    p_supnotify.add_argument("--tmux-session", dest="tmux_session", default=None,
+                             help="tmux session holding the interface window (default: "
+                                  "`work` if it has the window, else the one session "
+                                  "that has it; none or several fails closed)")
     p_supnotify.add_argument("--window", default="fleet",
                              help="tmux window name (default: fleet)")
     p_supnotify.add_argument("--dry-run", dest="dry_run", action="store_true",
                              help="print the exact bytes and stop: no lock, no claim "
-                                  "read, no write, no tmux")
+                                  "read, no write, no tmux send (an omitted --tmux-session "
+                                  "is still resolved via read-only `tmux list-windows`)")
     p_supnotify.add_argument("--sid", help="override caller session id")
     p_supnotify.add_argument("--nonce", help=NONCE_ARG_HELP)
 
@@ -27177,6 +28449,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_supha.add_argument("--sid", help="override caller session id")
     p_supha.add_argument("--nonce", help=NONCE_ARG_HELP)
 
+
+    hidden_commands = {
+        choice.dest for choice in sub._choices_actions
+        if choice.help == argparse.SUPPRESS
+    }
+    sub.metavar = "{" + ",".join(
+        name for name in sub.choices if name not in hidden_commands) + "}"
     return parser
 
 
@@ -27221,6 +28500,93 @@ def _wake_incarnation(name: str, old_sid: str) -> str:
     return incarnation_id
 
 
+def _is_ph(value):
+    """True for template text; minted url-safe base64 never contains <>."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or "<" in text or ">" in text:
+        return True
+    bare = text.strip("{}[]()$'\"` ").lower().replace("_", "-").replace(" ", "-")
+    return bare in ("value", "nonce", "your-nonce", "current-nonce", "nonce-value",
+                    "the-nonce", "my-nonce", "token", "handoff-token", "generation",
+                    "current-generation")
+
+
+def _wake_cmd():
+    py = Path(sys.executable).as_posix()
+    fleet_py = (INSTALL_ROOT / "bin" / "fleet.py").as_posix()
+    home = Path(FLEET_HOME).as_posix()
+    return (f'"{py}" "{fleet_py}" --fleet-home "{home}" send supervisor '
+            f'"Continuity recovery: resume this incarnation and abort every '
+            f'pending handoff successor before any other supervisor verb."')
+
+
+def _recovery_steps(claim):
+    """Exact recovery steps: founder override of claim-nonce §5.7, 2026-10-08."""
+    try:
+        inc = claim.get("incarnation_id", "?") if isinstance(claim, dict) else "?"
+        row = "the holder row (`fleet status` lists it)"
+        records = _registry_records_or_none()
+        workers = records.get("workers") if isinstance(records, dict) else None
+        for name, rec in (workers.items() if isinstance(workers, dict) else ()):
+            if _record_is_supervisor_claim_holder(rec, claim=claim) is True:
+                row = f"the holder row {name} (status now: {rec.get('status')})"
+                break
+        lines = [
+            "",
+            "RECOVERY (claim-nonce §5.7 founder override, 2026-10-08):",
+            "1. End this turn now; run no further supervisor verbs from this body.",
+            f"2. Once {row} is idle, the Interface or operator runs exactly:",
+            f"   {_wake_cmd()}",
+            f"   This wakes the same incarnation {inc} on a fresh session with a "
+            f"fresh nonce. A busy holder only queues the mail: wait for idle.",
+        ]
+        handles = [
+            f"--successor-sid {entry['successor_sid']}"
+            if isinstance(entry.get("successor_sid"), str) and entry["successor_sid"]
+            else f"--successor-inc {entry['successor_inc']}"
+            for entry in handoff_pending_entries(claim)]
+        if handles:
+            lines.append("3. Take the nonce only from the woken body's own `sup-boot` "
+                         "output; this refusal never repeats it. The woken body then "
+                         "aborts each pending successor by its exact handle:")
+            lines.extend(f"   fleet sup-handoff-abort {h} --nonce" for h in handles)
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _refuse_ph(args=None, nonce=None):
+    pairs = ((("--nonce", getattr(args, "nonce", None)),
+              ("--handoff-token", getattr(args, "handoff_token", None)))
+             if args is not None else (("--nonce", nonce),))
+    for flag, value in pairs:
+        if value is None or not _is_ph(value):
+            continue
+        shown = repr(value if len(value) <= 40 else value[:40] + "...")
+        if flag == "--nonce":
+            recovery = (
+                "Present the exact value printed after `NONCE:` by your last "
+                "sup-* verb, sup-boot or wake bootstrap. If that value is lost, "
+                "do not guess and do not retry:\n"
+                "1. End this turn now; run no further supervisor verbs.\n"
+                "2. Once the holder row is idle, the Interface or operator runs "
+                f"exactly:\n   {_wake_cmd()}\n"
+                "   This wakes the same incarnation with a fresh nonce; its "
+                "bootstrap aborts every pending handoff successor by exact "
+                "handle before any other work.")
+        else:
+            recovery = (
+                "Present the exact token from your successor task file. If it is "
+                "lost, end this turn: the holder aborts this attempt with "
+                "sup-handoff-abort and begins a new one.")
+        raise FleetCliError(
+            f"{flag} {shown} is a placeholder, not a minted value -- refused "
+            f"before any state change (nothing written, logged or rotated). "
+            f"{recovery}")
+
+
 def main(argv=None) -> int:
     # Use UTF-8 with replacement before output: legacy Windows code pages
     # cannot encode arbitrary Unicode roster and transcript text.
@@ -27257,6 +28623,7 @@ def main(argv=None) -> int:
         # machine-list entry and invokes the destructive tier.
         if (args.command == "init" and args.home is None
                 and home_flag is None and not args.statusline):
+            _refuse_ph(args)
             return cmd_init(args, create_in=Path.cwd())
         if args.command == "watch":
             if home_flag:
@@ -27268,6 +28635,7 @@ def main(argv=None) -> int:
         terminus_rc = apply_resolved_home(args, flag=home_flag)
         if terminus_rc is not None:
             return terminus_rc
+        _refuse_ph(args)
         if args.command == "home":
             return cmd_home(args)
         if args.command == "knowledge":
@@ -27302,6 +28670,10 @@ def main(argv=None) -> int:
             return cmd_codex_decline_fixed(args)
         if args.command == "codex-reobserve-active":
             return cmd_codex_reobserve_active(args)
+        if args.command == "codex-recover-failed-client":
+            import fleet_codex_failed_client_recovery
+            return fleet_codex_failed_client_recovery.cmd_recover(
+                sys.modules[__name__], args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
         if args.command == "interrupt":
@@ -27310,6 +28682,8 @@ def main(argv=None) -> int:
             return cmd_attach(args)
         if args.command == "release":
             return cmd_release(args)
+        if args.command == "abandon":
+            return cmd_abandon(args)
         if args.command == "respawn":
             return cmd_respawn(args)
         if args.command == "resume-limited":
@@ -27328,6 +28702,8 @@ def main(argv=None) -> int:
             return fleet_index.cmd_q(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "spec":
+            return cmd_spec(args)
         if args.command == "sup-boot":
             return cmd_sup_boot(args)
         if args.command == "sup-spawn":
@@ -27340,6 +28716,8 @@ def main(argv=None) -> int:
             return cmd_interface_register(args)
         if args.command == "relay-ack":
             return cmd_relay_ack(args)
+        if args.command == "mailman":
+            return cmd_mailman(args)
         if args.command == "wave-close":
             return cmd_wave_close(args)
         if args.command == "sup-heartbeat":
@@ -27444,18 +28822,16 @@ def _last_assistant_uuid(name: str, sid) -> str | None:
     return newest
 
 
-def _lane_done_turn_key(name: str, rec: dict) -> list:
+def _lane_done_turn_key(name, rec):
     sid = rec.get("session_id") or rec.get("codex_thread_id")
     key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
     tail = None if _is_codex_record(rec) else _last_assistant_uuid(name, sid)
     return key + [tail] if tail else key
 
 
-def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
-                     expected_mcx_id: str | None = None,
-                     expected_status: str | None = None,
-                     expected_last_dispatch_at: str | None = None,
-                     run=subprocess.run, sleep=time.sleep) -> bool:
+def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
+                     expected_status=None, expected_last_dispatch_at=None,
+                     run=subprocess.run, sleep=time.sleep):
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
     if _is_supervisor_shaped(name):
@@ -27515,8 +28891,17 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                 head = candidate
         except (OSError, subprocess.SubprocessError):
             pass
+    settle = dict(expected_mcx_id=expected_mcx_id, expected_status=expected_status,
+                  expected_last_dispatch_at=expected_last_dispatch_at)
+    if head != "none" and (_lane_done_sha_key(rec, head) in (rec.get("lane_done_shas") or [])
+                           or _lane_tree_dirty(cwd, run)):
+        _settle_lane_done(name, sid, turn_key, delivered=False, **settle)
+        return False
     message = f"LANE-DONE {name} {status} {head}"
     try:
+        if claim.get("provider") != "codex" and _lane_done_queued(parent_name, message):
+            _settle_lane_done(name, sid, turn_key, delivered=True, head=head, **settle)
+            return False
         for attempt in (1, 2):
             try:
                 with redirect_stdout(io.StringIO()):
@@ -27538,17 +28923,13 @@ def notify_lane_done(name: str, status: str, *, expected_sid: str | None = None,
                           expected_last_dispatch_at=expected_last_dispatch_at,
                           delivered=False)
         raise
-    _settle_lane_done(name, sid, turn_key,
-                      expected_mcx_id=expected_mcx_id,
-                      expected_status=expected_status,
-                      expected_last_dispatch_at=expected_last_dispatch_at,
-                      delivered=True)
+    _settle_lane_done(name, sid, turn_key, delivered=True, head=head, **settle)
     return True
 
 
 def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
                       expected_status=None, expected_last_dispatch_at=None,
-                      delivered: bool) -> None:
+                      delivered, head=None):
     with fleet_lock():
         data = read_registry_no_repair()
         current = data["workers"].get(name)
@@ -27573,6 +28954,10 @@ def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
             return
         if not owns_pending and not delivered:
             return
+        if delivered and head and head != "none":
+            key = _lane_done_sha_key(current, head)
+            shas = [x for x in (current.get("lane_done_shas") or []) if x != key]
+            current["lane_done_shas"] = (shas + [key])[-LANE_DONE_SHA_KEEP:]
         if delivered and _lane_done_turn_key(name, current) == turn_key:
             current["lane_done_notified"] = turn_key
         if owns_pending or delivered:
@@ -27758,6 +29143,437 @@ def _format_process_age(seconds):
     if seconds >= 60:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def _spawn_task_arg(name: str, task_arg: str, cwd) -> str:
+    path = task_file_path(name)
+    try:
+        head = path.read_bytes()[:512].decode("utf-8", errors="replace")
+    except OSError:
+        head = None
+    if head is not None and not head.startswith(f"You are fleet worker `{name}`"):
+        raise FleetCliError(
+            f"{name}: {path} exists and spawn did not write it; rename it to "
+            f"{name}-task.md and pass --task @<path>; nothing was registered")
+    token = task_arg.strip()
+    if token and not task_arg.startswith("@") and not any(c.isspace() for c in token):
+        try:
+            is_file = Path(token).is_file() or (Path(cwd) / token).is_file()
+        except (OSError, ValueError):
+            is_file = False
+        if is_file:
+            raise FleetCliError(
+                f"{name}: --task {token!r} names an existing file but takes the "
+                f"task TEXT; use --task @{token}; nothing was registered")
+    return _read_task_arg(task_arg)
+
+
+NOTIFY_DEFAULT_TMUX_SESSION = "work"
+
+
+def _resolve_notify_session(session, window, run=subprocess.run) -> str:
+    """Explicit session, else `work` if it has `window`, else the sole holder."""
+    if session is not None:
+        return session
+    try:
+        proc = run(["tmux", "list-windows", "-a", "-F",
+                    "#{session_name}:#{window_name}"],
+                   capture_output=True, text=True, timeout=10)
+        listing = proc.stdout if proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        listing = ""
+    matches = []
+    for row in (listing or "").splitlines():
+        name, _, win = row.rpartition(":")
+        if name and win == window and name not in matches:
+            matches.append(name)
+    if NOTIFY_DEFAULT_TMUX_SESSION in matches:
+        return NOTIFY_DEFAULT_TMUX_SESSION
+    if len(matches) == 1:
+        return matches[0]
+    found = ", ".join(f"{m}:{window}" for m in matches) or "none"
+    raise FleetCliError(
+        f"sup-notify: tmux would not deliver the line -- cannot choose the "
+        f"interface window `{window}` (candidates: {found}); pass "
+        f"--tmux-session explicitly; the interface has NOT been told.")
+
+
+_TERMINAL_QUOTA_SCHEMAS = frozenset({
+    "f0402dc8ce8d278108f1e68e9d46ec7e59ddd9d153f5e70668d84d56f258dda3",
+    "62f227e897351f20fe8b8984341512d1cc4ebf42def4487bc65d36fb7c40bba6",
+})
+
+
+def _terminal_quota_target_mail_absent(thread_id: str) -> None:
+    directory = mailbox_dir()
+    target = directory / f"{thread_id}.md"
+    if target.exists() or target.is_symlink() or list(
+            directory.glob(f"{thread_id}.md.claimed.*")):
+        raise FleetCliError(
+            "terminal-quota recovery has target mail or a claimed mail file; "
+            "preserve and reconcile it before resuming")
+
+
+def _terminal_quota_durable_preflight(binding: CodexWorkerBinding,
+                                      client) -> dict:
+    from fleet_codex import CodexApprovalStore, OperationJournal
+
+    record = binding.record
+    if record.get("pending_operation") is not None:
+        raise FleetCliError("terminal-quota recovery has a pending row operation")
+    operation_id = record.get("last_operation_id")
+    if not isinstance(operation_id, str) or not operation_id:
+        raise FleetCliError("terminal-quota recovery has no bound operation ID")
+    operation_dir = state_dir() / "codex" / "operations"
+    approval_dir = state_dir() / "codex" / "approvals"
+    if not operation_dir.is_dir() or not approval_dir.is_dir():
+        raise FleetCliError("terminal-quota recovery journal inventory is unavailable")
+    journal = OperationJournal(FLEET_HOME, binding.host_generation)
+    records = journal.records()
+    if any(item.get("state") in {"prepared", "accepted", "observed", "uncertain"}
+           for item in records):
+        raise FleetCliError("terminal-quota recovery has an unresolved predecessor")
+    matches = [item for item in records if item.get("operation_id") == operation_id]
+    if len(matches) != 1:
+        raise FleetCliError("terminal-quota recovery bound journal is missing or ambiguous")
+    prior = matches[0]
+    recovery = prior.get("recovery")
+    result = prior.get("result")
+    method = prior.get("public_method")
+    if (prior.get("state") != "committed"
+            or prior.get("home") != str(FLEET_HOME.resolve())
+            or prior.get("generation") != binding.host_generation
+            or not isinstance(recovery, dict)
+            or recovery.get("fleet_name") != binding.name
+            or recovery.get("thread_id") != binding.thread_id
+            or recovery.get("canonical_cwd") != binding.cwd
+            or not isinstance(result, dict)):
+        raise FleetCliError("terminal-quota recovery bound journal disagrees with row")
+    if method == "turn/start":
+        turn = result.get("turn")
+        linked = isinstance(turn, dict) and turn.get("id") == binding.turn_id
+    elif method == "turn/steer":
+        linked = result.get("turnId") == binding.turn_id
+    else:
+        linked = False
+    if not linked:
+        raise FleetCliError("terminal-quota recovery old accepted turn is unlinked")
+
+    evidence = _codex_public_evidence_file(binding)
+    if (not isinstance(evidence, dict)
+            or type(evidence.get("schema")) is not int or evidence["schema"] != 1
+            or evidence.get("turn_status") != "failed"
+            or evidence.get("error_code") != "usageLimitExceeded"):
+        raise FleetCliError("terminal-quota recovery lacks exact durable failed-turn evidence")
+
+    approvals = CodexApprovalStore(FLEET_HOME, binding.host_generation)
+    for wait in approvals.unresolved():
+        if (wait.get("thread_id") == binding.thread_id
+                or (wait.get("generation") == binding.host_generation
+                    and (wait.get("state") == "unknown"
+                         or not wait.get("thread_id")))):
+            raise FleetCliError("terminal-quota recovery has unresolved callback evidence")
+    _terminal_quota_target_mail_absent(binding.thread_id)
+    return prior
+
+
+def _resume_terminal_quota_codex(name: str) -> int:
+    source = _registered_interface_mail_source()
+    if (not isinstance(source, dict) or source.get("kind") != "codex"
+            or not _mail_source_is_current(source)):
+        raise FleetCliError("terminal-quota recovery requires the current genuine Codex Interface")
+    data = read_registry_no_repair()
+    record = data.get("workers", {}).get(name)
+    if not isinstance(record, dict):
+        raise FleetCliError(f"unknown worker: {name!r}")
+    refuse_if_archived(name, record, "resume-limited --terminal-quota")
+    binding = _codex_worker_binding(name, record)
+    if (record.get("status") not in {"dead-suspected", "idle", "limited"}
+            or record.get("adapter_state") not in {"uncertain", "idle"}
+            or record.get("provider_status") != "systemError"
+            or record.get("codex_error_code") != "usageLimitExceeded"):
+        raise FleetCliError("terminal-quota recovery row is not the exact quota/SystemError case")
+    model = _codex_model_slug(record.get("model"))
+    if model is None:
+        raise FleetCliError("terminal-quota recovery row has no Codex model")
+    profile = _codex_permission_profile(record.get("mode"))
+    effective = record.get("permission_effective")
+    if not isinstance(effective, dict):
+        raise FleetCliError("terminal-quota recovery has no recorded effective policy")
+    _validate_codex_thread_effective(dict(effective, model=model), model, profile)
+
+    client = _codex_existing_client(FLEET_HOME)
+    if (client.generation != binding.host_generation
+            or client.schema_digest not in _TERMINAL_QUOTA_SCHEMAS
+            or client.schema_digest != record.get("codex_schema_digest")):
+        raise FleetCliError("terminal-quota recovery host generation or reviewed schema changed")
+    prior = _terminal_quota_durable_preflight(binding, client)
+    observed = _codex_worker_observe(binding, client=client, require_full=True)
+    if (observed["provider_status"] != "systemError"
+            or observed["active_flags"]
+            or observed["turn_status"] != "failed"
+            or observed["error_code"] != "usageLimitExceeded"
+            or observed["thread_model"] != model):
+        raise FleetCliError("terminal-quota recovery public thread is not the exact failed turn")
+    allowed, _reset_at = _codex_rate_limit_state(client)
+    if allowed is not True:
+        raise FleetCliError("terminal-quota recovery needs fresh ordinaryUsageAllowed=true")
+    fresh_client = _codex_existing_client(FLEET_HOME)
+    host_identity = (
+        "generation", "schema_digest", "host_pid", "host_process_identity",
+        "app_server_pid", "app_server_process_identity")
+    if any(getattr(fresh_client, field, None) != getattr(client, field, None)
+           for field in host_identity):
+        raise FleetCliError("terminal-quota recovery host identity changed before reservation")
+    if (not _mail_source_is_current(source)
+            or not isinstance(_registered_interface_mail_source(), dict)):
+        raise FleetCliError("terminal-quota recovery Interface identity changed")
+    _terminal_quota_durable_preflight(binding, client)
+
+    operation_id = f"worker-terminal-quota-{uuid.uuid4()}"
+    reserved = _reserve_codex_worker_operation(
+        binding, operation_id, "terminal-quota/turn-start",
+        expected_record=record)
+    prompt = (
+        "The ordinary Codex usage limit has reset. Continue your existing task "
+        "from this thread's history. Preserve its scope and report the result."
+    )
+    operation = {
+        "operation_id": operation_id, "method": "rpc",
+        "payload": {"method": "turn/start", "params": {
+            "threadId": binding.thread_id,
+            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+        }},
+        "recovery": {
+            "kind": "worker/terminal-quota-turn-start",
+            "fleet_name": name, "thread_id": binding.thread_id,
+            "previous_turn_id": binding.turn_id,
+            "previous_operation_id": prior["operation_id"],
+            "canonical_cwd": binding.cwd,
+            "host_generation": binding.host_generation,
+            "schema_digest": client.schema_digest,
+        },
+    }
+    try:
+        reply = fresh_client.call(operation, timeout=30)
+        result = reply.result
+        turn = result.get("turn") if isinstance(result, dict) else None
+        turn_id = _provider_codex_id(
+            turn.get("id") if isinstance(turn, dict) else None,
+            "terminal-quota successor turn")
+        if (reply.generation != binding.host_generation
+                or turn_id == binding.turn_id
+                or turn.get("status") != "inProgress"):
+            raise FleetCliError("terminal-quota successor response is ambiguous")
+        fresh_client.commit(operation_id)
+    except BaseException as exc:
+        _freeze_codex_worker_operation(binding, operation_id, exc)
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise FleetCliError(
+            "terminal-quota turn/start acceptance is uncertain; retained the "
+            "reservation and did not retry") from exc
+
+    with fleet_lock():
+        data = load_registry()
+        current = data["workers"].get(name)
+        if current != reserved:
+            raise FleetCliError(
+                "terminal-quota successor was accepted but row changed; "
+                "preserved the reservation for review")
+        current.pop("pending_operation", None)
+        current.update({
+            "codex_turn_id": turn_id, "adapter_state": "active",
+            "provider_status": "active", "status": "working",
+            "last_activity": now_iso(), "last_dispatch_at": now_iso(),
+            "turns": current.get("turns", 0) + 1,
+        })
+        current.pop("ordinary_usage_allowed", None)
+        current.pop("limit_kind", None)
+        current.pop("limit_reset_at", None)
+        current.pop("codex_error_code", None)
+        save_registry(data)
+        _append_event_quiet(
+            "terminal_quota_turn_started", name,
+            codex_thread_id=binding.thread_id,
+            previous_turn_id=binding.turn_id,
+            codex_turn_id=turn_id, operation_id=operation_id,
+            substrate="codex")
+    print(f"{name}: resumed terminal quota on existing Codex thread {binding.thread_id}")
+    return 0
+
+
+def _lane_done_queued(parent_name: str, message: str) -> bool:
+    """True when the parent's unread mailbox already holds this exact message."""
+    rec = read_registry_no_repair()["workers"].get(parent_name) or {}
+    sid = rec.get("session_id")
+    if not sid:
+        return False
+    try:
+        text = (mailbox_dir() / f"{sid}.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return message in text.splitlines()
+
+
+CODEX_ACTIVITY_FRESH_SECONDS = 600
+
+
+def _codex_rollout_paths(thread_id: str) -> list:
+    """Date-filed rollout files Codex writes for one thread (creation day +-1)."""
+    suffix = f"-{thread_id}.jsonl"
+    try:
+        created = datetime.fromtimestamp((uuid.UUID(thread_id).int >> 80) / 1000)
+    except (ValueError, OverflowError, OSError):
+        return []
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    paths = []
+    for offset in (-1, 0, 1):
+        day = created + timedelta(days=offset)
+        folder = root / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}"
+        try:
+            paths.extend(folder.glob(f"rollout-*{suffix}"))
+        except OSError:
+            continue
+    return paths
+
+
+def _codex_recent_activity(record: dict, name: str, now=None) -> bool:
+    """True when the provider wrote a rollout or exact-turn evidence recently.
+    An unobservable row is dead-suspected only if this is False."""
+    thread_id = record.get("codex_thread_id")
+    if not isinstance(thread_id, str):
+        return False
+    stamps = []
+    for path in _codex_rollout_paths(thread_id):
+        try:
+            stamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    try:
+        evidence = _codex_public_evidence_file(_codex_worker_binding(name, record))
+    except (FleetCliError, OSError, ValueError):
+        evidence = None
+    observed_at = (evidence or {}).get("observed_at")
+    if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool):
+        stamps.append(float(observed_at))
+    if not stamps:
+        return False
+    age = (time.time() if now is None else now) - max(stamps)
+    return age <= CODEX_ACTIVITY_FRESH_SECONDS
+
+
+def _mailman_prims():
+    return fleet_mailman.Prims(
+        append=lambda path, data: _atomic_append_bytes(path, data),
+        write_json=lambda path, obj: _write_json_atomic(path, obj),
+        replace=lambda a, b: _replace_with_retry(a, b),
+        read_cursor=lambda home: _watch_read_cursor(home),
+        write_cursor=lambda home, cursor: _watch_write_cursor(home, cursor),
+        now=now_iso)
+
+
+def cmd_mailman(args) -> int:
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("mailman requires an explicit --fleet-home")
+    home = Path(FLEET_HOME)
+    sub = args.mailman_command
+    if sub == "init":
+        return fleet_mailman.cmd_init(home, _mailman_prims(), force=args.force)
+    if sub == "digest":
+        return fleet_mailman.cmd_digest(home, since=args.since)
+    return fleet_mailman.cmd_run(
+        home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
+        dry_run=args.dry_run, include_reported=args.include_reported)
+
+
+LANE_DONE_SHA_KEEP = 32
+
+
+def _lane_done_sha_key(rec, head) -> str:
+    return f"{rec.get('last_dispatch_at') or ''}@{head}"
+
+
+def _lane_tree_dirty(cwd, run) -> bool:
+    try:
+        proc = run(["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+                   capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+class _HideSuppressedFormatter(argparse.HelpFormatter):
+    def _format_action(self, action):
+        if action.help == argparse.SUPPRESS:
+            return ""
+        return super()._format_action(action)
+
+
+
+def _wave_floor_env(config):
+    env = os.environ.copy()
+    for key in ("CLAUDE_CODE_SESSION_ID", "FLEET_HOME", "FLEET_LIVE", "FLEET_WORKER"):
+        env.pop(key, None)
+    if config["uv_offline"]:
+        env["UV_OFFLINE"] = "1"
+    else:
+        env.pop("UV_OFFLINE", None)
+    env["UV_CACHE_DIR"] = "/tmp/w64-initrepo-uv-cache"
+    for key, value in config["env"].items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return env
+
+
+def _wave_floor_preflight(repo, config, run=subprocess.run, which=shutil.which):
+    uv = which("uv")
+    if uv is None:
+        raise FleetCliError(
+            "wave-close: `uv` is required to run the floor -- no interpreter on "
+            "PATH has pytest importable (CLAUDE.md)")
+    env = _wave_floor_env(config)
+    for version in config["interpreters"]:
+        if which(f"python{version}") is None:
+            raise FleetCliError(
+                f"wave-close: required interpreter python{version} is unavailable")
+        argv = [uv, "run", *[version if arg == "{python}" else arg
+                             for arg in config["uv_run_args"]],
+                "python", "-c", "import pytest"]
+        proc = run(argv, cwd=str(repo), env=env, capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
+        if proc.returncode == 0:
+            continue
+        lines = [line.strip() for line in (proc.stderr or proc.stdout or "").splitlines()
+                 if line.strip()]
+        detail = next((line for line in lines if "error" in line.lower()
+                       or "no solution" in line.lower()), lines[0] if lines else "no output")
+        warm_env = {key: value for key, value in env.items()
+                    if key in ("UV_CACHE_DIR",)}
+        warm = shlex.join(["env", *[f"{k}={v}" for k, v in warm_env.items()],
+                           "uv", *argv[1:]])
+        raise FleetCliError(
+            f"wave-close: python{version} floor env cannot import pytest "
+            f"(uv rc={proc.returncode}): {detail}. Warm it: {warm} -- then retry.")
+
+
+def _claude_rule_path(path) -> str:
+    p = Path(path).as_posix()
+    m = re.match(r"^([A-Za-z]):/(.*)$", p)
+    if m:
+        return f"//{m.group(1).lower()}/{m.group(2)}"
+    return "/" + p if p.startswith("/") else p
+
+
+def _worker_path_grants(name: str) -> list:
+    own = [task_file_path(name), boot_bundle_path(name), journal_file_path(name)]
+    rules = [f"{tool}({_claude_rule_path(p)})" for p in own for tool in ("Read", "Edit")]
+    if _is_supervisor_shaped(name):
+        rules += [f"Read({_claude_rule_path(d)}/**)"
+                  for d in (tasks_dir(), journals_dir())]
+    return rules
 
 
 if __name__ == "__main__":

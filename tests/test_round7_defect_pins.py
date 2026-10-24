@@ -441,7 +441,9 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         # [w59/inithome] E2/init split, operator 2026-08-10
                         "init --home", "journal-roll", "relay-ack")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
-                       "resume-limited", "sup-heartbeat", "interface-register")
+                       "resume-limited", "sup-heartbeat", "interface-register",
+                       # [w402/abandon-verb] registry-only lane_state write
+                       "abandon")
 RATIFIED_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "sup-guard", "q", "index",
@@ -571,12 +573,23 @@ RATIFIED_BUT_UNBUILT = ()
 # row proved rejected before acceptance (restores claimed mail, clears the
 # reservation) without a provider mutation, and refuses without an explicit
 # `--fleet-home`; it waits here under the same fail-safe default.
+# `codex-recover-failed-client` (PR #44) stages exact host recovery: it can
+# shut down and reboot the home's Codex host and rebind a worker thread, so it
+# waits here under the fail-safe default. `mailman` (PR #48) appends sorted
+# mail digests and a cursor in the home and refuses without an explicit
+# `--fleet-home`; its tier is operator-owned and waits here too.
+# `spec` (SDD gate, SPEC §17a) writes a campaign spec under `state/specs/`
+# (new, accept) or a verify stamp under `state/spec-verify/`; it dispatches
+# nothing and steers no worker. Its tier is operator-owned and waits here
+# under the fail-safe `destructive` default.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
                                      "lane-done", "sup-reconcile", "codex-respond",
                                      "codex-decline-fixed",
                                      "codex-reobserve-active",
                                      "codex-settle-preaccept",
-                                     "codex-settle-rejected")
+                                     "codex-settle-rejected",
+                                     "codex-recover-failed-client", "mailman",
+                                     "spec")
 
 
 def _classified_verbs():
