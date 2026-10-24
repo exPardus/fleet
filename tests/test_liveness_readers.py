@@ -340,6 +340,10 @@ class TestTheCensus:
             # a deliverable native address -- a pid AND a live status -- for
             # the registered session and for every same-name duplicate alike.
             "is_live",
+            # w405: transcript-based background-task liveness -- decides
+            # whether a lane's background tasks or queued wakes will start
+            # another turn, so LANE-DONE waits until nothing can re-wake it.
+            "_lane_background_live",
         }
         excluded = {
             # roster PLUMBING, not a liveness verdict

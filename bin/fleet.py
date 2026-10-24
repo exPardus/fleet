@@ -28822,6 +28822,76 @@ def _last_assistant_uuid(name: str, sid) -> str | None:
     return newest
 
 
+LANE_DONE_BACKGROUND_MAX_SECONDS = 3 * 3600
+_LANE_BACKGROUND_KEYS = ("backgroundTaskId", "taskId", "agentId", "task_id",
+                         "task-notification", "queue-operation")
+_TASK_NOTIFICATION_RE = re.compile(r"<task-notification>(.*?)</task-notification>", re.S)
+_TASK_ID_RE = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
+
+
+def _entry_texts(entry):
+    if isinstance(entry.get("content"), str):
+        return [entry["content"]]
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return [content]
+    if not isinstance(content, list):
+        return []
+    return [p["text"] for p in content if isinstance(p, dict)
+            and p.get("type") == "text" and isinstance(p.get("text"), str)]
+
+
+def _lane_background_live(name, sid, now=None) -> list:
+    """Background tasks and queued wakes that will start another turn of `sid`."""
+    transcript = find_transcript_path(name, sid) if sid else None
+    if transcript is None:
+        return []
+    try:
+        with open(transcript, encoding="utf-8", errors="replace") as f:
+            lines = [ln for ln in f if any(k in ln for k in _LANE_BACKGROUND_KEYS)]
+    except OSError:
+        return []
+    started, queued = {}, []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        at = entry.get("timestamp")
+        if entry.get("type") == "queue-operation":
+            if entry.get("operation") == "enqueue":
+                queued.append(at)
+            elif entry.get("operation") in ("dequeue", "remove") and queued:
+                queued.pop(0)
+        result = entry.get("toolUseResult")
+        if isinstance(result, dict):
+            task = (result.get("backgroundTaskId")
+                    or (result.get("taskId") if "timeoutMs" in result else None)
+                    or (result.get("agentId") if result.get("isAsync") else None))
+            if isinstance(task, str):
+                started[task] = at
+            if isinstance(result.get("task_id"), str):
+                started.pop(result["task_id"], None)
+        for text in _entry_texts(entry):
+            for block in _TASK_NOTIFICATION_RE.findall(text):
+                if "<status>" in block or "[Monitor expired" in block:
+                    for task in _TASK_ID_RE.findall(block):
+                        started.pop(task, None)
+    now = now or datetime.now(timezone.utc)
+
+    def fresh(at):
+        try:
+            started_at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            return (now - started_at).total_seconds() < LANE_DONE_BACKGROUND_MAX_SECONDS
+        except (AttributeError, TypeError, ValueError):
+            return True
+    return ([t for t, at in started.items() if fresh(at)]
+            + ["queued-wake" for at in queued if fresh(at)])
+
+
 def _lane_done_turn_key(name, rec):
     sid = rec.get("session_id") or rec.get("codex_thread_id")
     key = [rec.get("mcx_id") or sid, rec.get("last_dispatch_at")]
@@ -28831,7 +28901,7 @@ def _lane_done_turn_key(name, rec):
 
 def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
                      expected_status=None, expected_last_dispatch_at=None,
-                     run=subprocess.run, sleep=time.sleep):
+                     run=subprocess.run, sleep=time.sleep, background=True):
     if status not in {"idle", "dead", "limited", "over_ceiling"}:
         return False
     if _is_supervisor_shaped(name):
@@ -28868,6 +28938,9 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
         turn_key = _lane_done_turn_key(name, rec)
         if rec.get("lane_done_notified") == turn_key:
             return False
+        background = background and not _is_codex_record(rec)
+        if background and _lane_background_live(name, sid):
+            return False
         pending = rec.get("lane_done_pending")
         if isinstance(pending, dict) and pending.get("key") == turn_key:
             try:
@@ -28893,8 +28966,10 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
             pass
     settle = dict(expected_mcx_id=expected_mcx_id, expected_status=expected_status,
                   expected_last_dispatch_at=expected_last_dispatch_at)
-    if head != "none" and (_lane_done_sha_key(rec, head) in (rec.get("lane_done_shas") or [])
-                           or _lane_tree_dirty(cwd, run)):
+    if (background and (_lane_done_turn_key(name, rec) != turn_key
+                        or _lane_background_live(name, sid))) or (
+            head != "none" and (_lane_done_sha_key(rec, head) in (rec.get("lane_done_shas") or [])
+                                or _lane_tree_dirty(cwd, run))):
         _settle_lane_done(name, sid, turn_key, delivered=False, **settle)
         return False
     message = f"LANE-DONE {name} {status} {head}"
@@ -28990,8 +29065,11 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
         expected_mcx_id = None
         expected_status = None
         expected_last_dispatch_at = None
+        background = True
         if n in native:
             status = recompute_worker_native(n, rec, entries).get("status")
+            entry = _roster_entry_for(entries, rec.get("session_id"))
+            background = isinstance(entry, dict) and isinstance(entry.get("pid"), int)
         elif _is_codex_record(rec):
             if _codex_record_route(rec) == "mcx":
                 # Probe mcx completion.
@@ -29019,7 +29097,7 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
                     expected_mcx_id=expected_mcx_id,
                     expected_status=expected_status,
                     expected_last_dispatch_at=expected_last_dispatch_at,
-                    run=run, sleep=sleep):
+                    run=run, sleep=sleep, background=background):
                 delivered.append(n)
         except Exception:
             pass
