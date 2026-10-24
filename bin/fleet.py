@@ -18693,7 +18693,16 @@ def _wave_previous_close(repo, run=subprocess.run):
     for line in result.stdout.splitlines():
         commit, _, subject = line.partition("\t")
         if re.fullmatch(r"fleet wave-close: wave \d+", subject.strip()):
-            return commit
+            landed = commit
+            fp = _wave_git(repo, "rev-list", "--first-parent", "HEAD", run=run)
+            for cand in fp.stdout.split():
+                if cand == commit:
+                    return commit
+                if _wave_git(repo, "merge-base", "--is-ancestor", commit, cand,
+                             run=run, check=False).returncode != 0:
+                    return landed
+                landed = cand
+            return landed
     raise FleetCliError(
         "wave-close: no previous `fleet wave-close: wave N` commit found; "
         "supply --base explicitly")
@@ -28246,7 +28255,7 @@ def build_parser() -> argparse.ArgumentParser:
         "wave-close",
         help="reap, floor, account, land, push, and notify one wave boundary")
     p_wave.add_argument("--base", required=False, default=None,
-                        help="base commit SHA for the throughput diff (default: previous wave-close commit)")
+                        help="base commit SHA for the throughput diff (default: previous wave-close commit, or the PR merge that landed it)")
     p_wave.add_argument("--changelog", required=True,
                         help="CHANGELOG sentences, or @file containing them")
     p_wave.add_argument("--alias", action="append", default=None,
