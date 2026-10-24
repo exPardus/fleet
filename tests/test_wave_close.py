@@ -1514,7 +1514,8 @@ def _push_run(calls, *, branch="fleet/wave-95", upstream=True, remote_cfg="",
         if sub == "branch":
             return subprocess.CompletedProcess(argv, 0, branch + "\n", "")
         if sub == "rev-parse":
-            return subprocess.CompletedProcess(argv, 0 if upstream else 128, "", "")
+            return subprocess.CompletedProcess(argv, 0 if upstream else 128,
+                                               f"origin/{branch}\n" if upstream else "", "")
         if sub == "config":
             return subprocess.CompletedProcess(argv, 0 if remote_cfg else 1,
                                                remote_cfg, "")
@@ -1590,3 +1591,25 @@ def test_default_base_follows_pr_merge_that_landed_previous_close(tmp_path):
     assert fleet._wave_previous_close(tmp_path) == pr_merge != close
     git("checkout", "-q", "wave-1")
     assert fleet._wave_previous_close(tmp_path) == close
+
+
+def test_push_argv_ignores_upstream_with_different_branch_name(tmp_path):
+    def git(*args, cwd=tmp_path):
+        return subprocess.run(
+            ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "work"
+    git("init", "-q", "--bare", "-b", "main", str(remote))
+    git("clone", "-q", str(remote), str(work))
+    git("commit", "-q", "--allow-empty", "-m", "root", cwd=work)
+    git("push", "-q", "origin", "HEAD:main", cwd=work)
+    git("checkout", "-q", "-b", "fleet/wave-96", "origin/main", cwd=work)
+    assert git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=work) == "origin/main"
+    assert fleet._wave_push_argv(work) == [
+        "push", "--set-upstream", "origin", "fleet/wave-96"]
+    ok, _attempts, _failures = fleet._wave_push(work, sleep=lambda _s: None)
+    assert ok
+    assert git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=work) == "origin/fleet/wave-96"
+    assert fleet._wave_push_argv(work) == ["push"]

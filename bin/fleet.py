@@ -19807,7 +19807,7 @@ def _wave_push_argv(repo, run=subprocess.run):
         return ["push"]
     upstream = _wave_git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
                          "@{upstream}", run=run, check=False)
-    if upstream.returncode == 0:
+    if upstream.returncode == 0 and upstream.stdout.strip().endswith(f"/{branch}"):
         return ["push"]
     configured = _wave_git(repo, "config", "--get", f"branch.{branch}.remote",
                            run=run, check=False)
