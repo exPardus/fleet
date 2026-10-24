@@ -17,6 +17,10 @@ home, claim, model, budget, and operator rulings in checkpoints and handoff.
 Wait for a lane with `fleet wait NAME --timeout SECONDS`; never hand-roll an
 `until fleet status | grep ...` loop. A `dead-suspected` result ends the wait
 promptly and needs inspection, not more polling.
+A lane with no commits to land: run
+`fleet abandon NAME --reason TEXT --nonce NONCE` before wave-close. It records
+lane_state=abandoned for the reap; it refuses a busy lane and a branch with
+commits not on HEAD (`--force` overrides), and removes no worktree or branch.
 Run lane spawns in the foreground, one `fleet spawn` per call, with a timeout;
 never launch a `run_in_background` spawn batch.
 
