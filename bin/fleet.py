@@ -656,8 +656,8 @@ def task_file_path(name: str) -> Path:
 
 def briefs_dir() -> Path:
     """Store authoritative briefs outside the worker-authorized task directory.
-    `dispatch_bg` grants tasks_dir() wholesale. This separation restricts access
-    under permission-checking modes; bypass mode grants no such protection.
+    `dispatch_bg` grants a worker only its own task and journal files. Briefs
+    stay unreachable by rule; bypass mode grants no such protection.
     """
     return state_dir() / "briefs"
 
@@ -15835,11 +15835,11 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]
-    argv += ["-n", rendered, "--settings", settings_arg]
-    # Preauthorize task and journal directories: headless workers cannot answer
-    # prompts for protocol-required files outside their cwd. Do not grant the whole home.
-    argv += ["--add-dir", tasks_dir().as_posix(),
-             "--add-dir", journals_dir().as_posix()]
+    # Own-file Read/Edit grants only, no --add-dir: headless workers cannot answer prompts
+    # for protocol files outside their cwd, and none may write another's task file.
+    grants = ",".join(_worker_path_grants(name))
+    argv += ["-n", rendered, "--allowedTools", grants,
+             "--settings", settings_arg]
     # Forward persisted setting sources to the native dispatch.
     if setting_sources:
         argv += ["--setting-sources", setting_sources]
@@ -29202,6 +29202,23 @@ def _wave_floor_preflight(repo, config, run=subprocess.run, which=shutil.which):
         raise FleetCliError(
             f"wave-close: python{version} floor env cannot import pytest "
             f"(uv rc={proc.returncode}): {detail}. Warm it: {warm} -- then retry.")
+
+
+def _claude_rule_path(path) -> str:
+    p = Path(path).as_posix()
+    m = re.match(r"^([A-Za-z]):/(.*)$", p)
+    if m:
+        return f"//{m.group(1).lower()}/{m.group(2)}"
+    return "/" + p if p.startswith("/") else p
+
+
+def _worker_path_grants(name: str) -> list:
+    own = [task_file_path(name), boot_bundle_path(name), journal_file_path(name)]
+    rules = [f"{tool}({_claude_rule_path(p)})" for p in own for tool in ("Read", "Edit")]
+    if _is_supervisor_shaped(name):
+        rules += [f"Read({_claude_rule_path(d)}/**)"
+                  for d in (tasks_dir(), journals_dir())]
+    return rules
 
 
 if __name__ == "__main__":
