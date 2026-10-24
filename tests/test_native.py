@@ -413,28 +413,64 @@ class TestDispatchBg:
         assert "STEER-TOKEN-42" in argv[-1]
         assert "Read " in argv[-1]
 
-    def test_argv_pre_authorizes_tasks_and_journals_dirs_via_add_dir(self, native_home):
-        # T12 fix wave (finding 1): the task file lives under
-        # FLEET_HOME/tasks, outside the worker's own --dir cwd -- without
-        # --add-dir the worker's first Read on it hangs forever under any
-        # non-bypass mode. posix-port live finding 2026-07-18: the journal
-        # the preamble orders the worker to "create early" lives under
-        # FLEET_HOME/state/journals and hung the same way on its first
-        # Write under acceptEdits. Pin the exact flags + posix paths (the
-        # two protocol-required dirs only, never FLEET_HOME wholesale --
-        # least privilege).
+    @staticmethod
+    def _grants(argv):
+        i = argv.index("--allowedTools")
+        return argv[i + 1].split(",")
+
+    def test_argv_grants_only_own_task_and_journal_files(self, native_home):
+        # Defect 2 (SPEC 17b): --add-dir tasks_dir() let every worker write
+        # every other worker's task file. The grant is now per-worker
+        # --allowedTools rules naming only the worker's own task file,
+        # boot bundle and journal; no --add-dir remains. The paths live
+        # outside the worker cwd, and without a grant the first Read/Write
+        # hangs on an unanswerable headless prompt (T12, posix-port finding).
         calls = []
-        fleet.dispatch_bg("w1", "C:/proj", "b", "accept",
-                          run=_fake_run_factory(calls=calls), which=lambda _: "claude",
-                          sleep=lambda s: None, roster_fetch=_roster_with())
-        argv = calls[0][0]
-        added = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--add-dir"]
-        assert added == [fleet.tasks_dir().as_posix(),
-                         fleet.journals_dir().as_posix()]
-        # Both dirs must EXIST at dispatch time -- claude silently grants
-        # nothing for a nonexistent --add-dir target (live finding part 2).
+        for name in ("w1", "w2"):
+            fleet.dispatch_bg(name, "C:/proj", "b", "accept",
+                              run=_fake_run_factory(calls=calls),
+                              which=lambda _: "claude", sleep=lambda s: None,
+                              roster_fetch=_roster_with())
+        argv_a, argv_b = calls[0][0], calls[1][0]
+        assert "--add-dir" not in argv_a
+        grants_a = self._grants(argv_a)
+        own = {fleet.task_file_path("w1"), fleet.journal_file_path("w1"),
+               fleet.boot_bundle_path("w1")}
+        assert {g for g in grants_a if g.startswith("Edit(")} == {
+            f"Edit({fleet._claude_rule_path(p)})" for p in own}
+        assert {g for g in grants_a if g.startswith("Read(")} == {
+            f"Read({fleet._claude_rule_path(p)})" for p in own}
+        # Worker A's grants name nothing of worker B, and the dirs themselves
+        # are not granted.
+        other = [fleet.task_file_path("w2"), fleet.journal_file_path("w2")]
+        for g in grants_a:
+            for p in other:
+                assert fleet._claude_rule_path(p) not in g
+            assert not g.rstrip(")").endswith(("/tasks", "/journals", "/**"))
+        assert any(fleet._claude_rule_path(fleet.task_file_path("w2")) in g
+                   for g in self._grants(argv_b))
+        # The variadic flag must not swallow the prompt positional.
+        assert argv_a[-1].startswith("Read ")
+        assert argv_a[argv_a.index("--allowedTools") + 2].startswith("--")
+        # Dirs still exist: the worker creates its journal inside journals/.
         assert fleet.tasks_dir().is_dir()
         assert fleet.journals_dir().is_dir()
+
+    def test_supervisor_gets_read_only_dirs_plus_own_write_files(self, native_home):
+        calls = []
+        name = "sup|abc123|boot"
+        fleet.dispatch_bg(name, "C:/proj", "b", "accept",
+                          run=_fake_run_factory(calls=calls),
+                          which=lambda _: "claude", sleep=lambda s: None,
+                          roster_fetch=_roster_with())
+        grants = self._grants(calls[0][0])
+        tdir = fleet._claude_rule_path(fleet.tasks_dir())
+        jdir = fleet._claude_rule_path(fleet.journals_dir())
+        assert f"Read({tdir}/**)" in grants
+        assert f"Read({jdir}/**)" in grants
+        edits = {g for g in grants if g.startswith("Edit(")}
+        assert f"Edit({fleet._claude_rule_path(fleet.task_file_path(name))})" in edits
+        assert all("/**" not in g for g in edits)
 
     def test_resume_sid_inserts_resume_flag(self, native_home):
         calls = []

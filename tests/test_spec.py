@@ -497,7 +497,7 @@ class TestBinding:
         assert _spawn("w1", repo, monkeypatch, calls=calls) == 0
         rec = fleet.load_registry()["workers"]["w1"]
         assert not {"spec", "spec_slice", "spec_baseline_sha"} & set(rec)
-        assert _add_dirs(calls) == [fleet.tasks_dir().as_posix(), fleet.journals_dir().as_posix()]
+        assert _add_dirs(calls) == []
         assert "BINDING SPEC" not in fleet.task_file_path("w1").read_text(encoding="utf-8")
 
     def test_spec_flag_refused_when_sdd_off(self, home, repo, monkeypatch):

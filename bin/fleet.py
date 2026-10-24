@@ -656,8 +656,8 @@ def task_file_path(name: str) -> Path:
 
 def briefs_dir() -> Path:
     """Store authoritative briefs outside the worker-authorized task directory.
-    `dispatch_bg` grants tasks_dir() wholesale. This separation restricts access
-    under permission-checking modes; bypass mode grants no such protection.
+    `dispatch_bg` grants a worker only its own task and journal files. Briefs
+    stay unreachable by rule; bypass mode grants no such protection.
     """
     return state_dir() / "briefs"
 
@@ -954,13 +954,13 @@ def _quarantine_artifacts() -> list:
     An artifact marks an unresolved incident, not a fresh install. Readers:
       * `_sweep_husks` (:13937) -- refuse on presence alone.
       * `_doctor_check_autoclean` (:15016) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18449) -- upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:18448) -- upgrades need complete records.
       * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5121) -- expose that distinction to views.
       * `_doctor_check_registry` (:15264) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18327) -- name the incident-specific absence.
+      * `_identity_abstention_note` (:18326) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8344) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20046) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20045) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4394,7 +4394,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18449`), because legacy upgrades also require a complete registry.
+    (`:18448`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -15914,11 +15914,10 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     argv = [exe, "--bg"]
     if resume_sid:
         argv += ["--resume", resume_sid]
-    argv += ["-n", rendered, "--settings", settings_arg]
-    # Preauthorize protocol dirs outside cwd (headless workers cannot answer prompts),
-    # plus a bound spec dir; never the whole home.
-    argv += ["--add-dir", tasks_dir().as_posix(),
-             "--add-dir", journals_dir().as_posix()]
+    # Own-file grants only: no worker may write another's task file.
+    grants = ",".join(_worker_path_grants(name))
+    argv += ["-n", rendered, "--allowedTools", grants,
+             "--settings", settings_arg]
     for extra_dir in extra_add_dirs:
         argv += ["--add-dir", Path(extra_dir).as_posix()]
     # Forward persisted setting sources to the native dispatch.
@@ -17362,10 +17361,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17314, :20200, :20212, :20361, :24138, :24139, :24241, :24306, :24368, :25332, :25334, :25372, :25900, :28806`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20199, :20211, :20360, :24137, :24138, :24240, :24305, :24367, :25331, :25333, :25371, :25899, :28805`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10613, :11349, :15602, :26833. This makes union identity
+    OWN prior sid alone: :10613, :11349, :15602, :26832. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18072,7 +18071,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10613, :11349, :15602,
-    # :26833) -- so union identity cannot make one body answer for another.
+    # :26832) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18080,7 +18079,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17288`).
+        # names this gate as its reason (`:17287`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -29558,6 +29557,23 @@ def _wave_floor_preflight(repo, config, run=subprocess.run, which=shutil.which):
         raise FleetCliError(
             f"wave-close: python{version} floor env cannot import pytest "
             f"(uv rc={proc.returncode}): {detail}. Warm it: {warm} -- then retry.")
+
+
+def _claude_rule_path(path) -> str:
+    p = Path(path).as_posix()
+    m = re.match(r"^([A-Za-z]):/(.*)$", p)
+    if m:
+        return f"//{m.group(1).lower()}/{m.group(2)}"
+    return "/" + p if p.startswith("/") else p
+
+
+def _worker_path_grants(name: str) -> list:
+    own = [task_file_path(name), boot_bundle_path(name), journal_file_path(name)]
+    rules = [f"{tool}({_claude_rule_path(p)})" for p in own for tool in ("Read", "Edit")]
+    if _is_supervisor_shaped(name):
+        rules += [f"Read({_claude_rule_path(d)}/**)"
+                  for d in (tasks_dir(), journals_dir())]
+    return rules
 
 
 if __name__ == "__main__":

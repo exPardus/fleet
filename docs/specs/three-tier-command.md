@@ -1182,7 +1182,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 ```
 
 `dispatch_bg` renders `--settings` (the instance hook-wiring, so the child gets fleet's hooks) and
-`--add-dir` for the tasks/journals dirs, and launches under `env=_worker_env(name)`:
+`--add-dir` for the tasks/journals dirs (historical; now per-worker `--allowedTools`, SPEC §5), and launches under `env=_worker_env(name)`:
 
 ```
 # at 235421e56bfd328a7e913e519a1459ccf55918dc
@@ -1231,8 +1231,8 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
 - **`--settings`:** the supervisor gets the instance-rendered hooks. Without it the supervisor runs with
   none of fleet's mailbox/outcome/journal hooks — the same silent-hookless failure the M-E handoff fix
   closed. Mandatory, inherited free from `dispatch_bg`.
-- **`--add-dir`:** the supervisor can read `state/tasks` and `state/journals` (its briefs and worker
-  journals) without per-turn path wrangling. Inherited from `dispatch_bg`.
+- **`--allowedTools`:** the supervisor can read `state/tasks` and `state/journals` (its briefs and worker
+  journals) and write only its own task, boot-bundle and journal files without per-turn path wrangling. Inherited from `dispatch_bg`.
 - **Registry record:** the supervisor becomes a worker record under its per-launch pipe name
   `sup|<launch-id>|boot`, which is what makes it visible to `fleet status` — and what makes it
   archive/husk-eligible unless §7.2's exemption is built. *(Amended 2026-07-24 by operator ruling —
