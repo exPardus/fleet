@@ -182,7 +182,7 @@ def test_check_commands_docs_currency_catches_a_lane_report_missing_done(tmp_pat
     _git(worktree, "add", "-A")
     _git(worktree, "commit", "-qm", "add lane report")
 
-    checks = dict(fleet_land._check_commands(worktree, []))
+    checks = dict(fleet_land._check_commands(worktree, [], home_root=tmp_path))
     assert checks["docs-currency"] != 0
 
 
@@ -198,6 +198,33 @@ def test_foreign_home_config_disables_fleet_only_land_gates(tmp_path, monkeypatc
     checks = fleet_land._check_commands(worktree, [])
 
     assert checks == []
+
+
+def test_registration_is_a_named_gate(tmp_path, monkeypatch):
+    config = tmp_path / "supervisor" / "wave-close.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"gates": ["registration"]}), encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(fleet_land, "_run_shell",
+                        lambda command, cwd, log_dir, label:
+                        seen.append((label, command)) or 0)
+    assert "registration" in fleet_land.LAND_GATE_NAMES
+    assert fleet_land._check_commands(tmp_path, [], home_root=tmp_path,
+                                      files_changed=["README.md"], base=None) == []
+    assert fleet_land._check_commands(tmp_path, [], home_root=tmp_path,
+                                      files_changed=["bin/new.py"], base=None) == [
+                                          ("registration", 0)]
+    assert "test_index_split.py" in dict(seen)["registration"]
+
+
+def test_zero_gate_configured_home_prints_one_stderr_note(tmp_path, capsys):
+    config = tmp_path / "supervisor" / "wave-close.json"
+    config.parent.mkdir()
+    config.write_text(json.dumps({"expected_failures": []}), encoding="utf-8")
+    assert fleet_land._check_commands(tmp_path, [], home_root=tmp_path) == []
+    err = capsys.readouterr().err
+    assert err.count("no gates") == 1
+    assert str(config) in err
 
 
 def test_citation_gate_runs_only_for_fleet_py_change(tmp_path, monkeypatch):

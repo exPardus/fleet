@@ -231,8 +231,9 @@ plus `registration` (`test_fleet_sources`, `test_index_split`,
 `test_round7_defect_pins`) when the lane adds a `bin/*.py` file or a parser verb.
 The `citations` gate runs `tools/refresh_citations.py --check` only when the
 lane changes `bin/fleet.py`; `--write` refreshes unambiguous line pins before
-landing. A configured home runs no fleet-specific gate by default; set `gates` to
-an explicit list of built-in gate names or `{name, command}` objects for that
+landing. A configured home runs no fleet-specific gate by default (`fleet land`
+notes this on stderr); set `gates` to an explicit list of built-in gate names
+(`docs-currency`, `receipts`, `citations`, `registration`) or `{name, command}` objects for that
 home's own checks.
 
 `<lane>` is the lane **branch**, not its short name: `merge(w99/lane-join)`, never `merge(w99)`. `wave-close` resolves that token as a branch to join the lane to its registry record, and the worker record keeps the branch it was dispatched on, so the join survives `git worktree remove`. `fleet land` prints the exact command to run, in that form. A lane that parses but resolves to no record and no worktree is refused with `UNJOINED: N of M`, exactly as an unparsed subject is: a lane it cannot join has no substrate, no session and no token total, and publishing a zero for it is the lie wave 86 told on a 701-line wave. A merge named `merge(hotfix/<name>): ...` is interface/supervisor bookkeeping, not a worker lane: it is listed in the throughput line, contributes workers `0`, and does not require a registry row. A lane merged under its worker name joins that worker's row only when the row records no branch or the default branch, and no `cwd` other than the home root; for any other rename or re-dispatch, or when several rows match, pass `--alias <merge-lane>=<worker>` (repeatable) rather than editing the row.
