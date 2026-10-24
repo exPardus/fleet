@@ -28512,7 +28512,7 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
             pass
     settle = dict(expected_mcx_id=expected_mcx_id, expected_status=expected_status,
                   expected_last_dispatch_at=expected_last_dispatch_at)
-    if head != "none" and (head in (rec.get("lane_done_shas") or [])
+    if head != "none" and (_lane_done_sha_key(rec, head) in (rec.get("lane_done_shas") or [])
                            or _lane_tree_dirty(cwd, run)):
         _settle_lane_done(name, sid, turn_key, delivered=False, **settle)
         return False
@@ -28574,8 +28574,9 @@ def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
         if not owns_pending and not delivered:
             return
         if delivered and head and head != "none":
-            shas = [x for x in (current.get("lane_done_shas") or []) if x != head]
-            current["lane_done_shas"] = (shas + [head])[-LANE_DONE_SHA_KEEP:]
+            key = _lane_done_sha_key(current, head)
+            shas = [x for x in (current.get("lane_done_shas") or []) if x != key]
+            current["lane_done_shas"] = (shas + [key])[-LANE_DONE_SHA_KEEP:]
         if delivered and _lane_done_turn_key(name, current) == turn_key:
             current["lane_done_notified"] = turn_key
         if owns_pending or delivered:
@@ -29106,6 +29107,10 @@ def cmd_mailman(args) -> int:
 
 
 LANE_DONE_SHA_KEEP = 32
+
+
+def _lane_done_sha_key(rec, head) -> str:
+    return f"{rec.get('last_dispatch_at') or ''}@{head}"
 
 
 def _lane_tree_dirty(cwd, run) -> bool:

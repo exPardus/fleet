@@ -254,7 +254,8 @@ def test_busy_parent_queue_collapses_repeat_stops(home, monkeypatch):
         fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
     mail = (home / "mailbox" / f"{PARENT_SID}.md").read_text()
     assert mail.count("LANE-DONE lane idle abc1234") == 1
-    assert fleet.load_registry()["workers"]["lane"]["lane_done_shas"] == ["abc1234"]
+    lane = fleet.load_registry()["workers"]["lane"]
+    assert lane["lane_done_shas"] == [f"{lane.get('last_dispatch_at') or ''}@abc1234"]
 
 
 def test_same_sha_delivers_once_across_new_turns(home, monkeypatch):
@@ -296,3 +297,22 @@ def test_new_sha_fires_once_more(home, monkeypatch):
         fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID,
                                run=_git_runner(head))
     assert sends == ["LANE-DONE lane idle aaaa111", "LANE-DONE lane idle bbbb222"]
+
+
+def test_redispatch_on_same_sha_fires_again(home, monkeypatch):
+    """A review lane commits nothing: its next dispatch ends on the same sha
+    and must still report."""
+    sends = []
+    monkeypatch.setattr(fleet, "_cmd_send_native",
+                        lambda name, message: sends.append(message) or 0)
+    tail = []
+    monkeypatch.setattr(fleet, "_last_assistant_uuid", lambda n, s: tail[-1])
+    git = _git_runner({"sha": "abc1234"})
+    for dispatch in ("2026-10-24T00:00:00Z", "2026-10-24T01:00:00Z"):
+        data = fleet.load_registry()
+        data["workers"]["lane"]["last_dispatch_at"] = dispatch
+        fleet.save_registry(data)
+        for _ in range(2):
+            tail.append(f"uuid-{len(tail)}")
+            fleet.notify_lane_done("lane", "idle", expected_sid=LANE_SID, run=git)
+    assert sends == ["LANE-DONE lane idle abc1234"] * 2
