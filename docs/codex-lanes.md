@@ -97,6 +97,12 @@ Codex lanes count against the same worker limits as Claude lanes. The operating
 manual in [skills/fleet/SKILL.md](../skills/fleet/SKILL.md) states the current
 limits under Dispatch. Count Codex and Claude workers together.
 
+## Terminal quota recovery
+
+A Codex lane parked on a terminal quota turn (`SystemError`, `usageLimitExceeded`)
+resumes with `fleet resume-limited NAME --terminal-quota`. It needs one named lane
+and a Codex Interface, and refuses any other row.
+
 ## Troubleshooting
 
 - A lane shows `dead-suspected` after a host restart: see

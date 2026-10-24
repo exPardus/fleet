@@ -5,6 +5,7 @@ No real claude process is ever spawned: every test injects a fake `run` /
 `which` / roster fetch. Every test monkeypatches fleet.FLEET_HOME to a
 pytest tmp_path (autouse fixture below), same discipline as test_core.py.
 """
+import argparse
 import io
 import json
 import os
@@ -310,6 +311,47 @@ class TestCmdInit:
         rc = fleet.main(["resume-limited", "w1", "--force-now"])
         assert rc == 0
         assert seen == {"name": "w1", "force_now": True}
+
+    def test_resume_limited_terminal_quota_routes_to_helper(self, isolated_home, monkeypatch):
+        seen = []
+        monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_require_instance_settings", lambda: None)
+        monkeypatch.setattr(fleet, "_resume_terminal_quota_codex",
+                            lambda name: seen.append(name) or 0)
+        assert fleet.main(["resume-limited", "w1", "--terminal-quota"]) == 0
+        assert seen == ["w1"]
+
+    def test_resume_limited_terminal_quota_requires_name(self, isolated_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_require_instance_settings", lambda: None)
+        monkeypatch.setattr(fleet, "_resume_terminal_quota_codex",
+                            lambda name: pytest.fail("must not dispatch"))
+        with pytest.raises(fleet.FleetCliError, match="requires a single named lane"):
+            fleet.cmd_resume_limited(argparse.Namespace(
+                name=None, force_now=False, terminal_quota=True, nonce=None))
+
+    def test_resume_limited_terminal_quota_excludes_force_now(self, isolated_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_require_instance_settings", lambda: None)
+        monkeypatch.setattr(fleet, "_resume_terminal_quota_codex",
+                            lambda name: pytest.fail("must not dispatch"))
+        with pytest.raises(fleet.FleetCliError, match="cannot combine"):
+            fleet.cmd_resume_limited(argparse.Namespace(
+                name="w1", force_now=True, terminal_quota=True, nonce=None))
+
+    def test_resume_limited_terminal_quota_refuses_non_quota_row(self, isolated_home, monkeypatch):
+        monkeypatch.setattr(fleet, "_supervisor_gate", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_require_instance_settings", lambda: None)
+        monkeypatch.setattr(fleet, "_registered_interface_mail_source",
+                            lambda: {"kind": "codex"})
+        monkeypatch.setattr(fleet, "_mail_source_is_current", lambda s: True)
+        monkeypatch.setattr(fleet, "read_registry_no_repair", lambda: {
+            "workers": {"w1": {"status": "idle", "substrate": "codex"}}})
+        monkeypatch.setattr(fleet, "refuse_if_archived", lambda *a, **k: None)
+        monkeypatch.setattr(fleet, "_codex_worker_binding", lambda n, r: object())
+        with pytest.raises(fleet.FleetCliError, match="not the exact quota/SystemError case"):
+            fleet.cmd_resume_limited(argparse.Namespace(
+                name="w1", force_now=False, terminal_quota=True, nonce=None))
 
 
 # ---------------------------------------------------------------------------
