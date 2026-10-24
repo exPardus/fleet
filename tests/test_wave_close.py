@@ -1495,3 +1495,11 @@ class TestWaveCloseHardening:
             "a": {"branch": "fleet/lane"}, "b": {"branch": "fleet/lane"}})
         run = TestRenamedLaneJoins._run(tmp_path / "none", "unrelated")
         assert fleet._wave_lane_join(tmp_path, "lane", run=run) == (None, None, None)
+
+
+def test_no_definition_after_main_guard():
+    """`python bin/fleet.py` runs main() at the guard; a def below it is unbound."""
+    source = (pathlib.Path(__file__).resolve().parents[1] / "bin" / "fleet.py").read_text(
+        encoding="utf-8")
+    tail = source.split('\nif __name__ == "__main__":\n', 1)[1]
+    assert not [line for line in tail.splitlines() if line.startswith(("def ", "class "))]

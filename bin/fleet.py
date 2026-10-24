@@ -29108,9 +29108,6 @@ class _HideSuppressedFormatter(argparse.HelpFormatter):
         return super()._format_action(action)
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
 
 def _wave_floor_env(config):
     env = os.environ.copy()
@@ -29158,3 +29155,7 @@ def _wave_floor_preflight(repo, config, run=subprocess.run, which=shutil.which):
         raise FleetCliError(
             f"wave-close: python{version} floor env cannot import pytest "
             f"(uv rc={proc.returncode}): {detail}. Warm it: {warm} -- then retry.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
