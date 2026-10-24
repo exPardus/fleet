@@ -60,6 +60,10 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet land`](#fleet-land) — stage a lane result, rebase its branch, and run its checks
 - [`fleet brief`](#fleet-brief) — render a validated brief from a task file
 - [`fleet q`](#fleet-q) — query this project's symbol index (M2)
+- [`fleet spec`](#fleet-spec) — SDD campaign spec gate (requires sdd.enabled)
+  - [`fleet spec new`](#fleet-spec-new) — scaffold a proposed campaign spec
+  - [`fleet spec accept`](#fleet-spec-accept) — accept a reviewed spec; the author may not accept it
+  - [`fleet spec verify`](#fleet-spec-verify) — run the acceptance gate: exit 0 pass, 1 fail, 2 harness or tamper
 - [`fleet doctor`](#fleet-doctor) — run fleet health checks
 - [`fleet sup-boot`](#fleet-sup-boot) — supervisor boot ritual: epoch check, claim decision, boot bundle (spec §4)
 - [`fleet sup-spawn`](#fleet-sup-spawn) — dispatch the gen-0 supervisor body under sup|<launch-id>|boot (three-tier §10.1); its first act is `fleet sup-boot`
@@ -153,7 +157,8 @@ usage: fleet spawn [-h] --dir DIR --task TASK
                    [--max-budget-usd MAX_BUDGET_USD]
                    [--setting-sources SETTING_SOURCES] [--nonce NONCE]
                    [--force-band] [--token-ceiling TOKEN_CEILING]
-                   [--category CATEGORY] [--context CONTEXT]
+                   [--category CATEGORY] [--spec CAMPAIGN] [--slice NAME]
+                   [--context CONTEXT]
                    name
 
 positional arguments:
@@ -181,6 +186,9 @@ options:
                         never the hard ceiling
   --token-ceiling TOKEN_CEILING
   --category CATEGORY
+  --spec CAMPAIGN       bind to an accepted SDD campaign spec (requires
+                        sdd.enabled)
+  --slice NAME          the spec slice that narrows this worker's scope
   --context CONTEXT     comma-separated source paths under --dir whose fleet-
                         index digests are injected into the prompt (§7);
                         ignored when the project has no index
@@ -783,6 +791,62 @@ options:
                         still exit 0
   --no-refresh          never write anything: stale and orphan hits are
                         withheld rather than repaired
+```
+
+### fleet spec
+
+```text
+usage: fleet spec [-h] {new,accept,verify} ...
+
+positional arguments:
+  {new,accept,verify}
+    new                scaffold a proposed campaign spec
+    accept             accept a reviewed spec; the author may not accept it
+    verify             run the acceptance gate: exit 0 pass, 1 fail, 2 harness
+                       or tamper
+
+options:
+  -h, --help           show this help message and exit
+```
+
+#### fleet spec new
+
+```text
+usage: fleet spec new [-h] [--actor ACTOR] campaign
+
+positional arguments:
+  campaign
+
+options:
+  -h, --help     show this help message and exit
+  --actor ACTOR  durable actor identity (default: FLEET_ACTOR)
+```
+
+#### fleet spec accept
+
+```text
+usage: fleet spec accept [-h] [--actor ACTOR] campaign
+
+positional arguments:
+  campaign
+
+options:
+  -h, --help     show this help message and exit
+  --actor ACTOR  durable actor identity (default: FLEET_ACTOR)
+```
+
+#### fleet spec verify
+
+```text
+usage: fleet spec verify [-h] [--worker WORKER] [--base REV] campaign
+
+positional arguments:
+  campaign
+
+options:
+  -h, --help       show this help message and exit
+  --worker WORKER  verify a bound worker's slice in its registered cwd
+  --base REV       diff base (default: the worker's spec baseline)
 ```
 
 ### fleet doctor

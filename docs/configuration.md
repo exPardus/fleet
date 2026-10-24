@@ -35,6 +35,8 @@ with a retirement record, not by editing the file.
 | `supervisor/GOALS.md` | you | what "done" means for the campaign, the departments, the repository's rules | no |
 | `supervisor/wave-close.json` | you, optional | the test floor that `wave-close` and `land` use for this repository | no |
 | `logs/`, `mailbox/`, `docs/lanes/`, `knowledge/projects/` | fleet | worker logs, mail, lane results, per-project notes | no |
+| `state/config.json` | you, optional | `{"sdd": {"enabled": true}}` turns on the spec gate (`fleet spec`, `spawn --spec`); absent or unreadable means off | no |
+| `state/specs/`, `state/spec-verify/` | `fleet spec` | campaign specs and the latest `fleet spec verify` stamp per campaign | no |
 
 The runtime directories are local. The fleet source checkout ignores them by
 default. In another repository, add them to that repository's `.gitignore`.
@@ -138,6 +140,8 @@ for the recipe and the separate OpenRouter/Codex routes.
 | Variable | Effect |
 |---|---|
 | `FLEET_HOME` | default home when no `--fleet-home` option is given |
+| `FLEET_SDD` | `1`/`true`/`yes`/`on` turns the spec gate on, any other value off; overrides `state/config.json` |
+| `FLEET_ACTOR` | durable identity that `fleet spec new` records as author and `fleet spec accept` records as acceptor, when `--actor` is not given |
 | `FLEET_PYTHON` | interpreter used by the `bin/fleet` shim, if you do not want the first one it finds |
 | `CLAUDE_CONFIG_DIR` | Claude Code daemon namespace; one namespace keeps one daemon/backend. Provider setup is described in [any-provider-fleet-usage.md](any-provider-fleet-usage.md). |
 | `CLAUDE_CODE_OAUTH_TOKEN` | a long-lived token that makes Claude Code's remote control refuse to start. Unset it for interface sessions: `env -u CLAUDE_CODE_OAUTH_TOKEN claude` |

@@ -578,13 +578,18 @@ RATIFIED_BUT_UNBUILT = ()
 # waits here under the fail-safe default. `mailman` (PR #48) appends sorted
 # mail digests and a cursor in the home and refuses without an explicit
 # `--fleet-home`; its tier is operator-owned and waits here too.
+# `spec` (SDD gate, SPEC §17a) writes a campaign spec under `state/specs/`
+# (new, accept) or a verify stamp under `state/spec-verify/`; it dispatches
+# nothing and steers no worker. Its tier is operator-owned and waits here
+# under the fail-safe `destructive` default.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
                                      "lane-done", "sup-reconcile", "codex-respond",
                                      "codex-decline-fixed",
                                      "codex-reobserve-active",
                                      "codex-settle-preaccept",
                                      "codex-settle-rejected",
-                                     "codex-recover-failed-client", "mailman")
+                                     "codex-recover-failed-client", "mailman",
+                                     "spec")
 
 
 def _classified_verbs():
