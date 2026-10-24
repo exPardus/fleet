@@ -8,6 +8,15 @@ Git; `fleet init` creates those paths without replacing existing content.
 
 - [`getting-started.md`](getting-started.md) — install and initialize a home.
 - [`concepts.md`](concepts.md) — architecture and lifecycle overview.
+- [`provider-context.md`](provider-context.md) — what Fleet records about Claude provider routing.
+- [`cli-reference.md`](cli-reference.md) — every visible command, nested subcommand
+  and option, generated from the parser.
+- [`configuration.md`](configuration.md) — home files, `worker-settings.json`, `wave-close.json`, and status line.
+- [`troubleshooting.md`](troubleshooting.md) — nonces, busy holders, `dead-suspected`, and Codex host restarts.
+- [`codex-lanes.md`](codex-lanes.md) — running Codex workers.
+- [`faq.md`](faq.md) — short answers to common questions.
+- [`../SECURITY.md`](../SECURITY.md) — how to report a vulnerability.
+- [`../CONTRIBUTING.md`](../CONTRIBUTING.md) — development and contribution guidance.
 - [`SPEC.md`](SPEC.md) — behavioral specification and invariants.
 - [`ROADMAP.md`](ROADMAP.md) — future product direction.
 - [`PRIOR-ART.md`](PRIOR-ART.md) — generic ecosystem comparison.
@@ -19,8 +28,8 @@ Git; `fleet init` creates those paths without replacing existing content.
 - [`../README.md`](../README.md) and [`../product.md`](../product.md) define the
   public product.
 - [`../skills/fleet/SKILL.md`](../skills/fleet/SKILL.md) is the operating manual.
-- [`../knowledge/INDEX.md`](../knowledge/INDEX.md) and
-  [`../knowledge/playbooks/`](../knowledge/playbooks/) are generic knowledge.
+- [`../knowledge/playbooks/`](../knowledge/playbooks/) contains the tracked
+  generic knowledge playbooks.
 - [`../tests/`](../tests/) and [`../bin/`](../bin/) are the executable contract
   and implementation.
 

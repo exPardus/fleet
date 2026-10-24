@@ -24,6 +24,13 @@ Run every nonce-minting verb directly, never through a pipe or output filter.
 Record every printed `NONCE` before the next command; the newest value is the
 continuity proof for the next mutating supervisor verb.
 
+Fleet refuses placeholder-looking `--nonce` and `--handoff-token` values before
+command dispatch changes state. After a continuity refusal, end this body's
+turn. Once the holder row is idle, the Interface or operator runs the exact wake
+command in the refusal. The woken body takes its nonce from its own latest
+`NONCE:` output and aborts pending successors using their exact handles from
+that recovery text; never guess or replay a presented value.
+
 For Codex collaboration, `send_message` only queues a message. It does not start
 an idle or completed agent and queued delivery is not evidence that a body is
 running. Use `followup_task` when the reviewer or spender must wake. This differs
