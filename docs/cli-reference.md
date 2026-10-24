@@ -564,19 +564,23 @@ options:
 ### fleet resume-limited
 
 ```text
-usage: fleet resume-limited [-h] [--force-now] [--nonce NONCE] [name]
+usage: fleet resume-limited [-h] [--force-now] [--terminal-quota]
+                            [--nonce NONCE]
+                            [name]
 
 positional arguments:
   name
 
 options:
-  -h, --help     show this help message and exit
-  --force-now    resume a named worker even before its horizon / with an
-                 unknown horizon
-  --nonce NONCE  the current supervisor generation (claim-nonce §5.3): clears
-                 §7's claim gate for a mutating verb while a fresh claim is
-                 held, and proves the lineage that owns a rotated body's
-                 workers (§6.2)
+  -h, --help        show this help message and exit
+  --force-now       resume a named worker even before its horizon / with an
+                    unknown horizon
+  --terminal-quota  resume one named Codex lane parked on a terminal quota
+                    turn
+  --nonce NONCE     the current supervisor generation (claim-nonce §5.3):
+                    clears §7's claim gate for a mutating verb while a fresh
+                    claim is held, and proves the lineage that owns a rotated
+                    body's workers (§6.2)
 ```
 
 ### fleet kill
