@@ -960,7 +960,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_registry` (:15264) -- a renamed-away path is not readable.
       * `_identity_abstention_note` (:18326) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8344) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20045) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20065) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -17361,10 +17361,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20199, :20211, :20360, :24137, :24138, :24240, :24305, :24367, :25331, :25333, :25371, :25899, :28805`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20219, :20231, :20380, :24157, :24158, :24260, :24325, :24387, :25351, :25353, :25391, :25919, :28825`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10613, :11349, :15602, :26832. This makes union identity
+    OWN prior sid alone: :10613, :11349, :15602, :26852. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18071,7 +18071,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10613, :11349, :15602,
-    # :26832) -- so union identity cannot make one body answer for another.
+    # :26852) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -19790,14 +19790,36 @@ def _wave_refresh_progress(repo, wave_id):
     return sum(1 for line in text.splitlines() if marker in line and line.startswith("|"))
 
 
+def _wave_push_argv(repo, run=subprocess.run):
+    """Return push argv; a branch without upstream gets --set-upstream <remote>."""
+    branch = _wave_git(repo, "branch", "--show-current", run=run,
+                       check=False).stdout.strip()
+    if not branch:
+        return ["push"]
+    upstream = _wave_git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                         "@{upstream}", run=run, check=False)
+    if upstream.returncode == 0:
+        return ["push"]
+    configured = _wave_git(repo, "config", "--get", f"branch.{branch}.remote",
+                           run=run, check=False)
+    remote = configured.stdout.strip() if configured.returncode == 0 else ""
+    remote = remote or "origin"
+    remotes = _wave_git(repo, "remote", run=run, check=False).stdout.split()
+    if remote not in remotes:
+        raise FleetCliError(f"wave-close: branch {branch} has no upstream and remote "
+                            f"{remote!r} does not exist; add it or set the upstream")
+    return ["push", "--set-upstream", remote, branch]
+
+
 def _wave_push(repo, run=subprocess.run, sleep=time.sleep):
     """Push, retrying three times over five minutes, and return success/detail."""
     delay = WAVE_CLOSE_PUSH_WINDOW_SECONDS / (WAVE_CLOSE_PUSH_ATTEMPTS - 1)
+    push_argv = _wave_push_argv(repo, run=run)
     failures = []
     for attempt in range(WAVE_CLOSE_PUSH_ATTEMPTS):
         if attempt:
             sleep(delay)
-        result = _wave_git(repo, "push", run=run, check=False)
+        result = _wave_git(repo, *push_argv, run=run, check=False)
         if result.returncode == 0:
             return True, attempt + 1, failures
         failures.append((attempt + 1, (result.stderr or result.stdout or "").strip()))
@@ -19916,10 +19938,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     unknown = [value for value in token_values
                if value.startswith("UNMEASURED")]
     # A lane whose substrate could not be read contributes to no token source
-    # here, so the total is short by an unknown amount. Summing what remains
-    # would print that shortfall as a measured total (queue item 26: wave 86
-    # printed `tokens: 0` on a wave whose two lanes' substrates both read
-    # `unknown`).
+    # here, so a sum would print an unknown shortfall as a measured total
+    # (queue item 26: wave 86 printed `tokens: 0` for two `unknown` lanes).
     unknown_substrate = [name for name, substrate, _sha in lanes
                          if substrate == "unknown"]
     reasons = [value[len("UNMEASURED ("):-1] for value in unknown]

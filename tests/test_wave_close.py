@@ -1503,3 +1503,65 @@ def test_no_definition_after_main_guard():
         encoding="utf-8")
     tail = source.split('\nif __name__ == "__main__":\n', 1)[1]
     assert not [line for line in tail.splitlines() if line.startswith(("def ", "class "))]
+
+
+def _push_run(calls, *, branch="fleet/wave-95", upstream=True, remote_cfg="",
+              remotes="origin\n", push_rc=0):
+    def run(argv, **kwargs):
+        calls.append(argv)
+        sub = argv[1]
+        if sub == "branch":
+            return subprocess.CompletedProcess(argv, 0, branch + "\n", "")
+        if sub == "rev-parse":
+            return subprocess.CompletedProcess(argv, 0 if upstream else 128, "", "")
+        if sub == "config":
+            return subprocess.CompletedProcess(argv, 0 if remote_cfg else 1,
+                                               remote_cfg, "")
+        if sub == "remote":
+            return subprocess.CompletedProcess(argv, 0, remotes, "")
+        assert sub == "push"
+        return subprocess.CompletedProcess(argv, push_rc, "", "boom")
+    return run
+
+
+def test_push_without_upstream_sets_upstream_once(tmp_path):
+    calls = []
+    ok, attempts, failures = fleet._wave_push(
+        tmp_path, run=_push_run(calls, upstream=False), sleep=lambda _s: None)
+    assert (ok, attempts, failures) == (True, 1, [])
+    pushes = [c for c in calls if c[1] == "push"]
+    assert pushes == [["git", "push", "--set-upstream", "origin", "fleet/wave-95"]]
+
+
+def test_push_without_upstream_uses_configured_remote(tmp_path):
+    calls = []
+    fleet._wave_push(tmp_path, run=_push_run(calls, upstream=False, remote_cfg="up\n",
+                                             remotes="origin\nup\n"),
+                     sleep=lambda _s: None)
+    assert [c for c in calls if c[1] == "push"] == [
+        ["git", "push", "--set-upstream", "up", "fleet/wave-95"]]
+
+
+def test_push_with_upstream_is_plain(tmp_path):
+    calls = []
+    fleet._wave_push(tmp_path, run=_push_run(calls), sleep=lambda _s: None)
+    assert [c for c in calls if c[1] == "push"] == [["git", "push"]]
+
+
+def test_push_without_remote_errors_without_retry(tmp_path):
+    calls = []
+    sleeps = []
+    with pytest.raises(fleet.FleetCliError, match="does not exist"):
+        fleet._wave_push(tmp_path, run=_push_run(calls, upstream=False, remotes=""),
+                         sleep=sleeps.append)
+    assert not [c for c in calls if c[1] == "push"]
+    assert sleeps == []
+
+
+def test_push_transient_failure_still_retries(tmp_path):
+    calls = []
+    sleeps = []
+    ok, attempts, failures = fleet._wave_push(
+        tmp_path, run=_push_run(calls, push_rc=1), sleep=sleeps.append)
+    assert not ok and attempts == fleet.WAVE_CLOSE_PUSH_ATTEMPTS
+    assert len(sleeps) == fleet.WAVE_CLOSE_PUSH_ATTEMPTS - 1
