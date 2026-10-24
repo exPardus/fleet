@@ -223,10 +223,12 @@ The floor runs in a fresh clone of the home. With no config it is the fleet repo
 }
 ```
 
-`{python}` is replaced by each interpreter and must be present. `expected_failures` defaults to empty once a config exists. `env` names must be identifiers; a `null` value unsets that variable (the floor otherwise pins `UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache`). One interpreter skips the cross-interpreter comparison; two or more must agree on totals and failures. Unknown keys or malformed values refuse the close before the claim.
+`{python}` is replaced by each interpreter and must be present. `expected_failures` defaults to empty once a config exists. `env` names must be identifiers; a `null` value unsets that variable (the floor otherwise pins `UV_CACHE_DIR=/tmp/w64-initrepo-uv-cache`). One interpreter skips the cross-interpreter comparison; two or more must agree on totals and failures. Unknown keys or malformed values refuse the close before the claim, as does an interpreter whose uv env cannot import pytest (the refusal names the uv error and the warm command). Only failures outside `expected_failures` refuse; an expected failure that now passes is reported informationally. The floor runs before any reap or session stop.
 
 The same file owns landing gates. With no `supervisor/wave-close.json` (the
-fleet home), `fleet land` runs `docs-currency`, `receipts`, and `citations`.
+fleet home), `fleet land` runs `docs-currency`, `receipts`, and `citations`,
+plus `registration` (`test_fleet_sources`, `test_index_split`,
+`test_round7_defect_pins`) when the lane adds a `bin/*.py` file or a parser verb.
 The `citations` gate runs `tools/refresh_citations.py --check` only when the
 lane changes `bin/fleet.py`; `--write` refreshes unambiguous line pins before
 landing. A configured home runs no fleet-specific gate by default; set `gates` to
