@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -952,15 +952,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:13857) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:14936) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18368) -- upgrades need complete records.
+      * `_sweep_husks` (:13866) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:14945) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18378) -- upgrades need complete records.
       * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5121) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15184) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18246) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8339) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:19965) -- render the release explanation.
+      * `_doctor_check_registry` (:15193) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18256) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8343) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:19975) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -1155,10 +1155,8 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # A later body may own its lineage's workers only after proving continuity
         # in this invocation. Missing lineage falls back to spawned_by ownership.
         "spawned_by_lineage": spawned_by_lineage,
-        # Write-once per record: fork-steer retains created; respawn mints a fresh value.
-        # _releaser_live_sids compares created to released_at to bound its union arm.
-        # Carrying created across respawn would falsely keep the releaser-live gate armed
-        # and refuse successors even after the releaser has been replaced.
+        # Write-once: fork-steer keeps created, respawn mints it. _releaser_live_sids
+        # compares it to released_at; a carried value would keep that gate armed.
         "created": created,
         "status": "working",
         "attached_since": None,
@@ -1178,9 +1176,8 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
         # Explicit non-Claude substrate marker (item 24), e.g. "openrouter/<slug>".
         # None here falls back to dispatch_kind=="bg" => "claude" (_wave_record_substrate).
         "substrate": substrate,
-        # The CLI-captured short id supports the gone-to-success inference. Fast
-        # completion instead derives it from the sid; that provenance depends on the
-        # vendor id format. See _native_job_ref before using it as a removal reference.
+        # CLI-captured short id for gone-to-success inference; fast completion derives
+        # it from the sid instead. See _native_job_ref before using it for removal.
         "native_short_id": None,
         # Codex substrate (item 29): the mcx worker id captured from
         # `mcx spawn` stdout; the job lives at <cwd>/.mcx/<mcx_id>.
@@ -1649,7 +1646,7 @@ Do not leave servers or watchers running past the end of the turn without record
 
 
 def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None,
-                   context=None) -> tuple[str, Path | None, str]:
+                   context=None, spec_section=None) -> tuple[str, Path | None, str]:
     """Compose preamble, optional context digests, drained mail, task and journal.
     Return (prompt, claim_path, drained_mail); sid=None skips claiming mail.
     The caller restores the claim on failure or finalizes it after process
@@ -1679,6 +1676,9 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
 
     if task:
         parts.append(task)
+
+    if spec_section:
+        parts.append(spec_section)
 
     if journal_path is not None:
         journal_path = Path(journal_path)
@@ -4394,7 +4394,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18368`), because legacy upgrades also require a complete registry.
+    (`:18378`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -7007,14 +7007,17 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         )
 
     task = _spawn_task_arg(args.name, args.task, cwd)
+    binding = spec_binding_for_spawn(getattr(args, "spec", None),
+                                     getattr(args, "slice", None))
+    spec_baseline = current_head_sha(cwd) if binding["record"] else None
 
-    # Compose before pre-claiming so context/index I/O cannot leave a phantom
-    # working record. Report ordinary compose failures, but preserve Ctrl-C:
-    # there is no registry claim to roll back yet.
+    # Compose before pre-claiming: compose I/O cannot leave a phantom record, and
+    # Ctrl-C propagates because there is no registry claim to roll back yet.
     try:
         prompt, _claim, _mail = compose_prompt(args.name, cwd, task, None,
                                         context=fleet_index.parse_context_arg(
-                                            getattr(args, "context", None)))
+                                            getattr(args, "context", None)),
+                                        **binding["compose"])
     except FleetCliError:
         raise
     except Exception as exc:
@@ -7048,9 +7051,10 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
                 if codex_slug is not None else "bg"),
             category=args.category,
             substrate=_substrate_for_model(args.model),
-            # Item 16: the lane branch is the durable join key for wave-close;
-            # the worktree it is read from is the part that gets deleted.
+            # Item 16: the lane branch, not the deletable worktree, joins wave-close.
             branch=_worktree_branch(cwd))
+        if binding["record"]:
+            record.update(binding["record"], spec_baseline_sha=spec_baseline)
         if codex_slug is not None and codex_adapter == "mcx":
             record["mcx_approval"] = _mcx_approval(args.mode)
             record["mcx_effort"] = getattr(args, "effort", None) or "medium"
@@ -7089,7 +7093,7 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
             args.name, cwd, prompt, args.mode, model=args.model,
             category=args.category, hint=task,
             setting_sources=record.get("setting_sources"),
-            run=run, which=which, sleep=sleep, clock=clock,
+            run=run, which=which, sleep=sleep, clock=clock, **binding["dispatch"],
         )
     except NativeDispatchError as exc:
         # The exception's short id finds sid-keyed fast-completion outcomes.
@@ -11183,6 +11187,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     spawned_by = before.get("spawned_by")
     # Carry ownership provenance unchanged; respawn must not transfer it to its caller.
     spawned_by_lineage = before.get("spawned_by_lineage")
+    binding = spec_binding_for_respawn(before)
+    spec_baseline = current_head_sha(cwd) if binding["record"] else None
 
     roster_ok, entries = _fetch_agents_roster(which=which, run=run)
     if not roster_ok:
@@ -11271,6 +11277,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         new_record["cost_baseline"] = cost_usd
         new_record["retired_sids"] = prior_retired + [old_sid]
         new_record["last_dispatch_at"] = now_iso()
+        if binding["record"]:
+            carry_spec_binding(before, new_record, spec_baseline)
         data["workers"][name] = new_record
         save_registry(data)
         append_event("respawned", name, old_session_id=old_sid, new_session_id=None,
@@ -11286,7 +11294,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     journal_path = journal_file_path(name)
     # A fresh non-resume session has no cached pointer content, so no inline
     # resumed-turn payload is needed.
-    prompt, claim, _mail = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path)
+    prompt, claim, _mail = compose_prompt(name, cwd, task_for_record, old_sid, journal_path=journal_path,
+                                          **binding["compose"])
     prior_brief = brief_snapshot(name)
     try:
         # Write a task override inside the rollback envelope. Abort must restore it
@@ -11300,7 +11309,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model, category=category,
             hint=task_for_record, setting_sources=setting_sources,
-            run=run, which=which, sleep=sleep, clock=clock,
+            run=run, which=which, sleep=sleep, clock=clock, **binding["dispatch"],
         )
         finalize_mailbox_claim(claim)
     except NativeDispatchError as exc:
@@ -12206,7 +12215,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12121` / `cmd_respawn:11398`, before
+    # resolution that runs from `cmd_kill:12130` / `cmd_respawn:11407`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12237,9 +12246,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12121` / `cmd_respawn:11398`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12130` / `cmd_respawn:11407`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11419-11426` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11428-11435` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15787,10 +15796,9 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
                 setting_sources=None, inline_kind=None, inline_body="",
                 run=subprocess.run, which=shutil.which, sleep=time.sleep,
-                roster_fetch=None, clock=time.monotonic):
-    # Validate names at this dispatch boundary too: direct callers must not escape
-    # tasks_dir(). Supervisor names are admitted here, while fleet spawn's NAME_RE
-    # rejects their pipe-delimited shape.
+                roster_fetch=None, clock=time.monotonic, extra_add_dirs=()):
+    # Validate here too so direct callers cannot escape tasks_dir(); supervisor
+    # names pass here although fleet spawn's NAME_RE rejects their pipe shape.
     if (not name or not (NAME_RE.match(name) or _is_supervisor_shaped(name))
             or _SID_SHAPE_RE.match(name)):
         raise NativeDispatchError(
@@ -15836,10 +15844,12 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
     if resume_sid:
         argv += ["--resume", resume_sid]
     argv += ["-n", rendered, "--settings", settings_arg]
-    # Preauthorize task and journal directories: headless workers cannot answer
-    # prompts for protocol-required files outside their cwd. Do not grant the whole home.
+    # Preauthorize protocol dirs outside cwd (headless workers cannot answer prompts),
+    # plus a bound spec dir; never the whole home.
     argv += ["--add-dir", tasks_dir().as_posix(),
              "--add-dir", journals_dir().as_posix()]
+    for extra_dir in extra_add_dirs:
+        argv += ["--add-dir", Path(extra_dir).as_posix()]
     # Forward persisted setting sources to the native dispatch.
     if setting_sources:
         argv += ["--setting-sources", setting_sources]
@@ -17281,10 +17291,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12224, :12387, :12652, :12877, :12913, :13155, :13156, :13245, :13255, :13266, :13364, :13883, :17233, :20119, :20131, :20280, :24057, :24058, :24160, :24225, :24287, :25251, :25253, :25291, :25819, :28450`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12233, :12396, :12661, :12886, :12922, :13164, :13165, :13254, :13264, :13275, :13373, :13892, :17243, :20129, :20141, :20290, :24067, :24068, :24170, :24235, :24297, :25261, :25263, :25301, :25829, :28725`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10608, :11272, :15522, :26752. This makes union identity
+    OWN prior sid alone: :10612, :11278, :15531, :26762. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17990,8 +18000,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10608, :11272, :15522,
-    # :26752) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10612, :11278, :15531,
+    # :26762) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17999,7 +18009,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17207`).
+        # names this gate as its reason (`:17217`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18361,7 +18371,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13854`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13863`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -27417,6 +27427,248 @@ def _watch_timeout_arg(value: str) -> float:
     return timeout
 
 
+SpecFormatError = fleet_spec.SpecFormatError
+_SPEC_REV_RE = re.compile(r"^[0-9A-Za-z_][0-9A-Za-z_./^~@{}-]*$")
+_NO_SPEC_BINDING = {"compose": {}, "record": {}, "dispatch": {}}
+
+
+def config_path() -> Path:
+    return state_dir() / "config.json"
+
+
+def sdd_enabled() -> bool:
+    env = (os.environ.get("FLEET_SDD") or "").strip().lower()
+    if env:
+        return env in ("1", "true", "yes", "on")
+    try:
+        data = json.loads(config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    sdd = data.get("sdd") if isinstance(data, dict) else None
+    return isinstance(sdd, dict) and sdd.get("enabled") is True
+
+
+def campaign_specs_dir() -> Path:
+    return state_dir() / "specs"
+
+
+def spec_path(campaign: str) -> Path:
+    return campaign_specs_dir() / f"{fleet_spec.check_campaign_name(campaign)}.md"
+
+
+def verify_stamp_path(campaign: str) -> Path:
+    return state_dir() / "spec-verify" / f"{fleet_spec.check_campaign_name(campaign)}.json"
+
+
+def _read_spec_text(campaign: str) -> str:
+    path = spec_path(campaign)
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise SpecFormatError(f"no spec at {path}") from exc
+    except OSError as exc:
+        raise SpecFormatError(f"cannot read {path}: {exc}") from exc
+
+
+def load_spec(campaign: str) -> dict:
+    return fleet_spec.parse_spec(_read_spec_text(campaign))
+
+
+def write_spec(campaign: str, data: dict, body: str) -> None:
+    path = spec_path(campaign)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(fleet_spec.render_spec(campaign, data, body), encoding="utf-8")
+    _replace_with_retry(str(tmp), str(path))
+
+
+def spec_actor(args=None) -> str:
+    return (getattr(args, "actor", None) or os.environ.get("FLEET_ACTOR") or "").strip()
+
+
+def _require_sdd(verb: str) -> None:
+    if not sdd_enabled():
+        raise FleetCliError(
+            f"spec {verb}: SDD is disabled -- set FLEET_SDD=1 or "
+            f"{config_path()} {{\"sdd\": {{\"enabled\": true}}}}")
+
+
+def assert_spec_bindable(campaign: str) -> dict:
+    data = load_spec(campaign)
+    if data.get("status") != "accepted":
+        raise SpecFormatError(
+            f"refusing to bind: spec {campaign!r} is {data.get('status')!r}, not accepted")
+    if data.get("accepted_digest") != fleet_spec.spec_digest(data):
+        raise SpecFormatError(f"refusing to bind: spec {campaign!r} changed since accept")
+    return data
+
+
+def current_head_sha(cwd) -> str | None:
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip() or None
+
+
+def carry_spec_binding(before: dict, after: dict, new_baseline) -> None:
+    after["spec"] = before.get("spec")
+    after["spec_slice"] = before.get("spec_slice")
+    after["spec_baseline_sha"] = new_baseline
+
+
+def spec_section_for(campaign: str, slice_name, data: dict) -> str:
+    allow, deny = fleet_spec.effective_scope(data, slice_name)
+    lines = ["## BINDING SPEC",
+             f"Contract: {spec_path(campaign).as_posix()} (slice: {slice_name or 'whole-spec'})",
+             "Re-read this file at the start of every turn. Your work is verified",
+             f"against it deterministically by `fleet spec verify {campaign}`.",
+             f"Allowed paths: {', '.join(allow) or '(any)'}",
+             f"Forbidden paths: {', '.join(deny) or '(none)'}",
+             "Criteria you own:"]
+    for crit in fleet_spec.criteria_for(data, slice_name):
+        lines.append(f"- {crit.get('id')} [{crit.get('kind')}]: {crit.get('ears', '')}")
+    return "\n".join(lines) + "\n"
+
+
+def spec_binding_for_spawn(campaign, slice_name) -> dict:
+    if campaign is None and slice_name is None:
+        return _NO_SPEC_BINDING
+    if not campaign:
+        raise FleetCliError("--slice requires --spec")
+    _require_sdd("bind")
+    try:
+        data = assert_spec_bindable(campaign)
+    except SpecFormatError as exc:
+        raise FleetCliError(f"--spec {campaign}: {exc}") from exc
+    if slice_name and slice_name not in (data.get("slices") or {}):
+        raise FleetCliError(f"--spec {campaign}: no slice named {slice_name!r}")
+    return {"compose": {"spec_section": spec_section_for(campaign, slice_name, data)},
+            "record": {"spec": campaign, "spec_slice": slice_name},
+            "dispatch": {"extra_add_dirs": (campaign_specs_dir(),)}}
+
+
+def spec_binding_for_respawn(before: dict) -> dict:
+    if not before.get("spec"):
+        return _NO_SPEC_BINDING
+    if not sdd_enabled():
+        return {"compose": {}, "record": {"spec": before["spec"]}, "dispatch": {}}
+    return spec_binding_for_spawn(before["spec"], before.get("spec_slice"))
+
+
+def cmd_spec_new(args) -> int:
+    _require_sdd("new")
+    actor = spec_actor(args)
+    if not actor:
+        raise FleetCliError("spec new: name the author with --actor or FLEET_ACTOR")
+    path = spec_path(args.campaign)
+    if path.exists():
+        raise FleetCliError(f"spec new: {path} already exists")
+    data = {"spec": args.campaign, "status": "proposed", "author": actor,
+            "accepted_by": "", "reviewed_by": "", "accepted_digest": "", "links": [],
+            "scope_allow": [], "scope_deny": [], "slices": {}, "criteria": []}
+    write_spec(args.campaign, data, "## Context\n\n## Decision\n\n## Consequences\n\n"
+                                    "## Requirements (EARS)\n")
+    append_event("spec_created", args.campaign, author=actor)
+    print(f"created {path} (status=proposed, author={actor})")
+    return 0
+
+
+def cmd_spec_accept(args) -> int:
+    _require_sdd("accept")
+    actor = spec_actor(args)
+    if not actor:
+        raise FleetCliError("spec accept: name the acceptor with --actor or FLEET_ACTOR")
+    with fleet_lock():
+        try:
+            text = _read_spec_text(args.campaign)
+            data = fleet_spec.parse_spec(text)
+        except SpecFormatError as exc:
+            print(f"fleet: spec accept: {exc}", file=sys.stderr)
+            return 2
+        author = str(data.get("author") or "").strip()
+        reviewed = str(data.get("reviewed_by") or "").strip()
+        if data.get("status") != "proposed":
+            raise FleetCliError(f"spec accept: {args.campaign} is {data.get('status')!r}, not 'proposed'")
+        if not author or actor == author:
+            raise FleetCliError("spec accept: the author may not accept its own spec")
+        if not reviewed or reviewed == author:
+            raise FleetCliError("spec accept: reviewed_by must name a review by someone other than the author")
+        problems = fleet_spec.check_slice_scopes(data)
+        if problems:
+            for problem in problems:
+                print(f"fleet: spec accept: {problem}", file=sys.stderr)
+            return 2
+        data["status"] = "accepted"
+        data["accepted_by"] = actor
+        data["accepted_digest"] = fleet_spec.spec_digest(data)
+        write_spec(args.campaign, data, fleet_spec.spec_body(text))
+        append_event("spec_accepted", args.campaign, accepted_by=actor,
+                     digest=data["accepted_digest"])
+    print(f"accepted {args.campaign} by {actor} (digest {data['accepted_digest'][:12]})")
+    return 0
+
+
+def _spec_verify_refusal(message: str) -> int:
+    print(f"fleet: spec verify: {message}", file=sys.stderr)
+    return 2
+
+
+def cmd_spec_verify(args, run=None, git_run=None) -> int:
+    if not sdd_enabled():
+        return _spec_verify_refusal("SDD is disabled")
+    try:
+        data = load_spec(args.campaign)
+    except SpecFormatError as exc:
+        return _spec_verify_refusal(str(exc))
+    if data.get("status") != "accepted":
+        return _spec_verify_refusal(f"{args.campaign} is {data.get('status')!r}; only an accepted spec is verifiable")
+    digest = fleet_spec.spec_digest(data)
+    if data.get("accepted_digest") != digest:
+        return _spec_verify_refusal("TAMPER: executable fields changed since accept")
+    problems = fleet_spec.check_slice_scopes(data)
+    if problems:
+        return _spec_verify_refusal("; ".join(problems))
+    cwd, base, slice_name = Path.cwd(), getattr(args, "base", None), None
+    worker = getattr(args, "worker", None)
+    if worker:
+        ok, reason, registry = _read_registry_readonly()
+        if not ok:
+            return _spec_verify_refusal(f"registry is {reason}")
+        rec = dict(registry["workers"].get(worker) or {})
+        if not rec:
+            return _spec_verify_refusal(f"unknown worker {worker!r}")
+        if rec.get("spec") != args.campaign:
+            return _spec_verify_refusal(f"{worker} is bound to {rec.get('spec')!r}, not {args.campaign!r}")
+        cwd = Path(rec["cwd"])
+        slice_name = rec.get("spec_slice")
+        base = base or rec.get("spec_baseline_sha")
+    if base is not None and not _SPEC_REV_RE.match(base):
+        return _spec_verify_refusal(f"invalid base revision {base!r}")
+    if not cwd.is_dir():
+        return _spec_verify_refusal(f"worker cwd {cwd} does not exist")
+    results = fleet_spec.run_criteria(data, slice_name, cwd, base, run=run, git_run=git_run)
+    overall = fleet_spec.overall_status(results)
+    stamp = {"ts": now_iso(), "spec": args.campaign, "spec_status": data.get("status"),
+             "digest": digest, "worker": worker, "slice": slice_name, "cwd": str(cwd),
+             "base": base, "overall": overall,
+             "per_criterion": [{"id": r.id, "status": r.status, "detail": r.detail}
+                               for r in results]}
+    _write_json_atomic(verify_stamp_path(args.campaign), stamp)
+    for r in results:
+        print(f"{r.status:5} {r.id}: {r.detail}")
+    print(f"overall: {overall}")
+    return fleet_spec.EXIT_FOR[overall]
+
+
+def cmd_spec(args) -> int:
+    return {"new": cmd_spec_new, "accept": cmd_spec_accept,
+            "verify": cmd_spec_verify}[args.spec_command](args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # main consumes --fleet-home before argparse so it works on either side of
     # the verb and cannot collide with a subcommand destination.
@@ -27489,6 +27741,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
     # Use the default fleet category when dispatch receives no explicit category.
     p_spawn.add_argument("--category", default=None)
+    p_spawn.add_argument("--spec", default=None, metavar="CAMPAIGN",
+                         help="bind to an accepted SDD campaign spec (requires sdd.enabled)")
+    p_spawn.add_argument("--slice", default=None, metavar="NAME",
+                         help="the spec slice that narrows this worker's scope")
     # Resolve context sources against worker --dir and prepend complete digests.
     p_spawn.add_argument("--context", default=None,
                          help="comma-separated source paths under --dir whose "
@@ -27764,6 +28020,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_q.add_argument("--no-refresh", action="store_true", dest="no_refresh",
                      help="never write anything: stale and orphan hits are "
                           "withheld rather than repaired")
+
+    p_spec = sub.add_parser("spec", help="SDD campaign spec gate (requires sdd.enabled)")
+    spec_sub = p_spec.add_subparsers(dest="spec_command", required=True)
+    p_spec_new = spec_sub.add_parser("new", help="scaffold a proposed campaign spec")
+    p_spec_accept = spec_sub.add_parser(
+        "accept", help="accept a reviewed spec; the author may not accept it")
+    p_spec_verify = spec_sub.add_parser(
+        "verify", help="run the acceptance gate: exit 0 pass, 1 fail, 2 harness or tamper")
+    for p_sp in (p_spec_new, p_spec_accept, p_spec_verify):
+        p_sp.add_argument("campaign")
+    for p_sp in (p_spec_new, p_spec_accept):
+        p_sp.add_argument("--actor", default=None,
+                          help="durable actor identity (default: FLEET_ACTOR)")
+    p_spec_verify.add_argument("--worker", default=None,
+                               help="verify a bound worker's slice in its registered cwd")
+    p_spec_verify.add_argument("--base", default=None, metavar="REV",
+                               help="diff base (default: the worker's spec baseline)")
 
     p_doctor = sub.add_parser("doctor", help="run fleet health checks")
     p_doctor.add_argument(
@@ -28349,6 +28622,8 @@ def main(argv=None) -> int:
             return fleet_index.cmd_q(args)
         if args.command == "doctor":
             return cmd_doctor(args)
+        if args.command == "spec":
+            return cmd_spec(args)
         if args.command == "sup-boot":
             return cmd_sup_boot(args)
         if args.command == "sup-spawn":
