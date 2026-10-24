@@ -952,15 +952,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:13857) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:14936) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18368) -- upgrades need complete records.
+      * `_sweep_husks` (:13928) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15007) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18439) -- upgrades need complete records.
       * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5121) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15184) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18246) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8339) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:19965) -- render the release explanation.
+      * `_doctor_check_registry` (:15255) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18317) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8340) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20036) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4394,7 +4394,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18368`), because legacy upgrades also require a complete registry.
+    (`:18439`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -5665,7 +5665,8 @@ VERB_EFFECT_DESTRUCTIVE = ("clean", "archive", "autoclean",
                            # Bare init creates only its target home and uses the ordinary residual.
                            "init --home", "journal-roll", "relay-ack")
 VERB_EFFECT_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
-                          "resume-limited", "sup-heartbeat", "interface-register")
+                          "resume-limited", "sup-heartbeat", "interface-register",
+                          "abandon")
 VERB_EFFECT_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                         "home", "knowledge", "attach", "wait", "sup-status",
                         "sup-context", "sup-guard", "q", "index", "address", "watch",
@@ -11093,6 +11094,76 @@ def cmd_attach(args) -> int:
     )
 
 
+def _abandon_unlanded_commits(branch, run=subprocess.run):
+    try:
+        result = run(["git", "rev-list", "--count", f"HEAD..refs/heads/{branch}"],
+                     cwd=str(Path.cwd()), capture_output=True, text=True,
+                     encoding="utf-8", errors="replace")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    if result.returncode != 0:
+        probe = run(["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                    cwd=str(Path.cwd()), capture_output=True, text=True)
+        if probe.returncode == 1:
+            return 0, None
+        return None, (result.stderr or result.stdout or "git failed").strip()[:200]
+    try:
+        return int(result.stdout.strip()), None
+    except ValueError:
+        return None, f"unparseable rev-list output {result.stdout.strip()[:40]!r}"
+
+
+def cmd_abandon(args, run=subprocess.run) -> int:
+    _supervisor_gate("abandon", nonce=getattr(args, "nonce", None))
+    reason = (args.reason or "").strip()
+    if not reason:
+        raise FleetCliError("abandon: --reason must be non-empty")
+    name = _resolve_worker_target(args.name)
+    force = bool(getattr(args, "force", False))
+    with fleet_lock():
+        data = load_registry()
+        rec = data["workers"].get(name)
+        if not isinstance(rec, dict):
+            raise FleetCliError(f"unknown worker: {name!r}")
+        refuse_if_archived(name, rec, "abandon")
+        if rec.get("lane_state") in ("landed", "abandoned"):
+            print(f"{name}: already lane_state={rec['lane_state']} -- nothing to do")
+            return 0
+        if rec.get("status") in SUPERVISOR_BUSY_LANE_STATUSES:
+            raise FleetCliError(
+                f"abandon: {name} is {rec['status']} -- interrupt it first")
+        if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+            raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
+        branch = rec.get("branch")
+        ahead = 0
+        if isinstance(branch, str) and branch:
+            ahead, err = _abandon_unlanded_commits(branch, run=run)
+            if err is not None and not force:
+                raise FleetCliError(
+                    f"abandon: cannot check {branch} against HEAD ({err}); "
+                    "pass --force to abandon anyway")
+            if ahead and not force:
+                raise FleetCliError(
+                    f"abandon: {branch} has {ahead} commit(s) not on HEAD -- land "
+                    "them, or pass --force to abandon and discard")
+        rec["lane_state"] = "abandoned"
+        rec["abandoned_reason"] = reason
+        rec["abandoned_at"] = now_iso()
+        data["workers"][name] = rec
+        save_registry(data)
+        sid = rec.get("session_id")
+        if sid:
+            append_outcome(name, {"ts": now_iso(), "session_id": sid,
+                                  "kind": "abandoned", "result_text": reason})
+        append_event("abandoned", name, reason=reason, forced=force,
+                     unlanded_commits=ahead or 0)
+    print(f"{name}: lane_state=abandoned ({reason})")
+    print("next reap (supervisor boot, handoff, release) removes the row once its "
+          "session is idle with no unread mail; the worktree and branch are left "
+          "in place")
+    return 0
+
+
 def cmd_release(args) -> int:
     """Apply the continuity gate and change attached to idle; otherwise warn/no-op."""
     _supervisor_gate("release", nonce=getattr(args, "nonce", None))
@@ -12206,7 +12277,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12121` / `cmd_respawn:11398`, before
+    # resolution that runs from `cmd_kill:12192` / `cmd_respawn:11469`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12237,9 +12308,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12121` / `cmd_respawn:11398`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12192` / `cmd_respawn:11469`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11419-11426` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11490-11497` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -17281,10 +17352,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12224, :12387, :12652, :12877, :12913, :13155, :13156, :13245, :13255, :13266, :13364, :13883, :17233, :20119, :20131, :20280, :24057, :24058, :24160, :24225, :24287, :25251, :25253, :25291, :25819, :28450`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12295, :12458, :12723, :12948, :12984, :13226, :13227, :13316, :13326, :13337, :13435, :13954, :17304, :20190, :20202, :20351, :24128, :24129, :24231, :24296, :24358, :25322, :25324, :25362, :25890, :28531`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10608, :11272, :15522, :26752. This makes union identity
+    OWN prior sid alone: :10609, :11343, :15593, :26823. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17914,7 +17985,7 @@ def _wedged_release_gate(verb, claim):
 
 GATE_VERBS_ACCEPTING_NONCE = frozenset({
     "init", "spawn", "send", "resume-limited", "interrupt", "release",
-    "respawn", "kill", "clean", "archive", "sup-spawn",
+    "respawn", "kill", "clean", "archive", "sup-spawn", "abandon",
 })
 """The gated verbs whose parser actually declares `--nonce`, i.e. the ones the
 refusal below may honestly name that flag to (R2, ruling 2026-07-26: **a named
@@ -17990,8 +18061,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10608, :11272, :15522,
-    # :26752) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10609, :11343, :15593,
+    # :26823) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17999,7 +18070,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17207`).
+        # names this gate as its reason (`:17278`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18361,7 +18432,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13854`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13925`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -27653,6 +27724,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_release.add_argument("name")
     p_release.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
 
+    p_abandon = sub.add_parser(
+        "abandon", help="record a lane with nothing to land as lane_state=abandoned")
+    p_abandon.add_argument("name")
+    p_abandon.add_argument("--reason", required=True)
+    p_abandon.add_argument("--force", action="store_true",
+                           help="abandon although the branch has commits not on HEAD")
+    p_abandon.add_argument("--nonce", help=GATE_NONCE_ARG_HELP)
+
     p_respawn = sub.add_parser("respawn", help="fresh session for a worker (context-reset lever)")
     p_respawn.add_argument("name")
     p_respawn.add_argument("--task", default=None)
@@ -28331,6 +28410,8 @@ def main(argv=None) -> int:
             return cmd_attach(args)
         if args.command == "release":
             return cmd_release(args)
+        if args.command == "abandon":
+            return cmd_abandon(args)
         if args.command == "respawn":
             return cmd_respawn(args)
         if args.command == "resume-limited":

@@ -441,7 +441,9 @@ RATIFIED_DESTRUCTIVE = ("clean", "archive", "autoclean",
                         # [w59/inithome] E2/init split, operator 2026-08-10
                         "init --home", "journal-roll", "relay-ack")
 RATIFIED_DISRUPTIVE = ("kill", "interrupt", "send", "respawn", "release",
-                       "resume-limited", "sup-heartbeat", "interface-register")
+                       "resume-limited", "sup-heartbeat", "interface-register",
+                       # [w402/abandon-verb] registry-only lane_state write
+                       "abandon")
 RATIFIED_ORDINARY = ("spawn", "status", "peek", "result", "pr-poll",
                      "home", "knowledge", "attach", "wait", "sup-status",
                      "sup-context", "sup-guard", "q", "index",

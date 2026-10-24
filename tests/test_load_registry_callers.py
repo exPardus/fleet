@@ -229,7 +229,7 @@ ALLOWED = {
     "_reconcile_dead_suspected_codex_system_errors",
     "_freeze_codex_predecessor_retirement",
     "_finalize_codex_predecessor_retirement",
-    "cmd_attach", "cmd_release", "cmd_clean", "cmd_archive",
+    "cmd_attach", "cmd_release", "cmd_abandon", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",
     "_sweep_husks", "_expire_tombstones",
     # --- supervisor lifecycle: all inside `fleet_lock()` ---

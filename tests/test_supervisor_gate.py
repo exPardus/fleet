@@ -321,7 +321,7 @@ class TestGateExitCode:
 # --- every mutating lifecycle verb is behind the gate ----------------------
 
 GATED_VERBS = ["spawn", "sup-spawn", "send", "respawn", "kill", "clean",
-               "interrupt", "archive", "resume-limited", "release", "init"]
+               "interrupt", "archive", "resume-limited", "release", "init", "abandon"]
 
 
 def _gated_argv(verb, home):
@@ -342,6 +342,7 @@ def _gated_argv(verb, home):
             "archive": ["archive"],
             "resume-limited": ["resume-limited"],
             "release": ["release", "w"],
+            "abandon": ["abandon", "w", "--reason", "x"],
             "init": ["init"]}[verb]
 
 

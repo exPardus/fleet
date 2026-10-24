@@ -45,6 +45,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet codex-recover-failed-client`](#fleet-codex-recover-failed-client) — stage exact-home native Codex recovery after a failed host client
 - [`fleet interrupt`](#fleet-interrupt) — kill a worker's running turn
 - [`fleet release`](#fleet-release) — release an attached worker back to idle
+- [`fleet abandon`](#fleet-abandon) — record a lane with nothing to land as lane_state=abandoned
 - [`fleet respawn`](#fleet-respawn) — fresh session for a worker (context-reset lever)
 - [`fleet resume-limited`](#fleet-resume-limited) — relaunch limited workers whose reset horizon has passed
 - [`fleet kill`](#fleet-kill) — interrupt (if running) and mark a worker dead
@@ -531,6 +532,24 @@ options:
                  §7's claim gate for a mutating verb while a fresh claim is
                  held, and proves the lineage that owns a rotated body's
                  workers (§6.2)
+```
+
+### fleet abandon
+
+```text
+usage: fleet abandon [-h] --reason REASON [--force] [--nonce NONCE] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help       show this help message and exit
+  --reason REASON
+  --force          abandon although the branch has commits not on HEAD
+  --nonce NONCE    the current supervisor generation (claim-nonce §5.3):
+                   clears §7's claim gate for a mutating verb while a fresh
+                   claim is held, and proves the lineage that owns a rotated
+                   body's workers (§6.2)
 ```
 
 ### fleet respawn
