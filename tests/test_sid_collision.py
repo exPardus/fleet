@@ -40,6 +40,7 @@ collide with any record in any home. The replacements stay UUID-SHAPED so
 `fleet._SID_SHAPE_RE` sees what it always saw; they carry version nibble 0 and
 the NCS variant, which `uuid.UUID(...).version is None` reports.
 """
+import functools
 import ast
 import json
 import os
@@ -259,11 +260,12 @@ def caller_sid_sites(path):
     return sites
 
 
+@functools.lru_cache(maxsize=None)
 def census():
     out = []
     for path in sorted(TESTS.rglob("test_*.py")):
         out.extend(caller_sid_sites(path))
-    return out
+    return tuple(out)
 
 
 def offending_sites(sites):

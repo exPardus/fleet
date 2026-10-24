@@ -32,6 +32,7 @@ defect:
     append. It does NOT see a read, and it does not see a write into a home the
     list merely NAMES -- which is the hazard measured above.
 """
+import functools
 import json
 import os
 import subprocess
@@ -411,17 +412,21 @@ def _tests_root():
     return Path(__file__).resolve().parent
 
 
+@functools.lru_cache(maxsize=None)
+def _tree_census():
+    """The real-tree census, scanned once for the three tests that read it."""
+    rows = []
+    for path in sorted(_tests_root().rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        rows += census_home_seam_sites(path.read_text(encoding="utf-8"), rel)
+    return tuple(rows)
+
+
 class TestEveryFleetInterpreterDriveCarriesTheSeam:
     """The lint, over the real tree."""
 
     def _census(self):
-        root = _tests_root()
-        rows = []
-        for path in sorted(root.rglob("*.py")):
-            rel = path.relative_to(REPO).as_posix()
-            rows += census_home_seam_sites(
-                path.read_text(encoding="utf-8"), rel)
-        return rows
+        return _tree_census()
 
     def test_the_census_is_not_empty(self):
         """A lint whose subject list silently goes empty passes vacuously
