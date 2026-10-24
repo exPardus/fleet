@@ -29,6 +29,9 @@ HISTORICAL_METADATA_EXEMPTIONS = {
     # Merged via PR #40 without a docs change or trailer; it is now an
     # ancestor of main, so every lane rebased on main inherited the failure.
     "8c3f73a9ab86a6b30d8598680c772a34c4d00781",
+    # Prose-cap trim + citation refresh (no behaviour change) committed without
+    # a trailer; lanes w400-w402 branched from it before the omission surfaced.
+    "7600dc2a59e9109b4b8cf89e003629b19bb1d58b",
 }
 
 
