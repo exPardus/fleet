@@ -954,13 +954,13 @@ def _quarantine_artifacts() -> list:
     An artifact marks an unresolved incident, not a fresh install. Readers:
       * `_sweep_husks` (:13857) -- refuse on presence alone.
       * `_doctor_check_autoclean` (:14936) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18368) -- upgrades need complete records.
+      * `_require_claim_holder`'s §9 arm (:18369) -- upgrades need complete records.
       * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5121) -- expose that distinction to views.
       * `_doctor_check_registry` (:15184) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18246) -- name the incident-specific absence.
+      * `_identity_abstention_note` (:18247) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8339) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:19965) -- render the release explanation.
+      * `_tombstone_releasing_body` (:19966) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4394,7 +4394,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18368`), because legacy upgrades also require a complete registry.
+    (`:18369`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -15969,6 +15969,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 # HANDSHAKE. Claim writes hold fleet_lock and replace atomically; successors
 # write HANDSHAKE separately because only the claim holder may write the journal.
 
+SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS = 120.0   # sup-guard: idle holder + older unread mail -> WAKE
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
 # Bounded claim-local marker suppresses stalled-body pages without probing.
 SUPERVISOR_PARK_MAX_SECONDS = 24 * 3600.0
@@ -17280,10 +17281,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12224, :12387, :12652, :12877, :12913, :13155, :13156, :13245, :13255, :13266, :13364, :13883, :17232, :20119, :20131, :20280, :24057, :24058, :24160, :24225, :24273, :25230, :25232, :25270, :25798, :28429`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12224, :12387, :12652, :12877, :12913, :13155, :13156, :13245, :13255, :13266, :13364, :13883, :17233, :20120, :20132, :20281, :24058, :24059, :24161, :24226, :24292, :25258, :25260, :25298, :25826, :28457`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10608, :11272, :15522, :26731. This makes union identity
+    OWN prior sid alone: :10608, :11272, :15522, :26759. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -17990,7 +17991,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10608, :11272, :15522,
-    # :26731) -- so union identity cannot make one body answer for another.
+    # :26759) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -17998,7 +17999,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1026`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17206`).
+        # names this gate as its reason (`:17207`).
         # Unreadable or malformed records provide no holder proof and leave the gate armed.
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
@@ -24227,6 +24228,24 @@ def _sup_guard_body_name(sids, holder_sid=None, registry=None):
     return None
 
 
+def _sup_guard_unread_mail_age(sids):
+    """Age in seconds of the oldest unread mailbox file among ``sids``.
+
+    Read-only: stats ``mailbox/<sid>.md`` only (a claimed file is already
+    being drained). Returns None when there is no unread mail or on I/O error.
+    """
+    now = time.time()
+    ages = []
+    for sid in sids or []:
+        try:
+            st = (mailbox_dir() / f"{sid}.md").stat()
+        except OSError:
+            continue
+        if st.st_size > 0:
+            ages.append(max(0.0, now - st.st_mtime))
+    return max(ages, default=None)
+
+
 def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
     """Collect the read-only inputs for one two-live-body decision."""
     snapshot_fn = snapshot_fn or status_snapshot
@@ -24350,6 +24369,7 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         "pending": pending,
         "body_name": body_name,
         "idle_resumable_holder": idle_resumable_holder,
+        "unread_mail_age_seconds": _sup_guard_unread_mail_age(sids),
         "limited": bool(limited_rows),
         "limit_reset_at": max(horizons, default=None),
         "context_occupancy": claim.get("context_occupancy") if isinstance(claim, dict) else None,
@@ -24376,7 +24396,8 @@ def _sup_guard_decide(observation):
          "heartbeat_age_seconds", "body_name", "pending",
          "handshake_exists", "limit_reset_at", "parked_at", "parked_reason",
          "parked_wake_condition", "parked_age_seconds", "parked_active",
-         "parked_expired", "parked_finished_lanes", "busy_children")
+         "parked_expired", "parked_finished_lanes", "busy_children",
+         "unread_mail_age_seconds")
     }
     detail.update({
         key: obs.get(key) for key in
@@ -24468,6 +24489,13 @@ def _sup_guard_decide(observation):
         age = obs.get("heartbeat_age_seconds")
         if not isinstance(age, (int, float)):
             return "PAGE", "claim heartbeat unreadable", detail
+        mail_age = obs.get("unread_mail_age_seconds")
+        if (age <= SUPERVISOR_CLAIM_STALE_SECONDS and statuses == {"idle"}
+                and isinstance(mail_age, (int, float))
+                and mail_age > SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS):
+            # Idle holder with unread mail past the grace period: a fresh
+            # heartbeat does not mean the mail will be read.
+            return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME, detail
         if (age <= SUPERVISOR_CLAIM_STALE_SECONDS
                 and ("busy" in statuses or statuses == {"idle"})):
             detail["quiet"] = True

@@ -68,8 +68,10 @@ A supervisor is "busy" when its process is running a turn. A busy body whose
 heartbeat has gone stale is the case to watch.
 
 1. Run `fleet sup-guard --json`. Read the verdict:
-   - `OK`: the heartbeat is fresh and a live body holds the claim. Do nothing.
-   - `WAKE <body>`: the heartbeat is stale and the holder is idle. Run
+   - `OK`: the heartbeat is fresh and a live body holds the claim (an idle one has no
+     mail waiting over 120 s). Do nothing.
+   - `WAKE <body>`: the holder is idle and either the heartbeat is stale or
+     unread mail has waited over 120 s. Run
      `fleet sup-guard --do` to re-verify and send the wake brief. It never spawns.
    - `DISPATCH`: no live body remains and the guard allows a new one. Only the
      interface runs `fleet sup-spawn`.
