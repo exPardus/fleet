@@ -62,7 +62,7 @@ mailbox/
 supervisor/
 docs/lanes/
 knowledge/projects/
-local operator lessons
+knowledge/lessons.md
 ```
 
 The Fleet source checkout already carries these rules. In another repository,
@@ -80,7 +80,7 @@ fleet init --statusline # optional: fleet's row in the Claude Code status line
 `fleet init` does not register the home in the machine-wide list
 (`~/.claude/fleet-homes.list`). Do that with `fleet homes --add <path>` when
 you want `fleet homes` and the keeper to see it; the list is append-only and a
-mistaken add is reversed with `fleet homes --retire`.
+mistaken add is reversed with `fleet homes --retire PATH`.
 
 ## Your first job
 
@@ -121,7 +121,7 @@ band on their own.
 
 The keeper can run `bin/fleet_keeper.py --once` for every home you name. It
 pages the interface's tmux pane when a human is needed, wakes an idle
-supervisor with `fleet send` when it only needs a turn, and never dispatches.
+supervisor with `fleet send supervisor` when it only needs a turn, and never dispatches.
 Store host-specific service units and recipes in local operator storage, not
 in the public repository. If your shell exports a long-lived
 `CLAUDE_CODE_OAUTH_TOKEN`, launch interface sessions with
