@@ -960,7 +960,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_registry` (:15264) -- a renamed-away path is not readable.
       * `_identity_abstention_note` (:18326) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8344) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20071) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20065) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -17361,10 +17361,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20225, :20237, :20386, :24163, :24164, :24266, :24331, :24393, :25357, :25359, :25397, :25925, :28831`).
+    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20219, :20231, :20380, :24157, :24158, :24260, :24325, :24387, :25351, :25353, :25391, :25919, :28825`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10613, :11349, :15602, :26858. This makes union identity
+    OWN prior sid alone: :10613, :11349, :15602, :26852. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18071,7 +18071,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10613, :11349, :15602,
-    # :26858) -- so union identity cannot make one body answer for another.
+    # :26852) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -19791,11 +19791,7 @@ def _wave_refresh_progress(repo, wave_id):
 
 
 def _wave_push_argv(repo, run=subprocess.run):
-    """Return the push argv: plain when an upstream exists, else set one.
-
-    A fresh wave branch has no upstream, and a plain push then fails the same
-    way every time, so name the remote and branch and set the upstream.
-    """
+    """Return push argv; a branch without upstream gets --set-upstream <remote>."""
     branch = _wave_git(repo, "branch", "--show-current", run=run,
                        check=False).stdout.strip()
     if not branch:
@@ -19942,10 +19938,8 @@ def cmd_wave_close(args, run=subprocess.run, which=shutil.which,
     unknown = [value for value in token_values
                if value.startswith("UNMEASURED")]
     # A lane whose substrate could not be read contributes to no token source
-    # here, so the total is short by an unknown amount. Summing what remains
-    # would print that shortfall as a measured total (queue item 26: wave 86
-    # printed `tokens: 0` on a wave whose two lanes' substrates both read
-    # `unknown`).
+    # here, so a sum would print an unknown shortfall as a measured total
+    # (queue item 26: wave 86 printed `tokens: 0` for two `unknown` lanes).
     unknown_substrate = [name for name, substrate, _sha in lanes
                          if substrate == "unknown"]
     reasons = [value[len("UNMEASURED ("):-1] for value in unknown]
