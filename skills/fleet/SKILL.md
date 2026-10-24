@@ -46,7 +46,9 @@ in the fleet home or the interface state files.
 The interface state lives in the selected home. Read and append
 `state/interface/board.md` (at most 30 lines: supervisor state, lanes in flight,
 last `THROUGHPUT`, pending operator rulings with their task files, and the last
-relayed wave) and append one line per relay, ruling, wake, or spawn to
+relayed wave; "last" means the newest line in log or journal order, not the
+highest wave number, and task files under `done/` or `lens/`, `<lane>-task.md`
+files, and briefs named for a registry worker or its branch are not rulings) and append one line per relay, ruling, wake, or spawn to
 `state/interface/log.md`. Every interface action appends to the log. These
 files belong to the interface-state implementation; this manual only defines
 the ritual that reads and appends them.
