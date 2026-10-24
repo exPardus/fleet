@@ -230,8 +230,7 @@ def _interface_lanes(home):
 
 
 def _interface_last_throughput(home):
-    """Newest THROUGHPUT line in journal order: history files oldest-first,
-    then JOURNAL.md last. Wave numbers can restart, so position wins."""
+    """Newest THROUGHPUT line: history oldest-first, JOURNAL.md last."""
     last = None
     history = Path(home) / "supervisor" / "journal-history"
     try:
@@ -251,8 +250,7 @@ def _interface_last_throughput(home):
 
 
 def _interface_machine_stems(home):
-    """Stems of registry workers and their branch basenames, or None when
-    the registry exists but cannot be read."""
+    """Registry worker names and branch basenames; None if unreadable."""
     path = Path(home) / "state" / "fleet.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -272,15 +270,7 @@ def _interface_machine_stems(home):
 
 
 def _interface_pending_rulings(home):
-    """Task files that still await an operator ruling.
-
-    A file counts when it has no ``RULED:`` line and is not machine input.
-    Machine input is: anything under ``done/`` or ``lens/``, ``sup~*.md``,
-    any stem ending ``-task`` (lane task files), and any stem (or stem minus
-    ``-task``) naming a registry worker or a worker branch basename
-    (spawn-written briefs). Unreadable files or an unreadable registry give
-    ``UNMEASURED``.
-    """
+    """Task files without ``RULED:``, minus machine input (rule: skills/fleet/SKILL.md)."""
     root = Path(home) / "state" / "tasks"
     if not root.exists():
         return "UNMEASURED"
@@ -984,15 +974,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:13969) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15048) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18480) -- upgrades need complete records.
-      * `_acting_worker_identity` (:4444) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5153) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15296) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18358) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8376) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20106) -- render the release explanation.
+      * `_sweep_husks` (:13959) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15038) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18470) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4434) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5143) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15286) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18348) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8366) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20096) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4426,9 +4416,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18480`), because legacy upgrades also require a complete registry.
+    (`:18470`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1065`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1055`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -12318,7 +12308,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12233` / `cmd_respawn:11510`, before
+    # resolution that runs from `cmd_kill:12223` / `cmd_respawn:11500`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12349,9 +12339,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12233` / `cmd_respawn:11510`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12223` / `cmd_respawn:11500`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11531-11538` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11521-11528` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -17319,10 +17309,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1058`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1048`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5141`) applies here too. An unreadable registry
+    rule for the view path (`:5131`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17393,10 +17383,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4253, :4288, :4318, :4357, :4394, :4451, :4530, :5549, :12336, :12499, :12764, :12989, :13025, :13267, :13268, :13357, :13367, :13378, :13476, :13995, :17345, :20260, :20272, :20421, :24198, :24199, :24301, :24366, :24428, :25392, :25394, :25432, :25960, :28866`).
+    sites that already key on the union (`:4243, :4278, :4308, :4347, :4384, :4441, :4520, :5539, :12326, :12489, :12754, :12979, :13015, :13257, :13258, :13347, :13357, :13368, :13466, :13985, :17335, :20250, :20262, :20411, :24188, :24189, :24291, :24356, :24418, :25382, :25384, :25422, :25950, :28856`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10645, :11381, :15634, :26893. This makes union identity
+    OWN prior sid alone: :10635, :11371, :15624, :26883. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18102,16 +18092,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10645, :11381, :15634,
-    # :26893) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10635, :11371, :15624,
+    # :26883) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1058`), which is a write. Routing the identity read
+        # file aside (`:1048`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17319`).
+        # names this gate as its reason (`:17309`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18473,7 +18463,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13966`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13956`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
