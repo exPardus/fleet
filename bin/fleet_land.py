@@ -26,7 +26,7 @@ _REQUIRED_RESULT_KEYS = {
 }
 _TEST_KEYS = {"command", "rc", "passed", "failed", "skipped"}
 _CLAIM_KEYS = {"claim", "command"}
-LAND_GATE_NAMES = frozenset(("docs-currency", "receipts", "citations"))
+LAND_GATE_NAMES = frozenset(("docs-currency", "receipts", "citations", "registration"))
 
 
 def _git(repo: Path, *args: str, cwd: Path | None = None,
@@ -377,6 +377,7 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
                 "receipts": (f"{python} tools/verify_receipts.py --strict "
                              "--skip-volatile docs/specs/*.md"),
                 "citations": f"{python} tools/refresh_citations.py --check",
+                "registration": _REGISTRATION_COMMAND,
             }[gate]
             resolved.append((gate, command))
             continue
@@ -389,6 +390,9 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
                 f"land: supervisor/wave-close.json gates[{index}] must be a "
                 "gate name or {name, command} object")
         resolved.append((gate["name"], gate["command"]))
+    if not resolved:
+        print(f"land: {path} configures no gates; no fleet gates will run",
+              file=sys.stderr)
     return resolved
 
 
