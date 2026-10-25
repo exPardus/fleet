@@ -121,7 +121,8 @@ def test_new_usage_sources_remain_unmeasured_when_their_source_is_missing(tmp_pa
 
 def test_default_base_is_newest_wave_close_commit(tmp_path):
     def run(argv, **kwargs):
-        assert argv[:3] == ["git", "log", "--format=%H%x09%s"]
+        if argv[1] == "rev-list":
+            return subprocess.CompletedProcess(argv, 0, "deadbeef1234567\n", "")
         return subprocess.CompletedProcess(
             argv, 0,
             "deadbeef1234567\tfleet wave-close: wave 68\n"
@@ -1513,7 +1514,8 @@ def _push_run(calls, *, branch="fleet/wave-95", upstream=True, remote_cfg="",
         if sub == "branch":
             return subprocess.CompletedProcess(argv, 0, branch + "\n", "")
         if sub == "rev-parse":
-            return subprocess.CompletedProcess(argv, 0 if upstream else 128, "", "")
+            return subprocess.CompletedProcess(argv, 0 if upstream else 128,
+                                               f"origin/{branch}\n" if upstream else "", "")
         if sub == "config":
             return subprocess.CompletedProcess(argv, 0 if remote_cfg else 1,
                                                remote_cfg, "")
@@ -1565,3 +1567,49 @@ def test_push_transient_failure_still_retries(tmp_path):
         tmp_path, run=_push_run(calls, push_rc=1), sleep=sleeps.append)
     assert not ok and attempts == fleet.WAVE_CLOSE_PUSH_ATTEMPTS
     assert len(sleeps) == fleet.WAVE_CLOSE_PUSH_ATTEMPTS - 1
+
+
+def test_default_base_follows_pr_merge_that_landed_previous_close(tmp_path):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t",
+             *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "root")
+    git("checkout", "-q", "-b", "wave-1")
+    git("commit", "-q", "--allow-empty", "-m", "fleet wave-close: wave 1")
+    close = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main")
+    git("merge", "-q", "--no-ff", "wave-1", "-m", "Merge pull request #1 from x/wave-1")
+    pr_merge = git("rev-parse", "HEAD")
+    git("checkout", "-q", "-b", "wave-2")
+    git("checkout", "-q", "-b", "lane")
+    git("commit", "-q", "--allow-empty", "-m", "work")
+    git("checkout", "-q", "wave-2")
+    git("merge", "-q", "--no-ff", "-m", "merge(lane): x", "lane")
+    assert fleet._wave_previous_close(tmp_path) == pr_merge != close
+    git("checkout", "-q", "wave-1")
+    assert fleet._wave_previous_close(tmp_path) == close
+
+
+def test_push_argv_ignores_upstream_with_different_branch_name(tmp_path):
+    def git(*args, cwd=tmp_path):
+        return subprocess.run(
+            ["git", "-C", str(cwd), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "work"
+    git("init", "-q", "--bare", "-b", "main", str(remote))
+    git("clone", "-q", str(remote), str(work))
+    git("commit", "-q", "--allow-empty", "-m", "root", cwd=work)
+    git("push", "-q", "origin", "HEAD:main", cwd=work)
+    git("checkout", "-q", "-b", "fleet/wave-96", "origin/main", cwd=work)
+    assert git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=work) == "origin/main"
+    assert fleet._wave_push_argv(work) == [
+        "push", "--set-upstream", "origin", "fleet/wave-96"]
+    ok, _attempts, _failures = fleet._wave_push(work, sleep=lambda _s: None)
+    assert ok
+    assert git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=work) == "origin/fleet/wave-96"
+    assert fleet._wave_push_argv(work) == ["push"]

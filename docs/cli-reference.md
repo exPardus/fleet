@@ -1056,7 +1056,8 @@ usage: fleet wave-close [-h] [--base BASE] --changelog CHANGELOG
 options:
   -h, --help            show this help message and exit
   --base BASE           base commit SHA for the throughput diff (default:
-                        previous wave-close commit)
+                        previous wave-close commit, or the PR merge that
+                        landed it)
   --changelog CHANGELOG
                         CHANGELOG sentences, or @file containing them
   --alias MERGE_LANE=WORKER

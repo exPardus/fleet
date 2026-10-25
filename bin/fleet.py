@@ -230,29 +230,52 @@ def _interface_lanes(home):
 
 
 def _interface_last_throughput(home):
-    matches = []
-    paths = [Path(home) / "supervisor" / "JOURNAL.md"]
+    """Newest THROUGHPUT line: history oldest-first, JOURNAL.md last."""
+    last = None
     history = Path(home) / "supervisor" / "journal-history"
     try:
-        paths.extend(sorted(history.glob("*.md")))
+        paths = sorted(history.glob("*.md"))
     except OSError:
         return "UNMEASURED"
+    paths.append(Path(home) / "supervisor" / "JOURNAL.md")
     for path in paths:
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except (FileNotFoundError, OSError, UnicodeError):
             continue
         for line in lines:
-            if "THROUGHPUT" in line:
-                match = re.search(r"THROUGHPUT\s+wave\s+(\d+)", line)
-                if match:
-                    matches.append((int(match.group(1)), line.strip()))
-    return max(matches, key=lambda item: item[0])[1] if matches else "UNMEASURED"
+            if re.search(r"THROUGHPUT\s+wave\s+\d+", line):
+                last = line.strip()
+    return last if last else "UNMEASURED"
+
+
+def _interface_machine_stems(home):
+    """Registry worker names and branch basenames; None if unreadable."""
+    path = Path(home) / "state" / "fleet.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError, UnicodeError):
+        return None
+    workers = value.get("workers") if isinstance(value, dict) else None
+    if not isinstance(workers, dict):
+        return None
+    stems = set()
+    for name, row in workers.items():
+        stems.add(str(name))
+        if isinstance(row, dict) and isinstance(row.get("branch"), str):
+            stems.add(row["branch"].rsplit("/", 1)[-1])
+    return stems
 
 
 def _interface_pending_rulings(home):
+    """Task files without ``RULED:``, minus machine input (rule: skills/fleet/SKILL.md)."""
     root = Path(home) / "state" / "tasks"
     if not root.exists():
+        return "UNMEASURED"
+    machine = _interface_machine_stems(home)
+    if machine is None:
         return "UNMEASURED"
     found = []
     try:
@@ -261,12 +284,12 @@ def _interface_pending_rulings(home):
         return "UNMEASURED"
     for path in paths:
         relative = path.relative_to(root)
-        # Lens briefs are research inputs, not operator decision slots.
-        if relative.parts and relative.parts[0].lower() == "lens":
+        if relative.parts and relative.parts[0].lower() in ("lens", "done"):
             continue
-        # Supervisor-rendered task files are machine inputs, not unanswered
-        # operator rulings, wherever they appear under the task root.
         if fnmatch.fnmatch(path.name, "sup~*.md"):
+            continue
+        stem = path.stem
+        if stem.endswith("-task") or stem in machine:
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -278,19 +301,18 @@ def _interface_pending_rulings(home):
 
 
 def _interface_last_relayed(home):
+    """Wave number of the last RELAY line in log order (waves can restart)."""
     path = interface_log_path(home)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError, UnicodeError):
         return "UNMEASURED"
-    except (OSError, UnicodeError):
-        return "UNMEASURED"
-    waves = []
+    last = None
     for line in lines:
         match = re.search(r"RELAY.*?wave\s+(\d+)", line, re.IGNORECASE)
         if match:
-            waves.append(int(match.group(1)))
-    return str(max(waves)) if waves else "UNMEASURED"
+            last = match.group(1)
+    return last if last else "UNMEASURED"
 
 
 def render_interface_board(home=None) -> str:
@@ -952,15 +974,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:13937) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15016) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18448) -- upgrades need complete records.
-      * `_acting_worker_identity` (:4412) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5121) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15264) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18326) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8344) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20065) -- render the release explanation.
+      * `_sweep_husks` (:13959) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15038) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18470) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4434) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5143) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15286) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18348) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8366) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20096) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4394,9 +4416,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18448`), because legacy upgrades also require a complete registry.
+    (`:18470`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1033`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1055`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -12286,7 +12308,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12201` / `cmd_respawn:11478`, before
+    # resolution that runs from `cmd_kill:12223` / `cmd_respawn:11500`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12317,9 +12339,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12201` / `cmd_respawn:11478`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12223` / `cmd_respawn:11500`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11499-11506` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11521-11528` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -17287,10 +17309,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1026`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1048`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5109`) applies here too. An unreadable registry
+    rule for the view path (`:5131`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17361,10 +17383,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4221, :4256, :4286, :4325, :4362, :4419, :4498, :5517, :12304, :12467, :12732, :12957, :12993, :13235, :13236, :13325, :13335, :13346, :13444, :13963, :17313, :20219, :20231, :20380, :24157, :24158, :24260, :24325, :24387, :25351, :25353, :25391, :25919, :28825`).
+    sites that already key on the union (`:4243, :4278, :4308, :4347, :4384, :4441, :4520, :5539, :12326, :12489, :12754, :12979, :13015, :13257, :13258, :13347, :13357, :13368, :13466, :13985, :17335, :20250, :20262, :20411, :24188, :24189, :24291, :24356, :24418, :25382, :25384, :25422, :25950, :28856`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10613, :11349, :15602, :26852. This makes union identity
+    OWN prior sid alone: :10635, :11371, :15624, :26883. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18070,16 +18092,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10613, :11349, :15602,
-    # :26852) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10635, :11371, :15624,
+    # :26883) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1026`), which is a write. Routing the identity read
+        # file aside (`:1048`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17287`).
+        # names this gate as its reason (`:17309`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18441,7 +18463,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:13934`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:13956`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -18693,7 +18715,16 @@ def _wave_previous_close(repo, run=subprocess.run):
     for line in result.stdout.splitlines():
         commit, _, subject = line.partition("\t")
         if re.fullmatch(r"fleet wave-close: wave \d+", subject.strip()):
-            return commit
+            landed = commit
+            fp = _wave_git(repo, "rev-list", "--first-parent", "HEAD", run=run)
+            for cand in fp.stdout.split():
+                if cand == commit:
+                    return commit
+                if _wave_git(repo, "merge-base", "--is-ancestor", commit, cand,
+                             run=run, check=False).returncode != 0:
+                    return landed
+                landed = cand
+            return landed
     raise FleetCliError(
         "wave-close: no previous `fleet wave-close: wave N` commit found; "
         "supply --base explicitly")
@@ -19798,7 +19829,7 @@ def _wave_push_argv(repo, run=subprocess.run):
         return ["push"]
     upstream = _wave_git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
                          "@{upstream}", run=run, check=False)
-    if upstream.returncode == 0:
+    if upstream.returncode == 0 and upstream.stdout.strip().endswith(f"/{branch}"):
         return ["push"]
     configured = _wave_git(repo, "config", "--get", f"branch.{branch}.remote",
                            run=run, check=False)
@@ -28246,7 +28277,7 @@ def build_parser() -> argparse.ArgumentParser:
         "wave-close",
         help="reap, floor, account, land, push, and notify one wave boundary")
     p_wave.add_argument("--base", required=False, default=None,
-                        help="base commit SHA for the throughput diff (default: previous wave-close commit)")
+                        help="base commit SHA for the throughput diff (default: previous wave-close commit, or the PR merge that landed it)")
     p_wave.add_argument("--changelog", required=True,
                         help="CHANGELOG sentences, or @file containing them")
     p_wave.add_argument("--alias", action="append", default=None,
