@@ -515,10 +515,14 @@ class TestTheRetargetIsRealAndStillOpen:
 
         out = self._drive(tmp_path, install, work, "kill", "prod", sid=self.CALLER)
 
-        assert out.returncode == 0, out.stdout + out.stderr
-        assert _status(install, "prod") == "dead", (
+        # w419: the caller resolves to a worker row, so the destructive guard now
+        # refuses outright. The refusal names the INSTALL_ROOT home's row, which
+        # is the retarget: identity was resolved against the bystander home.
+        assert out.returncode == 1, out.stdout + out.stderr
+        assert "inside worker 'archived'" in out.stdout + out.stderr, (
             "the INSTALL_ROOT retarget no longer happens -- if that is because "
             "the seam was fenced, DELETE this class; do not restore the hole.")
+        assert _status(install, "prod") == "idle", out.stdout + out.stderr
         assert _status(work, "prod") == "idle", (
             "the fixture home was written after all: " + out.stdout + out.stderr)
 
@@ -557,6 +561,8 @@ class TestTheRetargetIsRealAndStillOpen:
         out = self._drive(tmp_path, install, work, "kill", "prod",
                           sid=SHIPPED_WORKER_SID)
 
-        assert out.returncode == 0, out.stdout + out.stderr
-        assert _status(install, "prod") == "dead"
+        # w419 refuses a worker caller; naming the install home's row is the retarget.
+        assert out.returncode == 1, out.stdout + out.stderr
+        assert "inside worker 'holder'" in out.stdout + out.stderr
+        assert _status(install, "prod") == "idle"
         assert _status(work, "prod") == "idle"
