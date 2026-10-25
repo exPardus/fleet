@@ -263,15 +263,18 @@ class TestARealKillsAnswerFollowsTheSeam:
         _plant_list(tmp_path, [listed])
         out = self._drive(tmp_path, "kill", "prod", "--yes",
                           FLEET_HOME=str(work), CLAUDE_CODE_SESSION_ID=SID)
-        assert out.returncode == 0, out.stdout + out.stderr
+        # w419: the sid resolves to a worker row, so the guard refuses outright;
+        # the refusal naming the LISTED home's row is the retarget.
+        assert out.returncode == 1, out.stdout + out.stderr
 
         def status(home):
             return json.loads((home / "state" / "fleet.json")
                               .read_text(encoding="utf-8"))["workers"]["prod"]["status"]
-        assert status(listed) == "dead", (
+        assert "inside worker 'prod'" in out.stdout + out.stderr, (
             "the retarget did not happen -- if `resolve_home` no longer "
             "outranks FLEET_HOME on a lookup hit, this whole file's severity "
             "argument needs re-deriving")
+        assert status(listed) == "idle"
         assert status(work) == "idle"
 
 
