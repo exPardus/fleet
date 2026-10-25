@@ -808,7 +808,7 @@ New, carried from the pivot spec and enforced in code: **never-demote-unknown** 
 
 If penetration defense is actually wanted it is a **separate security milestone**: `state/` write-denied to the worker token, the oracle under a separate service account, a chain anchored outside `state/`, and worker permission deny-rules.
 
-**Two unbuilt shipped defects this review surfaced (a third, the task-dir grant, is fixed: see §5 `--allowedTools`), independent of the oracle** (`[UNBUILT — fixes owned by the next code milestone]`): `append_event` uses a buffered text append where `stop_outcome.py` documents that plain `open(...,"a")` loses whole records under concurrent Windows writers; `_confirm_destructive` is a no-op inside a worker, because the env strip makes every worker present as the human shell the guard deliberately exempts.
+**One unbuilt shipped defect this review surfaced (two others are fixed: the task-dir grant, see §5 `--allowedTools`, and `append_event`, which now writes each record with one unbuffered append syscall through `_atomic_append_bytes`, pinned by `tests/test_append_event_atomic.py`), independent of the oracle** (`[UNBUILT — fix owned by the next code milestone]`): `_confirm_destructive` is a no-op inside a worker, because the env strip makes every worker present as the human shell the guard deliberately exempts.
 
 ## 18. Milestones
 
