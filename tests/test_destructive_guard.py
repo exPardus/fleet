@@ -192,6 +192,50 @@ class TestAWorkerIsNotExempt:
                                        assume_yes=False)
 
 
+class TestWorkerCallerFailsClosed:
+    """A worker refuses destructive verbs even with --yes (SPEC §5.1).
+    Identification: the caller sid resolves to a non-supervisor registry row, or
+    the FLEET_WORKER stamp `_worker_env` sets after the sid strip is present."""
+
+    SID = "fa15e51d-0000-0000-0000-000000000004"
+    VICTIM = {"v": _rec(spawned_by="someone-else")}
+
+    def _registry(self, monkeypatch, name, sid):
+        recs = {name: _rec(session_id=sid, status="idle")}
+        monkeypatch.setattr(fleet, "_read_registry_readonly",
+                            lambda: (True, None, {"workers": recs}))
+
+    @pytest.mark.parametrize("yes", [False, True])
+    def test_registry_resolved_worker_is_refused(self, monkeypatch, yes):
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.SID)
+        self._registry(monkeypatch, "lane-a", self.SID)
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=yes)
+        assert "operator shell" in str(exc.value) and "lane-a" in str(exc.value)
+
+    @pytest.mark.parametrize("yes", [False, True])
+    def test_stamped_worker_without_sid_is_refused(self, monkeypatch, yes):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("FLEET_WORKER", "lane-a")
+        with pytest.raises(fleet.DestructiveActionRefused):
+            fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=yes)
+
+    def test_human_shell_unchanged(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=False)
+
+    def test_supervisor_unchanged(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.SID)
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc1|boot")
+        self._registry(monkeypatch, "sup|inc1|boot", self.SID)
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=False)
+        assert "--yes" in str(exc.value)
+        fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=True)
+
+
 class TestProvenanceRecorded:
     def test_spawn_records_the_calling_session(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
@@ -628,7 +672,7 @@ class TestAWorkerCallerIsNotExempt:
                         session=self.WORKER_SID, worker="mf-fix")
         assert out.returncode == 1
         assert "Traceback" not in out.stderr, out.stderr
-        assert "--yes" in (out.stdout + out.stderr)
+        assert "operator shell" in (out.stdout + out.stderr)
         assert self._status(tmp_path) == "idle"
 
     def test_a_worker_killing_an_unknown_owner_worker_is_refused(self, tmp_path):
@@ -638,17 +682,16 @@ class TestAWorkerCallerIsNotExempt:
         out = self._run(tmp_path, "kill", "victim",
                         session=self.WORKER_SID, worker="mf-fix")
         assert out.returncode == 1
-        assert "unknown owner" in (out.stdout + out.stderr)
+        assert "operator shell" in (out.stdout + out.stderr)
         assert self._status(tmp_path) == "idle"
 
-    def test_a_worker_killing_the_worker_it_spawned_proceeds(self, tmp_path):
-        # session_id=None: no live session to `claude stop`, so the CLI goes
-        # straight to the terminal dead mark.
+    def test_a_worker_killing_the_worker_it_spawned_is_still_refused(self, tmp_path):
+        # w419: a worker is refused outright; owning the target no longer helps.
         self._seed(tmp_path, spawned_by=self.WORKER_SID, session_id=None)
-        out = self._run(tmp_path, "kill", "victim",
+        out = self._run(tmp_path, "kill", "victim", "--yes",
                         session=self.WORKER_SID, worker="mf-fix")
-        assert out.returncode == 0, out.stderr
-        assert self._status(tmp_path) == "dead"
+        assert out.returncode == 1
+        assert self._status(tmp_path) == "idle"
 
     def test_a_human_shell_keeps_its_exemption(self, tmp_path):
         # The other direction. fleet has always been a human-driven CLI;
@@ -658,21 +701,16 @@ class TestAWorkerCallerIsNotExempt:
         assert out.returncode == 0, out.stderr
         assert self._status(tmp_path) == "dead"
 
-    def test_the_fleet_worker_marker_alone_does_not_decide_the_verdict(self, tmp_path):
-        """FLEET_WORKER must never be the key (SPEC §6.1).
-
-        The supervisor successor carries FLEET_WORKER and is the one session
-        whose whole purpose is to receive the claim, so a guard keyed on it
-        refuses exactly the wrong caller. It is also an ordinary env var any
-        shell can set or unset. Observed in the field: this file's measurement
-        was taken in a process whose FLEET_WORKER named a DIFFERENT worker than
-        its own registry record -- the marker is not even a reliable identity
-        signal. Ownership is decided by `spawned_by` vs the caller sid, and by
-        nothing else: no sid, no guard, marker or no marker."""
+    def test_the_fleet_worker_stamp_without_sid_fails_closed(self, tmp_path):
+        """w419 supersedes the old "marker never decides" pin for the destructive
+        guard only. `_worker_env` sets the stamp after stripping the sid, so a
+        stamp with no sid is a stripped worker, not a human shell. Supervisor-shaped
+        stamps stay on the ordinary path (see TestWorkerCallerFailsClosed)."""
         self._seed(tmp_path, spawned_by=self.MANAGER_SID, session_id=None)
-        out = self._run(tmp_path, "kill", "victim", session=None, worker="mf-fix")
-        assert out.returncode == 0, out.stderr
-        assert self._status(tmp_path) == "dead"
+        out = self._run(tmp_path, "kill", "victim", "--yes", session=None, worker="mf-fix")
+        assert out.returncode == 1
+        assert "operator shell" in (out.stdout + out.stderr)
+        assert self._status(tmp_path) == "idle"
 
 
 class TestParserFlags:
