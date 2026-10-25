@@ -76,6 +76,7 @@ three-way classification check -- because a scanner that finds nothing passes
 everything, which is the failure `tools/verify_receipts.py --self-test` exists
 for one level up.
 """
+import bisect
 import io
 import re
 import tokenize
@@ -257,15 +258,20 @@ def _function_span(name):
     return (start, len(SRC))
 
 
+_DEF_RE = re.compile(r"^def\s+(\w+)")
+_DEF_INDEX = (None, [], [])  # (SRC it was built from, def lines, def names)
+
+
 def _enclosing_function(n):
-    best = None
-    for i, line in enumerate(SRC, start=1):
-        if i > n:
-            break
-        match = re.match(r"^def\s+(\w+)", line)
-        if match:
-            best = match.group(1)
-    return best
+    # One scan per SRC list (tools/refresh_citations.py rebinds SRC), then a
+    # bisect per query; the per-call rescan dominated the refresher's runtime.
+    global _DEF_INDEX
+    if _DEF_INDEX[0] is not SRC:
+        found = [(i, m.group(1)) for i, line in enumerate(SRC, start=1)
+                 for m in (_DEF_RE.match(line),) if m]
+        _DEF_INDEX = (SRC, [i for i, _ in found], [name for _, name in found])
+    at = bisect.bisect_right(_DEF_INDEX[1], n)
+    return _DEF_INDEX[2][at - 1] if at else None
 
 
 def _call_lines(callee):

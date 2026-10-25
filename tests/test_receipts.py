@@ -171,7 +171,8 @@ def vr():
         mod.BASH = mod.resolve_bash()
     except SystemExit as exc:  # no POSIX bash on this machine
         pytest.skip(f"no bash available to run receipts: {exc}")
-    return mod
+    yield mod
+    mod.cleanup()  # drop the pinned-tree extractions now, not at interpreter exit
 
 
 def _specs():

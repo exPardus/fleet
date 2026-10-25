@@ -127,6 +127,7 @@ the consumer's own parser, not a regex that agrees with the bug. The census and
 the drivers are cross-checked against each other, so a render added tomorrow
 cannot land without either a driver or a deliberate edit to the pinned count.
 """
+import functools
 import ast
 import json
 import shlex
@@ -409,12 +410,13 @@ def code_plane_files():
     return sorted(p for p in (REPO / "bin").rglob("*.py"))
 
 
+@functools.lru_cache(maxsize=None)
 def census_code_plane():
     sites = []
     for path in code_plane_files():
         rel = path.relative_to(REPO).as_posix()
         sites.extend(census_command_renders(path.read_text(encoding="utf-8"), rel))
-    return sorted(sites, key=lambda s: (s[0], s[1]))
+    return tuple(sorted(sites, key=lambda s: (s[0], s[1])))
 
 
 # The census, pinned by COUNT and by identity. A fifth render moves both, and
