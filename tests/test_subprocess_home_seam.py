@@ -32,6 +32,7 @@ defect:
     append. It does NOT see a read, and it does not see a write into a home the
     list merely NAMES -- which is the hazard measured above.
 """
+import functools
 import json
 import os
 import subprocess
@@ -262,15 +263,18 @@ class TestARealKillsAnswerFollowsTheSeam:
         _plant_list(tmp_path, [listed])
         out = self._drive(tmp_path, "kill", "prod", "--yes",
                           FLEET_HOME=str(work), CLAUDE_CODE_SESSION_ID=SID)
-        assert out.returncode == 0, out.stdout + out.stderr
+        # w419: the sid resolves to a worker row, so the guard refuses outright;
+        # the refusal naming the LISTED home's row is the retarget.
+        assert out.returncode == 1, out.stdout + out.stderr
 
         def status(home):
             return json.loads((home / "state" / "fleet.json")
                               .read_text(encoding="utf-8"))["workers"]["prod"]["status"]
-        assert status(listed) == "dead", (
+        assert "inside worker 'prod'" in out.stdout + out.stderr, (
             "the retarget did not happen -- if `resolve_home` no longer "
             "outranks FLEET_HOME on a lookup hit, this whole file's severity "
             "argument needs re-deriving")
+        assert status(listed) == "idle"
         assert status(work) == "idle"
 
 
@@ -411,17 +415,21 @@ def _tests_root():
     return Path(__file__).resolve().parent
 
 
+@functools.lru_cache(maxsize=None)
+def _tree_census():
+    """The real-tree census, scanned once for the three tests that read it."""
+    rows = []
+    for path in sorted(_tests_root().rglob("*.py")):
+        rel = path.relative_to(REPO).as_posix()
+        rows += census_home_seam_sites(path.read_text(encoding="utf-8"), rel)
+    return tuple(rows)
+
+
 class TestEveryFleetInterpreterDriveCarriesTheSeam:
     """The lint, over the real tree."""
 
     def _census(self):
-        root = _tests_root()
-        rows = []
-        for path in sorted(root.rglob("*.py")):
-            rel = path.relative_to(REPO).as_posix()
-            rows += census_home_seam_sites(
-                path.read_text(encoding="utf-8"), rel)
-        return rows
+        return _tree_census()
 
     def test_the_census_is_not_empty(self):
         """A lint whose subject list silently goes empty passes vacuously

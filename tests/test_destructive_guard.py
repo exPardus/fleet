@@ -192,6 +192,48 @@ class TestAWorkerIsNotExempt:
                                        assume_yes=False)
 
 
+class TestWorkerCallerFailsClosed:
+    """A worker refuses destructive verbs even with --yes (SPEC §5.1).
+    Identification: the caller sid resolves to a non-supervisor registry row.
+    Never the FLEET_WORKER stamp: a daemon can donate one to a foreign session."""
+
+    SID = "fa15e51d-0000-0000-0000-000000000004"
+    VICTIM = {"v": _rec(spawned_by="someone-else")}
+
+    def _registry(self, monkeypatch, name, sid):
+        recs = {name: _rec(session_id=sid, status="idle")}
+        monkeypatch.setattr(fleet, "_read_registry_readonly",
+                            lambda: (True, None, {"workers": recs}))
+
+    @pytest.mark.parametrize("yes", [False, True])
+    def test_registry_resolved_worker_is_refused(self, monkeypatch, yes):
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.SID)
+        self._registry(monkeypatch, "lane-a", self.SID)
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=yes)
+        assert "operator shell" in str(exc.value) and "lane-a" in str(exc.value)
+
+    def test_a_donated_stamp_alone_is_not_a_worker(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.setenv("FLEET_WORKER", "lane-a")
+        fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=False)
+
+    def test_human_shell_unchanged(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+        monkeypatch.delenv("FLEET_WORKER", raising=False)
+        fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=False)
+
+    def test_supervisor_unchanged(self, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", self.SID)
+        monkeypatch.setenv("FLEET_WORKER", "sup|inc1|boot")
+        self._registry(monkeypatch, "sup|inc1|boot", self.SID)
+        with pytest.raises(fleet.DestructiveActionRefused) as exc:
+            fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=False)
+        assert "--yes" in str(exc.value)
+        fleet._confirm_destructive("kill", ["v"], self.VICTIM, assume_yes=True)
+
+
 class TestProvenanceRecorded:
     def test_spawn_records_the_calling_session(self, monkeypatch):
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-A")
@@ -597,7 +639,12 @@ class TestAWorkerCallerIsNotExempt:
             (tmp_path / sub).mkdir(exist_ok=True)
         (tmp_path / "state" / "fleet.json").write_text(json.dumps(
             {"workers": {"victim": _rec(spawned_by=spawned_by, status="idle",
-                                        session_id=session_id)}}), encoding="utf-8")
+                                        session_id=session_id),
+                         # The calling worker's own row: w419 identifies a worker
+                         # caller by its registry-resolved sid, never the stamp.
+                         "mf-fix": _rec(spawned_by=self.MANAGER_SID, status="idle",
+                                        session_id=self.WORKER_SID)}}),
+            encoding="utf-8")
 
     def _run(self, tmp_path, *argv, session, worker=None):
         """Drive the real CLI with a chosen caller identity.
@@ -628,7 +675,7 @@ class TestAWorkerCallerIsNotExempt:
                         session=self.WORKER_SID, worker="mf-fix")
         assert out.returncode == 1
         assert "Traceback" not in out.stderr, out.stderr
-        assert "--yes" in (out.stdout + out.stderr)
+        assert "operator shell" in (out.stdout + out.stderr)
         assert self._status(tmp_path) == "idle"
 
     def test_a_worker_killing_an_unknown_owner_worker_is_refused(self, tmp_path):
@@ -638,17 +685,16 @@ class TestAWorkerCallerIsNotExempt:
         out = self._run(tmp_path, "kill", "victim",
                         session=self.WORKER_SID, worker="mf-fix")
         assert out.returncode == 1
-        assert "unknown owner" in (out.stdout + out.stderr)
+        assert "operator shell" in (out.stdout + out.stderr)
         assert self._status(tmp_path) == "idle"
 
-    def test_a_worker_killing_the_worker_it_spawned_proceeds(self, tmp_path):
-        # session_id=None: no live session to `claude stop`, so the CLI goes
-        # straight to the terminal dead mark.
+    def test_a_worker_killing_the_worker_it_spawned_is_still_refused(self, tmp_path):
+        # w419: a worker is refused outright; owning the target no longer helps.
         self._seed(tmp_path, spawned_by=self.WORKER_SID, session_id=None)
-        out = self._run(tmp_path, "kill", "victim",
+        out = self._run(tmp_path, "kill", "victim", "--yes",
                         session=self.WORKER_SID, worker="mf-fix")
-        assert out.returncode == 0, out.stderr
-        assert self._status(tmp_path) == "dead"
+        assert out.returncode == 1
+        assert self._status(tmp_path) == "idle"
 
     def test_a_human_shell_keeps_its_exemption(self, tmp_path):
         # The other direction. fleet has always been a human-driven CLI;
