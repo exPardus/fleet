@@ -44,7 +44,8 @@ Store operator preferences in the repository's per-repo memory directory, not
 in the fleet home or the interface state files.
 
 The interface state lives in the selected home. Read and append
-`state/interface/board.md` (at most 30 lines: supervisor state, lanes in flight,
+`state/interface/board.md` (at most 30 lines: supervisor state, lanes in flight
+(registry `working` rows with no fresh result for their dispatch and activity within the claim-stale window; stored status alone is not trusted),
 last `THROUGHPUT`, pending operator rulings with their task files, and the last
 relayed wave; "last" means the newest line in log or journal order, not the
 highest wave number, and task files under `done/` or `lens/`, `<lane>-task.md`
