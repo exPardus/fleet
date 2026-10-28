@@ -2286,14 +2286,14 @@ terminal-surface doctrine. That justification is false, and the partition was in
 
 ```
 # at 091d5fa
-$ sed -n '172p;175p' docs/SPEC.md | cut -c1-200
+$ sed -n '172p;175p' docs/SPEC.md | cut -b1-200
 | `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the prob
 | `wait <name...> [--any\|--all] [--timeout]` | `wait_for_workers` @2711: poll-recompute until `NATIVE_TERMINAL_STATUSES` (@1305: idle, dead, dead-suspected, limited, over_ceiling, interrupted). One r
 ```
 
 ```
 # at 091d5fa
-$ grep -n "authoritative" docs/specs/terminal-surface.md | head -2 | cut -c1-170
+$ grep -n "authoritative" docs/specs/terminal-surface.md | head -2 | cut -b1-170
 51:**D2 — the statusline never asserts liveness it did not probe for.** `--stale-ok` returns each worker's **last-committed** status plus `stale_seconds` derived from `
 118:`--json` prints `status_snapshot()` as JSON to stdout. `--stale-ok` selects the probe-free path (no recompute, no lock, no write). Without `--stale-ok`, `--json` prin
 ```
