@@ -3,7 +3,7 @@
 import io
 import json
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -199,3 +199,54 @@ def test_last_throughput_is_last_in_journal_order(tmp_path):
         "THROUGHPUT wave 5 newest\n", encoding="utf-8")
 
     assert fleet._interface_last_throughput(tmp_path) == "THROUGHPUT wave 5 newest"
+
+
+def _iso(moment):
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _plant_outcome(home, name, sid, moment):
+    outcomes = home / "state" / "outcomes"
+    outcomes.mkdir(parents=True, exist_ok=True)
+    (outcomes / f"{name}.jsonl").write_text(json.dumps({
+        "kind": "result", "session_id": sid, "ts": _iso(moment)}) + "\n",
+        encoding="utf-8")
+
+
+def test_board_lanes_excludes_stale_working_rows(tmp_path):
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    fresh = _iso(now - timedelta(minutes=2))
+    old = _iso(now - timedelta(hours=9))
+    _write_registry(tmp_path, {
+        "live-lane": {"status": "working", "session_id": "s1",
+                      "created": old, "last_dispatch_at": fresh,
+                      "last_activity": fresh},
+        "silent-lane": {"status": "working", "session_id": "s2",
+                        "created": old, "last_activity": old},
+        "finished-lane": {"status": "working", "session_id": "s3",
+                          "created": old, "last_dispatch_at": old,
+                          "last_activity": fresh},
+        "idle-lane": {"status": "idle", "session_id": "s4",
+                      "created": old, "last_activity": fresh},
+    })
+    _plant_outcome(tmp_path, "finished-lane", "s3", now - timedelta(minutes=1))
+
+    assert fleet._interface_lanes(tmp_path, now=now) == "live-lane"
+
+
+def test_board_lanes_none_when_every_working_row_is_dead(tmp_path):
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    old = _iso(now - timedelta(hours=9))
+    _write_registry(tmp_path, {
+        "ghost": {"status": "working", "session_id": "s1",
+                  "created": old, "last_activity": old}})
+
+    assert fleet._interface_lanes(tmp_path, now=now) == "none"
+
+
+def test_board_lanes_unreadable_activity_is_unmeasured(tmp_path):
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    _write_registry(tmp_path, {
+        "odd": {"status": "working", "session_id": "s1"}})
+
+    assert fleet._interface_lanes(tmp_path, now=now) == "odd (activity UNMEASURED)"
