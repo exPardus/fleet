@@ -1379,7 +1379,7 @@ def test_checked_shutdown_reachable_cli_helpers_exclude_state_writers():
         "_codex_paged_thread_read", "_codex_record_route",
         "_codex_rejected_send_public_header", "_codex_restore_host_identity",
         "_codex_restore_mail_snapshot", "_codex_supervisor_binding",
-        "_is_codex_record", "_is_supervisor_shaped",
+        "_is_codex_record", "_is_pi_record", "_is_supervisor_shaped",
         "_mail_provider_registration_is_exclusive", "_mail_source_is_current",
         "_provider_codex_id", "_registration_path_present", "_registration_token",
         "_registry_corrupt_reason", "_restored_continuation_context",

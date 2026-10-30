@@ -1014,15 +1014,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14013) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15092) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18524) -- upgrades need complete records.
-      * `_acting_worker_identity` (:4474) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5183) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15340) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18402) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8420) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20150) -- render the release explanation.
+      * `_sweep_husks` (:14097) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15176) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18611) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4543) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5252) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15424) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18489) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8502) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20238) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -2207,13 +2207,63 @@ def _codex_substrate(model):
     return "codex" if _codex_model_slug(model) is not None else None
 
 
+_PI_MODEL_RE = re.compile(r"^pi:(?P<bare>.+)$")
+_PI_FREE_SLUG_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:free$")
+
+
+def _pi_model_slug(model):
+    if not isinstance(model, str):
+        return None
+    match = _PI_MODEL_RE.match(model)
+    return match.group("bare") if match else None
+
+
+def _pi_substrate(model):
+    slug = _pi_model_slug(model)
+    return f"pi/{slug}" if slug is not None else None
+
+
+def _require_pi_free_model(model) -> str:
+    slug = _pi_model_slug(model)
+    if slug is None or not _PI_FREE_SLUG_RE.match(slug):
+        raise FleetCliError(
+            f"pi model refused: {model!r} -- pi lanes take only exact "
+            "pi:<vendor>/<model>:free OpenRouter slugs")
+    return slug
+
+
+def _require_pi_key() -> None:
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return
+    path = openrouter_key_path()
+    try:
+        path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise NativeDispatchError(
+            "pi model refused: no OpenRouter key (set OPENROUTER_API_KEY or "
+            f"fill {path.as_posix()}): {exc.strerror or exc}")
+
+
+def _is_pi_record(record) -> bool:
+    return (isinstance(record, dict)
+            and isinstance(record.get("substrate"), str)
+            and record["substrate"].startswith("pi/"))
+
+
 def _substrate_for_model(model):
     """The registry substrate for a `--model` value across every substrate."""
-    return _openrouter_substrate(model) or _codex_substrate(model)
+    return (_openrouter_substrate(model) or _codex_substrate(model)
+            or _pi_substrate(model))
 
 
 def _is_codex_record(record) -> bool:
-    return isinstance(record, dict) and record.get("substrate") == "codex"
+    return isinstance(record, dict) and (
+        record.get("substrate") == "codex" or _is_pi_record(record))
+
+
+def _external_lane_event_substrate(record) -> str:
+    return "pi" if _is_pi_record(record) else "codex"
 
 
 def _codex_record_route(record) -> str | None:
@@ -3729,19 +3779,27 @@ def _mcx_reconcile_saved_settings(name: str, record: dict) -> None:
                 f"row {wanted!r} -- refusing to steer")
 
 
+def _pi_wrapper_argv() -> list:
+    return [sys.executable, (Path(__file__).resolve().parent / "fleet_pi.py").as_posix()]
+
+
 def _mcx_run(record, args, run=subprocess.run, which=shutil.which,
              input_text=None, timeout=MCX_VERB_TIMEOUT_SECONDS):
     """Run one mcx verb against the record's job directory."""
-    exe = which("mcx")
-    if not exe:
-        raise FleetCliError(
-            "mcx not found on PATH (the multi-codex helper; see "
-            "skills/fleet/SKILL.md)")
+    if _is_pi_record(record):
+        base = _pi_wrapper_argv()
+    else:
+        exe = which("mcx")
+        if not exe:
+            raise FleetCliError(
+                "mcx not found on PATH (the multi-codex helper; see "
+                "skills/fleet/SKILL.md)")
+        base = [exe]
     cwd = record.get("cwd")
     run_cwd = cwd if cwd and Path(cwd).is_dir() else None
     try:
         settings = _mcx_record_env(record)
-        return run([exe, *args], cwd=run_cwd,
+        return run([*base, *args], cwd=run_cwd,
                    env=_mcx_env(record.get("cwd") or ".", **settings),
                    capture_output=True, text=True, encoding="utf-8",
                    errors="replace", input=input_text, timeout=timeout)
@@ -3828,6 +3886,8 @@ def _mcx_probe(record, run=subprocess.run, which=shutil.which):
             encoding="utf-8").strip().lower()
     except (OSError, UnicodeError):
         state = None
+    if _is_pi_record(record) and state in {"starting", "running"}:
+        state = None
     if state in {"starting", "running"}:
         return "working"
     if state in {"done", "completed", "complete", "idle"}:
@@ -3867,10 +3927,19 @@ def dispatch_codex(name, cwd, prompt_body, model, mode="dontask", effort="medium
         raise NativeDispatchError(
             f"invalid worker name: {name!r} (must match {NAME_RE.pattern})")
     bare = _codex_model_slug(model)
+    pi_lane = False
+    if bare is None and _pi_model_slug(model) is not None:
+        try:
+            bare = _require_pi_free_model(model)
+        except FleetCliError as exc:
+            raise NativeDispatchError(str(exc)) from exc
+        _require_pi_key()
+        pi_lane = True
     if bare is None:
         raise NativeDispatchError(
-            f"dispatch_codex requires a codex:<model> string, got {model!r}")
-    exe = _require_mcx(which)
+            "dispatch_codex requires a codex:<model> or pi:<model> string, "
+            f"got {model!r}")
+    launcher = _pi_wrapper_argv() if pi_lane else [_require_mcx(which)]
     approval = _mcx_approval(mode)
     if effort is None:
         effort = "medium"
@@ -3885,7 +3954,7 @@ def dispatch_codex(name, cwd, prompt_body, model, mode="dontask", effort="medium
     except OSError as exc:
         raise NativeDispatchError(f"task-file write failed: {exc}") from exc
     tiny_prompt = f"Read {task_path.as_posix()} and follow it exactly."
-    argv = [exe, "spawn", "-m", bare, "-r", effort, tiny_prompt]
+    argv = [*launcher, "spawn", "-m", bare, "-r", effort, tiny_prompt]
     try:
         proc = run(argv, cwd=str(cwd), env=_mcx_env(cwd, approval=approval,
                                                     effort=effort),
@@ -4456,7 +4525,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18524`), because legacy upgrades also require a complete registry.
+    (`:18611`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -7067,6 +7136,12 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     # Treat a quoted empty --model as omission before policy and dispatch.
     args.model = _normalise_model(getattr(args, "model", None))
     _enforce_tier_policy("worker", args.model)
+    if _pi_model_slug(args.model) is not None:
+        _require_pi_free_model(args.model)
+        try:
+            _require_pi_key()
+        except NativeDispatchError as exc:
+            raise FleetCliError(str(exc)) from exc
 
     # Warn at dispatch about hard denials, which may leave a worker waiting for
     # permission. This is advisory: a valid restricted task must remain launchable,
@@ -7108,6 +7183,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     codex_adapter = getattr(args, "codex_adapter", None) or "native"
     if codex_adapter not in {"mcx", "native"}:
         raise FleetCliError(f"unknown Codex adapter: {codex_adapter!r}")
+    if codex_slug is None and _pi_model_slug(args.model) is not None:
+        codex_slug = _pi_model_slug(args.model)
+        codex_adapter = "mcx"
     codex_operation_id = (
         f"worker-{args.name}-thread-{uuid.uuid4()}"
         if codex_slug is not None and codex_adapter == "native" else None)
@@ -8146,7 +8224,7 @@ def _cmd_spawn_codex_mcx(args, cwd, task, prompt, record,
                 rec["last_activity"] = now_iso()
                 save_registry(data)
                 _append_event_quiet("turn_started", name, mcx_id=mcx_id,
-                                    substrate="codex")
+                                    substrate=_external_lane_event_substrate(rec))
 
     if not _commit_launched_turn(_commit_codex_stamp, sleep=sleep):
         print(f"fleet: {name}: could not commit mcx worker {mcx_id} to the "
@@ -8155,6 +8233,10 @@ def _cmd_spawn_codex_mcx(args, cwd, task, prompt, record,
               file=sys.stderr)
         return 1
 
+    if _pi_model_slug(args.model) is not None:
+        print(f"model: {args.model} (via fleet_pi)")
+        print(f"{name} mcx {mcx_id} (pi worker)")
+        return 0
     print(f"model: codex:{_codex_model_slug(args.model)} (via mcx)")
     print(f"{name} mcx {mcx_id} (codex worker)")
     return 0
@@ -10630,7 +10712,7 @@ def _cmd_send_codex(name: str, message: str,
             r["turns"] = r.get("turns", 0) + 1
             save_registry(data)
             append_event("steered", name, mcx_id=rec["mcx_id"],
-                         substrate="codex")
+                         substrate=_external_lane_event_substrate(r))
     print(f"{name}: steered via mcx ({rec['mcx_id']}) -- steering RESTARTED "
           "the run on the same Codex thread; re-arm this lane's observer")
     return 0
@@ -11609,7 +11691,7 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
         return _cmd_respawn_codex_native(args, before)
     _require_mcx_codex_record(name, before, "respawn")
     model = before.get("model")
-    if _codex_model_slug(model) is None:
+    if _codex_model_slug(model) is None and _pi_model_slug(model) is None:
         raise FleetCliError(
             f"{name}: codex record without a codex:<model> model "
             f"({model!r}) -- kill it and spawn a replacement")
@@ -11660,10 +11742,12 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
             rec["last_dispatch_at"] = now_iso()
             rec["last_activity"] = now_iso()
             save_registry(data)
-            append_event("respawned", name, mcx_id=new_id, substrate="codex")
+            lane_kind = _external_lane_event_substrate(rec)
+            append_event("respawned", name, mcx_id=new_id, substrate=lane_kind)
             append_event("turn_started", name, mcx_id=new_id,
-                         substrate="codex")
-    print(f"{name} mcx {new_id} (codex worker, context reset)")
+                         substrate=lane_kind)
+    print(f"{name} mcx {new_id} ({'pi' if _is_pi_record(before) else 'codex'} "
+          "worker, context reset)")
     return 0
 
 
@@ -12362,7 +12446,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12277` / `cmd_respawn:11554`, before
+    # resolution that runs from `cmd_kill:12361` / `cmd_respawn:11636`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12393,9 +12477,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12277` / `cmd_respawn:11554`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12361` / `cmd_respawn:11636`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11575-11582` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11657-11664` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -16417,6 +16501,9 @@ def _enforce_tier_policy(role: str, explicit_model=None, policy: dict = None):
     omitted model under ``forbid-default`` would silently select Anthropic.
     """
     explicit_model = _normalise_model(explicit_model)
+    if _pi_model_slug(explicit_model) is not None and role != "worker":
+        raise FleetCliError(
+            f"{role} spawn refused: pi: models run worker lanes only")
     policy = policy or read_tier_policy()
     unterminated = policy.get("_unterminated_tier_policy")
     if unterminated:
@@ -17366,7 +17453,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1088`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5171`) applies here too. An unreadable registry
+    rule for the view path (`:5240`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17437,10 +17524,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4283, :4318, :4348, :4387, :4424, :4481, :4560, :5579, :12380, :12543, :12808, :13033, :13069, :13311, :13312, :13401, :13411, :13422, :13520, :14039, :17389, :20304, :20316, :20465, :24242, :24243, :24345, :24410, :24472, :25436, :25438, :25476, :26004, :28910`).
+    sites that already key on the union (`:4352, :4387, :4417, :4456, :4493, :4550, :4629, :5648, :12464, :12627, :12892, :13117, :13153, :13395, :13396, :13485, :13495, :13506, :13604, :14123, :17476, :20392, :20404, :20553, :24330, :24331, :24433, :24498, :24560, :25524, :25526, :25564, :26092, :28998`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10689, :11425, :15678, :26937. This makes union identity
+    OWN prior sid alone: :10771, :11507, :15762, :27025. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18146,8 +18233,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10689, :11425, :15678,
-    # :26937) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10771, :11507, :15762,
+    # :27025) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18155,7 +18242,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1088`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17363`).
+        # names this gate as its reason (`:17450`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18517,7 +18604,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14010`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14094`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19064,7 +19151,8 @@ def _wave_substrate_of_record(record):
         return None
     substrate = record.get("substrate")
     if substrate in {"claude", "codex"} or (
-            isinstance(substrate, str) and substrate.startswith("openrouter/")):
+            isinstance(substrate, str)
+            and substrate.startswith(("openrouter/", "pi/"))):
         return substrate
     # Native background records predate the explicit substrate field;
     # their dispatch kind is the durable Claude marker.
