@@ -295,3 +295,41 @@ class TestWatchdogAndControl:
         (job / "state").write_text("running\n")
         (job / "pid").write_text("999999999\n")
         assert wrap(["result", job_id], lane).returncode == 1
+
+
+class TestChildEnv:
+    def test_pi_gets_an_allowlisted_environment(self, tmp_path, monkeypatch,
+                                                lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        monkeypatch.setenv("UNRELATED_SECRET_TOKEN", "x")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+        job_id, job = spawn(lane)
+        assert wait_terminal(job) == "done"
+        keys = set(calls(log)[0]["env_keys"])
+        assert "UNRELATED_SECRET_TOKEN" not in keys
+        assert "AWS_SECRET_ACCESS_KEY" not in keys
+        assert {"PATH", "OPENROUTER_API_KEY", "PI_CODING_AGENT_DIR",
+                "FLEET_PI_FAKE_LOG"} <= keys
+        allowed = {"PATH", "HOME", "LANG", "TERM", "TMPDIR",
+                   "OPENROUTER_API_KEY", "PI_CODING_AGENT_DIR",
+                   "PI_SKIP_VERSION_CHECK", "PWD", "SHLVL", "_", "LC_CTYPE"}
+        assert all(k in allowed or k.startswith("FLEET_PI_") for k in keys), keys
+
+    def test_full_env_opt_out(self, tmp_path, monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        monkeypatch.setenv("UNRELATED_SECRET_TOKEN", "x")
+        monkeypatch.setenv("FLEET_PI_FULL_ENV", "1")
+        job_id, job = spawn(lane)
+        assert wait_terminal(job) == "done"
+        assert "UNRELATED_SECRET_TOKEN" in calls(log)[0]["env_keys"]
+
+
+class TestWindowsRefusal:
+    def test_wrapper_refuses_on_windows(self, monkeypatch, capsys):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        import fleet_platform
+
+        monkeypatch.setattr(fleet_pi, "PLATFORM", fleet_platform._WindowsPlatform())
+        assert fleet_pi.main(["list"]) == 1
+        assert "unsupported on Windows" in capsys.readouterr().err

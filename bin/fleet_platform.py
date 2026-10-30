@@ -51,6 +51,10 @@ class _WindowsPlatform:
     is_linux = False
     is_darwin = False
 
+    def require_pi_lanes(self) -> None:
+        raise UnsupportedPlatformError(
+            "pi lanes are unsupported on Windows (POSIX process groups and signals)")
+
     def memory_available_mb(self) -> int:
         """Windows has no portable MemAvailable implementation in Fleet."""
         raise UnsupportedPlatformError("available memory is unsupported on Windows")
@@ -145,6 +149,9 @@ class _PosixPlatform:
     is_windows = False
     is_linux = sys.platform.startswith("linux")
     is_darwin = sys.platform == "darwin"
+
+    def require_pi_lanes(self) -> None:
+        return None
 
     def memory_available_mb(self) -> int:
         """Read Linux MemAvailable; other POSIX platforms are explicit gaps."""

@@ -81,6 +81,28 @@ class TestHelpers:
             {"substrate": "pi/" + SLUG}) == "pi/" + SLUG
 
 
+class TestPlatformAndDoctor:
+    def test_windows_refuses_pi_lanes(self, monkeypatch):
+        monkeypatch.setattr(fleet, "PLATFORM", fleet._WindowsPlatform())
+        with pytest.raises(fleet.FleetCliError, match="unsupported on Windows"):
+            fleet._require_pi_free_model(MODEL)
+
+    def test_doctor_does_not_demand_mcx_for_pi_rows(self):
+        workers = {"p": {"substrate": "pi/" + SLUG, "dispatch_kind": "mcx",
+                         "mcx_id": "abcd1234", "session_id": None}}
+        name, ok, detail = fleet._doctor_check_codex_adapters(
+            workers, which=lambda _: None)
+        assert ok, detail
+        assert "mcx helper unavailable" not in detail and "pi=1" in detail
+
+    def test_doctor_still_flags_codex_mcx_rows(self):
+        workers = {"c": {"substrate": "codex", "dispatch_kind": "mcx",
+                         "mcx_id": "abcd1234", "session_id": None}}
+        _name, ok, detail = fleet._doctor_check_codex_adapters(
+            workers, which=lambda _: None)
+        assert not ok and "mcx helper unavailable" in detail
+
+
 class TestSpawn:
     def test_spawn_records_a_pi_row(self, pi_home, monkeypatch):
         log, worktree, rec = _spawn(pi_home, monkeypatch, [ok_run("hello")])
@@ -195,7 +217,7 @@ class TestVerbs:
         out = capsys.readouterr().out
         assert "tool bash" in out and "peekable" in out
 
-    def test_send_resumes_the_pi_session(self, pi_home, monkeypatch):
+    def test_send_resumes_the_pi_session(self, pi_home, monkeypatch, capsys):
         log, worktree, rec = _spawn(pi_home, monkeypatch,
                                     [ok_run("one"), ok_run("two")])
         job = _job(worktree, rec)
@@ -213,6 +235,8 @@ class TestVerbs:
         assert "--continue" in second and second[-1] == "and now this"
         row = fleet.load_registry()["workers"]["pi1"]
         assert row["turns"] == 2
+        out = capsys.readouterr().out
+        assert "same pi session" in out and "Codex" not in out
 
     def test_send_refuses_a_running_turn(self, pi_home, monkeypatch):
         run = {"events": [{"type": "agent_start"}, {"sleep": 30}]}

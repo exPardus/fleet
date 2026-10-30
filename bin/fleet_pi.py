@@ -44,6 +44,8 @@ import time
 import uuid
 from pathlib import Path
 
+from fleet_platform import PLATFORM, UnsupportedPlatformError
+
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:free$")
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
 EFFORTS = ("low", "medium", "high", "xhigh")
@@ -108,6 +110,19 @@ def job_dir(job_id: str) -> Path:
     if not JOB_ID_RE.match(job_id or ""):
         raise WrapperError(f"unknown worker: {job_id!r}")
     return jobs_root() / job_id
+
+
+ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "TERM", "TMPDIR", "OPENROUTER_API_KEY")
+
+
+def child_env() -> dict:
+    """The environment pi (and the shell it runs) receives: an allowlist, so
+    unrelated secrets in the operator's session never reach a free model's
+    tools. FLEET_PI_FULL_ENV=1 passes everything."""
+    if os.environ.get("FLEET_PI_FULL_ENV") == "1":
+        return dict(os.environ)
+    return {k: v for k, v in os.environ.items()
+            if k in ENV_ALLOWLIST or k.startswith("FLEET_PI_")}
 
 
 def find_pi() -> str:
@@ -369,7 +384,7 @@ class Runner:
     def run_once(self, prompt: str, resume: bool) -> Outcome:
         slug = check_slug(self.slug)
         agent = write_agent_config(self.job, slug)
-        env = dict(os.environ)
+        env = child_env()
         env["OPENROUTER_API_KEY"] = load_key()
         env["PI_CODING_AGENT_DIR"] = agent.as_posix()
         env.setdefault("PI_SKIP_VERSION_CHECK", "1")
@@ -588,6 +603,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        try:
+            PLATFORM.require_pi_lanes()
+        except UnsupportedPlatformError as exc:
+            raise WrapperError(str(exc))
         return args.fn(args)
     except WrapperError as exc:
         print(f"fleet_pi: {exc}", file=sys.stderr)

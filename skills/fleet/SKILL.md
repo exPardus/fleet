@@ -143,8 +143,8 @@ agent through `bin/fleet_pi.py`, which follows mcx's contract, so `status`,
 `interrupt`, `kill`, `respawn`, wave accounting and LANE-DONE mail work as for
 an explicit mcx lane. Provider failures and stalls read `dead`, never `idle`:
 the outcome comes from pi's events, not its exit code. Set
-`FLEET_PI_STALL_MINUTES` (default 5) to tune the no-event watchdog. A pi worker
-cannot commit; `fleet land` commits its dirty worktree. Default model order for free lanes: `thinkingmachines/inkling-small:free`,
+`FLEET_PI_STALL_MINUTES` (default 5) to tune the no-event watchdog. pi runs unsandboxed with a
+scrubbed env (see SPEC §6.2a); `fleet land` commits its dirty worktree. Default model order for free lanes: `thinkingmachines/inkling-small:free`,
 `nvidia/nemotron-3.5-super-vl:free`, `thinkingmachines/inkling:free`,
 `dots-studio/dots-3-note-preview:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`,
 `poolside/laguna-s-2.1:free`. See SPEC §6.2a for retry, telemetry and

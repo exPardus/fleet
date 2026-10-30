@@ -6,7 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-FAKE_PI_SOURCE = Path(__file__).parent / "fixtures" / "fake_pi.py"
+FLEET_PI_FAKE_SOURCE = Path(__file__).parent / "fixtures" / "fake_pi.py"
 SLUG = "acme/tiny-1:free"
 KEY = "test-key-not-real-0000"
 
@@ -51,14 +51,14 @@ def install_fake_pi(tmp_path, monkeypatch, runs):
     scenario = tmp_path / "pi-scenario.json"
     scenario.write_text(json.dumps({"runs": runs}), encoding="utf-8")
     fake = tmp_path / "fake-pi"
-    fake.write_text(f"#!{sys.executable}\n" + FAKE_PI_SOURCE.read_text(
+    fake.write_text(f"#!{sys.executable}\n" + FLEET_PI_FAKE_SOURCE.read_text(
         encoding="utf-8").split("\n", 1)[1], encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     log = tmp_path / "pi-calls.jsonl"
     monkeypatch.setenv("FLEET_PI_BIN", str(fake))
-    monkeypatch.setenv("FAKE_PI_SCENARIO", str(scenario))
-    monkeypatch.setenv("FAKE_PI_STATE", str(tmp_path / "pi-count"))
-    monkeypatch.setenv("FAKE_PI_LOG", str(log))
+    monkeypatch.setenv("FLEET_PI_FAKE_SCENARIO", str(scenario))
+    monkeypatch.setenv("FLEET_PI_FAKE_STATE", str(tmp_path / "pi-count"))
+    monkeypatch.setenv("FLEET_PI_FAKE_LOG", str(log))
     monkeypatch.setenv("OPENROUTER_API_KEY", KEY)
     monkeypatch.setenv("FLEET_PI_RESTART_PAUSE_SECONDS", "0")
     monkeypatch.setenv("FLEET_PI_STALL_MINUTES", "2")
