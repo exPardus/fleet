@@ -134,6 +134,22 @@ reused by respawn/steer; a caller's `MCX_APPROVAL` cannot weaken Fleet's mode.
 - An explicit mcx worker cannot commit: mcx runs `codex exec` under the default `workspace-write` sandbox, and a worktree's gitdir lives outside the worker's cwd, so `fleet land` commits the dirty worktree on the worker's behalf.
 - Do not use mcx to commit, steer unrelated workers, or create a second worker for a lane without an explicit split.
 
+## pi lanes
+
+Dispatch a free-model lane with `fleet spawn NAME --dir PATH --model pi:<vendor>/<model>:free --task "..."`.
+Fleet refuses any slug that does not end in `:free`. The lane runs the pi coding
+agent through `bin/fleet_pi.py`, which follows mcx's contract, so `status`,
+`peek`, `result`, `send` (resumes the same pi session; a running turn refuses),
+`interrupt`, `kill`, `respawn`, wave accounting and LANE-DONE mail work as for
+an explicit mcx lane. Provider failures and stalls read `dead`, never `idle`:
+the outcome comes from pi's events, not its exit code. Set
+`FLEET_PI_STALL_MINUTES` (default 5) to tune the no-event watchdog. pi runs unsandboxed with a
+scrubbed env (see SPEC §6.2a); `fleet land` commits its dirty worktree. Default model order for free lanes: `thinkingmachines/inkling-small:free`,
+`nvidia/nemotron-3.5-super-vl:free`, `thinkingmachines/inkling:free`,
+`dots-studio/dots-3-note-preview:free`, `nvidia/nemotron-3-ultra-550b-a55b:free`,
+`poolside/laguna-s-2.1:free`. See SPEC §6.2a for retry, telemetry and
+per-model settings.
+
 ## CLI verbs
 
 Each line below is derived from `build_parser()` in `bin/fleet.py`.
