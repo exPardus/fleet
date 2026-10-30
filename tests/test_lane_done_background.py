@@ -163,6 +163,32 @@ def test_queued_wake_suppresses(home, transcript, sends):
     assert sends == []
 
 
+def _attached_notice(transcript, task, body):
+    transcript._add({"type": "attachment", "attachment": {
+        "type": "queued_command",
+        "prompt": f"<task-notification>\n<task-id>{task}</task-id>\n{body}\n"
+                  f"</task-notification>"}})
+
+
+def test_queued_command_attachment_completes_task(home, transcript, sends):
+    transcript.monitor("bwatch")
+    transcript.assistant()
+    assert fleet._lane_background_live("lane", LANE_SID) == ["bwatch"]
+    _attached_notice(transcript, "bwatch", "<status>completed</status>")
+    transcript.assistant()
+    assert fleet._lane_background_live("lane", LANE_SID) == []
+    assert _stop()
+
+
+def test_queued_command_attachment_content_list(home, transcript, sends):
+    transcript.bash_background("bsuite")
+    transcript._add({"type": "attachment", "attachment": {
+        "type": "queued_command", "content": [
+            {"type": "text", "text": "<task-notification><task-id>bsuite</task-id>"
+                                     "<status>completed</status></task-notification>"}]}})
+    assert fleet._lane_background_live("lane", LANE_SID) == []
+
+
 def test_quoted_marker_text_is_not_a_task(home, transcript, sends):
     transcript.result({"stdout": "Monitor started (task bfake, expires in 15m)"},
                       "Command running in background with ID: bfake2.")

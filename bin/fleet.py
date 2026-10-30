@@ -28937,6 +28937,16 @@ _TASK_ID_RE = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>")
 def _entry_texts(entry):
     if isinstance(entry.get("content"), str):
         return [entry["content"]]
+    attachment = entry.get("attachment")
+    if isinstance(attachment, dict):
+        if isinstance(attachment.get("prompt"), str):
+            return [attachment["prompt"]]
+        content = attachment.get("content")
+        if isinstance(content, str):
+            return [content]
+        if isinstance(content, list):
+            return [p["text"] for p in content if isinstance(p, dict)
+                    and isinstance(p.get("text"), str)]
     message = entry.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
