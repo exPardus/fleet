@@ -26,6 +26,12 @@ Hard rules, enforced here and again in fleet:
     per-job pi agent dir; pi's install telemetry setting is left at default
     because some models 403 without the attribution headers it controls.
 
+Every pi run executes inside bubblewrap (`bwrap`): only the lane worktree, the
+job directory and a private /tmp and HOME are writable, system dirs and the
+toolchain are read-only, and the rest of $HOME (keys, other repos) does not
+exist inside. If bwrap is missing or fails its probe the lane is refused;
+there is no unsandboxed fallback.
+
 The OpenRouter key is read from the environment or ~/.config/openrouter/env
 and handed to the pi child only; it is never printed or written.
 """
@@ -156,6 +162,143 @@ def load_key() -> str:
     except OSError:
         pass
     raise WrapperError("OPENROUTER_API_KEY missing: set it or fill the key file")
+
+
+# ---------------------------------------------------------------------------
+# bubblewrap sandbox (POSIX/Linux; refuse when unavailable, never fall back)
+# ---------------------------------------------------------------------------
+
+def find_bwrap() -> str:
+    explicit = os.environ.get("FLEET_PI_BWRAP")
+    found = explicit or shutil.which("bwrap")
+    if not found:
+        raise WrapperError(
+            "bwrap not found: pi lanes run only inside bubblewrap "
+            "(install the bubblewrap package); refusing to run unsandboxed")
+    return found
+
+
+def _real(path) -> str:
+    return os.path.realpath(str(path))
+
+
+def _install_root(pi_bin: str) -> str:
+    """The directory holding the pi install: the parent of the node_modules
+    that contains the resolved pi entry point, else its own directory."""
+    real = Path(_real(pi_bin))
+    parts = real.parts
+    if "node_modules" in parts:
+        return Path(*parts[:parts.index("node_modules")]).as_posix()
+    return real.parent.as_posix()
+
+
+def _git_dirs(cwd: str):
+    """(worktree gitdir, common dir) for a linked worktree, else (None, None)
+    or (.git dir, None) for a plain checkout."""
+    dotgit = Path(cwd) / ".git"
+    if dotgit.is_dir():
+        return dotgit.as_posix(), None
+    text = _read(dotgit)
+    if not text or not text.startswith("gitdir:"):
+        return None, None
+    gitdir = Path(text.split(":", 1)[1].strip())
+    if not gitdir.is_absolute():
+        gitdir = Path(cwd) / gitdir
+    gitdir = Path(_real(gitdir))
+    common = _read(gitdir / "commondir")
+    if common:
+        return gitdir.as_posix(), _real(gitdir / common)
+    return gitdir.as_posix(), None
+
+
+def _sandbox_base_args() -> list:
+    args = []
+    for top in ("/usr", "/etc"):
+        if os.path.isdir(top):
+            args += ["--ro-bind", top, top]
+    for top in ("/bin", "/sbin", "/lib", "/lib32", "/lib64"):
+        if os.path.islink(top):
+            args += ["--symlink", os.readlink(top), top]
+        elif os.path.isdir(top):
+            args += ["--ro-bind", top, top]
+    # /etc/resolv.conf is usually a symlink into /run (systemd-resolved).
+    resolv = _real("/etc/resolv.conf")
+    if resolv.startswith("/run/") and os.path.exists(resolv):
+        args += ["--ro-bind", os.path.dirname(resolv), os.path.dirname(resolv)]
+    args += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+             "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+             "--unshare-cgroup-try", "--new-session", "--die-with-parent"]
+    return args
+
+
+_probe_ok = set()
+
+
+def probe_bwrap(bwrap: str) -> None:
+    """Run a trivial command in the real sandbox shape; raise if it fails."""
+    if bwrap in _probe_ok:
+        return
+    try:
+        proc = subprocess.run(
+            [bwrap, *_sandbox_base_args(), "--clearenv", "--", "/usr/bin/true"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WrapperError(
+            f"bwrap probe failed ({exc}); refusing to run pi unsandboxed")
+    if proc.returncode != 0:
+        raise WrapperError(
+            "bwrap probe failed (" + (proc.stderr.strip()[:200]
+                                      or f"exit {proc.returncode}")
+            + "); refusing to run pi unsandboxed")
+    _probe_ok.add(bwrap)
+
+
+def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
+                    bwrap: str | None = None) -> list:
+    """Wrap `cmd` (cmd[0] is pi) in bwrap. Pure: no filesystem writes.
+
+    Writable: cwd, the job dir, a private HOME under the job dir, /tmp.
+    Read-only: system dirs, the pi install, the node runtime, uv and its
+    python builds, and the repository's common git dir. Nothing else in the
+    real HOME is mounted."""
+    bwrap = bwrap or find_bwrap()
+    home = (job / "home").as_posix()
+    env = dict(env)
+    path_dirs = []
+    ro = [_install_root(cmd[0])]
+    node = shutil.which("node", path=env.get("PATH"))
+    if node:
+        node_real = Path(_real(node))
+        ro.append(node_real.parent.parent.as_posix())
+        path_dirs.append(node_real.parent.as_posix())
+    uv = shutil.which("uv", path=env.get("PATH"))
+    if uv:
+        ro.append(uv)
+        path_dirs.append(os.path.dirname(uv))
+        uv_python = Path.home() / ".local" / "share" / "uv" / "python"
+        if uv_python.is_dir():
+            ro.append(uv_python.as_posix())
+            env["UV_PYTHON_INSTALL_DIR"] = uv_python.as_posix()
+        env["UV_CACHE_DIR"] = home + "/.cache/uv"
+    gitdir, common = _git_dirs(cwd)
+    if common:
+        ro.append(common)
+    args = [bwrap, *_sandbox_base_args()]
+    seen = set()
+    for path in ro:
+        if path not in seen and os.path.exists(path):
+            seen.add(path)
+            args += ["--ro-bind", path, path]
+    rw = [cwd, job.as_posix()] + ([gitdir] if gitdir else [])
+    for path in rw:
+        args += ["--bind", path, path]
+    args += ["--chdir", cwd, "--clearenv"]
+    env["HOME"] = home
+    env["TMPDIR"] = "/tmp"
+    env["PATH"] = ":".join(path_dirs + ["/usr/local/bin", "/usr/bin", "/bin"])
+    for key, value in env.items():
+        args += ["--setenv", key, value]
+    return args + ["--", *cmd]
 
 
 # ---------------------------------------------------------------------------
@@ -391,8 +534,13 @@ class Runner:
         outcome = Outcome(slug)
         self.stalled = False
         self.last_event = time.monotonic()
+        (self.job / "home").mkdir(exist_ok=True)
+        bwrap = find_bwrap()
+        probe_bwrap(bwrap)
+        argv = sandbox_command(self.command(slug, prompt, resume), self.cwd,
+                               self.job, env, bwrap)
         self.proc = subprocess.Popen(
-            self.command(slug, prompt, resume), cwd=self.cwd, env=env,
+            argv, cwd=self.cwd, env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, start_new_session=True)
 
@@ -499,6 +647,7 @@ def cmd_spawn(args) -> int:
     if effort not in EFFORTS:
         raise WrapperError(f"unsupported effort: {effort!r}")
     find_pi()
+    probe_bwrap(find_bwrap())
     load_key()
     jobs_root().mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex[:8]

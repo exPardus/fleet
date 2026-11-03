@@ -264,18 +264,34 @@ differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:
 - **Follow-ups.** `fleet send` runs `steer`, which resumes the same pi session
   (`--continue`, same `--session-dir`) with the message; a live turn refuses, as
   for mcx. `interrupt`/`kill` call `stop`; `respawn` starts a fresh session.
-- **Execution.** pi has no sandbox; `mcx_approval` is recorded for status but
-  does not restrict a pi lane. Context files are off (`-nc`) unless
-  `FLEET_PI_CONTEXT_FILES` is set. The OpenRouter key comes from
+- **Execution.** `mcx_approval` is recorded for status but does not widen or
+  narrow a pi lane; the sandbox below is the boundary. Context files are off
+  (`-nc`) unless `FLEET_PI_CONTEXT_FILES` is set. The OpenRouter key comes from
   `OPENROUTER_API_KEY` or the OpenRouter key file and reaches only the pi child.
   pi is found via `FLEET_PI_BIN`, then a user-local install, then `PATH`.
-- **Landing.** `fleet land` commits a pi lane's dirty worktree on its behalf. The
-  lane itself has a shell and could run git, so treat it as untrusted code
-  execution, not a sandboxed committer.
-- **Unsandboxed.** pi runs with the user's full privileges. The child
-  environment is scrubbed to an allowlist (`PATH`, `HOME`, `LANG`, `TERM`,
-  `TMPDIR`, `OPENROUTER_API_KEY`, `FLEET_PI_*`) unless `FLEET_PI_FULL_ENV=1`.
-- **Platform.** POSIX only; fleet and the wrapper refuse pi lanes on Windows.
+- **Sandbox (bubblewrap).** Every pi run, including `steer` turns and the
+  restart after a provider failure, executes under `bwrap` with
+  `--die-with-parent --unshare-pid --new-session --unshare-ipc --unshare-uts
+  --unshare-cgroup-try` and `--clearenv` plus one `--setenv` per allowlisted
+  variable. Network stays on (OpenRouter). Writable: the lane worktree, the
+  job directory, a private `HOME` inside the job directory (which also holds the
+  uv cache) and a private `/tmp`; the worktree's own gitdir (outside the
+  worktree) is writable too. Read-only: `/usr`, `/etc`, the `/bin` `/lib*`
+  links, the pi install, the Node runtime, `uv` with its Python builds, and the
+  repository's common git dir (so `git status`/`diff`/`log` work, while commits
+  and ref writes fail; `fleet land` commits). Everything else under the real
+  `$HOME` -- `~/.ssh`, `~/.config`, other repositories -- is not mounted and does
+  not exist inside. If `bwrap` is missing (`FLEET_PI_BWRAP` overrides the lookup)
+  or fails a probe in the same flag shape, `spawn` exits 1 and a later turn
+  marks the job `failed`; there is no unsandboxed fallback and no escape
+  variable. Fleet `doctor` reports a pi row on a host without `bwrap`.
+- **Landing.** `fleet land` commits a pi lane's dirty worktree on its behalf; the
+  lane's own commits fail because the common git dir is read-only.
+- **Environment.** The child environment is scrubbed to an allowlist (`PATH`,
+  `HOME`, `LANG`, `TERM`, `TMPDIR`, `OPENROUTER_API_KEY`, `FLEET_PI_*`) unless
+  `FLEET_PI_FULL_ENV=1`; inside the sandbox `HOME`, `TMPDIR` and `PATH` are
+  rewritten to the private and read-only locations above.
+- **Platform.** POSIX/Linux only (bubblewrap); fleet and the wrapper refuse pi lanes on Windows, and on any host without a working `bwrap`.
 
 **Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).
 

@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 FLEET_PI_FAKE_SOURCE = Path(__file__).parent / "fixtures" / "fake_pi.py"
+FLEET_BWRAP_FAKE_SOURCE = Path(__file__).parent / "fixtures" / "fake_bwrap.py"
 SLUG = "acme/tiny-1:free"
 KEY = "test-key-not-real-0000"
 
@@ -46,6 +47,19 @@ def error_run(message="429 upstream rate-limited"):
     ], "exit": 0}  # --mode json exits 0 on provider failure
 
 
+def install_fake_bwrap(tmp_path, monkeypatch):
+    """Runnable fake bwrap; returns the path of its argv log."""
+    fake = tmp_path / "fake-bwrap"
+    fake.write_text(f"#!{sys.executable}\n" + FLEET_BWRAP_FAKE_SOURCE.read_text(
+        encoding="utf-8").split("\n", 1)[1], encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    log = tmp_path / "bwrap-calls.jsonl"
+    monkeypatch.setenv("FLEET_PI_BWRAP", str(fake))
+    monkeypatch.setenv("FLEET_PI_FAKE_BWRAP_LOG", str(log))
+    monkeypatch.delenv("FLEET_PI_FAKE_BWRAP_FAIL", raising=False)
+    return log
+
+
 def install_fake_pi(tmp_path, monkeypatch, runs):
     """Write the scenario and a runnable fake pi; export FLEET_PI_* env."""
     scenario = tmp_path / "pi-scenario.json"
@@ -55,6 +69,7 @@ def install_fake_pi(tmp_path, monkeypatch, runs):
         encoding="utf-8").split("\n", 1)[1], encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     log = tmp_path / "pi-calls.jsonl"
+    install_fake_bwrap(tmp_path, monkeypatch)
     monkeypatch.setenv("FLEET_PI_BIN", str(fake))
     monkeypatch.setenv("FLEET_PI_FAKE_SCENARIO", str(scenario))
     monkeypatch.setenv("FLEET_PI_FAKE_STATE", str(tmp_path / "pi-count"))

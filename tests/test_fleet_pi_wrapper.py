@@ -312,7 +312,7 @@ class TestChildEnv:
                 "FLEET_PI_FAKE_LOG"} <= keys
         allowed = {"PATH", "HOME", "LANG", "TERM", "TMPDIR",
                    "OPENROUTER_API_KEY", "PI_CODING_AGENT_DIR",
-                   "PI_SKIP_VERSION_CHECK", "PWD", "SHLVL", "_", "LC_CTYPE"}
+                   "PI_SKIP_VERSION_CHECK", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "PWD", "SHLVL", "_", "LC_CTYPE"}
         assert all(k in allowed or k.startswith("FLEET_PI_") for k in keys), keys
 
     def test_full_env_opt_out(self, tmp_path, monkeypatch, lane):
@@ -333,3 +333,118 @@ class TestWindowsRefusal:
         monkeypatch.setattr(fleet_pi, "PLATFORM", fleet_platform._WindowsPlatform())
         assert fleet_pi.main(["list"]) == 1
         assert "unsupported on Windows" in capsys.readouterr().err
+
+
+def _bwrap_runs(tmp_path):
+    path = tmp_path / "bwrap-calls.jsonl"
+    rows = [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+    return [r for r in rows if r["cmd"] != ["/usr/bin/true"]]
+
+
+def _pairs(opts, flag, width):
+    return [tuple(opts[i + 1:i + 1 + width]) for i, o in enumerate(opts) if o == flag]
+
+
+class TestSandbox:
+    def test_pi_runs_inside_bwrap_with_expected_argv(self, tmp_path,
+                                                     monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        job_id, job = spawn(lane)
+        assert wait_terminal(job) == "done"
+        (run,) = _bwrap_runs(tmp_path)
+        opts, cmd = run["opts"], run["cmd"]
+        assert cmd[0] == os.environ["FLEET_PI_BIN"] and "--provider" in cmd
+        for flag in ("--die-with-parent", "--unshare-pid", "--new-session",
+                     "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try",
+                     "--clearenv"):
+            assert flag in opts
+        assert "--unshare-net" not in opts
+        binds = [b[0] for b in _pairs(opts, "--bind", 2)]
+        assert str(lane) in binds and str(job) in binds
+        assert ("/usr", "/usr") in _pairs(opts, "--ro-bind", 2)
+        assert ("/tmp",) in _pairs(opts, "--tmpfs", 1)
+        env = {k: v for k, v in _pairs(opts, "--setenv", 2)}
+        assert env["PI_CODING_AGENT_DIR"] == str(job / "pi-agent")
+        assert env["HOME"] == str(job / "home") and env["TMPDIR"] == "/tmp"
+        assert env["OPENROUTER_API_KEY"] == KEY
+        # the fake pi saw the same scrubbed env
+        seen = calls(log)[0]["env_keys"]
+        assert "OPENROUTER_API_KEY" in seen and "PI_CODING_AGENT_DIR" in seen
+
+    def test_home_secrets_are_never_bound(self, tmp_path, monkeypatch, lane):
+        install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        home = Path.home()
+        job_id, job = spawn(lane)
+        assert wait_terminal(job) == "done"
+        (run,) = _bwrap_runs(tmp_path)
+        opts = run["opts"]
+        mounted = [o for i, o in enumerate(opts)
+                   if opts[i - 1] in ("--bind", "--ro-bind") or
+                   (i > 1 and opts[i - 2] in ("--bind", "--ro-bind"))]
+        for path in mounted:
+            assert path != str(home), "whole HOME must not be mounted"
+            for secret in (".ssh", ".config", "proga", ".gnupg", ".aws"):
+                assert not path.startswith(str(home / secret)), path
+
+    def test_missing_bwrap_refuses_spawn_without_running_pi(
+            self, tmp_path, monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        monkeypatch.setenv("FLEET_PI_BWRAP", str(tmp_path / "no-such-bwrap"))
+        proc = wrap(["spawn", "-m", SLUG, "x"], lane)
+        assert proc.returncode == 1
+        assert "bwrap" in proc.stderr and "unsandboxed" in proc.stderr
+        assert calls(log) == [] and not (lane / ".mcx").exists()
+
+    def test_no_bwrap_on_path_refuses(self, tmp_path, monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        monkeypatch.delenv("FLEET_PI_BWRAP")
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        proc = wrap(["spawn", "-m", SLUG, "x"], lane)
+        assert proc.returncode == 1 and "bwrap not found" in proc.stderr
+        assert calls(log) == []
+
+    def test_failing_probe_refuses_and_never_runs_pi(self, tmp_path,
+                                                     monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        monkeypatch.setenv("FLEET_PI_FAKE_BWRAP_FAIL", "1")
+        proc = wrap(["spawn", "-m", SLUG, "x"], lane)
+        assert proc.returncode == 1
+        assert "probe failed" in proc.stderr and "unsandboxed" in proc.stderr
+        assert calls(log) == []
+
+    def test_bwrap_vanishing_after_spawn_fails_the_job(self, tmp_path,
+                                                       monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        job_id, job = spawn(lane)
+        wait_terminal(job)
+        monkeypatch.setenv("FLEET_PI_BWRAP", str(tmp_path / "gone"))
+        (job / "state").write_text("starting\n")
+        (job / "turn").write_text("2\n")
+        n = len(calls(log))
+        proc = wrap(["_run", job_id], lane)
+        assert job_state(job) == "failed"
+        assert "bwrap" in (job / "error").read_text()
+        assert len(calls(log)) == n
+
+    def test_linked_worktree_gitdir_is_writable_common_dir_readonly(
+            self, tmp_path):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        common = tmp_path / "main" / ".git"
+        gitdir = common / "worktrees" / "w"
+        gitdir.mkdir(parents=True)
+        (gitdir / "commondir").write_text("../..\n")
+        work = tmp_path / "w"
+        work.mkdir()
+        (work / ".git").write_text(f"gitdir: {gitdir}\n")
+        job = work / ".mcx" / "abcd1234"
+        job.mkdir(parents=True)
+        argv = fleet_pi.sandbox_command(
+            ["/bin/pi", "x"], str(work), job, {"PATH": "/usr/bin"},
+            bwrap="/x/bwrap")
+        assert ("--bind", str(gitdir), str(gitdir)) in [
+            tuple(argv[i:i + 3]) for i in range(len(argv))]
+        assert ("--ro-bind", str(common), str(common)) in [
+            tuple(argv[i:i + 3]) for i in range(len(argv))]
+        assert argv[-3:] == ["--", "/bin/pi", "x"]

@@ -91,8 +91,16 @@ class TestPlatformAndDoctor:
         workers = {"p": {"substrate": "pi/" + SLUG, "dispatch_kind": "mcx",
                          "mcx_id": "abcd1234", "session_id": None}}
         name, ok, detail = fleet._doctor_check_codex_adapters(
-            workers, which=lambda _: None)
+            workers, which=lambda n: "/x/bwrap" if n == "bwrap" else None)
         assert ok, detail
+
+    def test_doctor_flags_pi_rows_without_bwrap(self, monkeypatch):
+        monkeypatch.delenv("FLEET_PI_BWRAP", raising=False)
+        workers = {"p": {"substrate": "pi/" + SLUG, "dispatch_kind": "mcx",
+                         "mcx_id": "abcd1234", "session_id": None}}
+        name, ok, detail = fleet._doctor_check_codex_adapters(
+            workers, which=lambda _: None)
+        assert not ok and "bwrap unavailable" in detail
         assert "mcx helper unavailable" not in detail and "pi=1" in detail
 
     def test_doctor_still_flags_codex_mcx_rows(self):
