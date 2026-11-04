@@ -272,25 +272,44 @@ differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:
 - **Sandbox (bubblewrap).** Every pi run, including `steer` turns and the
   restart after a provider failure, executes under `bwrap` with
   `--die-with-parent --unshare-pid --new-session --unshare-ipc --unshare-uts
-  --unshare-cgroup-try` and `--clearenv` plus one `--setenv` per allowlisted
-  variable. Network stays on (OpenRouter). Writable: the lane worktree, the
-  job directory, a private `HOME` inside the job directory (which also holds the
-  uv cache) and a private `/tmp`; the worktree's own gitdir (outside the
-  worktree) is writable too. Read-only: `/usr`, `/etc`, the `/bin` `/lib*`
-  links, the pi install, the Node runtime, `uv` with its Python builds, and the
-  repository's common git dir (so `git status`/`diff`/`log` work, while commits
-  and ref writes fail; `fleet land` commits). Everything else under the real
-  `$HOME` -- `~/.ssh`, `~/.config`, other repositories -- is not mounted and does
-  not exist inside. If `bwrap` is missing (`FLEET_PI_BWRAP` overrides the lookup)
-  or fails a probe in the same flag shape, `spawn` exits 1 and a later turn
-  marks the job `failed`; there is no unsandboxed fallback and no escape
-  variable. Fleet `doctor` reports a pi row on a host without `bwrap`.
+  --unshare-cgroup-try`. Writable: the lane worktree, a private `/tmp`, and
+  three job subdirectories -- `home` (a private `HOME`, also the uv cache),
+  `sessions` and `pi-agent` (minus its `settings.json`/`models.json`, which
+  stay read-only). Read-only: the rest of the job directory (`cwd`, `pid`,
+  `state`, `result`, `error`, `prompt`, ... -- a lane cannot fake its outcome,
+  retarget its own bind path or aim `stop` at another process; sibling jobs are
+  hidden), the worktree's `.git` and its gitdir (so a lane cannot repoint git at
+  a config of its own), the repository's common git dir, `/usr`, `/etc`, the
+  `/bin` `/lib*` links, the pi install, the Node runtime (its `bin/..` prefix,
+  never `$HOME` or a parent of it), and `uv` with its Python builds. `git
+  status`/`diff`/`log` work; commits, `add` and ref writes fail, and `fleet
+  land` commits. Everything else under the real `$HOME` -- `~/.ssh`,
+  `~/.config`, other repositories -- is not mounted and does not exist inside.
+  The lane directory read from `job/cwd` is checked before it is bound: an
+  absolute git checkout (a linked worktree's gitdir must point back at it),
+  never `$HOME` or a parent of it. The network namespace is **shared** (the
+  provider must be reachable), so services listening on localhost -- tunnels,
+  local sockets -- are reachable from inside; that is a known limit, not a
+  sandboxed property. `bwrap` must be the system one on `PATH`, root-owned and
+  not writable by others; there is no variable that selects another binary (a
+  scripted one is honoured only under the test suite). If `bwrap` is missing,
+  untrusted or fails a probe in the same flag shape, `spawn` exits 1 and a later
+  turn marks the job `failed`; there is no unsandboxed fallback and no escape
+  variable. Fleet `doctor` reports a pi row on a host without a trusted
+  `bwrap`.
 - **Landing.** `fleet land` commits a pi lane's dirty worktree on its behalf; the
-  lane's own commits fail because the common git dir is read-only.
-- **Environment.** The child environment is scrubbed to an allowlist (`PATH`,
-  `HOME`, `LANG`, `TERM`, `TMPDIR`, `OPENROUTER_API_KEY`, `FLEET_PI_*`) unless
-  `FLEET_PI_FULL_ENV=1`; inside the sandbox `HOME`, `TMPDIR` and `PATH` are
-  rewritten to the private and read-only locations above.
+  lane's own commits fail because the git dirs are read-only. Land first checks
+  that the worktree's gitdir is a `worktrees/<name>` entry of the repository
+  whose `commondir` and back-pointer match, and runs every git command with
+  `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
+- **Environment.** The child environment is an exact allowlist (`PATH`, `HOME`,
+  `LANG`, `TERM`, `TMPDIR`, `OPENROUTER_API_KEY`); no other variable passes and
+  there is no pass-everything switch. It travels as the process environment of
+  `bwrap` (`Popen(env=)`), never in argv, so the key is not visible in
+  `ps`/`/proc/<pid>/cmdline`. Inside the sandbox `HOME`, `TMPDIR` and `PATH` are
+  rewritten to the private and read-only locations above. `job/pid` records the
+  runner's start time; `stop` signals only a pid whose start time, session
+  leadership and command line still match.
 - **Platform.** POSIX/Linux only (bubblewrap); fleet and the wrapper refuse pi lanes on Windows, and on any host without a working `bwrap`.
 
 **Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).

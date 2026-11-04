@@ -402,3 +402,46 @@ def test_registration_gate_skips_an_edit_that_adds_neither(tmp_path, monkeypatch
     fleet_land._check_commands(lane, [], home_root=repo,
                                files_changed=["README.md"], base=base)
     assert "registration" not in seen
+
+
+def test_land_git_runs_with_hooks_and_fsmonitor_disabled(tmp_path, monkeypatch):
+    repo, lane, _base = _repo(tmp_path)
+    seen = []
+    real = subprocess.run
+    monkeypatch.setattr(fleet_land.subprocess, "run",
+                        lambda cmd, *a, **k: (seen.append(cmd), real(cmd, *a, **k))[1])
+    fleet_land._git(repo, "status", cwd=lane)
+    assert seen[0][:5] == ["git", "-c", "core.hooksPath=/dev/null",
+                           "-c", "core.fsmonitor=false"]
+
+
+def test_land_refuses_a_redirected_lane_gitdir(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    fleet_land._check_lane_gitdir(repo, lane)  # genuine worktree passes
+    evil = tmp_path / "evil" / ".git"
+    (evil / "worktrees" / "x").mkdir(parents=True)
+    (lane / ".git").write_text(f"gitdir: {evil}/worktrees/x\n")
+    with pytest.raises(fleet.FleetCliError, match="refusing"):
+        fleet_land._check_lane_gitdir(repo, lane)
+
+
+def test_land_refuses_a_lane_whose_commondir_was_rewritten(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    gitdir = Path((lane / ".git").read_text().split(":", 1)[1].strip())
+    other = tmp_path / "other"
+    other.mkdir()
+    (gitdir / "commondir").write_text(str(other) + "\n")
+    with pytest.raises(fleet.FleetCliError, match="does not belong"):
+        fleet_land._check_lane_gitdir(repo, lane)
+
+
+def test_land_does_not_run_a_lane_fsmonitor_hook(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    marker = tmp_path / "ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o755)
+    _git(lane, "config", "extensions.worktreeConfig", "true")
+    _git(lane, "config", "--worktree", "core.fsmonitor", str(hook))
+    fleet_land._git(repo, "status", cwd=lane)
+    assert not marker.exists()

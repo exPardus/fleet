@@ -1,6 +1,7 @@
 """bin/fleet_pi.py: the mcx-shaped pi wrapper, driven against a scripted pi."""
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -31,7 +32,7 @@ def spawn(cwd, slug=SLUG, prompt="do the thing", effort="medium"):
 @pytest.fixture
 def lane(tmp_path):
     work = tmp_path / "lane"
-    work.mkdir()
+    (work / ".git").mkdir(parents=True)
     return work
 
 
@@ -293,7 +294,7 @@ class TestWatchdogAndControl:
         job_id, job = spawn(lane)
         wait_terminal(job)
         (job / "state").write_text("running\n")
-        (job / "pid").write_text("999999999\n")
+        (job / "pid").write_text("999999999 1\n")
         assert wrap(["result", job_id], lane).returncode == 1
 
 
@@ -313,15 +314,20 @@ class TestChildEnv:
         allowed = {"PATH", "HOME", "LANG", "TERM", "TMPDIR",
                    "OPENROUTER_API_KEY", "PI_CODING_AGENT_DIR",
                    "PI_SKIP_VERSION_CHECK", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "PWD", "SHLVL", "_", "LC_CTYPE"}
-        assert all(k in allowed or k.startswith("FLEET_PI_") for k in keys), keys
+        assert all(k in allowed or k.startswith("FLEET_PI_FAKE_")
+                   for k in keys), keys
 
-    def test_full_env_opt_out(self, tmp_path, monkeypatch, lane):
+    def test_escape_variables_are_not_honoured(self, tmp_path, monkeypatch,
+                                               lane):
         log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
         monkeypatch.setenv("UNRELATED_SECRET_TOKEN", "x")
         monkeypatch.setenv("FLEET_PI_FULL_ENV", "1")
+        monkeypatch.setenv("FLEET_PI_EVIL", "1")
         job_id, job = spawn(lane)
         assert wait_terminal(job) == "done"
-        assert "UNRELATED_SECRET_TOKEN" in calls(log)[0]["env_keys"]
+        keys = set(calls(log)[0]["env_keys"])
+        assert not keys & {"UNRELATED_SECRET_TOKEN", "FLEET_PI_FULL_ENV",
+                           "FLEET_PI_EVIL"}
 
 
 class TestWindowsRefusal:
@@ -349,26 +355,29 @@ class TestSandbox:
     def test_pi_runs_inside_bwrap_with_expected_argv(self, tmp_path,
                                                      monkeypatch, lane):
         log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         job_id, job = spawn(lane)
         assert wait_terminal(job) == "done"
         (run,) = _bwrap_runs(tmp_path)
         opts, cmd = run["opts"], run["cmd"]
         assert cmd[0] == os.environ["FLEET_PI_BIN"] and "--provider" in cmd
         for flag in ("--die-with-parent", "--unshare-pid", "--new-session",
-                     "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try",
-                     "--clearenv"):
+                     "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try"):
             assert flag in opts
         assert "--unshare-net" not in opts
+        assert "--clearenv" not in opts and "--setenv" not in opts
         binds = [b[0] for b in _pairs(opts, "--bind", 2)]
-        assert str(lane) in binds and str(job) in binds
+        assert str(lane) in binds
+        assert str(job) not in binds            # the job dir is not rw
+        assert sorted(binds) == sorted(
+            [str(lane), str(job / "home"), str(job / "sessions"),
+             str(job / "pi-agent")])
+        ro = [b[0] for b in _pairs(opts, "--ro-bind", 2)]
+        assert str(job) in ro and str(lane / ".git") in ro
+        assert str(job / "pi-agent" / "settings.json") in ro
         assert ("/usr", "/usr") in _pairs(opts, "--ro-bind", 2)
         assert ("/tmp",) in _pairs(opts, "--tmpfs", 1)
-        env = {k: v for k, v in _pairs(opts, "--setenv", 2)}
-        assert env["PI_CODING_AGENT_DIR"] == str(job / "pi-agent")
-        assert env["HOME"] == str(job / "home") and env["TMPDIR"] == "/tmp"
-        assert env["OPENROUTER_API_KEY"] == KEY
-        # the fake pi saw the same scrubbed env
+        assert KEY not in json.dumps(run)       # no secret in argv
+        # the fake pi saw the scrubbed env, key included
         seen = calls(log)[0]["env_keys"]
         assert "OPENROUTER_API_KEY" in seen and "PI_CODING_AGENT_DIR" in seen
 
@@ -390,7 +399,7 @@ class TestSandbox:
     def test_missing_bwrap_refuses_spawn_without_running_pi(
             self, tmp_path, monkeypatch, lane):
         log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
-        monkeypatch.setenv("FLEET_PI_BWRAP", str(tmp_path / "no-such-bwrap"))
+        monkeypatch.setenv("FLEET_PI_TEST_BWRAP", str(tmp_path / "no-such-bwrap"))
         proc = wrap(["spawn", "-m", SLUG, "x"], lane)
         assert proc.returncode == 1
         assert "bwrap" in proc.stderr and "unsandboxed" in proc.stderr
@@ -398,7 +407,7 @@ class TestSandbox:
 
     def test_no_bwrap_on_path_refuses(self, tmp_path, monkeypatch, lane):
         log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
-        monkeypatch.delenv("FLEET_PI_BWRAP")
+        monkeypatch.delenv("FLEET_PI_TEST_BWRAP")
         monkeypatch.setenv("PATH", str(tmp_path / "empty"))
         proc = wrap(["spawn", "-m", SLUG, "x"], lane)
         assert proc.returncode == 1 and "bwrap not found" in proc.stderr
@@ -418,7 +427,7 @@ class TestSandbox:
         log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
         job_id, job = spawn(lane)
         wait_terminal(job)
-        monkeypatch.setenv("FLEET_PI_BWRAP", str(tmp_path / "gone"))
+        monkeypatch.setenv("FLEET_PI_TEST_BWRAP", str(tmp_path / "gone"))
         (job / "state").write_text("starting\n")
         (job / "turn").write_text("2\n")
         n = len(calls(log))
@@ -427,8 +436,7 @@ class TestSandbox:
         assert "bwrap" in (job / "error").read_text()
         assert len(calls(log)) == n
 
-    def test_linked_worktree_gitdir_is_writable_common_dir_readonly(
-            self, tmp_path):
+    def test_linked_worktree_git_pointers_are_readonly(self, tmp_path):
         sys.path.insert(0, str(WRAPPER.parent))
         import fleet_pi
         common = tmp_path / "main" / ".git"
@@ -438,13 +446,170 @@ class TestSandbox:
         work = tmp_path / "w"
         work.mkdir()
         (work / ".git").write_text(f"gitdir: {gitdir}\n")
+        (gitdir / "gitdir").write_text(f"{work / '.git'}\n")
         job = work / ".mcx" / "abcd1234"
         job.mkdir(parents=True)
-        argv = fleet_pi.sandbox_command(
-            ["/bin/pi", "x"], str(work), job, {"PATH": "/usr/bin"},
+        argv, env = fleet_pi.sandbox_command(
+            ["/bin/pi", "x"], str(work), job, {"PATH": "/usr/bin",
+                                               "OPENROUTER_API_KEY": KEY},
             bwrap="/x/bwrap")
-        assert ("--bind", str(gitdir), str(gitdir)) in [
-            tuple(argv[i:i + 3]) for i in range(len(argv))]
-        assert ("--ro-bind", str(common), str(common)) in [
-            tuple(argv[i:i + 3]) for i in range(len(argv))]
+        triples = [tuple(argv[i:i + 3]) for i in range(len(argv))]
+        assert ("--bind", str(gitdir), str(gitdir)) not in triples
+        for path in (gitdir, common, work / ".git", job):
+            assert ("--ro-bind", str(path), str(path)) in triples, path
         assert argv[-3:] == ["--", "/bin/pi", "x"]
+        assert KEY not in argv and env["OPENROUTER_API_KEY"] == KEY
+        assert fleet_pi.check_lane_cwd(str(work)) == str(work.resolve())
+        (gitdir / "gitdir").write_text(f"{tmp_path / 'elsewhere' / '.git'}\n")
+        with pytest.raises(fleet_pi.WrapperError, match="does not belong"):
+            fleet_pi.check_lane_cwd(str(work))
+
+    def test_job_dir_is_readonly_inside_the_real_sandbox(self, tmp_path,
+                                                         monkeypatch, lane):
+        bwrap = shutil.which("bwrap")
+        if not bwrap or not os.path.isfile("/usr/bin/sh"):
+            pytest.skip("no bwrap")
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        monkeypatch.delenv("FLEET_PI_TEST_BWRAP", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path / "h"))
+        job = lane / ".mcx" / "abcd1234"
+        other = lane / ".mcx" / "ffff0000"
+        for d in (job / "home", job / "sessions", other):
+            d.mkdir(parents=True)
+        for name in ("cwd", "pid", "state", "result"):
+            (job / name).write_text("orig\n")
+        (other / "state").write_text("orig\n")
+        script = ("for f in cwd pid state result newfile; do "
+                  "echo hacked > $J/$f 2>/dev/null && echo WROTE:$f; done; "
+                  "echo ok > $J/home/a && echo HOMEOK; "
+                  "echo ok > $J/sessions/a && echo SESSOK; "
+                  "test -e $J/../ffff0000 && echo SIBLING; "
+                  "echo x > .git/config 2>/dev/null && echo GITWROTE; "
+                  "echo OPENROUTER_API_KEY=$OPENROUTER_API_KEY")
+        env = {"PATH": "/usr/bin:/bin", "OPENROUTER_API_KEY": KEY, "J": str(job)}
+        argv, cenv = fleet_pi.sandbox_command(
+            ["/usr/bin/sh", "-c", script], str(lane), job, env, bwrap=bwrap)
+        try:
+            fleet_pi.probe_bwrap(bwrap)
+        except fleet_pi.WrapperError:
+            pytest.skip("bwrap cannot create a sandbox here")
+        cenv["J"] = str(job)
+        out = subprocess.run(argv, env=cenv, cwd=lane, capture_output=True,
+                             text=True, timeout=60)
+        assert "WROTE" not in out.stdout, out.stdout
+        assert "HOMEOK" in out.stdout and "SESSOK" in out.stdout, out
+        assert "SIBLING" not in out.stdout and "GITWROTE" not in out.stdout
+        assert f"OPENROUTER_API_KEY={KEY}" in out.stdout
+        for name in ("cwd", "pid", "state", "result"):
+            assert (job / name).read_text() == "orig\n"
+        assert not (job / "newfile").exists()
+
+
+class TestEscapes:
+    def test_bwrap_override_ignored_outside_tests(self, tmp_path, monkeypatch):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        fake = tmp_path / "bwrap"
+        fake.write_text("#!/bin/sh\nexec \"$@\"\n")
+        fake.chmod(0o755)
+        monkeypatch.setenv("FLEET_PI_BWRAP", str(fake))
+        monkeypatch.setenv("FLEET_PI_TEST_BWRAP", str(fake))
+        monkeypatch.delenv("PYTEST_CURRENT_TEST")
+        monkeypatch.setenv("PATH", str(tmp_path))
+        with pytest.raises(fleet_pi.WrapperError, match="not a root-owned"):
+            fleet_pi.find_bwrap()           # on PATH but user-owned: refused
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        with pytest.raises(fleet_pi.WrapperError, match="bwrap not found"):
+            fleet_pi.find_bwrap()
+
+    def test_system_bwrap_must_be_root_owned(self):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        assert fleet_pi._trusted_bwrap("/usr/bin/bwrap") or not os.path.exists(
+            "/usr/bin/bwrap")
+        assert not fleet_pi._trusted_bwrap(str(WRAPPER))
+
+    def test_lane_directory_must_be_a_worktree_not_home(self, tmp_path,
+                                                         monkeypatch, lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        home = tmp_path / "home"
+        (home / "proj" / ".git").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        for bad in (str(home), str(tmp_path), "relative", str(tmp_path / "no")):
+            with pytest.raises(fleet_pi.WrapperError):
+                fleet_pi.check_lane_cwd(bad)
+        (tmp_path / "plain").mkdir()
+        with pytest.raises(fleet_pi.WrapperError, match="not a git worktree"):
+            fleet_pi.check_lane_cwd(str(tmp_path / "plain"))
+        assert fleet_pi.check_lane_cwd(str(home / "proj"))
+        assert fleet_pi.check_lane_cwd(str(lane))
+
+    def test_rewritten_cwd_never_gets_bound(self, tmp_path, monkeypatch, lane):
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        job_id, job = spawn(lane)
+        wait_terminal(job)
+        n = len(calls(log))
+        (job / "cwd").write_text(str(Path.home()) + "\n")
+        (job / "state").write_text("starting\n")
+        (job / "turn").write_text("2\n")
+        wrap(["_run", job_id], lane)
+        assert job_state(job) == "failed"
+        assert "refusing lane directory" in (job / "error").read_text()
+        assert len(calls(log)) == n
+
+    def test_node_prefix_covering_home_is_refused(self, tmp_path, monkeypatch,
+                                                  lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        home = tmp_path / "home"
+        (home / "bin").mkdir(parents=True)
+        node = home / "bin" / "node"
+        node.write_text("#!/bin/sh\n")
+        node.chmod(0o755)
+        monkeypatch.setenv("HOME", str(home))
+        job = lane / ".mcx" / "abcd1234"
+        job.mkdir(parents=True)
+        with pytest.raises(fleet_pi.WrapperError, match=r"\$HOME"):
+            fleet_pi.sandbox_command(
+                ["/bin/pi"], str(lane), job,
+                {"PATH": str(home / "bin")}, bwrap="/x/bwrap")
+
+    def test_node_is_bound_by_prefix(self, tmp_path, monkeypatch, lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        prefix = tmp_path / "node-v1"
+        (prefix / "bin").mkdir(parents=True)
+        node = prefix / "bin" / "node"
+        node.write_text("#!/bin/sh\n")
+        node.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        job = lane / ".mcx" / "abcd1234"
+        job.mkdir(parents=True)
+        argv, _ = fleet_pi.sandbox_command(
+            ["/bin/pi"], str(lane), job, {"PATH": str(prefix / "bin")},
+            bwrap="/x/bwrap")
+        assert ("--ro-bind", str(prefix), str(prefix)) in [
+            tuple(argv[i:i + 3]) for i in range(len(argv))]
+
+    def test_stop_ignores_a_rewritten_pid(self, tmp_path, monkeypatch, lane):
+        install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        victim = subprocess.Popen(["sleep", "30"])
+        try:
+            job_id, job = spawn(lane)
+            wait_terminal(job)
+            for text in (f"{victim.pid}\n", f"{victim.pid} 1\n",
+                         f"{victim.pid} {_start(victim.pid)}\n"):
+                (job / "pid").write_text(text)
+                (job / "state").write_text("running\n")
+                assert wrap(["stop", job_id], lane).returncode == 0
+                assert victim.poll() is None, text
+                assert job_state(job) == "stopped"
+        finally:
+            victim.kill()
+            victim.wait()
+
+
+def _start(pid):
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])

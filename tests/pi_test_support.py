@@ -54,7 +54,7 @@ def install_fake_bwrap(tmp_path, monkeypatch):
         encoding="utf-8").split("\n", 1)[1], encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     log = tmp_path / "bwrap-calls.jsonl"
-    monkeypatch.setenv("FLEET_PI_BWRAP", str(fake))
+    monkeypatch.setenv("FLEET_PI_TEST_BWRAP", str(fake))
     monkeypatch.setenv("FLEET_PI_FAKE_BWRAP_LOG", str(log))
     monkeypatch.delenv("FLEET_PI_FAKE_BWRAP_FAIL", raising=False)
     return log

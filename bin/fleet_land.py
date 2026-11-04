@@ -29,12 +29,46 @@ _CLAIM_KEYS = {"claim", "command"}
 LAND_GATE_NAMES = frozenset(("docs-currency", "receipts", "citations", "registration"))
 
 
+_GIT_SAFE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
+
+def _check_lane_gitdir(repo: Path, worktree: Path) -> None:
+    common = Path(_git_output(repo, "rev-parse", "--git-common-dir",
+                              cwd=repo))
+    if not common.is_absolute():
+        common = repo / common
+    common = common.resolve()
+    dotgit = worktree / ".git"
+    if not dotgit.is_file():
+        raise FleetCliError(
+            f"land: {worktree} has no linked-worktree .git file; refusing")
+    text = dotgit.read_text(encoding="utf-8", errors="replace").strip()
+    if not text.startswith("gitdir:"):
+        raise FleetCliError(f"land: {dotgit} is not a gitdir pointer; refusing")
+    gitdir = Path(text.split(":", 1)[1].strip())
+    if not gitdir.is_absolute():
+        gitdir = worktree / gitdir
+    gitdir = gitdir.resolve()
+    if gitdir.parent != common / "worktrees":
+        raise FleetCliError(
+            f"land: {worktree} gitdir is outside {common}/worktrees; refusing")
+    try:
+        common_text = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        back = (gitdir / "gitdir").read_text(encoding="utf-8").strip()
+    except OSError:
+        raise FleetCliError(f"land: {gitdir} is missing commondir/gitdir; refusing")
+    if ((gitdir / common_text).resolve() != common
+            or Path(back).resolve() != dotgit.resolve()):
+        raise FleetCliError(
+            f"land: {gitdir} does not belong to {worktree}; refusing")
+
+
 def _git(repo: Path, *args: str, cwd: Path | None = None,
          check: bool = True) -> subprocess.CompletedProcess:
     """Run one Git command and turn a failed command into a CLI refusal."""
     run_cwd = str(cwd or repo)
     result = subprocess.run(
-        ["git", *args], cwd=run_cwd, capture_output=True, text=True,
+        ["git", *_GIT_SAFE, *args], cwd=run_cwd, capture_output=True, text=True,
         encoding="utf-8", errors="replace")
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
@@ -420,6 +454,8 @@ def cmd_land(args) -> int:
     lane = _validate_lane_name(getattr(args, "lane", None))
     repo = _repo_root()
     lane_branch, worktree = _resolve_lane(repo, lane)
+    if worktree != repo:
+        _check_lane_gitdir(repo, worktree)
     payload, report_rel, result_rel = _validate_result(lane, worktree)
     base = payload["base"]
     _git(repo, "cat-file", "-e", f"{base}^{{commit}}")

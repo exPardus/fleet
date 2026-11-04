@@ -47,7 +47,7 @@ def _args(worktree, **kw):
 def _spawn(pi_home, monkeypatch, runs, **kw):
     log = install_fake_pi(pi_home, monkeypatch, runs)
     worktree = pi_home / "lane"
-    worktree.mkdir(exist_ok=True)
+    (worktree / ".git").mkdir(parents=True, exist_ok=True)
     assert fleet.cmd_spawn(_args(worktree, **kw)) == 0
     rec = fleet.load_registry()["workers"][kw.get("name", "pi1")]
     return log, worktree, rec
@@ -95,13 +95,28 @@ class TestPlatformAndDoctor:
         assert ok, detail
 
     def test_doctor_flags_pi_rows_without_bwrap(self, monkeypatch):
-        monkeypatch.delenv("FLEET_PI_BWRAP", raising=False)
+        monkeypatch.delenv("FLEET_PI_TEST_BWRAP", raising=False)
         workers = {"p": {"substrate": "pi/" + SLUG, "dispatch_kind": "mcx",
                          "mcx_id": "abcd1234", "session_id": None}}
         name, ok, detail = fleet._doctor_check_codex_adapters(
             workers, which=lambda _: None)
         assert not ok and "bwrap unavailable" in detail
         assert "mcx helper unavailable" not in detail and "pi=1" in detail
+
+    def test_doctor_flags_untrusted_bwrap_and_ignores_the_old_override(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FLEET_PI_BWRAP", "/bin/true")
+        fake = tmp_path / "bwrap"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)                     # user-owned: not trusted
+        workers = {"p": {"substrate": "pi/" + SLUG, "dispatch_kind": "mcx",
+                         "mcx_id": "abcd1234", "session_id": None}}
+        _n, ok, detail = fleet._doctor_check_codex_adapters(
+            workers, which=lambda _: str(fake))
+        assert not ok and "not a root-owned" in detail
+        _n, ok, detail = fleet._doctor_check_codex_adapters(
+            workers, which=lambda _: None)
+        assert not ok and "bwrap unavailable" in detail
 
     def test_doctor_still_flags_codex_mcx_rows(self):
         workers = {"c": {"substrate": "codex", "dispatch_kind": "mcx",
@@ -134,7 +149,7 @@ class TestSpawn:
                                                         monkeypatch, model):
         log = install_fake_pi(pi_home, monkeypatch, [ok_run()])
         worktree = pi_home / "lane"
-        worktree.mkdir()
+        (worktree / ".git").mkdir(parents=True)
         with pytest.raises(fleet.FleetCliError, match="pi model refused"):
             fleet.cmd_spawn(_args(worktree, model=model))
         assert "pi1" not in fleet.load_registry()["workers"]
@@ -146,7 +161,7 @@ class TestSpawn:
         monkeypatch.delenv("OPENROUTER_API_KEY")
         (pi_home / "home" / "openrouter-env").unlink()
         worktree = pi_home / "lane"
-        worktree.mkdir()
+        (worktree / ".git").mkdir(parents=True)
         with pytest.raises(fleet.FleetCliError, match="no OpenRouter key"):
             fleet.cmd_spawn(_args(worktree))
         assert "pi1" not in fleet.load_registry()["workers"]
@@ -165,7 +180,7 @@ class TestSpawn:
         install_fake_pi(pi_home, monkeypatch, [ok_run()])
         monkeypatch.setenv("FLEET_PI_BIN", str(pi_home / "no-such-pi"))
         worktree = pi_home / "lane"
-        worktree.mkdir()
+        (worktree / ".git").mkdir(parents=True)
         # find_pi() accepts an explicit path without checking it, so break the
         # wrapper itself: a key-less environment makes spawn exit 1.
         monkeypatch.delenv("OPENROUTER_API_KEY")
@@ -200,7 +215,7 @@ class TestVerbs:
         install_fake_pi(pi_home, monkeypatch, [run])
         monkeypatch.setenv("FLEET_PI_STALL_MINUTES", "0.03")
         worktree = pi_home / "lane"
-        worktree.mkdir()
+        (worktree / ".git").mkdir(parents=True)
         assert fleet.cmd_spawn(_args(worktree)) == 0
         rec = fleet.load_registry()["workers"]["pi1"]
         assert wait_terminal(_job(worktree, rec), timeout=15) == "stopped"
@@ -212,7 +227,7 @@ class TestVerbs:
         job = _job(worktree, rec)
         wait_for(lambda: (job / "state").read_text().strip() == "running", 10)
         assert fleet.recompute_worker_codex("pi1", rec)["status"] == "working"
-        pid = int((job / "pid").read_text())
+        pid = int((job / "pid").read_text().split()[0])
         os.kill(pid, 9)  # runner dies without writing a terminal state
         wait_for(lambda: not _alive(pid), 10)
         assert fleet.recompute_worker_codex("pi1", rec)["status"] == "dead"

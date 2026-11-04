@@ -1015,14 +1015,14 @@ def _quarantine_artifacts() -> list:
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
       * `_sweep_husks` (:14101) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15191) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18626) -- upgrades need complete records.
+      * `_doctor_check_autoclean` (:15198) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18633) -- upgrades need complete records.
       * `_acting_worker_identity` (:4547) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5256) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15439) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18504) -- name the incident-specific absence.
+      * `_doctor_check_registry` (:15446) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18511) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8506) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20253) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20260) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4529,7 +4529,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18626`), because legacy upgrades also require a complete registry.
+    (`:18633`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -14677,6 +14677,7 @@ def _doctor_check_legacy_mix(workers: dict):
     return ("legacy-mix", True, "no pre-pivot workers")
 
 
+
 def _doctor_check_codex_adapters(workers: dict, which=shutil.which):
     """Census persisted Codex routes without probing or repairing either one."""
     names_by_route = {"native": [], "mcx": [], "invalid": []}
@@ -14704,10 +14705,16 @@ def _doctor_check_codex_adapters(workers: dict, which=shutil.which):
         findings.append(
             f"mcx helper unavailable for {len(names_by_route['mcx'])} mcx row(s)")
 
-    if pi_rows and which(os.environ.get("FLEET_PI_BWRAP") or "bwrap") is None:
-        findings.append(
-            f"bwrap unavailable for {len(pi_rows)} pi row(s): "
-            "pi lanes refuse to run unsandboxed")
+    if pi_rows:
+        bwrap_path = which("bwrap")
+        if bwrap_path is None:
+            findings.append(
+                f"bwrap unavailable for {len(pi_rows)} pi row(s): "
+                "pi lanes refuse to run unsandboxed")
+        elif os.path.exists(bwrap_path) and not importlib.import_module("fleet_pi")._trusted_bwrap(bwrap_path):
+            findings.append(
+                f"bwrap at {bwrap_path} is not a root-owned system binary: "
+                f"{len(pi_rows)} pi row(s) refuse to run")
 
     detail = (
         f"native={len(names_by_route['native'])} "
@@ -17539,10 +17546,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4356, :4391, :4421, :4460, :4497, :4554, :4633, :5652, :12468, :12631, :12896, :13121, :13157, :13399, :13400, :13489, :13499, :13510, :13608, :14127, :17491, :20407, :20419, :20568, :24345, :24346, :24448, :24513, :24575, :25539, :25541, :25579, :26107, :29013`).
+    sites that already key on the union (`:4356, :4391, :4421, :4460, :4497, :4554, :4633, :5652, :12468, :12631, :12896, :13121, :13157, :13399, :13400, :13489, :13499, :13510, :13608, :14127, :17498, :20414, :20426, :20575, :24352, :24353, :24455, :24520, :24582, :25546, :25548, :25586, :26114, :29020`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10775, :11511, :15777, :27040. This makes union identity
+    OWN prior sid alone: :10775, :11511, :15784, :27047. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18248,8 +18255,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10775, :11511, :15777,
-    # :27040) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10775, :11511, :15784,
+    # :27047) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18257,7 +18264,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1088`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17465`).
+        # names this gate as its reason (`:17472`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)

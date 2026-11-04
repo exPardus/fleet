@@ -27,10 +27,12 @@ Hard rules, enforced here and again in fleet:
     because some models 403 without the attribution headers it controls.
 
 Every pi run executes inside bubblewrap (`bwrap`): only the lane worktree, the
-job directory and a private /tmp and HOME are writable, system dirs and the
-toolchain are read-only, and the rest of $HOME (keys, other repos) does not
-exist inside. If bwrap is missing or fails its probe the lane is refused;
-there is no unsandboxed fallback.
+job's `home` and `sessions` directories and a private /tmp are writable; the
+job's control files (cwd, pid, state, result, ...), the worktree's `.git` and
+its gitdir, system dirs and the toolchain are read-only, and the rest of $HOME
+(keys, other repos) does not exist inside. If bwrap is missing, is not a
+root-owned system binary, or fails its probe the lane is refused; there is no
+unsandboxed fallback and no escape variable.
 
 The OpenRouter key is read from the environment or ~/.config/openrouter/env
 and handed to the pi child only; it is never printed or written.
@@ -119,16 +121,24 @@ def job_dir(job_id: str) -> Path:
 
 
 ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "TERM", "TMPDIR", "OPENROUTER_API_KEY")
+# Exact names the scripted-pi test fixtures read; honoured only under pytest.
+_TEST_ENV_NAMES = (
+    "FLEET_PI_FAKE_SCENARIO", "FLEET_PI_FAKE_STATE", "FLEET_PI_FAKE_LOG",
+    "FLEET_PI_FAKE_BWRAP_LOG", "FLEET_PI_FAKE_BWRAP_FAIL")
+
+
+def _under_pytest() -> bool:
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def child_env() -> dict:
-    """The environment pi (and the shell it runs) receives: an allowlist, so
-    unrelated secrets in the operator's session never reach a free model's
-    tools. FLEET_PI_FULL_ENV=1 passes everything."""
-    if os.environ.get("FLEET_PI_FULL_ENV") == "1":
-        return dict(os.environ)
-    return {k: v for k, v in os.environ.items()
-            if k in ENV_ALLOWLIST or k.startswith("FLEET_PI_")}
+    """The environment pi (and the shell it runs) receives: exact allowlisted
+    names only, so unrelated secrets in the operator's session never reach a
+    free model's tools. There is no pass-everything switch."""
+    names = set(ENV_ALLOWLIST)
+    if _under_pytest():
+        names.update(_TEST_ENV_NAMES)
+    return {k: v for k, v in os.environ.items() if k in names}
 
 
 def find_pi() -> str:
@@ -168,13 +178,35 @@ def load_key() -> str:
 # bubblewrap sandbox (POSIX/Linux; refuse when unavailable, never fall back)
 # ---------------------------------------------------------------------------
 
+def _trusted_bwrap(path: str) -> bool:
+    """A bwrap that only root can replace: root-owned, not group/world
+    writable, in a root-owned directory that others cannot write."""
+    try:
+        real = _real(path)
+        for target in (real, os.path.dirname(real)):
+            st = os.stat(target)
+            if st.st_uid != 0 or st.st_mode & 0o022:
+                return False
+        return os.access(real, os.X_OK)
+    except OSError:
+        return False
+
+
 def find_bwrap() -> str:
-    explicit = os.environ.get("FLEET_PI_BWRAP")
-    found = explicit or shutil.which("bwrap")
+    # FLEET_PI_TEST_BWRAP swaps in a scripted bwrap for the test suite only;
+    # outside pytest it is ignored, as is any other bwrap-selecting variable.
+    override = os.environ.get("FLEET_PI_TEST_BWRAP")
+    if override and _under_pytest():
+        return override
+    found = shutil.which("bwrap")
     if not found:
         raise WrapperError(
             "bwrap not found: pi lanes run only inside bubblewrap "
             "(install the bubblewrap package); refusing to run unsandboxed")
+    if not _trusted_bwrap(found):
+        raise WrapperError(
+            f"bwrap at {found} is not a root-owned system binary; "
+            "refusing to run pi unsandboxed")
     return found
 
 
@@ -253,15 +285,69 @@ def probe_bwrap(bwrap: str) -> None:
     _probe_ok.add(bwrap)
 
 
-def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
-                    bwrap: str | None = None) -> list:
-    """Wrap `cmd` (cmd[0] is pi) in bwrap. Pure: no filesystem writes.
+def _home_real() -> str:
+    return _real(Path.home())
 
-    Writable: cwd, the job dir, a private HOME under the job dir, /tmp.
+
+def _covers_home(path) -> bool:
+    """True when `path` is the real HOME or one of its ancestors."""
+    home = Path(_home_real())
+    target = Path(_real(path))
+    return target == home or target in home.parents
+
+
+def _check_mount(path: str) -> str:
+    if _covers_home(path):
+        raise WrapperError(
+            f"refusing to mount {path}: it is or contains $HOME "
+            "(keys and other repositories would be visible to the lane)")
+    return path
+
+
+def check_lane_cwd(cwd) -> str:
+    """Return the real lane worktree path, or raise. The sandbox binds this
+    path read-write, so it must be a git checkout and never HOME or a parent
+    of it; for a linked worktree the gitdir must point back at it."""
+    if not cwd or not os.path.isabs(cwd):
+        raise WrapperError(f"refusing lane directory {cwd!r}: not absolute")
+    real = _real(cwd)
+    if not os.path.isdir(real):
+        raise WrapperError(f"refusing lane directory {cwd!r}: not a directory")
+    if _covers_home(real):
+        raise WrapperError(
+            f"refusing lane directory {cwd!r}: it is or contains $HOME")
+    dotgit = Path(real) / ".git"
+    if dotgit.is_dir():
+        return real
+    gitdir, common = _git_dirs(real)
+    if not gitdir:
+        raise WrapperError(
+            f"refusing lane directory {cwd!r}: not a git worktree")
+    back = _read(Path(gitdir) / "gitdir")
+    if not back or _real(back) != _real(dotgit):
+        raise WrapperError(
+            f"refusing lane directory {cwd!r}: its gitdir does not belong "
+            "to this worktree")
+    return real
+
+
+def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
+                    bwrap: str | None = None):
+    """Wrap `cmd` (cmd[0] is pi) in bwrap; return (argv, child_env). Pure: no
+    filesystem writes.
+
+    Writable: cwd, the job's `home` (also the uv cache), `sessions` and `pi-agent`
+    (minus its settings.json/models.json), /tmp.
     Read-only: system dirs, the pi install, the node runtime, uv and its
-    python builds, and the repository's common git dir. Nothing else in the
-    real HOME is mounted."""
+    python builds, the rest of the job dir (control files, agent config), the
+    worktree's `.git` and gitdir, and the repository's common git dir. Nothing
+    else in the real HOME is mounted.
+
+    The environment travels in `child_env` (Popen env=), never in argv, so
+    secrets stay out of /proc/<pid>/cmdline; there is no --clearenv because
+    the dict is already the allowlist."""
     bwrap = bwrap or find_bwrap()
+    job = Path(job)
     home = (job / "home").as_posix()
     env = dict(env)
     path_dirs = []
@@ -269,7 +355,10 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
     node = shutil.which("node", path=env.get("PATH"))
     if node:
         node_real = Path(_real(node))
-        ro.append(node_real.parent.parent.as_posix())
+        if node_real.parent.name == "bin":
+            ro.append(node_real.parent.parent.as_posix())
+        else:
+            ro.append(node_real.as_posix())
         path_dirs.append(node_real.parent.as_posix())
     uv = shutil.which("uv", path=env.get("PATH"))
     if uv:
@@ -286,19 +375,35 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
     args = [bwrap, *_sandbox_base_args()]
     seen = set()
     for path in ro:
+        _check_mount(path)
         if path not in seen and os.path.exists(path):
             seen.add(path)
             args += ["--ro-bind", path, path]
-    rw = [cwd, job.as_posix()] + ([gitdir] if gitdir else [])
-    for path in rw:
-        args += ["--bind", path, path]
-    args += ["--chdir", cwd, "--clearenv"]
+    args += ["--bind", cwd, cwd]
+    # Later mounts win: the worktree's git redirection points stay read-only,
+    # so a lane cannot repoint git at a config of its own.
+    for path in (Path(cwd) / ".git").as_posix(), gitdir:
+        if path and os.path.exists(path):
+            args += ["--ro-bind", path, path]
+    # The jobs root is replaced by an empty tmpfs so sibling jobs vanish; this
+    # job comes back read-only except its home and sessions directories.
+    args += ["--tmpfs", job.parent.as_posix(),
+             "--ro-bind", job.as_posix(), job.as_posix()]
+    for sub in ("home", "sessions", "pi-agent"):
+        if sub == "pi-agent" and not (job / sub).is_dir():
+            continue
+        args += ["--bind", (job / sub).as_posix(), (job / sub).as_posix()]
+    # pi keeps locks and credentials in its agent dir, but the settings the
+    # wrapper wrote (retry knobs, model overrides) stay read-only.
+    for name in ("settings.json", "models.json"):
+        conf = job / "pi-agent" / name
+        if conf.is_file():
+            args += ["--ro-bind", conf.as_posix(), conf.as_posix()]
+    args += ["--chdir", cwd]
     env["HOME"] = home
     env["TMPDIR"] = "/tmp"
     env["PATH"] = ":".join(path_dirs + ["/usr/local/bin", "/usr/bin", "/bin"])
-    for key, value in env.items():
-        args += ["--setenv", key, value]
-    return args + ["--", *cmd]
+    return args + ["--", *cmd], env
 
 
 # ---------------------------------------------------------------------------
@@ -325,18 +430,45 @@ def _set_state(job: Path, state: str, only_from=None) -> bool:
     return True
 
 
-def _pid_alive(pid) -> bool:
+def _proc_start(pid):
+    """Kernel start time (clock ticks) of `pid`, or None if it is gone."""
     try:
-        os.kill(int(pid), 0)
-    except (OSError, TypeError, ValueError):
-        return False
-    return True
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+        return int(stat.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def _write_pid(job: Path, pid: int) -> None:
+    _write(job / "pid", f"{pid} {_proc_start(pid) or 0}\n")
+
+
+def _runner_pid(job: Path):
+    """The live runner's pid, or None. A pid is trusted only when its start
+    time matches the one recorded at launch, it leads its own session (the
+    runner is started with start_new_session) and its command line is this
+    wrapper's `_run <job>`; a recycled or rewritten pid fails all three."""
+    parts = (_read(job / "pid") or "").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    pid, started = int(parts[0]), int(parts[1])
+    if pid <= 1 or not started or _proc_start(pid) != started:
+        return None
+    try:
+        if os.getpgid(pid) != pid:
+            return None
+        argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return None
+    if b"_run" not in argv or job.name.encode() not in argv:
+        return None
+    return pid
 
 
 def effective_state(job: Path) -> str | None:
     """The state file, corrected when the runner died without writing one."""
     state = _read(job / "state")
-    if state in _LIVE_STATES and not _pid_alive(_read(job / "pid")):
+    if state in _LIVE_STATES and _runner_pid(job) is None:
         return "failed"
     return state
 
@@ -472,7 +604,7 @@ class Runner:
     def __init__(self, job: Path):
         self.job = job
         self.slug = _read(job / "model")
-        self.cwd = _read(job / "cwd")
+        self.cwd = check_lane_cwd(_read(job / "cwd"))
         self.effort = _read(job / "effort") or "medium"
         self.stall_seconds = _env_number(
             "FLEET_PI_STALL_MINUTES", DEFAULT_STALL_MINUTES) * 60
@@ -534,13 +666,14 @@ class Runner:
         outcome = Outcome(slug)
         self.stalled = False
         self.last_event = time.monotonic()
-        (self.job / "home").mkdir(exist_ok=True)
+        for sub in ("home", "sessions"):
+            (self.job / sub).mkdir(exist_ok=True)
         bwrap = find_bwrap()
         probe_bwrap(bwrap)
-        argv = sandbox_command(self.command(slug, prompt, resume), self.cwd,
-                               self.job, env, bwrap)
+        argv, sandbox_env = sandbox_command(
+            self.command(slug, prompt, resume), self.cwd, self.job, env, bwrap)
         self.proc = subprocess.Popen(
-            argv, cwd=self.cwd, env=env,
+            argv, cwd=self.cwd, env=sandbox_env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, start_new_session=True)
 
@@ -638,11 +771,12 @@ def _launch_runner(job: Path) -> None:
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, env=dict(os.environ), cwd=os.getcwd(),
         start_new_session=True)
-    _write(job / "pid", f"{proc.pid}\n")
+    _write_pid(job, proc.pid)
 
 
 def cmd_spawn(args) -> int:
     slug = check_slug(args.model)
+    check_lane_cwd(os.getcwd())
     effort = args.effort or os.environ.get("MCX_EFFORT") or "medium"
     if effort not in EFFORTS:
         raise WrapperError(f"unsupported effort: {effort!r}")
@@ -705,14 +839,14 @@ def cmd_stop(args) -> int:
     if not job.is_dir():
         print(f"unknown worker: {args.id}", file=sys.stderr)
         return 1
-    pid = _read(job / "pid")
-    if pid and _pid_alive(pid):
+    pid = _runner_pid(job)  # never signal a pid that fails the identity check
+    if pid:
         try:
-            os.kill(int(pid), signal.SIGTERM)  # runner kills pi, marks stopped
+            os.kill(pid, signal.SIGTERM)  # runner kills pi, marks stopped
         except OSError:
             pass
         deadline = time.monotonic() + 8
-        while _pid_alive(pid) and time.monotonic() < deadline:
+        while _runner_pid(job) and time.monotonic() < deadline:
             time.sleep(0.1)
     _set_state(job, "stopped", only_from=_LIVE_STATES)
     return 0
@@ -726,7 +860,14 @@ def cmd_list(_args) -> int:
 
 
 def cmd_run(args) -> int:
-    return Runner(job_dir(args.id)).run()
+    job = job_dir(args.id)
+    try:
+        runner = Runner(job)
+    except WrapperError as exc:
+        _write(job / "error", str(exc) + "\n")
+        _set_state(job, "failed", only_from=_LIVE_STATES)
+        return 0
+    return runner.run()
 
 
 def build_parser() -> argparse.ArgumentParser:
