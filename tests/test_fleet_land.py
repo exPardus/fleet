@@ -402,3 +402,168 @@ def test_registration_gate_skips_an_edit_that_adds_neither(tmp_path, monkeypatch
     fleet_land._check_commands(lane, [], home_root=repo,
                                files_changed=["README.md"], base=base)
     assert "registration" not in seen
+
+
+def test_land_git_runs_with_hooks_and_fsmonitor_disabled(tmp_path, monkeypatch):
+    repo, lane, _base = _repo(tmp_path)
+    seen = []
+    real = subprocess.run
+    monkeypatch.setattr(fleet_land.subprocess, "run",
+                        lambda cmd, *a, **k: (seen.append(cmd), real(cmd, *a, **k))[1])
+    fleet_land._git(repo, "status", cwd=lane)
+    assert seen[0][:5] == ["git", "-c", "core.hooksPath=/dev/null",
+                           "-c", "core.fsmonitor=false"]
+
+
+def test_land_refuses_a_redirected_lane_gitdir(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    fleet_land._check_lane_gitdir(repo, lane)  # genuine worktree passes
+    evil = tmp_path / "evil" / ".git"
+    (evil / "worktrees" / "x").mkdir(parents=True)
+    (lane / ".git").write_text(f"gitdir: {evil}/worktrees/x\n")
+    with pytest.raises(fleet.FleetCliError, match="refusing"):
+        fleet_land._check_lane_gitdir(repo, lane)
+
+
+def test_land_refuses_a_lane_whose_commondir_was_rewritten(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    gitdir = Path((lane / ".git").read_text().split(":", 1)[1].strip())
+    other = tmp_path / "other"
+    other.mkdir()
+    (gitdir / "commondir").write_text(str(other) + "\n")
+    with pytest.raises(fleet.FleetCliError, match="does not belong"):
+        fleet_land._check_lane_gitdir(repo, lane)
+
+
+def test_land_does_not_run_a_lane_fsmonitor_hook(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    marker = tmp_path / "ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o755)
+    _git(lane, "config", "extensions.worktreeConfig", "true")
+    _git(lane, "config", "--worktree", "core.fsmonitor", str(hook))
+    fleet_land._git(repo, "status", cwd=lane)
+    assert not marker.exists()
+
+
+def _gates_off_home(tmp_path):
+    home = tmp_path / "fleethome"
+    (home / "supervisor").mkdir(parents=True)
+    (home / "supervisor" / "wave-close.json").write_text('{"gates": []}')
+    return home
+
+
+def _mark_pi(lane):
+    job = lane / ".mcx" / "abcd1234"
+    job.mkdir(parents=True)
+    (job / "pi").write_text("1\n")
+    (job / "cwd").write_text(str(lane) + "\n")
+
+
+def test_pi_lane_commands_run_inside_the_sandbox(tmp_path, monkeypatch):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("no bwrap")
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    escape = tmp_path / "escaped"
+    home = _gates_off_home(tmp_path)
+    monkeypatch.setenv("SECRET_TOKEN_X", "hunter2")
+    command = (f"echo pwn > {escape}; test -z \"$SECRET_TOKEN_X\" || exit 7; "
+               "touch inside-ok; ! touch .git/evil 2>/dev/null")
+    checks = fleet_land._check_commands(
+        lane, [{"command": command}], home_root=home, sandboxed=True)
+    assert checks == [("tests[1]", 0)]
+    assert not escape.exists()          # /tmp inside is private
+    assert (lane / "inside-ok").exists()
+
+
+def test_non_pi_lane_commands_still_run_on_the_host(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    escape = tmp_path / "escaped"
+    checks = fleet_land._check_commands(
+        lane, [{"command": f"echo ok > {escape}"}],
+        home_root=_gates_off_home(tmp_path))
+    assert checks == [("tests[1]", 0)] and escape.exists()
+
+
+def test_pi_lane_without_a_sandbox_is_refused_not_run(tmp_path, monkeypatch):
+    import fleet_pi
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    escape = tmp_path / "escaped"
+    monkeypatch.setattr(fleet_pi, "find_bwrap", lambda: (_ for _ in ()).throw(
+        fleet_pi.WrapperError("bwrap not found")))
+    with pytest.raises(fleet.FleetCliError, match="needs a sandbox"):
+        fleet_land._check_commands(
+            lane, [{"command": f"echo pwn > {escape}"}],
+            home_root=_gates_off_home(tmp_path), sandboxed=True)
+    assert not escape.exists()
+
+
+def test_pi_lane_gates_also_run_sandboxed(tmp_path, monkeypatch):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("no bwrap")
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    escape = tmp_path / "gate-escaped"
+    home = tmp_path / "fleethome"
+    (home / "supervisor").mkdir(parents=True)
+    (home / "supervisor" / "wave-close.json").write_text(json.dumps(
+        {"gates": [{"name": "custom", "command": f"echo pwn > {escape}"}]}))
+    checks = fleet_land._check_commands(lane, [], home_root=home,
+                                        sandboxed=True)
+    assert checks == [("custom", 0)] and not escape.exists()
+
+
+def test_land_sandbox_hides_the_mcx_control_dir_and_has_no_network(tmp_path):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("no bwrap")
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    marker = lane / ".mcx" / "abcd1234" / "pi"
+    evil = tmp_path / "bashrc"
+    command = ("rm -rf .mcx/*/pi .mcx/*/cwd 2>/dev/null; "
+               "ln -sf /nonexistent .mcx/abcd1234/log 2>/dev/null; "
+               "test -z \"$(ls -A .mcx)\"; "
+               "! (ls /sys/class/net | grep -qv '^lo$')")
+    checks = fleet_land._check_commands(
+        lane, [{"command": command}], home_root=_gates_off_home(tmp_path),
+        sandboxed=True)
+    assert checks == [("tests[1]", 0)]
+    assert marker.exists() and (marker.parent / "cwd").exists()
+    assert not (marker.parent / "log").is_symlink()
+
+
+def test_deleted_marker_is_still_sandboxed_registry_decides():
+    wt = Path("/x/lane")
+    no_probe = argparse.Namespace(lane="w1")
+    assert fleet_land._lane_sandboxed(no_probe, wt) is True          # fail closed
+    unknown = argparse.Namespace(_lane_is_pi=lambda w: None)
+    assert fleet_land._lane_sandboxed(unknown, wt) is True            # no row
+    pi = argparse.Namespace(_lane_is_pi=lambda w: True)
+    assert fleet_land._lane_sandboxed(pi, wt) is True
+    non_pi = argparse.Namespace(_lane_is_pi=lambda w: False)
+    assert fleet_land._lane_sandboxed(non_pi, wt) is False
+
+
+def test_registry_probe_reads_the_row_substrate(tmp_path, monkeypatch):
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    rows = {"a": {"cwd": str(lane), "substrate": "pi/acme/x:free"}}
+    monkeypatch.setattr(fleet, "_read_registry_readonly",
+                        lambda: (True, "", {"workers": rows}))
+    assert fleet._land_lane_is_pi(lane) is True
+    rows["a"] = {"cwd": str(lane), "substrate": "codex"}
+    assert fleet._land_lane_is_pi(lane) is False
+    rows["a"] = {"cwd": str(lane)}                 # no substrate: not pi
+    assert fleet._land_lane_is_pi(lane) is False
+    rows["b"] = {"cwd": str(lane), "substrate": "pi/acme/x:free"}
+    assert fleet._land_lane_is_pi(lane) is True    # any pi row wins
+    assert fleet._land_lane_is_pi(tmp_path / "other") is None
+    monkeypatch.setattr(fleet, "_read_registry_readonly",
+                        lambda: (False, "corrupt", None))
+    assert fleet._land_lane_is_pi(lane) is None

@@ -29,12 +29,46 @@ _CLAIM_KEYS = {"claim", "command"}
 LAND_GATE_NAMES = frozenset(("docs-currency", "receipts", "citations", "registration"))
 
 
+_GIT_SAFE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
+
+def _check_lane_gitdir(repo: Path, worktree: Path) -> None:
+    common = Path(_git_output(repo, "rev-parse", "--git-common-dir",
+                              cwd=repo))
+    if not common.is_absolute():
+        common = repo / common
+    common = common.resolve()
+    dotgit = worktree / ".git"
+    if not dotgit.is_file():
+        raise FleetCliError(
+            f"land: {worktree} has no linked-worktree .git file; refusing")
+    text = dotgit.read_text(encoding="utf-8", errors="replace").strip()
+    if not text.startswith("gitdir:"):
+        raise FleetCliError(f"land: {dotgit} is not a gitdir pointer; refusing")
+    gitdir = Path(text.split(":", 1)[1].strip())
+    if not gitdir.is_absolute():
+        gitdir = worktree / gitdir
+    gitdir = gitdir.resolve()
+    if gitdir.parent != common / "worktrees":
+        raise FleetCliError(
+            f"land: {worktree} gitdir is outside {common}/worktrees; refusing")
+    try:
+        common_text = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        back = (gitdir / "gitdir").read_text(encoding="utf-8").strip()
+    except OSError:
+        raise FleetCliError(f"land: {gitdir} is missing commondir/gitdir; refusing")
+    if ((gitdir / common_text).resolve() != common
+            or Path(back).resolve() != dotgit.resolve()):
+        raise FleetCliError(
+            f"land: {gitdir} does not belong to {worktree}; refusing")
+
+
 def _git(repo: Path, *args: str, cwd: Path | None = None,
          check: bool = True) -> subprocess.CompletedProcess:
     """Run one Git command and turn a failed command into a CLI refusal."""
     run_cwd = str(cwd or repo)
     result = subprocess.run(
-        ["git", *args], cwd=run_cwd, capture_output=True, text=True,
+        ["git", *_GIT_SAFE, *args], cwd=run_cwd, capture_output=True, text=True,
         encoding="utf-8", errors="replace")
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
@@ -297,12 +331,32 @@ def _rebase(repo: Path, worktree: Path, lane_branch: str,
         f"land: rebase {lane_branch!r} conflicted; aborted cleanly; paths: {names}")
 
 
+def _lane_sandboxed(args, worktree: Path) -> bool:
+    probe = getattr(args, "_lane_is_pi", None)
+    return probe is None or probe(worktree) is not False
+
+
 def _run_shell(command: str, cwd: Path, log_dir: Path,
-               label: str) -> int:
+               label: str, sandboxed: bool = False) -> int:
     """Run a recorded command and preserve complete stdout/stderr in a log."""
-    result = subprocess.run(command, cwd=str(cwd), shell=True,
-                            executable="/bin/sh", capture_output=True,
-                            text=True, encoding="utf-8", errors="replace")
+    if sandboxed:
+        import fleet_pi
+        python = Path(os.path.realpath(sys.executable))
+        command = command.replace(shlex.quote(sys.executable),
+                                  shlex.quote(python.as_posix()))
+        try:
+            argv, env = fleet_pi.sandbox_shell(
+                command, cwd, log_dir / (label + ".sbx"),
+                extra_ro=[python.parent.parent.as_posix()])
+        except fleet_pi.WrapperError as exc:
+            raise FleetCliError(f"land: pi lane code needs a sandbox: {exc}")
+        result = subprocess.run(argv, cwd=str(cwd), env=env,
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace")
+    else:
+        result = subprocess.run(command, cwd=str(cwd), shell=True,
+                                executable="/bin/sh", capture_output=True,
+                                text=True, encoding="utf-8", errors="replace")
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / f"{label}.log").write_text(
         f"$ {command}\n\n{result.stdout or ''}\n--- stderr ---\n"
@@ -398,20 +452,23 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
 
 def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = None,
                     files_changed: list[str] | None = None,
-                    base: str | None = None) \
+                    base: str | None = None, sandboxed: bool = False) \
         -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
     checks = []
     for index, item in enumerate(tests, start=1):
         checks.append((f"tests[{index}]", _run_shell(
-            item["command"], worktree, log_dir, f"test-{index}")))
+            item["command"], worktree, log_dir, f"test-{index}",
+            **({"sandboxed": True} if sandboxed else {}))))
     for name, command in _land_gates(worktree, home_root=home_root):
         if name == "citations" and "bin/fleet.py" not in (files_changed or []):
             continue
         if name == "registration" and not _adds_registration(
                 worktree, base, files_changed or []):
             continue
-        checks.append((name, _run_shell(command, worktree, log_dir, name)))
+        checks.append((name, _run_shell(
+            command, worktree, log_dir, name,
+            **({"sandboxed": True} if sandboxed else {}))))
     return checks
 
 
@@ -420,6 +477,8 @@ def cmd_land(args) -> int:
     lane = _validate_lane_name(getattr(args, "lane", None))
     repo = _repo_root()
     lane_branch, worktree = _resolve_lane(repo, lane)
+    if worktree != repo:
+        _check_lane_gitdir(repo, worktree)
     payload, report_rel, result_rel = _validate_result(lane, worktree)
     base = payload["base"]
     _git(repo, "cat-file", "-e", f"{base}^{{commit}}")
@@ -431,12 +490,14 @@ def cmd_land(args) -> int:
         raise FleetCliError("land: lane branch cannot be its own source branch")
     _rebase(repo, worktree, lane_branch, source_branch)
     home_override = getattr(args, "_fleet_home", None)
+    extra = {"sandboxed": True} if _lane_sandboxed(args, worktree) else {}
     checks = (_check_commands(worktree, payload["tests"],
                               home_root=Path(home_override),
-                              files_changed=payload["files_changed"], base=base)
+                              files_changed=payload["files_changed"], base=base,
+                              **extra)
               if home_override else _check_commands(
                   worktree, payload["tests"], files_changed=payload["files_changed"],
-                  base=base))
+                  base=base, **extra))
     tip = _git_output(repo, "rev-parse", f"refs/heads/{lane_branch}")
     stat = _git_output(repo, "diff", "--shortstat", f"{base}..{tip}") or "0 files changed"
     red = [name for name, rc in checks if rc != 0]

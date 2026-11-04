@@ -230,6 +230,101 @@ restarted run. `fleet status` and `fleet peek` show the approval mode so a
 sandboxed lane is visible. Legacy rows without these fields derive approval
 from their saved Fleet mode and use medium effort.
 
+### 6.2a pi lanes (`--model pi:<vendor>/<model>:free`)
+
+A `pi:` model runs the pi coding agent against a free OpenRouter model through
+`bin/fleet_pi.py`, a stdlib-only wrapper that speaks mcx's verb and job-directory
+contract (`spawn`, `result` with exit 2 live / 0 done / 1 failed or stopped,
+`steer ID -`, `stop`, `list`; state under `<lane worktree>/.mcx/<id>/`). The row
+persists `substrate=pi/<slug>` and `dispatch_kind=mcx`, so every verb, wave-close
+stop and LANE-DONE mail rides the mcx route; only the executable behind it
+differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:`.
+
+- **Free only.** Fleet and the wrapper both refuse any slug that is not an exact
+  `<vendor>/<model>:free`, before a registry write or a pi process. The wrapper
+  always passes `--provider openrouter` and the exact slug (pi fuzzy-matches) and
+  fails a run whose assistant messages report a different model. `sup-spawn` and
+  other non-worker roles refuse `pi:` models.
+- **Outcome from events.** `--mode json` exits 0 on provider failure, so the
+  verdict is derived from the event stream: `done` needs an `agent_end` with no
+  later error; an assistant `stopReason` of `error`/`aborted`, an `error` event,
+  an exhausted `auto_retry` or a stream that ends without `agent_end` is
+  `failed` (fleet status `dead`). A transient failure (429, 50x, rate limit, no
+  upstreams) restarts the run once on the same pi session after a pause; the
+  answer is the last assistant text (the thinking block only when no text exists).
+- **Stall watchdog.** No pi event for `FLEET_PI_STALL_MINUTES` (default 5) kills
+  the run and marks the job `stopped`, which fleet reads as `dead`.
+- **Retry policy.** The wrapper writes a per-job pi agent dir
+  (`PI_CODING_AGENT_DIR`) with `retry.maxRetries=5`, `baseDelayMs=4000` and
+  `maxAgentDelayMs=120000` (`FLEET_PI_MAX_RETRIES`, `FLEET_PI_RETRY_BASE_MS`,
+  `FLEET_PI_RETRY_MAX_MS`), plus a `modelOverrides` entry capping
+  `dots-studio/dots-3-note-preview:free` at `maxTokens` 32768. pi's install
+  telemetry setting is never touched: some models 403 without the attribution
+  headers it controls.
+- **Follow-ups.** `fleet send` runs `steer`, which resumes the same pi session
+  (`--continue`, same `--session-dir`) with the message; a live turn refuses, as
+  for mcx. `interrupt`/`kill` call `stop`; `respawn` starts a fresh session.
+- **Execution.** `mcx_approval` is recorded for status but does not widen or
+  narrow a pi lane; the sandbox below is the boundary. Context files are off
+  (`-nc`) unless `FLEET_PI_CONTEXT_FILES` is set. The OpenRouter key comes from
+  `OPENROUTER_API_KEY` or the OpenRouter key file and reaches only the pi child.
+  pi is found via `FLEET_PI_BIN`, then a user-local install, then `PATH`.
+- **Sandbox (bubblewrap).** Every pi run, including `steer` turns and the
+  restart after a provider failure, executes under `bwrap` with
+  `--die-with-parent --unshare-pid --new-session --unshare-ipc --unshare-uts
+  --unshare-cgroup-try`. Writable: the lane worktree, a private `/tmp`, and
+  three job subdirectories -- `home` (a private `HOME`, also the uv cache),
+  `sessions` and `pi-agent` (minus its `settings.json`/`models.json`, which
+  stay read-only). Read-only: the rest of the job directory (`cwd`, `pid`,
+  `state`, `result`, `error`, `prompt`, ... -- a lane cannot fake its outcome,
+  retarget its own bind path or aim `stop` at another process; sibling jobs are
+  hidden), the worktree's `.git` and its gitdir (so a lane cannot repoint git at
+  a config of its own), the repository's common git dir, `/usr`, `/etc`, the
+  `/bin` `/lib*` links, the pi install, the Node runtime (a dedicated install prefix, else the lone binary;
+  never `$HOME` or a parent of it), and `uv` with its Python builds. `git
+  status`/`diff`/`log` work; commits, `add` and ref writes fail, and `fleet
+  land` commits. Everything else under the real `$HOME` -- `~/.ssh`,
+  `~/.config`, other repositories -- is not mounted and does not exist inside.
+  The lane directory read from `job/cwd` is checked before it is bound: an
+  absolute git checkout (a linked worktree's gitdir must point back at it),
+  never `$HOME` or a parent of it. The network namespace is **shared** (the
+  provider must be reachable), so services listening on localhost -- tunnels,
+  local sockets -- are reachable from inside; that is a known limit, not a
+  sandboxed property. `bwrap` must be the system one on `PATH`, root-owned and
+  not writable by others; there is no variable that selects another binary (a
+  scripted one is honoured only under the test suite). If `bwrap` is missing,
+  untrusted or fails a probe in the same flag shape, `spawn` exits 1 and a later
+  turn marks the job `failed`; there is no unsandboxed fallback and no escape
+  variable. Fleet `doctor` reports a pi row on a host without a trusted
+  `bwrap`.
+- **Landing.** `fleet land` commits a pi lane's dirty worktree on its behalf; the
+  lane's own commits fail because the git dirs are read-only. Land first checks
+  that the worktree's gitdir is a `worktrees/<name>` entry of the repository
+  whose `commondir` and back-pointer match, and runs every git command with
+  `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
+  For a pi lane every command `land` runs from lane-written data -- the
+  `tests[].command` entries of the lane result and the landing gates, which
+  execute the lane's `tests/*.py`, `tools/*.py` and `conftest.py` -- runs inside
+  the same bubblewrap sandbox with no API key, a throwaway `HOME`, no network
+  (`--unshare-net`) and the worktree's `.mcx` hidden behind an empty tmpfs (so
+  lane code cannot touch job control files). Whether a lane is a pi lane comes
+  from the registry row for its worktree and fails closed: the sandbox is used
+  unless a row exists and says non-pi. If no trusted `bwrap` is available `land`
+  refuses instead of running the code on the host. The interpreter inside is
+  the resolved real binary of the one running `land` (its `bin/..` prefix is
+  mounted read-only); the host venv's site-packages are absent and there is no
+  network, so a gate needing third-party packages or a download (`pytest`,
+  `uv --with`) goes red for a pi lane and is run by the supervisor instead.
+- **Environment.** The child environment is an exact allowlist (`PATH`, `HOME`,
+  `LANG`, `TERM`, `TMPDIR`, `OPENROUTER_API_KEY`); no other variable passes and
+  there is no pass-everything switch. It travels as the process environment of
+  `bwrap` (`Popen(env=)`), never in argv, so the key is not visible in
+  `ps`/`/proc/<pid>/cmdline`. Inside the sandbox `HOME`, `TMPDIR` and `PATH` are
+  rewritten to the private and read-only locations above. `job/pid` records the
+  runner's start time; `stop` signals only a pid whose start time, session
+  leadership and command line still match.
+- **Platform.** POSIX/Linux only (bubblewrap); fleet and the wrapper refuse pi lanes on Windows, and on any host without a working `bwrap`.
+
 **Launch contract around the choke point (spawn shape, `cmd_spawn` @2128):** pre-claim the record under `fleet.lock` with `session_id=None` + `last_dispatch_at` stamped → dispatch outside the lock → re-lock and stamp sid/short-id via `_commit_launched_turn` (@1769: 6 attempts, backoff — a lock timeout must not strand a live session; on exhaustion `_report_stranded_native_turn` prints the recovery handles and the pre-claim is **kept**, never popped, because a live session exists) → on dispatch failure, roll the pre-claim back. **Fast-completion exception:** a worker can finish before the join resolves; if an outcome record for this name is newer than the pre-claim, commit `idle` with the outcome's sid instead of rolling back a finished task (`_fast_completion_sid` @5927).
 
 ### 6.1 The second dispatch path — supervisor successor (`cmd_sup_handoff_begin`)
@@ -274,7 +369,7 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 
 | Verb | Native behavior (receipt) |
 |---|---|
-| `spawn <name> --dir --task [--mode dontask] [--model] [--effort medium] [--codex-adapter native\|mcx] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. Codex `--model codex:<model>` defaults to the native app-server adapter and accepts `--effort low|medium|high|xhigh`; explicit mcx persists its selected effort and approval on that row. |
+| `spawn <name> --dir --task [--mode dontask] [--model] [--effort medium] [--codex-adapter native\|mcx] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. Codex `--model codex:<model>` defaults to the native app-server adapter and accepts `--effort low|medium|high|xhigh`; explicit mcx persists its selected effort and approval on that row. `--model pi:<vendor>/<model>:free` dispatches a pi lane (§6.2a); any non-`:free` slug is refused. |
 | `send <name> <text\|@file>` | `_cmd_send_native` @2928. Working (roster busy/waiting) → mailbox append, unchanged mid-turn path (G1). An ordinary idle worker → **fork-steer** (RATIFIED G2(b)): ceiling check via summed outcome tokens, pre-claim, mailbox append rides the drain, `dispatch_bg(resume_sid=old_sid)` mints a NEW sid; `_restamp_after_steer` retires the old sid, restamps sid/short-id, and `_migrate_residual_mailbox` re-points late mail. An idle supervisor holder instead wakes unforked with a fresh wake nonce, resumes the same incarnation, and its fixed bootstrap aborts every pending handoff successor before campaign work. Refuses: dead-suspected, dead/interrupted (→ respawn), limited (→ resume-limited), other sticky states, and any G9-suspicious roster. Rollback restores the mailbox claim and the pre-claim **only if** the record still matches the claim this call wrote. |
 | `mail verify <id>` | File-only Interface-mail verification. Reads one atomic `state/mail-receipts/<id>.json`, checks its body digest and source against the current Interface registration, and prints the canonical body only after `VERIFIED`; missing, malformed, forged, or superseded evidence prints `UNVERIFIED` and exits 1. It takes no `fleet.lock`, probes nothing live, writes nothing, and never trusts mailbox content as provenance. |
 | `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the probe-free/lock-free/write-free view path (`status_snapshot` @1558). Archived records hidden by default (`--all` or a named query includes them) and **never recomputed**. Epoch-frozen ⇒ verdicts carried, not derived. |
