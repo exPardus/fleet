@@ -652,6 +652,40 @@ class TestEscapes:
         with pytest.raises(fleet_pi.WrapperError, match="not a plain directory"):
             run()
 
+    def test_symlinked_log_events_or_agent_dir_are_refused(self, tmp_path,
+                                                           lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        victim = tmp_path / "bashrc"
+        victim.write_text("keep\n")
+        for name in ("log", "events.jsonl"):
+            job = lane / ".mcx" / ("a" + name[:3] + "0000")
+            job.mkdir(parents=True)
+            (job / "cwd").write_text(str(lane) + "\n")
+            (job / name).symlink_to(victim)
+            with pytest.raises(fleet_pi.WrapperError, match="refusing"):
+                fleet_pi.Runner(job)
+        assert victim.read_text() == "keep\n"
+        job = lane / ".mcx" / "agent000"
+        job.mkdir(parents=True)
+        target = tmp_path / "hostdir"
+        target.mkdir()
+        (job / "pi-agent").symlink_to(target)
+        with pytest.raises(fleet_pi.WrapperError, match="not a plain directory"):
+            fleet_pi.write_agent_config(job, SLUG)
+        assert list(target.iterdir()) == []
+
+    def test_pi_sandbox_hides_a_stray_mcx_dir_elsewhere(self, tmp_path, lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        job = tmp_path / "jobs" / "abcd1234"
+        for sub in ("home", "sessions"):
+            (job / sub).mkdir(parents=True)
+        argv, _ = fleet_pi.sandbox_command(
+            ["/bin/pi"], str(lane), job, {"PATH": "/usr/bin"}, bwrap="/x/bwrap")
+        assert ("--tmpfs", str(lane / ".mcx")) in [
+            tuple(argv[i:i + 2]) for i in range(len(argv))]
+
     def test_stop_ignores_a_rewritten_pid(self, tmp_path, monkeypatch, lane):
         install_fake_pi(tmp_path, monkeypatch, [ok_run()])
         victim = subprocess.Popen(["sleep", "30"])

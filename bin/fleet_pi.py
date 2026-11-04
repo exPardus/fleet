@@ -335,7 +335,7 @@ def check_lane_cwd(cwd) -> str:
 
 def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
                     bwrap: str | None = None, extra_ro=(),
-                    install_root: bool = True):
+                    install_root: bool = True, no_net: bool = False):
     """Wrap `cmd` (cmd[0] is pi) in bwrap; return (argv, child_env). Pure: no
     filesystem writes.
 
@@ -378,7 +378,7 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
     gitdir, common = _git_dirs(cwd)
     if common:
         ro.append(common)
-    args = [bwrap, *_sandbox_base_args()]
+    args = [bwrap, *_sandbox_base_args()] + (["--unshare-net"] if no_net else [])
     seen = set()
     for path in ro:
         _check_mount(path)
@@ -386,6 +386,8 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
             seen.add(path)
             args += ["--ro-bind", path, path]
     args += ["--bind", cwd, cwd]
+    if job.parent.as_posix() != (Path(cwd) / ".mcx").as_posix():
+        args += ["--tmpfs", (Path(cwd) / ".mcx").as_posix()]
     # Later mounts win: the worktree's git redirection points stay read-only,
     # so a lane cannot repoint git at a config of its own.
     for path in (Path(cwd) / ".git").as_posix(), gitdir:
@@ -431,7 +433,7 @@ def sandbox_shell(command: str, cwd, workdir: Path, extra_ro=()):
     env = child_env()
     env.pop("OPENROUTER_API_KEY", None)
     return sandbox_command(["/bin/sh", "-c", command], cwd, job, env, bwrap,
-                           extra_ro=extra_ro, install_root=False)
+                           extra_ro=extra_ro, install_root=False, no_net=True)
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +517,8 @@ def effective_state(job: Path) -> str | None:
 def write_agent_config(job: Path, slug: str) -> Path:
     """Per-job pi agent dir: patient retry plus per-model overrides only."""
     agent = job / "pi-agent"
+    if os.path.lexists(agent) and not stat.S_ISDIR(os.lstat(agent).st_mode):
+        raise WrapperError(f"refusing {agent}: not a plain directory")
     agent.mkdir(exist_ok=True)
     settings = {"retry": {
         "enabled": True,
@@ -639,6 +643,15 @@ class Outcome:
 # the detached runner
 # ---------------------------------------------------------------------------
 
+def _open_plain(path: Path, mode: str, **kwargs):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                     | os.O_NOFOLLOW, 0o644)
+    except OSError as exc:
+        raise WrapperError(f"refusing {path}: {exc.strerror}")
+    return os.fdopen(fd, mode, **kwargs)
+
+
 class Runner:
     def __init__(self, job: Path):
         self.job = job
@@ -655,8 +668,8 @@ class Runner:
         self.stop_requested = False
         self.stalled = False
         self.last_event = time.monotonic()
-        self.log = open(job / "log", "a", encoding="utf-8", buffering=1)
-        self.events = open(job / "events.jsonl", "ab", buffering=0)
+        self.log = _open_plain(job / "log", "a", encoding="utf-8", buffering=1)
+        self.events = _open_plain(job / "events.jsonl", "ab", buffering=0)
 
     def say(self, line: str) -> None:
         self.log.write(line + "\n")

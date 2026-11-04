@@ -458,6 +458,7 @@ def _mark_pi(lane):
     job = lane / ".mcx" / "abcd1234"
     job.mkdir(parents=True)
     (job / "pi").write_text("1\n")
+    (job / "cwd").write_text(str(lane) + "\n")
 
 
 def test_pi_lane_commands_run_inside_the_sandbox(tmp_path, monkeypatch):
@@ -472,7 +473,7 @@ def test_pi_lane_commands_run_inside_the_sandbox(tmp_path, monkeypatch):
     command = (f"echo pwn > {escape}; test -z \"$SECRET_TOKEN_X\" || exit 7; "
                "touch inside-ok; ! touch .git/evil 2>/dev/null")
     checks = fleet_land._check_commands(
-        lane, [{"command": command}], home_root=home)
+        lane, [{"command": command}], home_root=home, sandboxed=True)
     assert checks == [("tests[1]", 0)]
     assert not escape.exists()          # /tmp inside is private
     assert (lane / "inside-ok").exists()
@@ -497,7 +498,7 @@ def test_pi_lane_without_a_sandbox_is_refused_not_run(tmp_path, monkeypatch):
     with pytest.raises(fleet.FleetCliError, match="needs a sandbox"):
         fleet_land._check_commands(
             lane, [{"command": f"echo pwn > {escape}"}],
-            home_root=_gates_off_home(tmp_path))
+            home_root=_gates_off_home(tmp_path), sandboxed=True)
     assert not escape.exists()
 
 
@@ -512,5 +513,57 @@ def test_pi_lane_gates_also_run_sandboxed(tmp_path, monkeypatch):
     (home / "supervisor").mkdir(parents=True)
     (home / "supervisor" / "wave-close.json").write_text(json.dumps(
         {"gates": [{"name": "custom", "command": f"echo pwn > {escape}"}]}))
-    checks = fleet_land._check_commands(lane, [], home_root=home)
+    checks = fleet_land._check_commands(lane, [], home_root=home,
+                                        sandboxed=True)
     assert checks == [("custom", 0)] and not escape.exists()
+
+
+def test_land_sandbox_hides_the_mcx_control_dir_and_has_no_network(tmp_path):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("no bwrap")
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    marker = lane / ".mcx" / "abcd1234" / "pi"
+    evil = tmp_path / "bashrc"
+    command = ("rm -rf .mcx/*/pi .mcx/*/cwd 2>/dev/null; "
+               "ln -sf /nonexistent .mcx/abcd1234/log 2>/dev/null; "
+               "test -z \"$(ls -A .mcx)\"; "
+               "! (ls /sys/class/net | grep -qv '^lo$')")
+    checks = fleet_land._check_commands(
+        lane, [{"command": command}], home_root=_gates_off_home(tmp_path),
+        sandboxed=True)
+    assert checks == [("tests[1]", 0)]
+    assert marker.exists() and (marker.parent / "cwd").exists()
+    assert not (marker.parent / "log").is_symlink()
+
+
+def test_deleted_marker_is_still_sandboxed_registry_decides():
+    wt = Path("/x/lane")
+    no_probe = argparse.Namespace(lane="w1")
+    assert fleet_land._lane_sandboxed(no_probe, wt) is True          # fail closed
+    unknown = argparse.Namespace(_lane_is_pi=lambda w: None)
+    assert fleet_land._lane_sandboxed(unknown, wt) is True            # no row
+    pi = argparse.Namespace(_lane_is_pi=lambda w: True)
+    assert fleet_land._lane_sandboxed(pi, wt) is True
+    non_pi = argparse.Namespace(_lane_is_pi=lambda w: False)
+    assert fleet_land._lane_sandboxed(non_pi, wt) is False
+
+
+def test_registry_probe_reads_the_row_substrate(tmp_path, monkeypatch):
+    lane = tmp_path / "lane"
+    lane.mkdir()
+    rows = {"a": {"cwd": str(lane), "substrate": "pi/acme/x:free"}}
+    monkeypatch.setattr(fleet, "_read_registry_readonly",
+                        lambda: (True, "", {"workers": rows}))
+    assert fleet._land_lane_is_pi(lane) is True
+    rows["a"] = {"cwd": str(lane), "substrate": "codex"}
+    assert fleet._land_lane_is_pi(lane) is False
+    rows["a"] = {"cwd": str(lane)}                 # no substrate: not pi
+    assert fleet._land_lane_is_pi(lane) is False
+    rows["b"] = {"cwd": str(lane), "substrate": "pi/acme/x:free"}
+    assert fleet._land_lane_is_pi(lane) is True    # any pi row wins
+    assert fleet._land_lane_is_pi(tmp_path / "other") is None
+    monkeypatch.setattr(fleet, "_read_registry_readonly",
+                        lambda: (False, "corrupt", None))
+    assert fleet._land_lane_is_pi(lane) is None

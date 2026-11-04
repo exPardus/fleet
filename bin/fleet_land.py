@@ -6,7 +6,6 @@ on the fleet kernel or its parser globals.
 """
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
@@ -332,9 +331,9 @@ def _rebase(repo: Path, worktree: Path, lane_branch: str,
         f"land: rebase {lane_branch!r} conflicted; aborted cleanly; paths: {names}")
 
 
-def _is_pi_lane(worktree: Path) -> bool:
-    return any(Path(p).is_file() for p in glob.glob(
-        str(worktree / ".mcx" / "*" / "pi")))
+def _lane_sandboxed(args, worktree: Path) -> bool:
+    probe = getattr(args, "_lane_is_pi", None)
+    return probe is None or probe(worktree) is not False
 
 
 def _run_shell(command: str, cwd: Path, log_dir: Path,
@@ -453,10 +452,9 @@ def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str
 
 def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = None,
                     files_changed: list[str] | None = None,
-                    base: str | None = None) \
+                    base: str | None = None, sandboxed: bool = False) \
         -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
-    sandboxed = _is_pi_lane(worktree)
     checks = []
     for index, item in enumerate(tests, start=1):
         checks.append((f"tests[{index}]", _run_shell(
@@ -492,12 +490,14 @@ def cmd_land(args) -> int:
         raise FleetCliError("land: lane branch cannot be its own source branch")
     _rebase(repo, worktree, lane_branch, source_branch)
     home_override = getattr(args, "_fleet_home", None)
+    extra = {"sandboxed": True} if _lane_sandboxed(args, worktree) else {}
     checks = (_check_commands(worktree, payload["tests"],
                               home_root=Path(home_override),
-                              files_changed=payload["files_changed"], base=base)
+                              files_changed=payload["files_changed"], base=base,
+                              **extra)
               if home_override else _check_commands(
                   worktree, payload["tests"], files_changed=payload["files_changed"],
-                  base=base))
+                  base=base, **extra))
     tip = _git_output(repo, "rev-parse", f"refs/heads/{lane_branch}")
     stat = _git_output(repo, "diff", "--shortstat", f"{base}..{tip}") or "0 files changed"
     red = [name for name, rc in checks if rc != 0]

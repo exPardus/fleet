@@ -302,14 +302,19 @@ differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:
   that the worktree's gitdir is a `worktrees/<name>` entry of the repository
   whose `commondir` and back-pointer match, and runs every git command with
   `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
-  For a pi lane (a `.mcx/<job>/pi` marker in the worktree) every command
-  `land` runs from lane-written data -- the `tests[].command` entries of the
-  lane result and the landing gates, which execute the lane's `tests/*.py`,
-  `tools/*.py` and `conftest.py` -- runs inside the same bubblewrap sandbox
-  with no API key and a throwaway `HOME`; if no trusted `bwrap` is available
-  `land` refuses instead of running them on the host. Inside, the Python
-  interpreter is the resolved real binary, so third-party packages of the
-  host's venv are absent and a gate needing them goes red.
+  For a pi lane every command `land` runs from lane-written data -- the
+  `tests[].command` entries of the lane result and the landing gates, which
+  execute the lane's `tests/*.py`, `tools/*.py` and `conftest.py` -- runs inside
+  the same bubblewrap sandbox with no API key, a throwaway `HOME`, no network
+  (`--unshare-net`) and the worktree's `.mcx` hidden behind an empty tmpfs (so
+  lane code cannot touch job control files). Whether a lane is a pi lane comes
+  from the registry row for its worktree and fails closed: the sandbox is used
+  unless a row exists and says non-pi. If no trusted `bwrap` is available `land`
+  refuses instead of running the code on the host. The interpreter inside is
+  the resolved real binary of the one running `land` (its `bin/..` prefix is
+  mounted read-only); the host venv's site-packages are absent and there is no
+  network, so a gate needing third-party packages or a download (`pytest`,
+  `uv --with`) goes red for a pi lane and is run by the supervisor instead.
 - **Environment.** The child environment is an exact allowlist (`PATH`, `HOME`,
   `LANG`, `TERM`, `TMPDIR`, `OPENROUTER_API_KEY`); no other variable passes and
   there is no pass-everything switch. It travels as the process environment of
