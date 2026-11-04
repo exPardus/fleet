@@ -45,8 +45,10 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -332,7 +334,8 @@ def check_lane_cwd(cwd) -> str:
 
 
 def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
-                    bwrap: str | None = None):
+                    bwrap: str | None = None, extra_ro=(),
+                    install_root: bool = True):
     """Wrap `cmd` (cmd[0] is pi) in bwrap; return (argv, child_env). Pure: no
     filesystem writes.
 
@@ -351,14 +354,17 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
     home = (job / "home").as_posix()
     env = dict(env)
     path_dirs = []
-    ro = [_install_root(cmd[0])]
+    ro = ([_install_root(cmd[0])] if install_root else []) + list(extra_ro)
     node = shutil.which("node", path=env.get("PATH"))
     if node:
         node_real = Path(_real(node))
-        if node_real.parent.name == "bin":
-            ro.append(node_real.parent.parent.as_posix())
+        prefix = node_real.parent.parent
+        if node_real.parent.name == "bin" and any(
+                (prefix / marker).is_dir()
+                for marker in ("include/node", "lib/node_modules")):
+            ro.append(prefix.as_posix())      # a dedicated node install
         else:
-            ro.append(node_real.as_posix())
+            ro.append(node_real.as_posix())   # a lone binary: never its dir
         path_dirs.append(node_real.parent.as_posix())
     uv = shutil.which("uv", path=env.get("PATH"))
     if uv:
@@ -390,14 +396,20 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
     args += ["--tmpfs", job.parent.as_posix(),
              "--ro-bind", job.as_posix(), job.as_posix()]
     for sub in ("home", "sessions", "pi-agent"):
-        if sub == "pi-agent" and not (job / sub).is_dir():
-            continue
+        if not os.path.lexists(job / sub):
+            if sub == "pi-agent":
+                continue
+        elif not stat.S_ISDIR(os.lstat(job / sub).st_mode):
+            raise WrapperError(f"refusing {job / sub}: not a plain directory")
         args += ["--bind", (job / sub).as_posix(), (job / sub).as_posix()]
     # pi keeps locks and credentials in its agent dir, but the settings the
-    # wrapper wrote (retry knobs, model overrides) stay read-only.
+    # wrapper wrote (retry knobs, model overrides) stay read-only. Anything
+    # but a regular file there (a planted symlink) refuses the run.
     for name in ("settings.json", "models.json"):
         conf = job / "pi-agent" / name
-        if conf.is_file():
+        if os.path.lexists(conf):
+            if not stat.S_ISREG(os.lstat(conf).st_mode):
+                raise WrapperError(f"refusing {conf}: not a regular file")
             args += ["--ro-bind", conf.as_posix(), conf.as_posix()]
     args += ["--chdir", cwd]
     env["HOME"] = home
@@ -406,14 +418,41 @@ def sandbox_command(cmd: list, cwd: str, job: Path, env: dict,
     return args + ["--", *cmd], env
 
 
+def sandbox_shell(command: str, cwd, workdir: Path, extra_ro=()):
+    """(argv, env) running `command` through sh inside the pi sandbox: the
+    same mounts and scrubbed env as a pi lane (no API key), in a throwaway
+    job dir. Used by `fleet land` for code a pi lane wrote."""
+    cwd = check_lane_cwd(str(cwd))
+    bwrap = find_bwrap()
+    probe_bwrap(bwrap)
+    job = Path(workdir)
+    for sub in ("home", "sessions"):
+        (job / sub).mkdir(parents=True, exist_ok=True)
+    env = child_env()
+    env.pop("OPENROUTER_API_KEY", None)
+    return sandbox_command(["/bin/sh", "-c", command], cwd, job, env, bwrap,
+                           extra_ro=extra_ro, install_root=False)
+
+
 # ---------------------------------------------------------------------------
 # job directory helpers
 # ---------------------------------------------------------------------------
 
 def _write(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # mkstemp creates a fresh O_EXCL file with a random name, so a symlink a
+    # lane planted at a predictable temp name is never followed.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _read(path: Path, default=None):

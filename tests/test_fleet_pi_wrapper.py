@@ -565,6 +565,7 @@ class TestEscapes:
         import fleet_pi
         home = tmp_path / "home"
         (home / "bin").mkdir(parents=True)
+        (home / "lib" / "node_modules").mkdir(parents=True)
         node = home / "bin" / "node"
         node.write_text("#!/bin/sh\n")
         node.chmod(0o755)
@@ -581,6 +582,7 @@ class TestEscapes:
         import fleet_pi
         prefix = tmp_path / "node-v1"
         (prefix / "bin").mkdir(parents=True)
+        (prefix / "lib" / "node_modules").mkdir(parents=True)
         node = prefix / "bin" / "node"
         node.write_text("#!/bin/sh\n")
         node.chmod(0o755)
@@ -592,6 +594,63 @@ class TestEscapes:
             bwrap="/x/bwrap")
         assert ("--ro-bind", str(prefix), str(prefix)) in [
             tuple(argv[i:i + 3]) for i in range(len(argv))]
+
+    def test_lone_node_binary_never_mounts_its_directory_tree(
+            self, tmp_path, monkeypatch, lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        home = tmp_path / "home"
+        (home / ".local" / "bin").mkdir(parents=True)
+        (home / ".local" / "share" / "secret").mkdir(parents=True)
+        node = home / ".local" / "bin" / "node"
+        node.write_text("#!/bin/sh\n")
+        node.chmod(0o755)
+        monkeypatch.setenv("HOME", str(home))
+        job = lane / ".mcx" / "abcd1234"
+        job.mkdir(parents=True)
+        argv, _ = fleet_pi.sandbox_command(
+            ["/bin/pi"], str(lane), job, {"PATH": str(home / ".local" / "bin")},
+            bwrap="/x/bwrap")
+        triples = [tuple(argv[i:i + 3]) for i in range(len(argv))]
+        assert ("--ro-bind", str(node), str(node)) in triples
+        assert ("--ro-bind", str(home / ".local"),
+                str(home / ".local")) not in triples
+
+    def test_planted_temp_symlink_is_not_followed(self, tmp_path, lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        job = lane / ".mcx" / "abcd1234"
+        agent = job / "pi-agent"
+        agent.mkdir(parents=True)
+        victim = tmp_path / "victim"
+        victim.write_text("precious\n")
+        for name in ("settings.json.tmp", "models.json.tmp", "settings.json"):
+            (agent / name).symlink_to(victim)
+        fleet_pi.write_agent_config(job, "dots-studio/dots-3-note-preview:free")
+        assert victim.read_text() == "precious\n"
+        assert (agent / "settings.json").is_file()
+        assert not (agent / "settings.json").is_symlink()
+
+    def test_symlinked_config_or_dirs_refuse_the_bind(self, tmp_path, lane):
+        sys.path.insert(0, str(WRAPPER.parent))
+        import fleet_pi
+        job = lane / ".mcx" / "abcd1234"
+        for sub in ("home", "sessions", "pi-agent"):
+            (job / sub).mkdir(parents=True)
+        fleet_pi.write_agent_config(job, SLUG)
+        run = lambda: fleet_pi.sandbox_command(
+            ["/bin/pi"], str(lane), job, {"PATH": "/usr/bin"}, bwrap="/x/bwrap")
+        run()
+        victim = tmp_path / "victim"
+        victim.write_text("x")
+        (job / "pi-agent" / "models.json").symlink_to(victim)
+        with pytest.raises(fleet_pi.WrapperError, match="not a regular file"):
+            run()
+        (job / "pi-agent" / "models.json").unlink()
+        (job / "sessions").rmdir()
+        (job / "sessions").symlink_to(tmp_path)
+        with pytest.raises(fleet_pi.WrapperError, match="not a plain directory"):
+            run()
 
     def test_stop_ignores_a_rewritten_pid(self, tmp_path, monkeypatch, lane):
         install_fake_pi(tmp_path, monkeypatch, [ok_run()])

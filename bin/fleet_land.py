@@ -6,6 +6,7 @@ on the fleet kernel or its parser globals.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -331,12 +332,32 @@ def _rebase(repo: Path, worktree: Path, lane_branch: str,
         f"land: rebase {lane_branch!r} conflicted; aborted cleanly; paths: {names}")
 
 
+def _is_pi_lane(worktree: Path) -> bool:
+    return any(Path(p).is_file() for p in glob.glob(
+        str(worktree / ".mcx" / "*" / "pi")))
+
+
 def _run_shell(command: str, cwd: Path, log_dir: Path,
-               label: str) -> int:
+               label: str, sandboxed: bool = False) -> int:
     """Run a recorded command and preserve complete stdout/stderr in a log."""
-    result = subprocess.run(command, cwd=str(cwd), shell=True,
-                            executable="/bin/sh", capture_output=True,
-                            text=True, encoding="utf-8", errors="replace")
+    if sandboxed:
+        import fleet_pi
+        python = Path(os.path.realpath(sys.executable))
+        command = command.replace(shlex.quote(sys.executable),
+                                  shlex.quote(python.as_posix()))
+        try:
+            argv, env = fleet_pi.sandbox_shell(
+                command, cwd, log_dir / (label + ".sbx"),
+                extra_ro=[python.parent.parent.as_posix()])
+        except fleet_pi.WrapperError as exc:
+            raise FleetCliError(f"land: pi lane code needs a sandbox: {exc}")
+        result = subprocess.run(argv, cwd=str(cwd), env=env,
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace")
+    else:
+        result = subprocess.run(command, cwd=str(cwd), shell=True,
+                                executable="/bin/sh", capture_output=True,
+                                text=True, encoding="utf-8", errors="replace")
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / f"{label}.log").write_text(
         f"$ {command}\n\n{result.stdout or ''}\n--- stderr ---\n"
@@ -435,17 +456,21 @@ def _check_commands(worktree: Path, tests: list[dict], home_root: Path | None = 
                     base: str | None = None) \
         -> list[tuple[str, int]]:
     log_dir = Path(tempfile.mkdtemp(prefix="fleet-land-"))
+    sandboxed = _is_pi_lane(worktree)
     checks = []
     for index, item in enumerate(tests, start=1):
         checks.append((f"tests[{index}]", _run_shell(
-            item["command"], worktree, log_dir, f"test-{index}")))
+            item["command"], worktree, log_dir, f"test-{index}",
+            **({"sandboxed": True} if sandboxed else {}))))
     for name, command in _land_gates(worktree, home_root=home_root):
         if name == "citations" and "bin/fleet.py" not in (files_changed or []):
             continue
         if name == "registration" and not _adds_registration(
                 worktree, base, files_changed or []):
             continue
-        checks.append((name, _run_shell(command, worktree, log_dir, name)))
+        checks.append((name, _run_shell(
+            command, worktree, log_dir, name,
+            **({"sandboxed": True} if sandboxed else {}))))
     return checks
 
 

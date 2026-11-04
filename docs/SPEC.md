@@ -280,7 +280,7 @@ differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:
   retarget its own bind path or aim `stop` at another process; sibling jobs are
   hidden), the worktree's `.git` and its gitdir (so a lane cannot repoint git at
   a config of its own), the repository's common git dir, `/usr`, `/etc`, the
-  `/bin` `/lib*` links, the pi install, the Node runtime (its `bin/..` prefix,
+  `/bin` `/lib*` links, the pi install, the Node runtime (a dedicated install prefix, else the lone binary;
   never `$HOME` or a parent of it), and `uv` with its Python builds. `git
   status`/`diff`/`log` work; commits, `add` and ref writes fail, and `fleet
   land` commits. Everything else under the real `$HOME` -- `~/.ssh`,
@@ -302,6 +302,14 @@ differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:
   that the worktree's gitdir is a `worktrees/<name>` entry of the repository
   whose `commondir` and back-pointer match, and runs every git command with
   `-c core.hooksPath=/dev/null -c core.fsmonitor=false`.
+  For a pi lane (a `.mcx/<job>/pi` marker in the worktree) every command
+  `land` runs from lane-written data -- the `tests[].command` entries of the
+  lane result and the landing gates, which execute the lane's `tests/*.py`,
+  `tools/*.py` and `conftest.py` -- runs inside the same bubblewrap sandbox
+  with no API key and a throwaway `HOME`; if no trusted `bwrap` is available
+  `land` refuses instead of running them on the host. Inside, the Python
+  interpreter is the resolved real binary, so third-party packages of the
+  host's venv are absent and a gate needing them goes red.
 - **Environment.** The child environment is an exact allowlist (`PATH`, `HOME`,
   `LANG`, `TERM`, `TMPDIR`, `OPENROUTER_API_KEY`); no other variable passes and
   there is no pass-everything switch. It travels as the process environment of

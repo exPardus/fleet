@@ -445,3 +445,72 @@ def test_land_does_not_run_a_lane_fsmonitor_hook(tmp_path):
     _git(lane, "config", "--worktree", "core.fsmonitor", str(hook))
     fleet_land._git(repo, "status", cwd=lane)
     assert not marker.exists()
+
+
+def _gates_off_home(tmp_path):
+    home = tmp_path / "fleethome"
+    (home / "supervisor").mkdir(parents=True)
+    (home / "supervisor" / "wave-close.json").write_text('{"gates": []}')
+    return home
+
+
+def _mark_pi(lane):
+    job = lane / ".mcx" / "abcd1234"
+    job.mkdir(parents=True)
+    (job / "pi").write_text("1\n")
+
+
+def test_pi_lane_commands_run_inside_the_sandbox(tmp_path, monkeypatch):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("no bwrap")
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    escape = tmp_path / "escaped"
+    home = _gates_off_home(tmp_path)
+    monkeypatch.setenv("SECRET_TOKEN_X", "hunter2")
+    command = (f"echo pwn > {escape}; test -z \"$SECRET_TOKEN_X\" || exit 7; "
+               "touch inside-ok; ! touch .git/evil 2>/dev/null")
+    checks = fleet_land._check_commands(
+        lane, [{"command": command}], home_root=home)
+    assert checks == [("tests[1]", 0)]
+    assert not escape.exists()          # /tmp inside is private
+    assert (lane / "inside-ok").exists()
+
+
+def test_non_pi_lane_commands_still_run_on_the_host(tmp_path):
+    repo, lane, _base = _repo(tmp_path)
+    escape = tmp_path / "escaped"
+    checks = fleet_land._check_commands(
+        lane, [{"command": f"echo ok > {escape}"}],
+        home_root=_gates_off_home(tmp_path))
+    assert checks == [("tests[1]", 0)] and escape.exists()
+
+
+def test_pi_lane_without_a_sandbox_is_refused_not_run(tmp_path, monkeypatch):
+    import fleet_pi
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    escape = tmp_path / "escaped"
+    monkeypatch.setattr(fleet_pi, "find_bwrap", lambda: (_ for _ in ()).throw(
+        fleet_pi.WrapperError("bwrap not found")))
+    with pytest.raises(fleet.FleetCliError, match="needs a sandbox"):
+        fleet_land._check_commands(
+            lane, [{"command": f"echo pwn > {escape}"}],
+            home_root=_gates_off_home(tmp_path))
+    assert not escape.exists()
+
+
+def test_pi_lane_gates_also_run_sandboxed(tmp_path, monkeypatch):
+    import shutil
+    if not shutil.which("bwrap"):
+        pytest.skip("no bwrap")
+    repo, lane, _base = _repo(tmp_path)
+    _mark_pi(lane)
+    escape = tmp_path / "gate-escaped"
+    home = tmp_path / "fleethome"
+    (home / "supervisor").mkdir(parents=True)
+    (home / "supervisor" / "wave-close.json").write_text(json.dumps(
+        {"gates": [{"name": "custom", "command": f"echo pwn > {escape}"}]}))
+    checks = fleet_land._check_commands(lane, [], home_root=home)
+    assert checks == [("custom", 0)] and not escape.exists()
