@@ -11287,6 +11287,41 @@ def _abandon_unlanded_commits(branch, run=subprocess.run):
         return None, f"unparseable rev-list output {result.stdout.strip()[:40]!r}"
 
 
+def _reconcile_working_row(name: str, roster_fn=None) -> None:
+    """Persist the live verdict for a row still marked working.
+    The turn-end notifier and `fleet status` both derive idle from the roster,
+    but only the status verb wrote it back, so a finished lane kept
+    status=working and blocked abandon. Probe outside the lock, then write only
+    if the row is unchanged and the verdict is idle; failures leave it alone."""
+    try:
+        data = read_registry_no_repair()
+        before = data["workers"].get(name)
+        if (not isinstance(before, dict) or before.get("status") != "working"
+                or before.get("archived_at")):
+            return
+        entries = []
+        if not _is_codex_record(before):
+            roster_ok, payload = (roster_fn or _fetch_agents_roster)()
+            entries = payload if roster_ok and isinstance(payload, list) else []
+            if native_epoch_suspicious(
+                    roster_ok and isinstance(payload, list), entries,
+                    data["workers"]):
+                return
+        after = dict(recompute_worker(name, before, entries))
+        after.pop("waiting_for_permission", None)
+        if after.get("status") != "idle":
+            return
+        with fleet_lock():
+            data = load_registry()
+            if data["workers"].get(name) != before:
+                return
+            data["workers"][name] = after
+            save_registry(data)
+            append_event("status_changed", name, old="working", new="idle")
+    except Exception:
+        return
+
+
 def cmd_abandon(args, run=subprocess.run) -> int:
     _supervisor_gate("abandon", nonce=getattr(args, "nonce", None))
     reason = (args.reason or "").strip()
@@ -11294,6 +11329,7 @@ def cmd_abandon(args, run=subprocess.run) -> int:
         raise FleetCliError("abandon: --reason must be non-empty")
     name = _resolve_worker_target(args.name)
     force = bool(getattr(args, "force", False))
+    _reconcile_working_row(name)
     with fleet_lock():
         data = load_registry()
         rec = data["workers"].get(name)
@@ -29323,6 +29359,8 @@ def sweep_lane_done(roster_fn=None, *, run=subprocess.run,
             continue
         if status != "idle":
             continue
+        if n in native:
+            _reconcile_working_row(n, roster_fn=lambda: (True, entries))
         try:
             if notify_lane_done(
                     n, "idle",
@@ -29342,6 +29380,7 @@ def cmd_lane_done(args) -> int:
     data = read_registry_no_repair()
     for name, rec in data["workers"].items():
         if isinstance(rec, dict) and rec.get("session_id") == args.sid:
+            _reconcile_working_row(name)
             notify_lane_done(name, "idle", expected_sid=args.sid)
             break
     return 0

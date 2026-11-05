@@ -110,3 +110,35 @@ def test_leaves_worktree_and_branch(isolated_home, repo):
     _seed(isolated_home)
     _run("--reason", "x")
     assert _git(repo, "rev-parse", "--verify", "refs/heads/lane/one").returncode == 0
+
+
+def _finished_turn(sid, roster_status="idle"):
+    fleet.append_outcome("w1", {"ts": fleet.now_iso(), "session_id": sid,
+                                "kind": "result", "result_text": "done"})
+    return lambda *a, **k: (True, [{"sessionId": sid, "status": roster_status,
+                                    "pid": 1}])
+
+
+def test_finished_turn_still_marked_working_does_not_block(
+        isolated_home, repo, monkeypatch):
+    sid = _seed(isolated_home, status="working")
+    monkeypatch.setattr(fleet, "_fetch_agents_roster", _finished_turn(sid))
+    assert _run("--reason", "done") == 0
+    rec = fleet.load_registry()["workers"]["w1"]
+    assert rec["status"] == "idle" and rec["lane_state"] == "abandoned"
+
+
+def test_live_busy_turn_still_blocks(isolated_home, repo, monkeypatch):
+    sid = _seed(isolated_home, status="working")
+    monkeypatch.setattr(fleet, "_fetch_agents_roster",
+                        _finished_turn(sid, roster_status="busy"))
+    with pytest.raises(fleet.FleetCliError, match="interrupt"):
+        _run("--reason", "x")
+    assert fleet.load_registry()["workers"]["w1"]["status"] == "working"
+
+
+def test_lane_done_hook_persists_idle(isolated_home, repo, monkeypatch):
+    sid = _seed(isolated_home, status="working")
+    monkeypatch.setattr(fleet, "_fetch_agents_roster", _finished_turn(sid))
+    fleet.cmd_lane_done(type("A", (), {"sid": sid})())
+    assert fleet.load_registry()["workers"]["w1"]["status"] == "idle"
