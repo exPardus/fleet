@@ -12,13 +12,13 @@ commands.
   to pip install. The floor is declared once as `fleet.MIN_PYTHON_VERSION`.
 - **Claude Code CLI 2.1.202 or newer**, logged in. Fleet shells out to
   `claude` for every dispatch.
-- Optional: **Codex CLI** and [mcx](https://github.com/acme/multi-codex)
+- Optional: **Codex CLI** and [mcx](https://github.com/exPardus/multi-codex)
   for Codex workers; **tmux** and **systemd** for the unattended keeper.
 
 ## Install
 
 ```sh
-git clone https://github.com/acme/fleet.git
+git clone https://github.com/exPardus/fleet.git
 cd fleet
 export PATH="$PWD/bin:$PATH"      # put this line in your shell rc to keep it
 fleet --help

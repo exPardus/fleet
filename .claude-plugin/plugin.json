@@ -3,7 +3,7 @@
   "description": "Three-tier command for Claude Code sessions: an interface tier that owns the plan, a supervisor tier that dispatches and gates, and worker sessions that survive reboots.",
   "version": "0.2.0",
   "author": {
-    "name": "the operator"
+    "name": "exPardus"
   },
   "keywords": ["fleet", "orchestration", "sessions", "workers"]
 }

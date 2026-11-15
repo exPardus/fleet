@@ -2,7 +2,7 @@
   "name": "claude-fleet",
   "description": "claude-fleet: three-tier command for Claude Code — an interface session that owns the plan, a supervisor that dispatches and gates, and durable worker sessions across projects.",
   "owner": {
-    "name": "the operator"
+    "name": "exPardus"
   },
   "plugins": [
     {
