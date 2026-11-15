@@ -12,6 +12,28 @@ usage limits.
 Fleet is not a coding assistant. Claude Code and Codex are. Fleet is the layer
 that keeps several model sessions working on one job over hours or days.
 
+Fleet is built with fleet. Its own changes land in waves: a supervisor splits the
+work, workers write it on branches, and `fleet land` and `fleet wave-close` check it
+before it reaches `main`.
+
+## What it does
+
+| | |
+|---|---|
+| **Your existing plan** | Workers are real Claude Code and Codex sessions, so they run on the Claude Code or Codex plan you are already logged in with. No API key is needed; OpenRouter is optional. |
+| **Durable sessions** | Every worker, supervisor and claim lives in plain files. A fresh session resumes a role from disk, without the old conversation. |
+| **Supervisor handoff** | A supervisor hands over to its successor at its context limit. Only one supervisor body is live per home; `fleet sup-guard` checks it. |
+| **Mid-turn steering** | `fleet send` steers a running worker without attaching to it. |
+| **Usage limits** | A worker that hits a usage limit is parked and resumed when the limit resets. |
+| **Honest status** | A worker fleet cannot confirm is alive becomes `dead-suspected`. Fleet never respawns it on its own, because a respawn repeats its side effects. |
+| **Work journals** | A stuck worker can be respawned and continue from its journal instead of starting over. |
+| **Land gates** | `fleet land` validates a lane's structured result, rebases it and runs the repository's checks before a model reads it. A worker cannot mark its own work done. |
+| **Wave accounting** | `fleet wave-close` runs the full test floor, pushes, and records what landed: lines per area, workers, tokens, and tokens per landed line. When a number cannot be measured it says `UNMEASURED`, never 0. |
+| **Several model providers** | Claude Code, native Codex through a fleet host, OpenRouter models, and free models through a `pi` adapter, behind one registry. |
+| **Knowledge loop** | Each session reads `knowledge/` at start and writes lessons back after a campaign, so the fleet gets better at running the fleet. |
+| **Unattended keeper** | An optional systemd timer pages you through tmux when a person is needed, and wakes an idle supervisor. It never dispatches work. |
+| **Spec gate** | Optional: `fleet spec new/accept/verify` binds a lane to an accepted spec before it can land. |
+
 ## How it fits together
 
 Fleet has three tiers. Each tier is a session with a defined role. Claude Code
@@ -42,7 +64,7 @@ For the full picture, read [docs/concepts.md](docs/concepts.md).
 - **Python 3.10 or newer** on `PATH`. Fleet's `bin/fleet.py` uses only the standard
   library, so there is nothing to `pip install`.
 - **Claude Code CLI 2.1.202 or newer**, logged in. Fleet starts Claude workers and supervisors through `claude`. Native Codex lanes do not use `claude`; they talk to the Codex app-server through a fleet host process.
-- **Optional:** the Codex CLI, for Codex workers. [mcx](https://github.com/acme/multi-codex)
+- **Optional:** the Codex CLI, for Codex workers. [mcx](https://github.com/exPardus/multi-codex)
   is needed only for the legacy `--codex-adapter mcx` route. **tmux** and
   **systemd** are needed only for the unattended keeper.
 
@@ -51,7 +73,7 @@ For the full picture, read [docs/concepts.md](docs/concepts.md).
 Clone the repository and put its `bin/` directory on your `PATH`:
 
 ```sh
-git clone https://github.com/acme/fleet.git
+git clone https://github.com/exPardus/fleet.git
 cd fleet
 export PATH="$PWD/bin:$PATH"      # add this line to your shell rc to keep it
 fleet --help
