@@ -20,6 +20,7 @@ before it reaches `main`.
 
 | | |
 |---|---|
+| **Your existing plan** | Workers are real Claude Code and Codex sessions, so they run on the Claude Code or Codex plan you are already logged in with. No API key is needed; OpenRouter is optional. |
 | **Durable sessions** | Every worker, supervisor and claim lives in plain files. A fresh session resumes a role from disk, without the old conversation. |
 | **Supervisor handoff** | A supervisor hands over to its successor at its context limit. Only one supervisor body is live per home; `fleet sup-guard` checks it. |
 | **Mid-turn steering** | `fleet send` steers a running worker without attaching to it. |
