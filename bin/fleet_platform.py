@@ -111,6 +111,11 @@ class _WindowsPlatform:
                 continue
         return rows
 
+    def fsync_dir(self, path: Path) -> None:
+        """Windows has no directory handle os.fsync can flush; a documented
+        no-op here only. Callers still fsync the file before linking it."""
+        return None
+
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Append bytes with one FILE_APPEND_DATA-only WriteFile call.
         Windows CRT O_APPEND performs seek and write separately, risking lost records
@@ -216,6 +221,16 @@ byte_limit=$3
             except ValueError:
                 continue
         return rows
+
+    def fsync_dir(self, path: Path) -> None:
+        """fsync a directory so a new link, rename or mkdir in it is durable.
+        Every error raises: a skipped fsync would void the caller's ordering."""
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                     | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def atomic_append_bytes(self, path: Path, data: bytes) -> None:
         """Append bytes with one O_APPEND write, atomically seeking to EOF on POSIX.

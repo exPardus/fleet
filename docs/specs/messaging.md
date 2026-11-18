@@ -1,7 +1,12 @@
 # Spec: `fleet msg` — one messaging layer for every harness
 
-**Status:** proposed, not built; revision 2 after review. Build plan:
-`docs/plans/messaging-plan.md`. Where this spec and later code differ, the
+**Status:** revision 2 after review. Build plan:
+`docs/plans/messaging-plan.md`. **Built (plan PR 1):** §4 envelope, §5 store
+paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
+`ingest()`, the one receiver path, and the §7 `Transport` Protocol in
+`bin/fleet_msg_transport.py` (§5.1 lists
+what PR 1 fixed that this spec left open). Every other section is proposed,
+not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
 **Builds on:** `docs/specs/mailman.md` (mail format, crash-safe filing,
@@ -60,7 +65,8 @@ $ grep -n "^def cmd_steer" bin/fleet_pi.py
 An **identity** is a stable name. A **holder** is the body that reads for it
 now. Messages address identities, never bodies.
 
-- Grammar `^[a-z][a-z0-9-]{0,39}$`; qualified form `name@site`.
+- Grammar `^[a-z][a-z0-9-]{0,39}$`; qualified form `name@site`. A site
+  label uses the same grammar.
 - An unqualified name always means the local site. No cross-site search.
 - A **site** is one home's label, set by `fleet msg init --site LABEL`. `init`
   and `sync` refuse a label that another listed home uses; `hello` refuses a
@@ -89,7 +95,10 @@ with an empty queue.
 ## 4. Envelope
 
 One JSON object, UTF-8, canonical form `json.dumps(sort_keys=True,
-separators=(",", ":"))`. Immutable once written.
+separators=(",", ":"))`. Immutable once written. Stored and transferred bytes
+equal the canonical form; other bytes are `rejected: corrupt`. The field set
+is exact: a missing or extra field is `rejected: schema`.
+`from_auth.detail` is null or printable ASCII of at most 128 characters.
 
 | field | meaning |
 |---|---|
@@ -99,10 +108,10 @@ separators=(",", ":"))`. Immutable once written.
 | `from_auth` | `{method, detail}` set by the sending site from caller evidence (§10) |
 | `kind` | `note` (default), `task`, `receipt` |
 | `needs_answer` | default `false` |
-| `re`, `thread` | parent id or null; root id |
-| `hop`, `path` | parent `hop` + 1; identities visited in the thread (sender-enforced, §11) |
+| `re`, `thread` | parent id or null; root id (a root's `thread` is its own `id`) |
+| `hop`, `path` | parent `hop` + 1 (root 0); the senders of the thread chain, root first and ending at `from`, so `len(path) = hop + 1` (sender-enforced, §11) |
 | `seq` | per (`from`, `to`) counter (§5) |
-| `sent_at` | sender clock, advisory |
+| `sent_at` | sender clock, advisory, `YYYY-MM-DDTHH:MM:SSZ` |
 | `body`, `body_sha256` | ≤120 words, ≤8 KiB |
 
 Receiver facts (`received_at` by the receiver's clock, `via`, state) live in
@@ -115,13 +124,16 @@ Under each home's ignored `state/msg/`:
 ```
 site.json, peers.json, config.json
 ids/<name>.json              named roles only
-locks/<identity>.lock        OS-released locks (mailman's lock backend)
+locks/from-<name>.lock       sender lock (OS-released, mailman's lock backend)
+locks/spool-<name>.lock      ingest lock, one per spool
 locks/outbox-<site>.lock     one per outbox: qseq allocation and file write
-seq/<from>__<to>             last seq allocated
-outbox/<site>/q/<qseq>-<id>.json   waiting for a remote site
+seq/<from>__<to>             last seq allocated (both `name@site`)
+outbox/<site>/qseq           last qseq allocated
+outbox/<site>/tmp/           private tmp names
+outbox/<site>/q/<qseq>-<id>.json   waiting for a remote site; qseq 12 digits
 outbox/<site>/sent/          moved here when the peer confirms
 spool/<name>/tmp|new|cur|done/<id>.json
-rejected/<id>.json           with reason
+rejected/<id>-<sha16>.json   with reason and the original bytes
 seen/<id[:2]>/<id>           dedup markers
 ledger.jsonl                 append-only operational log
 archive/<yyyymm>/            compaction target (§6)
@@ -142,7 +154,7 @@ ingest repairs it: it creates the marker and runs step 3's ledger line and the
 §9 notice once, then returns `duplicate`. The lock removes the
 concurrent-ingest race.
 
-**`enqueue(from, to, envelope)`**, under `locks/<from>.lock`: run every §11
+**`enqueue(from, to, envelope)`**, under `locks/from-<name>.lock`: run every §11
 rule first, then allocate `seq` (read, increment, write a unique tmp name,
 fsync, rename), then `publish` (local `to`) or, for a remote `to`, take
 `locks/outbox-<site>.lock`, allocate `qseq` and write
@@ -151,6 +163,74 @@ order therefore equals `qseq` order. A refusal allocates nothing, so a refused
 send leaves no seq gap.
 
 No path takes `fleet.lock` or writes the registry.
+
+### 5.1 Built contract (plan PR 1)
+
+PR 1 fixed these points, which the text above left open:
+
+- **Lock names carry a fixed prefix** (`from-`, `spool-`, `outbox-`).
+  Revision 2 named the sender lock `locks/<identity>.lock`; an identity named
+  `spool-x` then shared the ingest lock of spool `x`, and a send from
+  `spool-x` to `x` deadlocked on its own lock. Lock order is always sender
+  lock, then spool or outbox lock. Lock files are never unlinked.
+- **`qseq` has its own counter** `outbox/<site>/qseq`, allocated like `seq`.
+  Deriving it from a listing of `q/` and `sent/` would reuse numbers after
+  `compact` moves `sent/` away.
+- **Signatures**: `publish(store, name, env, notify=None)` returns
+  `delivered` or `duplicate`; `enqueue(store, draft, rules=None,
+  notify=None)` returns `delivered`, `duplicate` or `queued` with the
+  envelope. `rules(draft)` returns a refusal reason or None and runs under
+  the sender lock before any allocation. `notify(name, env)` is the §9 hook;
+  it runs after every lock (sender and spool) is released, so a hook may
+  itself send, and its failure is a `notice-failed` ledger line only.
+- **Retry dedup at the sender.** Before allocating, `enqueue` looks for the
+  id: locally the marker or the spool file, remotely `outbox/<site>/q|sent`.
+  A found id returns the stored envelope (`duplicate`, or `queued` while
+  still in `q/`) and allocates no seq or qseq, so one id never maps to two
+  byte strings.
+- **`ingest(store, raw, peer_site, hosted, now, admit, notify)`** is the
+  one receiver path. Every transport calls it and nothing lower. In order:
+  the raw size bound, `parse`, `to` names this site, `from` is on the
+  transport-authenticated `peer_site` and in its hosted names (`auth`), the
+  §6 clock bounds (`future`, `stale`), `admit(env)` for the §11 per-peer
+  ingest cap and retired lanes (supplied by later PRs), then `publish`. A
+  refusal goes to `reject()`. It returns the §7 push-result vocabulary:
+  `accepted`, `duplicate`, `rejected:<why>`.
+- **Hostile bytes.** `parse` checks `ENVELOPE_MAX_BYTES` (64 KiB, above the
+  largest valid envelope) before decoding, and every failure is an
+  `EnvelopeError` with a §6 reason, never another exception: a peer cannot
+  wedge a queue with one unclassifiable entry. Digit classes are ASCII only.
+  `outbox_entries` reads at most the bound plus one byte per entry and skips
+  an entry a concurrent commit moved to `sent/`.
+- **No symlinks under `state/msg/`.** Every directory component is checked
+  with `lstat`; lock, tmp, marker and counter files open with `O_NOFOLLOW`;
+  the ledger, spool and outbox entries must be regular files. A planted
+  link is refused with `StoreError`, never followed, and never yields a
+  marker without a message.
+- **Directory fsync** goes through `PLATFORM.fsync_dir`: on POSIX every
+  error raises; on Windows it is a documented no-op in the adapter only.
+- **Renames never overwrite.** `move` and `outbox_commit` refuse an existing
+  target under the owning lock.
+- **Rejects never collide.** A rejected envelope is kept as
+  `rejected/<id>-<sha256[:16]>.json` (`sha-<sha256[:32]>.json` without an
+  id), so distinct bytes claiming one id are all kept; an identical re-reject
+  writes nothing and logs nothing.
+- **Reads and acks** move a file `new → cur` or `cur → done` with `move()`,
+  under the same spool lock as ingest, so an ingest never sees the file in
+  neither state.
+- **Crash windows after the marker.** A crash after step 2 is repaired
+  exactly once, as above. A crash between the marker and the ledger line
+  loses that ledger line; a crash between the ledger line and the notice
+  loses the notice (the drain rule still lists the message). Neither
+  duplicates or loses the message.
+- **Outbox reads and commits**: `outbox_entries(site, hint_qseq)` returns
+  every entry in `q/` ascending (the hint never filters);
+  `outbox_commit(site, ids)` moves exactly those ids to `sent/` under the
+  outbox lock.
+- **Ledger appends** use `fleet_platform.PLATFORM.atomic_append_bytes`, the
+  backend `_atomic_append_bytes` calls, because the new modules never import
+  `bin/fleet.py`.
+- Reject reasons are those of §6 plus `retired` (§3).
 
 ## 6. Delivery, receipts, retention
 
@@ -401,6 +481,8 @@ none in v1.
 | hostile peer site | forges names of another site | the peer may only send names it hosts; no relay | it can say anything as its own identities |
 | hostile peer site | directs local lanes with a `task` stamped `supervisor-nonce` | direction only from the local supervisor, the named Interface site, or a `direct: true` peer; otherwise `remote-task` note | a `direct: true` peer is trusted fully |
 | hostile peer site | replays or floods | markers, stale and future bounds, per-pair rate, 200/h per-peer ingest cap | disk grows by at most the cap; compaction packs and never deletes, so the operator watches `queue` |
+| same-user process | plants a symlink under `state/msg/` to redirect writes or swallow an id | every component is `lstat`-checked, files open `O_NOFOLLOW`, a planted link is refused; never a marker without a message | it can still edit or move regular files directly (boundary 1) |
+| hostile peer site | sends an oversized, deeply nested or invalid-UTF-8 envelope to wedge the queue | size bound before decode; every parse failure is a classified reject | none beyond disk use of the kept reject |
 | any body | leaks a nonce through `detail` or the ledger | `detail` holds only `nonce_seq` and an 8-hex prefix | none |
 | network attacker | tampers or replays on the wire | ssh channel; frame sha; dedup | none beyond ssh's own |
 | misconfigured forced command | client chooses its own site | `serve` refuses without `--peer`; live test pins it | a wrong `--peer` in `authorized_keys` trusts the wrong site |
