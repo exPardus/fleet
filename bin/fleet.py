@@ -1014,15 +1014,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14177) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15274) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18733) -- upgrades need complete records.
+      * `_sweep_husks` (:14183) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15485) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18944) -- upgrades need complete records.
       * `_acting_worker_identity` (:4555) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5320) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15522) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18611) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8570) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20360) -- render the release explanation.
+      * `_doctor_check_registry` (:15733) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18822) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8575) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20571) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4537,7 +4537,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18733`), because legacy upgrades also require a complete registry.
+    (`:18944`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -7195,6 +7195,9 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
         force_band=getattr(args, "force_band", False))
     if _ceiling_refusal is not None:
         raise FleetCliError(_ceiling_refusal)
+    _memory_refusal = _memory_budget_refusal(run=run, which=which)
+    if _memory_refusal is not None:
+        raise FleetCliError(_memory_refusal)
     _require_instance_settings()
 
     cwd = Path(args.dir)
@@ -8554,6 +8557,8 @@ def cmd_status(args) -> int:
         # flag. Keep the warning out of --json stdout, whose consumers parse it.
         for stall in _permission_stalls(display, roster_entries):
             print(f"permission-stall: {_permission_stall_line(*stall)}")
+        if home_process_usage(all_workers, roster_entries)[0]:
+            print(_process_usage_line(all_workers, roster_entries))
     # Surface nonzero swallowed hook-error totals; doctor provides the tail.
     n_hook_errors = _hook_error_count()
     if n_hook_errors:
@@ -11436,6 +11441,7 @@ def cmd_abandon(args, run=subprocess.run) -> int:
         append_event("abandoned", name, reason=reason, forced=force,
                      unlanded_commits=ahead or 0)
     print(f"{name}: lane_state=abandoned ({reason})")
+    stop_lane_after({name: "abandoned"})
     print("next reap (supervisor boot, handoff, release) removes the row once its "
           "session is idle with no unread mail; the worktree and branch are left "
           "in place")
@@ -12562,7 +12568,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12441` / `cmd_respawn:11716`, before
+    # resolution that runs from `cmd_kill:12447` / `cmd_respawn:11722`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12593,9 +12599,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12441` / `cmd_respawn:11716`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12447` / `cmd_respawn:11722`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11737-11744` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11743-11750` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -14363,6 +14369,17 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
         errors.append(f"husks: {type(exc).__name__}: {exc}")
         print(f"autoclean: husk tier failed: {exc}", file=sys.stderr)
 
+    idle_stopped = []
+    try:
+        idle_stopped = stop_idle_sessions(
+            dry_run=dry_run, run=run, which=which,
+            caller=getattr(args, "reap_caller_sid", None))
+    except RegistryCorruptError:
+        raise  # F1: run-abort, never tier-skip
+    except Exception as exc:  # noqa: BLE001 -- tier isolation (D3)
+        errors.append(f"idle: {type(exc).__name__}: {exc}")
+        print(f"autoclean: idle tier failed: {exc}", file=sys.stderr)
+
     tombstones = []
     if expire_hours is not None:
         try:
@@ -14376,6 +14393,7 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
     # Report deferred work in stamp/event/summary without making a transient daemon failure fatal.
     summary = {"ts": now_iso(), "dry_run": dry_run, "archive_rc": archive_rc,
                "husks_removed": len(husks), "husks_deferred": len(husks_deferred),
+               "idle_stopped": len(idle_stopped),
                "tombstones_expired": len(tombstones),
                "errors": errors}
     if not dry_run:
@@ -14388,14 +14406,207 @@ def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
             append_event("autoclean_run", "*", archive_rc=archive_rc,
                          husks_removed=len(husks),
                          husks_deferred=len(husks_deferred),
+                         idle_stopped=len(idle_stopped),
                          tombstones_expired=len(tombstones), errors=errors)
         except OSError as exc:
             print(f"autoclean: event append failed: {exc}", file=sys.stderr)
     print(f"autoclean: husks_removed={len(husks)} "
           f"husks_deferred={len(husks_deferred)} "
+          f"idle_stopped={len(idle_stopped)} "
           f"tombstones_expired={len(tombstones)}"
           f" errors={len(errors)}{' (dry-run)' if dry_run else ''}")
     return 1 if errors else 0
+
+
+# Lane garbage collection (SPEC §11): idle sessions stop, state stays.
+GC_IDLE_TTL_MINUTES_DEFAULT = 30
+
+
+def gc_config() -> dict:
+    """`state/config.json` "gc": idle_ttl_minutes (0/null off), memory_budget_mb,
+    min_available_mb. Unset or non-numeric values keep the defaults."""
+    try:
+        data = json.loads(config_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    raw = data.get("gc") if isinstance(data, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+
+    def number(key, default):
+        value = raw.get(key, default)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return default
+        return value if value > 0 else None
+    return {"idle_ttl_minutes": number("idle_ttl_minutes", GC_IDLE_TTL_MINUTES_DEFAULT),
+            "memory_budget_mb": number("memory_budget_mb", None),
+            "min_available_mb": number("min_available_mb", None)}
+
+
+def _roster_idle_live(entries: list, sid) -> bool:
+    entry = _roster_entry_for(entries, sid) if sid else None
+    return (isinstance(entry, dict) and isinstance(entry.get("pid"), int)
+            and entry.get("status") == "idle")
+
+
+def _idle_since(name: str, rec: dict, sid: str):
+    outcome = latest_outcome(name, sid)
+    for value in ((outcome or {}).get("ts"), rec.get("last_activity")):
+        try:
+            return _parse_iso(str(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def idle_stop_candidates(workers: dict, entries: list, *, now=None, ttl_minutes=None,
+                         caller=None, only=None) -> list:
+    """`(name, sid, reason)` for idle live lane sessions fleet may stop.
+    Reasons: "retired" (an idle fork left behind), "landed"/"abandoned",
+    "idle-ttl", or the reason `only` names. Supervisors, Codex rows, the
+    caller, unread mail, a running turn and live background tasks are kept."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for name, rec in sorted(workers.items()):
+        if (not isinstance(rec, dict) or rec.get("archived_at")
+                or _is_supervisor_shaped(name) or _is_codex_record(rec)
+                or (only is not None and name not in only)
+                or (caller and caller in _record_sids(rec))):
+            continue
+        sid = rec.get("session_id")
+        for old in rec.get("retired_sids") or []:
+            if (isinstance(old, str) and old != sid and _roster_idle_live(entries, old)
+                    and not _reap_mail_pending(old)):
+                out.append((name, old, "retired"))
+        if (not sid or not _roster_idle_live(entries, sid) or _reap_mail_pending(sid)
+                or recompute_worker_native(name, rec, entries).get("status") != "idle"
+                or _lane_background_live(name, sid)):
+            continue
+        if only is not None:
+            reason = only[name]
+        elif rec.get("lane_state") in ("landed", "abandoned"):
+            reason = rec["lane_state"]
+        else:
+            since = _idle_since(name, rec, sid)
+            if (not ttl_minutes or since is None
+                    or (now - since).total_seconds() < ttl_minutes * 60):
+                continue
+            reason = "idle-ttl"
+        out.append((name, sid, reason))
+    return out
+
+
+def stop_idle_sessions(*, dry_run=False, run=subprocess.run, which=shutil.which,
+                       roster_fn=None, now=None, only=None, caller=None) -> list:
+    """Stop idle lane sessions (`idle_stop_candidates`); rows and transcripts stay,
+    so a send or respawn resumes them. Returns `name:reason` per stopped sid."""
+    ok, _reason, data = _read_registry_readonly()
+    if not ok:
+        return []
+    workers = data.get("workers", {})
+    if not any(isinstance(r, dict) and not r.get("archived_at")
+               and not _is_supervisor_shaped(n) and not _is_codex_record(r)
+               for n, r in workers.items()):
+        return []
+    roster_fn = roster_fn or (lambda: _fetch_agents_roster(which=which, run=run))
+    roster_ok, payload = roster_fn()
+    if not roster_ok or not isinstance(payload, list):
+        return []
+    if native_epoch_suspicious(True, payload, workers):
+        return []
+    stopped = []
+    for name, sid, reason in idle_stop_candidates(
+            workers, payload, now=now, caller=caller or current_caller_session(),
+            ttl_minutes=gc_config()["idle_ttl_minutes"], only=only):
+        if dry_run:
+            print(f"idle: would stop {sid} ({name}, {reason})")
+            continue
+        stop_ok, outcome = _stop_native_session_status(sid, run=run, which=which)
+        if stop_ok:
+            _append_event_quiet("idle_session_stopped", name, session_id=sid,
+                                reason=reason)
+            stopped.append(f"{name}:{reason}")
+        else:
+            print(f"idle: stop {sid} ({name}) deferred: {outcome}", file=sys.stderr)
+    return stopped
+
+
+def stop_lane_after(names: dict) -> None:
+    """Best-effort immediate stop for lanes whose result was taken (`land`
+    GREEN, `abandon`); the idle-TTL sweep retries anything left running."""
+    try:
+        for item in stop_idle_sessions(only=names):
+            print(f"fleet: stopped idle session {item}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 -- the verb already succeeded
+        print(f"fleet: idle-session stop deferred: {exc}", file=sys.stderr)
+
+
+def _stop_landed_lane(lane, home) -> None:
+    """After a GREEN `fleet land --fleet-home`, stop the lane's idle session."""
+    global FLEET_HOME
+    home = Path(home).resolve()
+    if not isinstance(lane, str) or not home.is_dir():
+        return
+    FLEET_HOME = home
+    ok, _reason, data = _read_registry_readonly()
+    if not ok:
+        return
+    names = {n: "landed-green" for n, r in data.get("workers", {}).items()
+             if isinstance(r, dict) and (n == lane or r.get("branch") == lane
+                                         or str(r.get("branch") or "").startswith(lane + "/"))}
+    if names:
+        stop_lane_after(names)
+
+
+def home_process_usage(workers: dict, entries: list):
+    """(live process count, resident MB or None) for this home's sessions."""
+    sids = set()
+    for rec in workers.values():
+        if isinstance(rec, dict):
+            sids |= _record_sids(rec)
+    pids = sorted({e["pid"] for e in entries if isinstance(e, dict)
+                   and e.get("sessionId") in sids and isinstance(e.get("pid"), int)})
+    total = 0
+    for pid in pids:
+        try:
+            total += PLATFORM.process_rss_mb(pid)
+        except UnsupportedPlatformError:
+            return len(pids), None
+    return len(pids), total
+
+
+def _process_usage_line(workers: dict, entries: list) -> str:
+    count, rss = home_process_usage(workers, entries)
+    budget = gc_config()["memory_budget_mb"]
+    line = f"processes: {count} live, rss={'UNREADABLE' if rss is None else f'{rss} MB'}"
+    return line + (f" (budget {budget} MB)" if budget else "")
+
+
+def _memory_budget_refusal(run=subprocess.run, which=shutil.which):
+    """Spawn refusal text when the home is over `gc.memory_budget_mb` or the
+    host is under `gc.min_available_mb`; None when unset or unmeasurable."""
+    cfg = gc_config()
+    floor, budget = cfg["min_available_mb"], cfg["memory_budget_mb"]
+    if floor:
+        try:
+            available = PLATFORM.memory_available_mb()
+        except UnsupportedPlatformError:
+            available = None
+        if available is not None and available < floor:
+            return (f"spawn: available memory {available} MB is below "
+                    f"gc.min_available_mb {floor} -- reap idle lanes "
+                    "(fleet autoclean) or lower the floor")
+    if budget:
+        roster_ok, payload = _fetch_agents_roster(which=which, run=run)
+        ok, _reason, data = _read_registry_readonly()
+        if roster_ok and isinstance(payload, list) and ok:
+            count, rss = home_process_usage(data.get("workers", {}), payload)
+            if rss is not None and rss >= budget:
+                return (f"spawn: {count} home session(s) use {rss} MB, at or above "
+                        f"gc.memory_budget_mb {budget} -- reap idle lanes "
+                        "(fleet autoclean) or raise the budget")
+    return None
 
 
 SUPERVISOR_REAP_RULE = (
@@ -17682,10 +17893,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12544, :12707, :12972, :13197, :13233, :13475, :13476, :13565, :13575, :13586, :13684, :14203, :17598, :20514, :20526, :20675, :24452, :24453, :24555, :24620, :24682, :25703, :25705, :25743, :26271, :29183`).
+    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12550, :12713, :12978, :13203, :13239, :13481, :13482, :13571, :13581, :13592, :13690, :14209, :17809, :20725, :20737, :20886, :24663, :24664, :24766, :24831, :24893, :25925, :25927, :25965, :26493, :29409`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10851, :11587, :15884, :27204. This makes union identity
+    OWN prior sid alone: :10856, :11593, :16095, :27426. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18391,8 +18602,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10851, :11587, :15884,
-    # :27204) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10856, :11593, :16095,
+    # :27426) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18400,7 +18611,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1088`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17572`).
+        # names this gate as its reason (`:17783`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18762,7 +18973,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14174`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14180`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -25085,6 +25296,15 @@ def _sup_guard_lane_sweep(roster_fn=None) -> list:
         return []
 
 
+def _sup_guard_idle_sweep(roster_fn=None) -> list:
+    """Run the idle-session stop (lane GC, §11); never changes the verdict."""
+    try:
+        return stop_idle_sessions(roster_fn=roster_fn)
+    except Exception as exc:  # noqa: BLE001 -- the guard must still decide
+        print(f"fleet: sup-guard idle sweep failed: {exc}", file=sys.stderr)
+        return []
+
+
 def _sup_guard_dead_sweep(roster_fn=None) -> dict:
     """Run the lane-dead backstop; its failure never changes the verdict."""
     try:
@@ -25123,7 +25343,8 @@ def _cmd_codex_sup_guard(args, lane_done=(), lane_dead=None) -> int:
     if getattr(args, "json", False):
         output = {**observation, "verdict": line, "sent": sent,
                   "lane_done_sent": list(lane_done),
-                  **(lane_dead or {"stream_retried": [], "lane_dead_sent": []})}
+                  **(lane_dead or {"stream_retried": [], "lane_dead_sent": [],
+                                  "idle_stopped": []})}
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
     else:
         print(line)
@@ -25143,6 +25364,7 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
     lane_dead = (_sup_guard_dead_sweep(roster_fn) if do
                  else {"stream_retried": [], "lane_dead_sent": []})
+    lane_dead["idle_stopped"] = _sup_guard_idle_sweep(roster_fn) if do else []
     if isinstance(claim, dict) and claim.get("provider") == "codex":
         return _cmd_codex_sup_guard(args, lane_done=lane_done, lane_dead=lane_dead)
     observation = _sup_guard_observe(
@@ -29028,8 +29250,12 @@ def main(argv=None) -> int:
         # Land is a repository operation owned by its leaf module. It must not
         # resolve or read fleet-home state before it can prepare a lane.
         if args.command == "land" or args.command == "brief":
-            return (fleet_land.cmd_land(args) if args.command == "land"
-                    else fleet_brief.cmd_brief(args))
+            if args.command == "brief":
+                return fleet_brief.cmd_brief(args)
+            rc = fleet_land.cmd_land(args)
+            if rc == 0 and home_flag is not None:
+                _stop_landed_lane(args.lane, home_flag)
+            return rc
         # Bare init creates in cwd; explicit selectors and statusline setup use the
         # normal resolver. Do not synthesize args.home, which also appends the
         # machine-list entry and invokes the destructive tier.

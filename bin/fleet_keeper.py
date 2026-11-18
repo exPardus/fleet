@@ -963,7 +963,8 @@ def _run_one(argv=None, *, run=subprocess.run, now_fn=time.time,
         print(f"[{tag}] keeper: lane-done delivered for "
               f"{', '.join(map(str, lane_done))}", file=out)
     for key, what in (("stream_retried", "stream retry sent for"),
-                      ("lane_dead_sent", "lane-dead delivered for")):
+                      ("lane_dead_sent", "lane-dead delivered for"),
+                      ("idle_stopped", "idle session stopped for")):
         names = obs["supervisor_guard"].get(key)
         if isinstance(names, list) and names:
             print(f"[{tag}] keeper: {what} {', '.join(map(str, names))}", file=out)
