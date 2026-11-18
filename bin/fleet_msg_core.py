@@ -38,6 +38,7 @@ NEEDS_ANSWER_DEFAULT = False    # no reply required; adapters never auto-reply
 METHODS = ("lane-registry", "supervisor-nonce", "supervisor-sid",
            "interface-registration", "bound-holder", "unverified",
            "legacy-unverified")
+UNVERIFIED_METHODS = ("unverified", "legacy-unverified")
 REJECT_REASONS = ("size", "rate", "auth", "stale", "future", "schema",
                   "corrupt", "retired")
 BODY_MAX_WORDS = 120
@@ -319,10 +320,13 @@ class Store:
         _require_id(msg_id)
         return self.root / "seen" / msg_id[:2] / msg_id
 
-    def seq_path(self, frm: str, to: str) -> Path:
+    def seq_path(self, frm: str, to: str, unverified: bool = False) -> Path:
+        """Last-seq counter of one (from, to). An unverified sender (§8.1) has
+        its own counter, so a spoofed `from` never shares the real identity's
+        seqs, gaps or rule history."""
         split_qualified(frm)
         split_qualified(to)
-        return self.root / "seq" / f"{frm}__{to}"
+        return self.root / "seq" / (f"{frm}__{to}.unv" if unverified else f"{frm}__{to}")
 
     def outbox(self, site: str, state: str) -> Path:
         _require_name(site)
@@ -471,8 +475,8 @@ class Store:
         self.fsync_dir(path.parent)
         return value
 
-    def last_seq(self, frm: str, to: str) -> int:
-        path = self.seq_path(frm, to)
+    def last_seq(self, frm: str, to: str, unverified: bool = False) -> int:
+        path = self.seq_path(frm, to, unverified)
         if not self._require_regular_or_absent(path):
             return 0
         text = path.read_text(encoding="ascii", errors="replace")
@@ -670,7 +674,8 @@ def enqueue(store: Store, draft: dict, *,
             reason = rules(draft)
             if reason is not None:
                 raise Refused(reason)
-        seq = store._counter_next(store.seq_path(draft["from"], draft["to"]))
+        unverified = draft["from_auth"]["method"] in UNVERIFIED_METHODS
+        seq = store._counter_next(store.seq_path(draft["from"], draft["to"], unverified))
         store.fault("seq-allocated")
         env = validate(dict(draft, seq=seq))
         if to_site == store.site:

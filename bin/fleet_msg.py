@@ -8,7 +8,9 @@ in as an injected `MsgPrims`, so this module never imports `fleet.py`.
 
 Doctrine: stdlib only, Python 3.10. No `fleet.lock`, no registry write, no
 steer. `status`, `queue`, `ids`, `whois` and `inbox --peek` write nothing.
-Rules, the fs transport and the notice are wired in plan PR 6, not here.
+Plan PR 6 wires the rest: the §11 rules into `send`, the fs transport into
+`sync` and a non-peek `inbox`, the §9 notice after a delivery, the
+`## MESSAGES` drain block, and the spool archive on `fleet archive`.
 """
 from __future__ import annotations
 
@@ -23,6 +25,10 @@ from pathlib import Path
 from typing import Callable
 
 import fleet_msg_core as core
+import fleet_msg_fs as fsx
+import fleet_msg_rules as rules
+import fleet_msg_transport as transport
+import fleet_msg_wake as wake
 
 SUPERVISOR, INTERFACE = "supervisor", "interface"
 OUTBOX_WARN_S = 900
@@ -32,7 +38,9 @@ EXIT_TIMEOUT = 3
 # the caller names no `--from`: a live nonce first, the plain sid last.
 PROOF_ORDER = ("supervisor-nonce", "lane-registry", "supervisor-sid",
                "interface-registration")
-UNVERIFIED_METHODS = ("unverified", "legacy-unverified")
+UNVERIFIED_METHODS = core.UNVERIFIED_METHODS
+HWM_ABOVE_MAX = 1000                 # acked-out-of-order seqs kept per sender (§8.1)
+SYNC_POLL_S = 1.0
 
 
 class MsgError(Exception):
@@ -65,6 +73,14 @@ class MsgPrims:
     """Members of the machine homes list (paths)."""
     clock: Callable[[], float] = time.time
     sleep: Callable[[float], None] = time.sleep
+    adapter_of: "Callable[[str], str] | None" = None
+    """identity -> claude|codex|pi|interface|unbound; None disables the notice."""
+    holder_sid: "Callable[[str], str | None] | None" = None
+    """identity -> the Claude session id that holds it."""
+    append_mailbox: "Callable[[str, str], None] | None" = None
+    """Fleet's `append_mailbox(sid, message)`."""
+    log_nonce_rejection: "Callable[[str, dict, str], None] | None" = None
+    """(kind, claim, presented nonce) -> the nonce-rejection log `fleet doctor` reads."""
 
 
 # --- store and config -------------------------------------------------------
@@ -179,6 +195,19 @@ def _supervisor_sid(prims: MsgPrims, claim) -> bool:
     return bool(sid) and sid == claim.get("session_id")
 
 
+def _log_nonce_rejection(prims: MsgPrims, claim, nonce: str, presented) -> None:
+    """§8.1: a refused `--nonce` leaves a record for `fleet doctor`, as the
+    gated verbs do. The log keeps a digest prefix, never the value; a failure
+    to log never changes the refusal."""
+    if prims.log_nonce_rejection is None or not isinstance(claim, dict):
+        return
+    kind = "superseded-pending" if presented == "prior" else "refused"
+    try:
+        prims.log_nonce_rejection(kind, claim, nonce)
+    except Exception:  # noqa: BLE001 -- the refusal stands either way
+        pass
+
+
 def caller_proofs(prims: MsgPrims, nonce: "str | None" = None) -> list:
     """Every identity the caller proves, as (name, method, detail), best first
     (§10). A presented nonce that does not match the live claim refuses."""
@@ -188,6 +217,8 @@ def caller_proofs(prims: MsgPrims, nonce: "str | None" = None) -> list:
         held = (isinstance(claim, dict) and claim.get("state") != "released"
                 and ("nonce_hash" in claim or "state" in claim))
         presented = prims.nonce_presentation(claim, nonce) if held else None
+        if presented != "live":
+            _log_nonce_rejection(prims, claim, nonce, presented)
         if presented == "pending":
             raise MsgError("--nonce is a pending generation: run a gated verb first")
         if presented != "live":
@@ -326,32 +357,324 @@ def _verified_line(store: core.Store, env: dict) -> str:
 GAP_RANGES_MAX = 20
 
 
+def _ns_key(env: dict) -> str:
+    """The sender namespace of an envelope (§8.1): an unverified sender is
+    counted apart from the real identity of the same name."""
+    unverified = env["from_auth"]["method"] in UNVERIFIED_METHODS
+    return env["from"] + ("#unv" if unverified else "")
+
+
+def _hwm_path(store: core.Store, name: str) -> Path:
+    return store.root / "hwm" / f"{name}.json"
+
+
+def _hwm_apply(marks: dict, key: str, seq: int) -> None:
+    """Record one acked seq. `upto` is the highest seq below which every seq
+    is settled; acks above a hole sit in `above`, bounded. Past the bound the
+    oldest hole is settled: a gap is shown, never enforced (§6)."""
+    mark = marks.setdefault(key, {"upto": 0, "above": []})
+    if seq <= mark["upto"]:
+        return
+    above = set(mark["above"])
+    above.add(seq)
+    while True:
+        while mark["upto"] + 1 in above:
+            mark["upto"] += 1
+            above.discard(mark["upto"])
+        if len(above) <= HWM_ABOVE_MAX:
+            break
+        mark["upto"] = min(above)
+    mark["above"] = sorted(above)
+
+
+def _hwm_from_done(store: core.Store, name: str) -> dict:
+    """Marks rebuilt from `done/`: the one-time bootstrap for a spool that
+    predates the mark file."""
+    marks: dict = {}
+    for msg_id in core.list_spool(store, name, "done"):
+        env = _load(store, name, "done", msg_id)
+        if env is not None:
+            _hwm_apply(marks, _ns_key(env), env["seq"])
+    return marks
+
+
+def _read_hwm(store: core.Store, name: str) -> "dict | None":
+    data = _read_json(_hwm_path(store, name))
+    return data if isinstance(data, dict) else None
+
+
+def _hwm_record(store: core.Store, name: str, env: dict) -> None:
+    """After an ack: fold the acked envelope into the spool's marks, under the
+    spool lock. The first write bootstraps from `done/`. Read-only verbs never
+    call this."""
+    with store.locked("spool", name):
+        marks = _read_hwm(store, name)
+        if marks is None:
+            marks = _hwm_from_done(store, name)
+        _hwm_apply(marks, _ns_key(env), env["seq"])
+        path = _hwm_path(store, name)
+        store._ensure_dir(path.parent)
+        store._require_regular_or_absent(path)
+        tmp = path.parent / f"{name}.{os.getpid()}.{core.new_id()[:8]}.tmp"
+        data = json.dumps(marks, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, data)
+            store.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(path))
+        store.fsync_dir(path.parent)
+
+
 def _gaps(store: core.Store, name: str) -> list:
-    """Missing seqs per sender across new|cur|done (§6: shown, blocks nothing),
-    as `[first, last]` ranges: cost is O(messages), never O(max seq). At most
-    GAP_RANGES_MAX ranges per sender are kept."""
+    """Missing seqs per sender namespace (§6: shown, blocks nothing), as
+    `[first, last]` ranges: cost is O(unacked messages), never O(max seq) or
+    O(acked history). Acked seqs come from the per-spool high-water marks
+    (`hwm/<name>.json`); a spool with no mark file is read from `done/` once,
+    without writing. At most GAP_RANGES_MAX ranges per sender are kept."""
+    marks = _read_hwm(store, name)
+    if marks is None:
+        marks = _hwm_from_done(store, name)
     seqs: dict = {}
-    for state in ("new", "cur", "done"):
+    for state in ("new", "cur"):
         for msg_id in core.list_spool(store, name, state):
             env = _load(store, name, state, msg_id)
             if env is not None:
-                seqs.setdefault(env["from"], set()).add(env["seq"])
+                seqs.setdefault(_ns_key(env), set()).add(env["seq"])
     out = []
-    for sender in sorted(seqs):
-        missing, prev = [], 0
-        for seq in sorted(seqs[sender]):
+    for key in sorted(set(seqs) | set(marks)):
+        mark = marks.get(key) or {"upto": 0, "above": []}
+        upto = mark["upto"] if type(mark.get("upto")) is int else 0
+        present = set(seqs.get(key, ())) | {a for a in mark.get("above", ())
+                                           if type(a) is int}
+        missing, prev = [], upto
+        for seq in sorted(s for s in present if s > upto):
             if seq > prev + 1:
                 missing.append([prev + 1, seq - 1])
                 if len(missing) >= GAP_RANGES_MAX:
                     break
             prev = seq
         if missing:
-            out.append((sender, missing))
+            out.append((key.replace("#unv", " (unverified)"), missing))
     return out
 
 
 def _range_text(span: list) -> str:
     return str(span[0]) if span[0] == span[1] else f"{span[0]}-{span[1]}"
+
+
+# --- wiring: rules, notice, fs sync (plan PR 6) -----------------------------
+
+def _limits(store: core.Store) -> rules.Limits:
+    try:
+        return rules.Limits.from_config(_config(store))
+    except rules.RulesError as exc:
+        raise MsgError(f"config.json: {exc}") from None
+
+
+def _ledger_sends(store: core.Store):
+    """(ts, from, to, kind, method, site-of-from) per `delivered` or `queued`
+    ledger line: the history the §11 rules and the per-peer ingest cap count."""
+    for record in _ledger(store):
+        if record.get("event") not in ("delivered", "queued"):
+            continue
+        frm, to = record.get("from"), record.get("to")
+        if not (isinstance(frm, str) and isinstance(to, str)):
+            continue
+        try:
+            ts = core.parse_iso_utc(record.get("ts"))
+        except (core.EnvelopeError, ValueError, TypeError):
+            continue
+        yield ts, frm, to, record.get("kind"), record.get("method")
+
+
+def _history(store: core.Store) -> Callable[[dict], list]:
+    """`history(draft)` for `rules.make_rules`: the (from, to) pair's earlier
+    sends in both directions, in the draft's own sender namespace (§8.1), so a
+    spoofed unverified `--from` is never charged to the real identity."""
+    def history(draft: dict) -> list:
+        frm, to = draft["from"], draft["to"]
+        unverified = draft["from_auth"]["method"] in UNVERIFIED_METHODS
+        out = []
+        for ts, a, b, kind, method in _ledger_sends(store):
+            if {a, b} != {frm, to} or kind not in core.KINDS:
+                continue
+            if a == frm and (method in UNVERIFIED_METHODS) != unverified:
+                continue
+            out.append(rules.Sent(ts, a, b, kind))
+        return out
+    return history
+
+
+def _wake_prims(prims: MsgPrims) -> "wake.WakePrims | None":
+    if prims.adapter_of is None or prims.holder_sid is None or prims.append_mailbox is None:
+        return None
+    return wake.WakePrims(fleet_home=str(prims.fleet_home), adapter_of=prims.adapter_of,
+                          holder_sid=prims.holder_sid, append_mailbox=prims.append_mailbox)
+
+
+def _notify(prims: MsgPrims, store: core.Store):
+    wp = _wake_prims(prims)
+    return wake.make_notify(store, wp) if wp is not None else None
+
+
+def drain_block_for(prims: MsgPrims, name: str) -> str:
+    """The `## MESSAGES` block for `compose_prompt` (§9): empty when this home
+    has no message store or nothing is unread. Read-only; never raises."""
+    try:
+        if read_site(prims.fleet_home) is None:
+            return ""
+        wp = _wake_prims(prims) or wake.WakePrims(
+            fleet_home=str(prims.fleet_home), adapter_of=lambda _n: wake.UNBOUND,
+            holder_sid=lambda _n: None, append_mailbox=lambda _s, _t: None)
+        store = core.Store(prims.fleet_home, read_site(prims.fleet_home),
+                           clock=prims.clock, sleep=prims.sleep)
+        return wake.drain_block(store, wp, name)
+    except Exception:  # noqa: BLE001 -- a prompt is never lost to the drain block
+        return ""
+
+
+def hosted_names(prims: MsgPrims, home: Path) -> list:
+    """Identities the home at `home` hosts (§3): supervisor, interface, every
+    non-supervisor-shaped registry row, and named roles. Read-only."""
+    names = {SUPERVISOR, INTERFACE}
+    try:
+        data = json.loads((Path(home) / "state" / "fleet.json").read_text(encoding="utf-8"))
+        workers = data.get("workers") if isinstance(data, dict) else None
+        if isinstance(workers, dict):
+            names.update(n for n in workers if core.valid_name(n)
+                         and not prims.is_supervisor_shaped(n))
+    except (OSError, UnicodeError, ValueError):
+        pass
+    try:
+        for entry in os.listdir(Path(home) / "state" / "msg" / "ids"):
+            if entry.endswith(".json") and core.valid_name(entry[:-5]):
+                names.add(entry[:-5])
+    except OSError:
+        pass
+    return sorted(names)
+
+
+def _retired_names(prims: MsgPrims) -> list:
+    workers = prims.workers() or {}
+    return sorted(n for n, rec in workers.items() if isinstance(rec, dict)
+                  and rec.get("archived_at") is not None and core.valid_name(n)
+                  and not prims.is_supervisor_shaped(n))
+
+
+def _peer_home(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> Path:
+    """The home of fs peer `site`: `peers.json` `home`, else the homes-list
+    member whose `site.json` names it."""
+    explicit = peer.get("home")
+    if isinstance(explicit, str) and explicit:
+        return Path(explicit)
+    for member in prims.homes():
+        try:
+            if read_site(Path(member)) == site:
+                return Path(member)
+        except (OSError, MsgError):
+            continue
+    raise MsgError(f"no home for fs peer {site!r}: set \"home\" in peers.json or "
+                   "list its home in the homes list")
+
+
+def sync_fs_peer(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> dict:
+    """One fs pass with `site` (§7.1): pull the peer's envelopes for us,
+    `ingest()` each, then `commit()` by id so the peer receives receipts and
+    drains its outbox. Returns counts. Takes no `fleet.lock`."""
+    home = _peer_home(prims, store, site, peer)
+    fs = fsx.FsTransport(store, home, site, _FsPrims(prims))
+    try:
+        local = transport.SiteInfo(
+            site=store.site, schemas=(core.SCHEMA,), clock=core.iso_utc(prims.clock()),
+            hosted=tuple(hosted_names(prims, prims.fleet_home)))
+        remote = fs.hello(local)
+        limits = _limits(store)
+        admit = rules.make_admit(limits, site, lambda s: _recent_ingests(store, s),
+                                 lambda: _retired_names(prims), prims.clock)
+        notify = _notify(prims, store)
+        counts = {"pulled": 0, "accepted": 0, "duplicate": 0, "rejected": 0}
+        ids = []
+        for qseq, raw in fs.pull(0):
+            counts["pulled"] += 1
+            result = core.ingest(store, raw, peer_site=site, hosted=remote.hosted,
+                                 now=prims.clock(), admit=admit, notify=notify)
+            counts["rejected" if result.startswith("rejected") else result] += 1
+            try:
+                msg_id = core.parse(raw)["id"]
+            except core.EnvelopeError:
+                msg_id = fs.entry_id(qseq)
+            if msg_id is not None:
+                ids.append(msg_id)
+        fs.commit(ids)
+        counts["warnings"] = list(fs.warnings)
+        return counts
+    except transport.TransportError as exc:
+        raise MsgError(f"sync {site}: {exc}") from None
+    finally:
+        fs.close()
+
+
+class _FsPrims:
+    def __init__(self, prims: MsgPrims):
+        self._prims = prims
+
+    def hosted(self, home: Path):
+        return hosted_names(self._prims, home)
+
+
+def _recent_ingests(store: core.Store, peer_site: str) -> list:
+    """Receive times of non-receipt envelopes from `peer_site` (§11 cap)."""
+    suffix = f"@{peer_site}"
+    return [ts for ts, frm, _to, kind, _method in _ledger_sends(store)
+            if frm.endswith(suffix) and kind != "receipt"]
+
+
+def sync_all_fs(prims: MsgPrims, store: core.Store, only: "str | None" = None) -> list:
+    """Sync every fs peer in `peers.json` (or `only`). One peer's failure never
+    stops the others. Returns (site, counts | error text) pairs."""
+    results = []
+    for site, peer in sorted(_peers(store).items()):
+        if only is not None and site != only:
+            continue
+        if not (isinstance(peer, dict) and peer.get("transport") == "fs"):
+            continue
+        try:
+            results.append((site, sync_fs_peer(prims, store, site, peer)))
+        except (MsgError, core.StoreError, OSError) as exc:
+            results.append((site, str(exc)))
+    return results
+
+
+def archive_spool(prims: MsgPrims, name: str) -> "Path | None":
+    """T10b: `fleet archive` of a lane moves its spool to
+    `archive/<yyyymm>/spool-<name>-<epoch>/`; nothing is deleted, and a later
+    lane of the same name starts with an empty spool. Returns the target, or
+    None when there is no store or no spool. Never raises into the archive."""
+    try:
+        site = read_site(prims.fleet_home)
+        if site is None or not core.valid_name(name):
+            return None
+        store = core.Store(prims.fleet_home, site, clock=prims.clock, sleep=prims.sleep)
+        source = store.root / "spool" / name
+        with store.locked("spool", name):
+            if not os.path.isdir(source) or os.path.islink(source):
+                return None
+            now = prims.clock()
+            stamp = time.strftime("%Y%m", time.gmtime(now))
+            target = store.root / "archive" / stamp / f"spool-{name}-{int(now)}"
+            store._ensure_dir(target.parent)
+            if os.path.lexists(target):
+                return None
+            os.replace(str(source), str(target))
+            store.fsync_dir(target.parent)
+            store.fsync_dir(source.parent)
+        store.ledger("spool-archived", to=f"{name}@{store.site}", archive=target.name)
+        return target
+    except (MsgError, core.StoreError, OSError):
+        return None
 
 
 # --- verbs ------------------------------------------------------------------
@@ -441,7 +764,10 @@ def cmd_send(prims: MsgPrims, args, out) -> int:
             from_auth={"method": method, "detail": detail},
             sent_at=core.iso_utc(prims.clock()), kind=args.kind,
             needs_answer=bool(args.needs_answer), parent=parent)
-        status, env = core.enqueue(store, draft)
+        status, env = core.enqueue(
+            store, draft,
+            rules=rules.make_rules(_limits(store), _history(store), prims.clock),
+            notify=_notify(prims, store))
     except core.EnvelopeError as exc:
         raise MsgError(f"refused: {exc.reason}: {exc}") from None
     except core.Refused as exc:
@@ -460,6 +786,17 @@ def _entry(store: core.Store, env: dict, state: str, reader=None) -> dict:
             "reader": reader}
 
 
+def _auto_sync(prims: MsgPrims, store: core.Store, peek: bool) -> None:
+    """A non-peek `inbox` first pulls from every fs peer (§7.1), so a reader
+    sees what a sibling home already sent. `--peek` writes nothing, so it never
+    syncs. A peer that cannot be read is named on stderr and never blocks."""
+    if peek:
+        return
+    for site, outcome in sync_all_fs(prims, store):
+        if isinstance(outcome, str):
+            print(f"fleet msg: {outcome}", file=sys.stderr)
+
+
 def cmd_inbox(prims: MsgPrims, args, out) -> int:
     store = open_store(prims)
     name = args.name or _default_name(prims)
@@ -468,6 +805,7 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
     if args.wait is not None and not (math.isfinite(args.wait) and args.wait >= 0):
         raise MsgError("--wait must be a finite number of seconds >= 0")
     proof = None if args.peek else _require_holder(prims, name)
+    _auto_sync(prims, store, args.peek)
     if args.wait is not None:
         deadline = prims.clock() + args.wait
         while not core.list_spool(store, name, "new"):
@@ -475,6 +813,7 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
                 print("TIMEOUT", file=out)
                 return EXIT_TIMEOUT
             prims.sleep(WAIT_POLL_S)
+            _auto_sync(prims, store, args.peek)
     states = ("new", "cur") if args.all else ("new",)
     readers = _readers(store) if args.all else {}
     entries, corrupt = [], []
@@ -519,6 +858,30 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
     return 0
 
 
+def cmd_sync(prims: MsgPrims, args, out) -> int:
+    store = open_store(prims)
+    if args.watch and (args.interval is None or not (math.isfinite(args.interval)
+                                                      and args.interval > 0)):
+        raise MsgError("--watch needs a finite --interval S > 0")
+    if args.peer is not None and args.peer not in _peers(store):
+        raise MsgError(f"unknown site {args.peer!r}: not in peers.json")
+    failed = 0
+    while True:
+        results = sync_all_fs(prims, store, args.peer)
+        for site, outcome in results:
+            if isinstance(outcome, str):
+                print(f"FAILED {site}: {outcome}", file=out)
+                failed += 1
+                continue
+            print(f"SYNC {site} pulled={outcome['pulled']} accepted={outcome['accepted']} "
+                  f"duplicate={outcome['duplicate']} rejected={outcome['rejected']}", file=out)
+            for warning in outcome["warnings"]:
+                print(f"WARN {warning}", file=out)
+        if not args.watch:
+            return 1 if failed else 0
+        prims.sleep(args.interval)
+
+
 def cmd_ack(prims: MsgPrims, args, out) -> int:
     store = open_store(prims)
     proofs = caller_proofs(prims)
@@ -535,6 +898,9 @@ def cmd_ack(prims: MsgPrims, args, out) -> int:
             reader = f"{method}/{_reader_body(prims)}"
             core.move(store, name, msg_id, "new", "cur", reader=reader)
             if core.move(store, name, msg_id, "cur", "done", reader=reader):
+                acked = _load(store, name, "done", msg_id)
+                if acked is not None:
+                    _hwm_record(store, name, acked)
                 print(f"ACKED {msg_id} {name}@{store.site}", file=out)
                 done = True
                 break
@@ -657,7 +1023,7 @@ def cmd_ids(prims: MsgPrims, args, out) -> int:
 
 
 VERBS = {"init": cmd_init, "send": cmd_send, "inbox": cmd_inbox, "ack": cmd_ack,
-         "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois}
+         "sync": cmd_sync, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois}
 
 
 def run(args, prims: MsgPrims, out=None) -> int:

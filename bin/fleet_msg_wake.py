@@ -64,7 +64,7 @@ def unread(store: core.Store, name: str, limit: "int | None" = None) -> list[dic
                 out.append(env)
         except (core.EnvelopeError, core.StoreError):
             continue
-    out.sort(key=lambda e: (e["sent_at"], e["id"]))
+    out.sort(key=lambda e: (e["sent_at"], e["seq"], e["id"]))
     return out
 
 
@@ -74,9 +74,9 @@ def notice_due(env: dict, unread_envs: list[dict]) -> bool:
     earliest of a concurrent batch always notices. A receipt never notices."""
     if env["kind"] == "receipt":
         return False
-    key = (env["sent_at"], env["id"])
+    key = (env["sent_at"], env["seq"], env["id"])
     return not any(u["from"] == env["from"] and u["kind"] != "receipt"
-                   and (u["sent_at"], u["id"]) < key for u in unread_envs)
+                   and (u["sent_at"], u["seq"], u["id"]) < key for u in unread_envs)
 
 
 def wake(store: core.Store, prims: WakePrims, name: str, env: dict) -> str:

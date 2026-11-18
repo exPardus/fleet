@@ -1736,6 +1736,10 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
             # this event is an audit entry, not a retry queue.
             append_event("mail_drained", name, sid=sid)
 
+    drain = _msg_drain_block(name)
+    if drain:
+        parts.append(drain)
+
     if task:
         parts.append(task)
 
@@ -12607,7 +12611,7 @@ def _supervisor_lifecycle_target(verb, name):
     # Read without repair from
     # `cmd_kill:12453` / `cmd_respawn:11728`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11749-11756` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11753-11760` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -14110,6 +14114,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
                              reap_caller_sid=reap_caller_sid,
                              remove_sessions=is_native(rec),
                              lane_state=rec.get("lane_state"))
+        _archive_msg_spool(n)
 
     # Resumes finish prior work; do not count or emit a second archived transition.
     for n in resume_names:
@@ -14123,6 +14128,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
                              reap_caller_sid=reap_caller_sid,
                              remove_sessions=is_native(rec),
                              lane_state=rec.get("lane_state"))
+        _archive_msg_spool(n)
 
     skipped_count = len(names) - archived_count
     stats = getattr(args, "reap_stats", None)
@@ -18619,7 +18625,7 @@ def _wedged_release_gate(verb, claim):
 
 GATE_VERBS_ACCEPTING_NONCE = frozenset({
     "init", "spawn", "send", "resume-limited", "interrupt", "release",
-    "respawn", "kill", "clean", "archive", "sup-spawn", "abandon",
+    "respawn", "kill", "clean", "archive", "sup-spawn", "abandon", "msg",
 })
 """The gated verbs whose parser actually declares `--nonce`, i.e. the ones the
 refusal below may honestly name that flag to (R2, ruling 2026-07-26: **a named
@@ -28969,6 +28975,12 @@ def build_parser() -> argparse.ArgumentParser:
         "id", metavar="ID")
     msg_sub.add_parser("queue", help="unread, unacked and outbox counts").add_argument(
         "--json", action="store_true")
+    p_msg_sync = msg_sub.add_parser(
+        "sync", help="pull from fs peers and receive receipts (all peers, or --peer)")
+    p_msg_sync.add_argument("--peer", default=None, metavar="SITE")
+    p_msg_sync.add_argument("--once", action="store_true", help="one pass (the default)")
+    p_msg_sync.add_argument("--watch", action="store_true", help="repeat every --interval S")
+    p_msg_sync.add_argument("--interval", type=float, default=None, metavar="S")
     msg_sub.add_parser("ids", help="list the identities of this home")
     msg_sub.add_parser("whois", help="resolve one identity to its holder").add_argument(
         "name", metavar="NAME")
@@ -30792,14 +30804,79 @@ def _msg_prims():
         claim=read_incarnation,
         nonce_presentation=_nonce_presentation,
         nonce_digest=nonce_digest,
-        homes=lambda: list(read_homes_list().get("members") or []))
+        homes=lambda: list(read_homes_list().get("members") or []),
+        adapter_of=_msg_adapter_of,
+        holder_sid=_msg_holder_sid,
+        append_mailbox=append_mailbox,
+        log_nonce_rejection=lambda kind, claim, nonce: _append_nonce_rejection(
+            kind, "msg", current_caller_session(), claim, nonce))
+
+
+def _msg_record(name: str):
+    records = _registry_records_or_none()
+    workers = records.get("workers") if isinstance(records, dict) else None
+    rec = workers.get(name) if isinstance(workers, dict) else None
+    return rec if isinstance(rec, dict) else None
+
+
+def _msg_adapter_of(name: str) -> str:
+    """Notice path of an identity (docs/specs/messaging.md §9): `claude` gets a
+    mailbox notice; every other adapter is reached by the drain block."""
+    if name == "interface":
+        return "interface"
+    if name == "supervisor":
+        claim = read_incarnation()
+        if not isinstance(claim, dict) or claim.get("state") == "released":
+            return "unbound"
+        return "codex" if claim.get("provider") == "codex" else "claude"
+    rec = _msg_record(name)
+    if rec is None or rec.get("archived_at") is not None or _is_supervisor_shaped(name):
+        return "unbound"
+    if _is_pi_record(rec):
+        return "pi"
+    return "codex" if _is_codex_record(rec) else "claude"
+
+
+def _msg_holder_sid(name: str):
+    if name == "supervisor":
+        claim = read_incarnation()
+        sid = claim.get("session_id") if isinstance(claim, dict) else None
+        return sid if isinstance(sid, str) and sid else None
+    rec = _msg_record(name)
+    sid = rec.get("session_id") if rec else None
+    return sid if isinstance(sid, str) and sid else None
 
 
 def cmd_msg(args) -> int:
     if not getattr(args, "_fleet_home_explicit", False):
         raise FleetCliError("msg requires an explicit --fleet-home")
     import fleet_msg
+    if (args.msg_command == "send" and args.kind == "task"
+            and _registered_lane_mail_sender() is None
+            and _registered_interface_mail_source() is None):
+        # A task is direction (§10): a caller that is neither a registered
+        # lane nor the registered Interface (which holds no generation by
+        # design) proves continuity with the claim nonce, like a gated verb.
+        _supervisor_gate("msg", nonce=getattr(args, "nonce", None))
     return fleet_msg.run(args, _msg_prims())
+
+
+def _msg_drain_block(name: str) -> str:
+    """The `## MESSAGES` block for one lane's prompt, or "" (never raises)."""
+    try:
+        import fleet_msg
+        return fleet_msg.drain_block_for(_msg_prims(), name)
+    except Exception:  # noqa: BLE001 -- a prompt is never lost to the drain block
+        return ""
+
+
+def _archive_msg_spool(name: str) -> None:
+    """Move an archived lane's message spool to `state/msg/archive/` (T10b)."""
+    try:
+        import fleet_msg
+        fleet_msg.archive_spool(_msg_prims(), name)
+    except Exception:  # noqa: BLE001 -- messaging never fails an archive
+        pass
 
 
 LANE_DONE_SHA_KEEP = 32

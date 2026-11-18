@@ -82,6 +82,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet msg ack`](#fleet-msg-ack) — acknowledge read messages (cur -> done)
   - [`fleet msg status`](#fleet-msg-status) — where one message is and its ledger
   - [`fleet msg queue`](#fleet-msg-queue) — unread, unacked and outbox counts
+  - [`fleet msg sync`](#fleet-msg-sync) — pull from fs peers and receive receipts (all peers, or --peer)
   - [`fleet msg ids`](#fleet-msg-ids) — list the identities of this home
   - [`fleet msg whois`](#fleet-msg-whois) — resolve one identity to its holder
 - [`fleet relay-ack`](#fleet-relay-ack) — append an interface relay and acknowledge one mail file
@@ -1046,16 +1047,18 @@ options:
 ### fleet msg
 
 ```text
-usage: fleet msg [-h] {init,send,inbox,ack,status,queue,ids,whois} ...
+usage: fleet msg [-h] {init,send,inbox,ack,status,queue,sync,ids,whois} ...
 
 positional arguments:
-  {init,send,inbox,ack,status,queue,ids,whois}
+  {init,send,inbox,ack,status,queue,sync,ids,whois}
     init                set this home's site label
     send                send one message; DELIVERED or QUEUED
     inbox               read NAME's queue (new -> cur)
     ack                 acknowledge read messages (cur -> done)
     status              where one message is and its ledger
     queue               unread, unacked and outbox counts
+    sync                pull from fs peers and receive receipts (all peers, or
+                        --peer)
     ids                 list the identities of this home
     whois               resolve one identity to its holder
 
@@ -1141,6 +1144,19 @@ usage: fleet msg queue [-h] [--json]
 options:
   -h, --help  show this help message and exit
   --json
+```
+
+#### fleet msg sync
+
+```text
+usage: fleet msg sync [-h] [--peer SITE] [--once] [--watch] [--interval S]
+
+options:
+  -h, --help    show this help message and exit
+  --peer SITE
+  --once        one pass (the default)
+  --watch       repeat every --interval S
+  --interval S
 ```
 
 #### fleet msg ids
