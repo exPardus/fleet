@@ -110,7 +110,8 @@ def test_happy_path_observation(home):
     assert obs["pending_decision"] is None
     assert obs["agents_ok"] is True and obs["agents_missing"] is False
     assert obs["registry_ok"] is True and obs["registry_reason"] is None
-    assert obs["workers"] == [{"name": "w1", "status": "idle", "mail": 1, "limit_kind": None}]
+    assert obs["workers"] == [{"name": "w1", "status": "idle", "mail": 1, "limit_kind": None,
+                               "turns": 3, "stale_seconds": None}]
     assert obs["unpushed"] == 2 and obs["oldest_unpushed_ts"] == 1799990000.0
     assert obs["hook_error_lines"] == 2 and obs["prev_hook_error_lines"] == 1
 

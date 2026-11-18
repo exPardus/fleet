@@ -28,6 +28,10 @@ Page = namedtuple("Page", "rule fingerprint text")
 UNPUSHED_PAGE_SECONDS = 6 * 3600
 REPAGE_SECONDS = 6 * 3600
 ANOMALOUS_STATUSES = ("dead-suspected", "limited")
+# A worker anomaly pages once, when the keeper first sees it. A row whose
+# last activity is older than this was dead before any recent tick and never
+# pages, so a home full of long-dead rows does not flood the interface.
+WORKER_ANOMALY_MAX_AGE_SECONDS = 24 * 3600
 
 # THE SANITISER MOVED, THE DOCTRINE DID NOT (w58/notify, 2026-09-09). Fix
 # wave 1's C4 body now lives in `fleet.one_line` / `fleet.interface_line`,
@@ -170,19 +174,40 @@ def rule_supervisor_frozen(obs, now):
                 "Carry it to the operator.")
 
 
-def rule_worker_anomaly(obs, now):
-    names = []
+def worker_anomalies(obs):
+    """{key: label} for every current worker anomaly.
+    The key carries the row's turn count, so a row that is respawned or
+    re-steered and dies again is a new anomaly; the same death keeps its key.
+    Rows idle past `WORKER_ANOMALY_MAX_AGE_SECONDS` are left out."""
+    found = {}
+    guard = obs.get("supervisor_guard") or {}
     for w in obs.get("workers", []):
         # The guard has the current supervisor's dedicated alert and horizon.
         # Including it here would re-page a limited body on the worker cadence.
-        guard = obs.get("supervisor_guard") or {}
         if w.get("name") and w.get("name") == guard.get("body_name"):
             continue
         status = w.get("status")
         if status in ANOMALOUS_STATUSES:
-            names.append(f"{w.get('name')}({status})")
+            label = f"{w.get('name')}({status})"
         elif status == "idle" and (w.get("mail") or 0) > 0:
-            names.append(f"{w.get('name')}(idle+mail)")
+            label = f"{w.get('name')}(idle+mail)"
+        else:
+            continue
+        stale = w.get("stale_seconds")
+        if isinstance(stale, (int, float)) and stale > WORKER_ANOMALY_MAX_AGE_SECONDS:
+            continue
+        found[f"{label}:{w.get('turns')}"] = label
+    return found
+
+
+def rule_worker_anomaly(obs, now):
+    """Page anomalies the previous tick had not already paged (`anomaly_seen`).
+    A row stays silent while it stays in the same anomaly; one that recovers
+    drops out of the seen set and pages again if it fails again."""
+    seen = obs.get("anomaly_seen")
+    seen = set(seen) if isinstance(seen, list) else set()
+    names = [label for key, label in worker_anomalies(obs).items()
+             if key not in seen]
     if not names:
         return None
     joined = ", ".join(sorted(names))
@@ -619,7 +644,8 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
     agents_ok, agents_missing, agent_statuses = _agents(run)
     unpushed, oldest, unpushed_ref = _git_unpushed(home, run, out=out)
     workers = [{"name": w.get("name"), "status": w.get("status"),
-                "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind")}
+                "mail": w.get("mail") or 0, "limit_kind": w.get("limit_kind"),
+                "turns": w.get("turns"), "stale_seconds": w.get("stale_seconds")}
                for w in (snap.get("workers") or [])]
     # Type-normalise BEFORE the roster lookup (re-review minor 2):
     # `incarnation.get("session_id")` is worker-writable projection data, and
@@ -691,6 +717,7 @@ def collect(home, *, now, run=subprocess.run, snapshot_fn=fleet.status_snapshot,
         "unpushed_ref": unpushed_ref,
         "hook_error_lines": _count_lines(home / "state" / "hook-errors.log"),
         "prev_hook_error_lines": int(prev_state.get("_hook_error_lines", 0) or 0),
+        "anomaly_seen": prev_state.get("_anomaly_seen"),
     }
 
 
@@ -935,6 +962,11 @@ def _run_one(argv=None, *, run=subprocess.run, now_fn=time.time,
     if isinstance(lane_done, list) and lane_done:
         print(f"[{tag}] keeper: lane-done delivered for "
               f"{', '.join(map(str, lane_done))}", file=out)
+    for key, what in (("stream_retried", "stream retry sent for"),
+                      ("lane_dead_sent", "lane-dead delivered for")):
+        names = obs["supervisor_guard"].get(key)
+        if isinstance(names, list) and names:
+            print(f"[{tag}] keeper: {what} {', '.join(map(str, names))}", file=out)
     pages = evaluate(obs, now)
     prev_rules = {k_: v for k_, v in state.items() if not k_.startswith("_")}
     interface_notice = None
@@ -1056,6 +1088,13 @@ def _run_one(argv=None, *, run=subprocess.run, now_fn=time.time,
                 rule_state[p.rule] = previous
 
     rule_state["_hook_error_lines"] = obs["hook_error_lines"]
+    # The seen set advances unless this tick's worker-anomaly page failed.
+    anomaly_paged = rule_state.get("worker-anomaly") == prev_rules.get("worker-anomaly")
+    if any(p.rule == "worker-anomaly" for p in send) and anomaly_paged:
+        if isinstance(state.get("_anomaly_seen"), list):
+            rule_state["_anomaly_seen"] = state["_anomaly_seen"]
+    else:
+        rule_state["_anomaly_seen"] = sorted(worker_anomalies(obs))
     save_state(state_path, rule_state)
     return 0
 

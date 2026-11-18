@@ -458,3 +458,52 @@ def test_limited_main_pages_once_before_a_distant_reset_horizon(home):
     assert "supervisor limited" in runner.typed()[0]
     _main(home, runner, now=NOW + k.REPAGE_SECONDS + 1)
     assert len(runner.tmux("paste-buffer")) == 1
+
+
+def _anomaly_snapshot(*workers):
+    def snap():
+        data = _snapshot()
+        data["workers"] = list(workers)
+        return data
+    return snap
+
+
+def _tick(home, runner, snap, now=NOW):
+    out = io.StringIO()
+    k.main(["--once", "--fleet-home", str(home)], run=runner,
+           now_fn=lambda: now, snapshot_fn=snap, out=out)
+    return out.getvalue()
+
+
+def _quiet_guard():
+    return Runner(guard={"verdict": "OK", "reason": "fresh", "state": "held",
+                         "sent": False, "quiet": True})
+
+
+def test_a_worker_death_pages_once_and_long_dead_rows_never(home):
+    """w489: the keeper paged ~70 rows dead since September on every tick
+    where its fingerprint changed. A death pages once; old deaths never."""
+    old = [{"name": f"old{i}", "status": "dead-suspected", "mail": 0,
+            "turns": 1, "stale_seconds": k.WORKER_ANOMALY_MAX_AGE_SECONDS + 1}
+           for i in range(70)]
+    new = {"name": "fresh", "status": "dead-suspected", "mail": 0,
+           "turns": 4, "stale_seconds": 120.0}
+    r = _quiet_guard()
+    _tick(home, r, _anomaly_snapshot(*old, new))
+    assert len(r.typed()) == 1
+    assert "fresh(dead-suspected)" in r.typed()[0] and "old0" not in r.typed()[0]
+    r2 = _quiet_guard()
+    _tick(home, r2, _anomaly_snapshot(*old, new), now=NOW + k.REPAGE_SECONDS + 1)
+    assert r2.typed() == []
+
+
+def test_a_failed_anomaly_page_is_retried_next_tick(home):
+    new = {"name": "fresh", "status": "dead-suspected", "mail": 0,
+           "turns": 4, "stale_seconds": 120.0}
+    failing = _quiet_guard()
+    failing.paste_rc = 1
+    _tick(home, failing, _anomaly_snapshot(new))
+    assert "_anomaly_seen" not in _state(home)
+    r = _quiet_guard()
+    _tick(home, r, _anomaly_snapshot(new), now=NOW + 60)
+    assert len(r.typed()) == 1 and "fresh(dead-suspected)" in r.typed()[0]

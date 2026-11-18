@@ -83,7 +83,7 @@ the selected fleet home:
 - Never tick an operator gate; carry open decisions to the operator and record the ruling with its task file.
 - Ask the operator before every destructive verb, including `kill`, `clean`, `archive`, repair, release, retirement, and home registration changes.
 - When more than one home is listed, pass `--fleet-home <path>` on every mutating verb.
-- Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity. `supervisor limited` means wait for the recorded roster horizon; do not wake or spawn around that limit. The keeper pages it once until that horizon.
+- Treat a `KEEPER:` page as an observation: read the board, run `fleet status`, `fleet sup-status`, and `fleet sup-guard`, then follow the guard; page the operator on `PAGE` or ambiguity. `supervisor limited` means wait for the recorded roster horizon; do not wake or spawn around that limit. The keeper pages it once until that horizon. `supervisor turn died on an API stream error; N retries exhausted` means the guard already retried the wake: report it and relaunch with `sup-spawn` once the guard says `DISPATCH`, or resume the body by hand. A worker anomaly pages once per death; rows dead for more than 24 h never page.
 - `bin/fleet_keeper.py --once --fleet-home <PATH> ...` accepts repeatable homes; it observes, wakes, and pages each independently, prefixes every page/wake line with that home's statusline tag, and stores dedup state under that home's `state/keeper/last-page.json`.
 - Treat a `SUPERVISOR:` line as a graceful generation handoff: acknowledge it, read `fleet sup-status --json`, record the transfer, and use the guard before any stillborn-successor dispatch.
 - Use `fleet watch` with `run_in_background` for interface watching; do not maintain a hand-written polling loop. Use `fleet relay-ack` to acknowledge and mirror handled mail.
@@ -211,7 +211,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 Read `supervisor.md` before taking the Supervisor role. Persist each child's
 canonical ID, worktree, brief, and writer/reviewer role; after compaction query
 the full canonical roster, refuse active-writer worktree collisions, and
-reconcile every required nested review before accepting the parent. An allowed worker Stop or observed Codex completion mails `LANE-DONE` to its current claim-holding supervisor and wakes that body when idle. For Codex
+reconcile every required nested review before accepting the parent. An allowed worker Stop or observed Codex completion mails `LANE-DONE` to its current claim-holding supervisor and wakes that body when idle. A turn that ends on a transient API error (connection lost, overloaded, 5xx) is retried in the same session up to three times with backoff; a lane that still ends without an outcome mails `LANE-DEAD <name> <reason>` the same way. On `LANE-DEAD`, read `fleet peek`/`fleet result`, then respawn or reassign the lane; never wait on it. For Codex
 collaboration, `send_message` only queues delivery; use `followup_task` to wake
 an idle or completed agent. This differs from `fleet send supervisor`.
 

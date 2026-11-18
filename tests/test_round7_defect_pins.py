@@ -550,6 +550,9 @@ RATIFIED_BUT_UNBUILT = ()
 # `lane-done` is an internal Stop bridge with a mailbox append and possible
 # supervisor wake. The ratified table predates it; keep the fail-safe unknown
 # tier until the operator assigns its cross-home effect class.
+# `stream-recover` (w489) is the StopFailure bridge, the same family as
+# `lane-done`: it may fork-steer the dead lane, append mail and wake the
+# supervisor. It waits here under the same fail-safe unknown tier.
 # `sup-reconcile` (w103) resumes a native Codex supervisor thread after a host
 # restart. Its effects are not one obvious class: it writes the home's
 # supervisor claim (the `sup-heartbeat` shape, DISRUPTIVE), may start the
@@ -583,7 +586,8 @@ RATIFIED_BUT_UNBUILT = ()
 # nothing and steers no worker. Its tier is operator-owned and waits here
 # under the fail-safe `destructive` default.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
-                                     "lane-done", "sup-reconcile", "codex-respond",
+                                     "lane-done", "stream-recover",
+                                     "sup-reconcile", "codex-respond",
                                      "codex-decline-fixed",
                                      "codex-reobserve-active",
                                      "codex-settle-preaccept",

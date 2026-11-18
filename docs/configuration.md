@@ -53,13 +53,17 @@ file contains:
   allows `Bash(fleet q:*)` so workers can query the project's symbol index.
 - **`crossSessionInbound`**: set to `accept`, so a worker receives steering messages
   from the supervisor.
-- **`hooks`**: three hook commands, each started with the Python interpreter that
+- **`hooks`**: four hook events, each command started with the Python interpreter that
   ran `fleet init`:
   - `PostToolUse` runs `bin/hooks/posttooluse_mailbox.py`. It delivers queued
     steering messages at the next tool boundary.
   - `Stop` runs `bin/hooks/stop_outcome.py` and `bin/hooks/stop_mailbox.py`. The
     first records the turn's outcome. The second checks for mail that arrived
     during the turn.
+  - `StopFailure` runs `bin/hooks/stopfailure_recover.py`. A turn that ends on
+    an API error fires this instead of `Stop`; the hook starts
+    `fleet stream-recover` detached, which retries a transient error in the same
+    session or sends `LANE-DEAD` to the lane's supervisor.
   - `PostCompact` runs `bin/hooks/postcompact_journal.py`. It writes a marker to the
     worker's journal after a context compaction.
 
@@ -150,6 +154,12 @@ for the recipe and the separate OpenRouter/Codex routes.
 
 The keeper is optional and off by default. Run it on a schedule with
 `bin/fleet_keeper.py --once --fleet-home PATH`, once per home. It pages the
-interface's tmux pane, wakes an idle supervisor, and never dispatches work. Service
+interface's tmux pane, wakes an idle supervisor, and never dispatches work. Each
+tick runs `fleet sup-guard --do`, which also retries a lane or supervisor turn
+that ended on a transient API error and sends `LANE-DEAD` for a lane that died
+without an outcome. A worker anomaly pages once per death; rows whose last
+activity is more than 24 hours old never page. A home rendered before the
+`StopFailure` hook existed gets it when `fleet init` is run again (see
+`worker-settings.json`); until then only the keeper tick catches these deaths. Service
 units and schedules are host-specific. Keep them in your own operator storage, not
 in the repository. See [getting-started.md](getting-started.md#unattended-on-a-server).
