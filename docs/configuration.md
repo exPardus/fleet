@@ -160,6 +160,9 @@ that ended on a transient API error and sends `LANE-DEAD` for a lane that died
 without an outcome. A worker anomaly pages once per death; rows whose last
 activity is more than 24 hours old never page. A home rendered before the
 `StopFailure` hook existed gets it when `fleet init` is run again (see
-`worker-settings.json`); until then only the keeper tick catches these deaths. Service
+`worker-settings.json`); `fleet doctor` fails `hook-coverage` until then. Without
+the hook a death is reported as `LANE-DEAD <name> no-outcome` and is not retried:
+the retry needs the hook's StopFailure marker, because transcript text alone can be
+written by the worker. Service
 units and schedules are host-specific. Keep them in your own operator storage, not
 in the repository. See [getting-started.md](getting-started.md#unattended-on-a-server).

@@ -1014,15 +1014,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14173) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15270) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18705) -- upgrades need complete records.
+      * `_sweep_husks` (:14177) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15274) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18733) -- upgrades need complete records.
       * `_acting_worker_identity` (:4555) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5320) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15518) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18583) -- name the incident-specific absence.
+      * `_doctor_check_registry` (:15522) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18611) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8570) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20332) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20360) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4537,7 +4537,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18705`), because legacy upgrades also require a complete registry.
+    (`:18733`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -9517,6 +9517,10 @@ def _cmd_send_native(name: str, message: str,
         after["status"] = "working"
         after["last_activity"] = now_iso()
         after["last_dispatch_at"] = now_iso()
+        if stream_dead and isinstance(after.get("stream_retry"), dict):
+            # This dispatch continues the death's attempt chain (§8).
+            after["stream_retry"] = {**after["stream_retry"],
+                                     "dispatch_at": after["last_dispatch_at"]}
         data["workers"][name] = after
         save_registry(data)
 
@@ -12558,7 +12562,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12437` / `cmd_respawn:11712`, before
+    # resolution that runs from `cmd_kill:12441` / `cmd_respawn:11716`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12589,9 +12593,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12437` / `cmd_respawn:11712`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12441` / `cmd_respawn:11716`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11733-11740` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11737-11744` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15539,6 +15543,29 @@ def _doctor_check_hook_registration():
             f"all registered hook events known and command paths exist ({registered})")
 
 
+def _doctor_check_hook_coverage():
+    """Fail when the rendered instance lacks a hook event the template has.
+    `instance-freshness` compares mtimes only; a home rendered before the
+    template gained an event (StopFailure) keeps working without it. A
+    hooks-less instance is left to the instance checks."""
+    try:
+        template = json.loads(template_settings_path().read_text(encoding="utf-8"))
+        instance = json.loads(instance_settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return ("hook-coverage", True, f"not checked ({exc.__class__.__name__}); "
+                "instance checks own unreadable settings")
+    wanted = template.get("hooks") if isinstance(template, dict) else None
+    have = instance.get("hooks") if isinstance(instance, dict) else None
+    if not isinstance(wanted, dict) or not isinstance(have, dict):
+        return ("hook-coverage", True, "no hooks to compare")
+    missing = sorted(set(wanted) - set(have))
+    if missing:
+        return ("hook-coverage", False,
+                f"instance lacks template hook event(s) {', '.join(missing)} "
+                "-- run `fleet init` to re-render worker-settings.json")
+    return ("hook-coverage", True, "every template hook event is registered")
+
+
 def _doctor_check_registry(error, repaired: bool, quarantined=None,
                            attempted: bool = False):
     """Report registry readability and the actual quarantine outcome.
@@ -15637,6 +15664,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         # Pair content-grant validation with freshness: mtime alone misses hand edits.
         functools.partial(_doctor_check_instance_grants),
         functools.partial(_doctor_check_hook_registration),
+        functools.partial(_doctor_check_hook_coverage),
         functools.partial(_doctor_check_legacy_settings),
         functools.partial(_doctor_check_local_seeds),
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
@@ -17654,10 +17682,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12540, :12703, :12968, :13193, :13229, :13471, :13472, :13561, :13571, :13582, :13680, :14199, :17570, :20486, :20498, :20647, :24424, :24425, :24527, :24592, :24654, :25674, :25676, :25714, :26242, :29154`).
+    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12544, :12707, :12972, :13197, :13233, :13475, :13476, :13565, :13575, :13586, :13684, :14203, :17598, :20514, :20526, :20675, :24452, :24453, :24555, :24620, :24682, :25703, :25705, :25743, :26271, :29183`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10847, :11583, :15856, :27175. This makes union identity
+    OWN prior sid alone: :10851, :11587, :15884, :27204. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18363,8 +18391,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10847, :11583, :15856,
-    # :27175) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10851, :11587, :15884,
+    # :27204) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18372,7 +18400,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1088`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17544`).
+        # names this gate as its reason (`:17572`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18734,7 +18762,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14170`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14174`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -25146,7 +25174,8 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
                             name=SUPERVISOR_BODY_NAME,
                             message=f"@{supervisor_wake_brief_path()}", nonce=None,
                             _fleet_structured_notice=True,
-                            _fleet_stream_retry=True))
+                            _fleet_stream_retry=bool(
+                                detail.get("stream_retry_attempt"))))
                     break
                 except TransientSendRefusal:
                     if attempt == 2:
@@ -29521,7 +29550,9 @@ def cmd_lane_done(args) -> int:
 
 # Turns that end on an API error: in-session stream retry and LANE-DEAD (SPEC §8).
 STREAM_RETRY_DELAYS_SECONDS = (30.0, 120.0, 480.0)  # after the error record
-STREAM_RETRY_RESET_SECONDS = 6 * 3600
+STREAM_RETRY_JITTER_FRACTION = 0.5  # per-session spread so a burst does not resume at once
+STREAM_RETRY_MAX_IN_FLIGHT = 2  # per home; the rest wait for the next sweep
+STREAM_RETRY_IN_FLIGHT_SECONDS = 300.0
 STREAM_RECOVER_MAX_WAIT_SECONDS = 600.0
 STREAM_RECOVER_SETTLE_SECONDS = 60.0  # re-check a row the roster still shows busy
 STREAM_RECOVER_POLL_SECONDS = 10.0
@@ -29532,9 +29563,39 @@ STREAM_RETRY_MESSAGE = (
 LANE_DEAD_MAX_AGE_SECONDS = 24 * 3600
 
 
+def stopfailure_marker_path(sid: str) -> Path:
+    return state_dir() / "stopfailure" / f"{sid}.json"
+
+
+def _write_stopfailure_marker(sid: str) -> None:
+    """Fleet-owned proof that Claude Code fired StopFailure for `sid`."""
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid):
+        return
+    path = stopfailure_marker_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{sid}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps({"at": now_iso()}), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _stopfailure_since(sid, since) -> bool:
+    """True when a StopFailure marker for `sid` is at or after `since`."""
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid):
+        return False
+    try:
+        at = _parse_iso(json.loads(
+            stopfailure_marker_path(sid).read_text(encoding="utf-8"))["at"])
+        anchor = _parse_iso(since) - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    return at >= anchor
+
+
 def _turn_ended_on_api_error(name: str, rec: dict, entries: list):
     """`(kind, error_record)` when this native turn ended on an API error and
-    neither the roster (busy) nor a fresh outcome says otherwise."""
+    neither the roster (busy) nor a fresh outcome says otherwise. Transcript
+    text alone is worker-writable, so a StopFailure marker for this dispatch
+    is also required."""
     if (not isinstance(rec, dict) or rec.get("archived_at")
             or _is_codex_record(rec)
             or rec.get("status") not in ("working", "idle", "dead-suspected")):
@@ -29545,13 +29606,19 @@ def _turn_ended_on_api_error(name: str, rec: dict, entries: list):
     entry = _roster_entry_for(entries, sid)
     if isinstance(entry, dict) and entry.get("status") in ("busy", "waiting"):
         return None, None
-    if has_fresh_outcome(name, sid, rec.get("last_dispatch_at") or rec.get("created")):
+    since = rec.get("last_dispatch_at") or rec.get("created")
+    if has_fresh_outcome(name, sid, since):
+        return None, None
+    if not _stopfailure_since(sid, since):
         return None, None
     return _api_error_ended_dispatch(name, rec)
 
 
-def _stream_retry_attempts(name: str, rec: dict, now) -> int:
-    """Attempts spent; reset by a completed turn or `STREAM_RETRY_RESET_SECONDS`."""
+def _stream_retry_attempts(name: str, rec: dict, now=None) -> int:
+    """Attempts spent on this death. The count belongs to the failing turn and
+    the retries it chained (`anchor` -> `dispatch_at`); only a completed turn
+    or a dispatch the retry did not write resets it. Elapsed time never does,
+    so an exhausted lane stays exhausted."""
     state = rec.get("stream_retry")
     if not isinstance(state, dict):
         return 0
@@ -29562,7 +29629,8 @@ def _stream_retry_attempts(name: str, rec: dict, now) -> int:
         last = _parse_iso(state.get("last_at"))
     except (TypeError, ValueError):
         return 0
-    if (now - last).total_seconds() > STREAM_RETRY_RESET_SECONDS:
+    chain = {state.get(k) for k in ("anchor", "dispatch_at")} - {None}
+    if chain and rec.get("last_dispatch_at") not in chain:
         return 0
     for outcome in read_outcomes(name):
         if outcome.get("kind") != "result":
@@ -29588,23 +29656,55 @@ def stream_retry_plan(name: str, rec: dict, entries: list, now=None) -> dict:
         return {"action": "exhausted", "attempts": attempts,
                 "reason": "stream-error-retries-exhausted"}
     error_at = _record_time(err) or now
-    due_at = error_at + timedelta(seconds=STREAM_RETRY_DELAYS_SECONDS[attempts])
+    delay = STREAM_RETRY_DELAYS_SECONDS[attempts]
+    due_at = error_at + timedelta(
+        seconds=delay * (1 + STREAM_RETRY_JITTER_FRACTION
+                         * _stream_retry_jitter(rec.get("session_id"))))
     return {"action": "retry" if now >= due_at else "wait",
             "attempt": attempts + 1, "due_at": due_at, "error_at": error_at}
 
 
+def _stream_retry_jitter(sid) -> float:
+    """Stable fraction in [0, 1) per session."""
+    digest = hashlib.sha256(str(sid or "").encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") / 2 ** 32
+
+
+def _stream_retries_in_flight(data: dict, name: str) -> int:
+    """Other rows of this home whose retry was spent in the last window."""
+    now = datetime.now(timezone.utc)
+    count = 0
+    for other, rec in (data.get("workers") or {}).items():
+        state = rec.get("stream_retry") if isinstance(rec, dict) else None
+        if other == name or not isinstance(state, dict) or state.get("exhausted_at"):
+            continue
+        try:
+            age = (now - _parse_iso(state.get("last_at"))).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if 0 <= age < STREAM_RETRY_IN_FLIGHT_SECONDS:
+            count += 1
+    return count
+
+
 def _record_stream_retry(name: str, before: dict, plan: dict) -> bool:
-    """Spend attempt `plan["attempt"]` before the send; False if the row moved on."""
+    """Spend attempt `plan["attempt"]` before the send. False when the row
+    moved on, another recoverer spent this attempt first, or the home already
+    has `STREAM_RETRY_MAX_IN_FLIGHT` retries running (the next sweep retries)."""
     with fleet_lock():
         data = load_registry()
         cur = data["workers"].get(name)
         if (not isinstance(cur, dict)
                 or cur.get("session_id") != before.get("session_id")
-                or cur.get("last_dispatch_at") != before.get("last_dispatch_at")):
+                or cur.get("last_dispatch_at") != before.get("last_dispatch_at")
+                or _stream_retry_attempts(name, cur) != plan["attempt"] - 1):
+            return False
+        if _stream_retries_in_flight(data, name) >= STREAM_RETRY_MAX_IN_FLIGHT:
             return False
         error_at = plan.get("error_at")
         cur["stream_retry"] = {
             "attempts": plan["attempt"], "last_at": now_iso(),
+            "anchor": cur.get("last_dispatch_at"),
             "error_at": (error_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                          if isinstance(error_at, datetime) else None)}
         save_registry(data)
@@ -29647,7 +29747,7 @@ def recover_lane(name: str, entries: list, *, now=None, run=subprocess.run,
         return plan
     if action in ("exhausted", "api-error"):
         reason = plan["reason"]
-        if action == "exhausted":
+        if action == "exhausted" and _mark_stream_retry_exhausted(name, rec):
             append_event("stream_retry_exhausted", name,
                          attempts=plan.get("attempts"))
     elif status == "dead-suspected" and not _is_codex_record(rec):
@@ -29664,6 +29764,20 @@ def recover_lane(name: str, entries: list, *, now=None, run=subprocess.run,
         plan["done"] = "lane-dead"
         plan["reason"] = reason
     return plan
+
+
+def _mark_stream_retry_exhausted(name: str, before: dict) -> bool:
+    """Stamp `exhausted_at` once per death; True on the first stamp."""
+    with fleet_lock():
+        data = load_registry()
+        cur = data["workers"].get(name)
+        state = cur.get("stream_retry") if isinstance(cur, dict) else None
+        if (not isinstance(state, dict) or state.get("exhausted_at")
+                or cur.get("last_dispatch_at") != before.get("last_dispatch_at")):
+            return False
+        state["exhausted_at"] = now_iso()
+        save_registry(data)
+    return True
 
 
 def _lane_death_at(name: str, rec: dict):
@@ -29807,6 +29921,10 @@ def cmd_stream_recover(args, *, roster_fn=None, sleep=time.sleep,
                  if isinstance(r, dict) and r.get("session_id") == sid), None)
     if name is None or not sid:
         return 0
+    try:
+        _write_stopfailure_marker(sid)
+    except OSError as exc:
+        print(f"fleet: stream-recover: marker: {exc}", file=sys.stderr)
     if _is_supervisor_shaped(name):
         if wait:
             sleep(STREAM_RETRY_DELAYS_SECONDS[0])

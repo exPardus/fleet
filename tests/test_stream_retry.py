@@ -88,9 +88,18 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _tail(home, *records):
+def _tail(home, *records, marker=(LANE_SID,)):
+    """Write the transcript tail; `marker` sids also get the StopFailure marker
+    `stream-recover` writes when the hook fires (P2-4 provenance)."""
     (home / "lane.jsonl").write_text("".join(r + "\n" for r in records),
                                      encoding="utf-8")
+    for sid in marker:
+        fleet._write_stopfailure_marker(sid)
+
+
+def _jittered(delay, sid=LANE_SID):
+    return delay * (1 + fleet.STREAM_RETRY_JITTER_FRACTION
+                    * fleet._stream_retry_jitter(sid))
 
 
 IDLE = [{"sessionId": LANE_SID, "status": "idle", "state": "working", "pid": 7}]
@@ -177,8 +186,9 @@ def test_backoff_waits_then_retries(home):
     _tail(home, _api_error(CONNECTION_LOST, at=died))
     plan = fleet.stream_retry_plan(LANE, _lane(), IDLE, now=NOW)
     assert plan["action"] == "wait"
-    assert plan["due_at"] == died + timedelta(seconds=fleet.STREAM_RETRY_DELAYS_SECONDS[0])
-    later = NOW + timedelta(seconds=fleet.STREAM_RETRY_DELAYS_SECONDS[0])
+    assert plan["due_at"] == died + timedelta(
+        seconds=_jittered(fleet.STREAM_RETRY_DELAYS_SECONDS[0]))
+    later = died + timedelta(seconds=_jittered(fleet.STREAM_RETRY_DELAYS_SECONDS[0]))
     assert fleet.stream_retry_plan(LANE, _lane(), IDLE, now=later)["action"] == "retry"
 
 
@@ -360,7 +370,8 @@ def test_stream_recover_waits_for_the_backoff_then_retries(home, monkeypatch):
     fleet.cmd_stream_recover(SimpleNamespace(sid=LANE_SID, wait=True),
                              roster_fn=lambda: (True, IDLE), sleep=sleep,
                              now_fn=lambda: clock["now"])
-    assert sleeps and sleeps[0] == pytest.approx(fleet.STREAM_RETRY_DELAYS_SECONDS[0], abs=1.0)
+    assert sleeps and sleeps[0] == pytest.approx(
+        _jittered(fleet.STREAM_RETRY_DELAYS_SECONDS[0]), abs=1.0)
     assert sends == [(LANE, fleet.STREAM_RETRY_MESSAGE, True)]
 
 
@@ -427,7 +438,8 @@ def test_supervisor_body_plan_reads_its_own_transcript(home):
     sup = data["workers"][PARENT]
     sup.update(status="working", last_dispatch_at=_iso(NOW - timedelta(hours=1)))
     fleet.save_registry(data)
-    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=5)))
+    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=5)),
+          marker=(PARENT_SID,))
     roster = [{"sessionId": PARENT_SID, "status": "idle", "pid": 1}]
     assert fleet.stream_retry_plan(PARENT, sup, roster, now=NOW)["action"] == "retry"
 
@@ -454,3 +466,168 @@ def test_keeper_pages_each_death_once():
     # A second death of the same row (new turn) is a new page.
     again = {"workers": [_worker("w1", turns=2)], "anomaly_seen": seen}
     assert k.rule_worker_anomaly(again, 0) is not None
+
+
+# ---------------------------------------------------------------- w485 review pins
+
+def _dispatch(at):
+    data = fleet.load_registry()
+    data["workers"][LANE].update(last_dispatch_at=_iso(at), status="working")
+    fleet.save_registry(data)
+
+
+def _fake_retry_send(monkeypatch, clock):
+    """`_cmd_send_native` stand-in that performs the real pre-claim stamp."""
+    sends = []
+
+    def send(name, message, *args, **kwargs):
+        sends.append(message)
+        with fleet.fleet_lock():
+            data = fleet.load_registry()
+            rec = data["workers"][name]
+            rec["last_dispatch_at"] = _iso(clock["now"])
+            if kwargs.get("stream_retry") and isinstance(rec.get("stream_retry"), dict):
+                rec["stream_retry"]["dispatch_at"] = rec["last_dispatch_at"]
+            fleet.save_registry(data)
+        return 0
+    monkeypatch.setattr(fleet, "_cmd_send_native", send)
+    return sends
+
+
+def test_p1_exhausted_lane_stays_dead_after_hours_and_reports_once(home, monkeypatch):
+    """#74 P1-1: the bound is per death; elapsed time never resets it."""
+    sends = _sends(monkeypatch)
+    _exhaust(home)
+    first = fleet.recover_lane(LANE, IDLE, now=NOW)
+    assert first["done"] == "lane-dead"
+    assert _lane()["stream_retry"]["exhausted_at"]
+    for hours in (7, 13, 23):
+        later = NOW + timedelta(hours=hours)
+        assert fleet.stream_retry_plan(LANE, _lane(), IDLE, now=later)["action"] == "exhausted"
+        assert fleet.recover_lane(LANE, IDLE, now=later)["done"] is None
+    assert sends == [(PARENT, f"LANE-DEAD {LANE} stream-error-retries-exhausted", False)]
+
+
+def test_p1_retry_chain_counts_one_death_and_a_new_dispatch_resets(home, monkeypatch):
+    """Attempts chain through the dispatches the retries wrote; a dispatch the
+    retry did not write (operator/supervisor send) starts a fresh budget."""
+    clock = {"now": NOW}
+    sends = _fake_retry_send(monkeypatch, clock)
+    t = NOW
+    for attempt in range(1, len(fleet.STREAM_RETRY_DELAYS_SECONDS) + 1):
+        _tail(home, _api_error(CONNECTION_LOST, at=t))
+        t += timedelta(seconds=_jittered(fleet.STREAM_RETRY_DELAYS_SECONDS[attempt - 1]) + 1)
+        clock["now"] = t
+        step = fleet.recover_lane(LANE, IDLE, now=t)
+        assert (step["done"], step["attempt"]) == ("retried", attempt)
+        assert _lane()["stream_retry"]["dispatch_at"] == _iso(t)
+        t += timedelta(seconds=30)
+        # Age the spent attempt out of the in-flight window: this pin is the chain.
+        data = fleet.load_registry()
+        data["workers"][LANE]["stream_retry"]["last_at"] = _iso(NOW - timedelta(hours=1))
+        fleet.save_registry(data)
+    _tail(home, _api_error(CONNECTION_LOST, at=t))
+    assert fleet.stream_retry_plan(LANE, _lane(), IDLE, now=t + timedelta(hours=8))[
+        "action"] == "exhausted"
+    assert len(sends) == 3
+    # A non-retry dispatch: the next death has its own budget.
+    _dispatch(t + timedelta(minutes=1))
+    _tail(home, _api_error(CONNECTION_LOST, at=t + timedelta(minutes=2)))
+    plan = fleet.stream_retry_plan(LANE, _lane(), IDLE, now=t + timedelta(minutes=30))
+    assert (plan["action"], plan["attempt"]) == ("retry", 1)
+
+
+def test_p2_1_jitter_spreads_sessions_inside_the_bound():
+    fractions = {fleet._stream_retry_jitter(f"sid-{i}") for i in range(20)}
+    assert len(fractions) > 10 and all(0 <= f < 1 for f in fractions)
+    assert fleet._stream_retry_jitter("a") == fleet._stream_retry_jitter("a")
+
+
+def test_p2_1_in_flight_cap_defers_the_rest_to_the_next_sweep(home, monkeypatch):
+    sends = _sends(monkeypatch)
+    data = fleet.load_registry()
+    for i in range(fleet.STREAM_RETRY_MAX_IN_FLIGHT):
+        other = fleet.new_worker_record(f"o{i}-sid", str(home), "w", "bypass")
+        other["stream_retry"] = {"attempts": 1, "last_at": fleet.now_iso()}
+        data["workers"][f"o{i}"] = other
+    fleet.save_registry(data)
+    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=30)))
+    assert fleet.recover_lane(LANE, IDLE, now=NOW)["done"] is None
+    assert sends == [] and "stream_retry" not in _lane()
+
+
+def test_p2_2_second_recoverer_cannot_spend_the_same_attempt(home):
+    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=30)))
+    before = _lane()
+    plan = fleet.stream_retry_plan(LANE, before, IDLE, now=NOW)
+    assert fleet._record_stream_retry(LANE, before, plan)
+    assert not fleet._record_stream_retry(LANE, before, plan)
+    assert _lane()["stream_retry"]["attempts"] == 1
+
+
+def test_p2_3_only_a_stream_wake_carries_the_retry_flag(home, monkeypatch):
+    seen = []
+    monkeypatch.setattr(fleet, "_sup_guard_lane_sweep", lambda *_: [])
+    monkeypatch.setattr(fleet, "_sup_guard_dead_sweep",
+                        lambda *_: {"stream_retried": [], "lane_dead_sent": []})
+    monkeypatch.setattr(fleet, "_sup_guard_observe", lambda **_: {})
+    monkeypatch.setattr(fleet, "_reap_current_supervisor_forks", lambda **_: None)
+    monkeypatch.setattr(fleet, "_sup_guard_decide",
+                        lambda _obs: ("WAKE", PARENT, {"body_name": PARENT}))
+    monkeypatch.setattr(fleet, "cmd_send", lambda ns: seen.append(
+        ns._fleet_stream_retry) or 0)
+    try:
+        fleet.cmd_sup_guard(SimpleNamespace(do=True, json=True))
+    except Exception:  # noqa: BLE001 -- output shaping is not this pin
+        pass
+    assert seen == [False]
+
+
+def test_p2_4_transcript_text_without_stopfailure_marker_is_not_acted_on(home, monkeypatch):
+    """A worker can append an error line to its own transcript; without the
+    fleet-owned StopFailure marker it gets no retry and no api-error LANE-DEAD."""
+    sends = _sends(monkeypatch)
+    _tail(home, _api_error("API Error: 401 authentication_error",
+                           at=NOW - timedelta(minutes=5)), marker=())
+    assert fleet.stream_retry_plan(LANE, _lane(), IDLE, now=NOW)["action"] == "none"
+    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=5)), marker=())
+    assert fleet.stream_retry_plan(LANE, _lane(), IDLE, now=NOW)["action"] == "none"
+    step = fleet.recover_lane(LANE, IDLE, now=NOW)
+    assert step.get("reason") != "api-error"
+    assert all("api-error" not in m and m != fleet.STREAM_RETRY_MESSAGE
+               for _, m, _ in sends)
+
+
+def test_p2_4_marker_older_than_the_dispatch_does_not_vouch(home):
+    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=5)))
+    marker = fleet.stopfailure_marker_path(LANE_SID)
+    marker.write_text(json.dumps({"at": _iso(NOW - timedelta(hours=3))}))
+    assert fleet.stream_retry_plan(LANE, _lane(), IDLE, now=NOW)["action"] == "none"
+
+
+def test_p2_4_stream_recover_writes_the_marker(home, monkeypatch):
+    sends = _sends(monkeypatch)
+    _tail(home, _api_error(CONNECTION_LOST, at=NOW - timedelta(minutes=30)), marker=())
+    assert not fleet.stopfailure_marker_path(LANE_SID).exists()
+    fleet.cmd_stream_recover(SimpleNamespace(sid=LANE_SID, wait=False),
+                             roster_fn=lambda: (True, IDLE), now_fn=lambda: NOW)
+    assert fleet.stopfailure_marker_path(LANE_SID).exists()
+    assert sends == [(LANE, fleet.STREAM_RETRY_MESSAGE, True)]
+
+
+def test_p2_5_doctor_fails_an_instance_missing_a_template_event(home, monkeypatch):
+    template = home / "template.json"
+    template.write_text(json.dumps({"hooks": {"Stop": [], "StopFailure": []}}))
+    monkeypatch.setattr(fleet, "template_settings_path", lambda: template)
+    fleet.instance_settings_path().write_text(json.dumps({"hooks": {"Stop": []}}))
+    name, ok, msg = fleet._doctor_check_hook_coverage()
+    assert (name, ok) == ("hook-coverage", False)
+    assert "StopFailure" in msg and "fleet init" in msg
+    fleet.instance_settings_path().write_text(
+        json.dumps({"hooks": {"Stop": [], "StopFailure": []}}))
+    assert fleet._doctor_check_hook_coverage()[1] is True
+
+
+def test_p2_5_shipped_template_registers_stopfailure():
+    template = json.loads((HOOK.parents[2] / "worker-settings.template.json").read_text())
+    assert "StopFailure" in template["hooks"]
