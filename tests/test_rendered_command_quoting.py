@@ -738,7 +738,7 @@ class TestTheTemplateSurfaceQuotesToo:
 
     def test_the_template_is_valid_and_has_hook_commands_at_all(self):
         payload = json.loads(TEMPLATE.read_text(encoding="utf-8"))
-        assert len(_template_hook_commands(payload)) == 4
+        assert len(_template_hook_commands(payload)) == 5
 
     def test_every_placeholder_in_every_hook_command_is_quoted(self):
         payload = json.loads(TEMPLATE.read_text(encoding="utf-8"))
@@ -762,7 +762,7 @@ class TestTheTemplateSurfaceQuotesToo:
             python_exe=python_exe, fleet_home=home, fleet_install=install)
         payload = json.loads(rendered)
         commands = _template_hook_commands(payload)
-        assert len(commands) == 4
+        assert len(commands) == 5
         expect = {python_exe.resolve().as_posix(), home.resolve().as_posix()}
         # `install` carries the hazard for the `argv[1]` assertion below but is
         # NOT in `expect`, so it was outside the "does the fixture actually

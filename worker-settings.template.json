@@ -7,6 +7,8 @@
     "Stop": [{ "hooks": [{ "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stop_outcome.py\" --fleet-home \"{{FLEET_HOME}}\"" }, { "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stop_mailbox.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],
+    "StopFailure": [{ "hooks": [{ "type": "command",
+      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/stopfailure_recover.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],
     "PostCompact": [{ "hooks": [{ "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/postcompact_journal.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }]
   }

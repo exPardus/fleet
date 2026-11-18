@@ -1014,15 +1014,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14109) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15206) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18641) -- upgrades need complete records.
+      * `_sweep_husks` (:14177) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15274) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:18733) -- upgrades need complete records.
       * `_acting_worker_identity` (:4555) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5264) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15454) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18519) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8514) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20268) -- render the release explanation.
+      * `_read_registry_readonly` (:5320) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15522) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18611) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8570) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20360) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4537,7 +4537,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18641`), because legacy upgrades also require a complete registry.
+    (`:18733`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -4794,21 +4794,30 @@ STREAM_DEATH_MARKERS = (
     "the response stopped arriving",
 )
 
+# Retried like a stream death, not respawn evidence: overloaded and 5xx.
+TRANSIENT_API_ERROR_STATUSES = frozenset({500, 502, 503, 504, 529})
+TRANSIENT_API_ERROR_MARKERS = (
+    "overloaded_error",
+    "overloaded",
+    "internal server error",
+    "api_error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+)
 
-def transcript_stream_death_scan(sid: str, transcript_path=None) -> bool:
-    """Whether the transcript tail's newest qualifying record is an API stream death.
-    Walk newest-first past bookkeeping as `transcript_limit_scan` does: the first
-    error-shaped or substantive record is authoritative. Missing or unreadable
-    transcript access returns False -- absence never licenses the guess.
-    An explicit path avoids repeating the caller's resolution.
-    """
+
+def transcript_api_error_tail(sid: str, transcript_path=None):
+    """`(kind, record)` for the tail's newest qualifying record, walked as
+    `transcript_limit_scan` does: kind limit | stream | api-error, or
+    `(None, None)` for chatter or an unreadable transcript."""
     try:
         path = Path(transcript_path) if transcript_path else find_transcript_path(None, sid)
         if path is None or not path.exists():
-            return False
+            return None, None
         lines = _read_tail_lines(path)
     except OSError:
-        return False
+        return None, None
     for line in reversed(lines):
         line = line.strip()
         if not line:
@@ -4823,13 +4832,33 @@ def transcript_stream_death_scan(sid: str, transcript_path=None) -> bool:
         if not is_error and not _is_substantive_transcript_record(rec):
             continue  # bookkeeping record -- keep walking backward
         if not is_error:
-            return False
-        msg = rec.get("message") or {}
-        parts = [c.get("text", "") for c in (msg.get("content") or [])
-                 if isinstance(c, dict) and c.get("type") == "text"]
-        text = "\n".join(parts).lower()
-        return any(marker in text for marker in STREAM_DEATH_MARKERS)
-    return False
+            return None, None
+        if rec.get("apiErrorStatus") == 429 or rec.get("error") == "rate_limit":
+            return "limit", rec
+        text = _api_error_text(rec)
+        if (any(marker in text for marker in STREAM_DEATH_MARKERS)
+                or rec.get("apiErrorStatus") in TRANSIENT_API_ERROR_STATUSES
+                or any(marker in text for marker in TRANSIENT_API_ERROR_MARKERS)):
+            return "stream", rec
+        return "api-error", rec
+    return None, None
+
+
+def _api_error_text(rec: dict) -> str:
+    """Lower-cased text parts of an API error record's message content."""
+    msg = rec.get("message") or {}
+    content = msg.get("content") if isinstance(msg, dict) else None
+    parts = [c.get("text", "") for c in (content or [])
+             if isinstance(c, dict) and c.get("type") == "text"
+             and isinstance(c.get("text"), str)]
+    return "\n".join(parts).lower()
+
+
+def transcript_stream_death_scan(sid: str, transcript_path=None) -> bool:
+    """Whether the tail is a measured stream death (item 31 respawn evidence)."""
+    kind, rec = transcript_api_error_tail(sid, transcript_path)
+    return kind == "stream" and any(
+        marker in _api_error_text(rec) for marker in STREAM_DEATH_MARKERS)
 
 
 # Native verdicts use roster and Stop-hook outcomes. _limit_scan_hook is the
@@ -4839,6 +4868,8 @@ _limit_scan_hook = transcript_limit_scan  # Injectable transcript-tail limit sca
 
 # Injectable companion reader for turns whose transport died with no outcome.
 _stream_death_scan_hook = transcript_stream_death_scan
+
+_api_error_tail_hook = transcript_api_error_tail  # Injectable tail classifier.
 
 NATIVE_TERMINAL_STATUSES = {"idle", "dead", "dead-suspected", "limited",
                             "over_ceiling", "interrupted"}
@@ -4872,11 +4903,36 @@ def _investigate_no_outcome(name: str, record: dict, updated: dict) -> dict:
             updated["limit_reset_at"] = reset_at
             updated["limit_kind"] = kind
             return updated
+    # An API error of this dispatch proves the turn ended despite the grace.
+    if _api_error_ended_dispatch(name, record)[0] in ("stream", "api-error"):
+        updated["status"] = "dead-suspected"
+        return updated
     if _dispatch_grace_active(record):
         updated["status"] = "working"
         return updated
     updated["status"] = "dead-suspected"
     return updated
+
+
+def _api_error_ended_dispatch(name: str, record: dict):
+    """`(kind, record)` when the tail is an API error stamped at or after this
+    dispatch (fork-steers copy older history); untimed counts after grace."""
+    scan = _api_error_tail_hook
+    sid = record.get("session_id") if isinstance(record, dict) else None
+    if scan is None or not sid:
+        return None, None
+    kind, err = scan(sid, transcript_path=find_transcript_path(name, sid))
+    if kind is None:
+        return None, None
+    at = _record_time(err)
+    since = record.get("last_dispatch_at") or record.get("created")
+    if at is None:
+        return (kind, err) if not _dispatch_grace_active(record) else (None, None)
+    try:
+        anchor = _parse_iso(since) - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    except (TypeError, ValueError):
+        return kind, err
+    return (kind, err) if at >= anchor else (None, None)
 
 
 def recompute_worker_native(name: str, record: dict, roster_entries: list) -> dict:
@@ -9322,14 +9378,16 @@ class TransientSendRefusal(FleetCliError):
 
 
 def _cmd_send_native(name: str, message: str,
-                     run=subprocess.run, which=shutil.which, sleep=time.sleep) -> int:
+                     run=subprocess.run, which=shutil.which, sleep=time.sleep,
+                     *, stream_retry=False) -> int:
     """Queue mail for a working worker or fork-steer an idle one.
     Fetch the roster outside the lock, then re-read/recompute under a fresh lock.
     Refuse dead, interrupted, suspected-dead, limited and other unsupported states.
     For idle workers, check cumulative tokens and pre-claim working. Outside the
     lock, append mail before composing/draining it and dispatch with resume_sid.
     Commit the new sid, ceiling and steered event with retries. On failure restore
-    claimed mail and roll back only a record still in this call's pre-claim state."""
+    claimed mail and roll back only a record still in this call's pre-claim state.
+    `stream_retry` fork-steers a proven transient API-error death (§8)."""
     # Record caller sid on mail events for interface-fork divergence detection.
     # The claimless interface tier cannot prevent forks through continuity gating;
     # provenance permits warnings. Human shells have no sid and are ignored.
@@ -9352,12 +9410,17 @@ def _cmd_send_native(name: str, message: str,
             )
         after = recompute_worker_native(name, rec, roster_entries)
         status = after["status"]
+        # A proven stream death is not in flight; the retry steers it as idle.
+        stream_dead = bool(stream_retry) and _turn_ended_on_api_error(
+            name, rec, roster_entries)[0] == "stream"
+        if stream_dead:
+            status = after["status"] = "idle"
 
         # A raw working record may be another sender's in-flight pre-claim.
         # Respect it only without a fresh completion and before claim expiry
         # (a stale working label also describes finished turns), using the same
         # anchors as recomputation.
-        if rec.get("status") == "working" and status != "working":
+        if rec.get("status") == "working" and status != "working" and not stream_dead:
             raw_sid = rec.get("session_id")
             if raw_sid is None:
                 # Refuse a sid-less launch claim; mailbox/None.md would silently lose this message.
@@ -9454,6 +9517,10 @@ def _cmd_send_native(name: str, message: str,
         after["status"] = "working"
         after["last_activity"] = now_iso()
         after["last_dispatch_at"] = now_iso()
+        if stream_dead and isinstance(after.get("stream_retry"), dict):
+            # This dispatch continues the death's attempt chain (§8).
+            after["stream_retry"] = {**after["stream_retry"],
+                                     "dispatch_at": after["last_dispatch_at"]}
         data["workers"][name] = after
         save_registry(data)
 
@@ -9753,8 +9820,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
     if _is_codex_record(before):
         result = _cmd_send_codex(args.name, message, run=run, which=which)
     else:
-        result = _cmd_send_native(args.name, message,
-                                  run=run, which=which, sleep=sleep)
+        result = _cmd_send_native(
+            args.name, message, run=run, which=which, sleep=sleep,
+            stream_retry=bool(getattr(args, "_fleet_stream_retry", False)))
     if result == 0 and mail_receipt_id is not None:
         print(f"{args.name}: Interface mail receipt {mail_receipt_id} -- "
               f"supervisor must verify before acting")
@@ -12494,7 +12562,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12373` / `cmd_respawn:11648`, before
+    # resolution that runs from `cmd_kill:12441` / `cmd_respawn:11716`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12525,9 +12593,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12373` / `cmd_respawn:11648`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12441` / `cmd_respawn:11716`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11669-11676` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11737-11744` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -15428,7 +15496,7 @@ def _doctor_check_hook_errors():
               "this row to PASS")
 
 
-_KNOWN_HOOK_EVENTS = frozenset({"PostToolUse", "Stop", "PostCompact"})
+_KNOWN_HOOK_EVENTS = frozenset({"PostToolUse", "Stop", "StopFailure", "PostCompact"})
 
 
 def _doctor_check_hook_registration():
@@ -15473,6 +15541,29 @@ def _doctor_check_hook_registration():
     registered = ", ".join(sorted(hooks)) or "none"
     return ("hook-registration", True,
             f"all registered hook events known and command paths exist ({registered})")
+
+
+def _doctor_check_hook_coverage():
+    """Fail when the rendered instance lacks a hook event the template has.
+    `instance-freshness` compares mtimes only; a home rendered before the
+    template gained an event (StopFailure) keeps working without it. A
+    hooks-less instance is left to the instance checks."""
+    try:
+        template = json.loads(template_settings_path().read_text(encoding="utf-8"))
+        instance = json.loads(instance_settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return ("hook-coverage", True, f"not checked ({exc.__class__.__name__}); "
+                "instance checks own unreadable settings")
+    wanted = template.get("hooks") if isinstance(template, dict) else None
+    have = instance.get("hooks") if isinstance(instance, dict) else None
+    if not isinstance(wanted, dict) or not isinstance(have, dict):
+        return ("hook-coverage", True, "no hooks to compare")
+    missing = sorted(set(wanted) - set(have))
+    if missing:
+        return ("hook-coverage", False,
+                f"instance lacks template hook event(s) {', '.join(missing)} "
+                "-- run `fleet init` to re-render worker-settings.json")
+    return ("hook-coverage", True, "every template hook event is registered")
 
 
 def _doctor_check_registry(error, repaired: bool, quarantined=None,
@@ -15573,6 +15664,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         # Pair content-grant validation with freshness: mtime alone misses hand edits.
         functools.partial(_doctor_check_instance_grants),
         functools.partial(_doctor_check_hook_registration),
+        functools.partial(_doctor_check_hook_coverage),
         functools.partial(_doctor_check_legacy_settings),
         functools.partial(_doctor_check_local_seeds),
         functools.partial(_doctor_check_posttooluse_hook_smoke, run=run),
@@ -17519,7 +17611,7 @@ def _registry_records_or_none():
     QUARANTINES a corrupt registry -- it renames the file aside (`:1088`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5252`) applies here too. An unreadable registry
+    rule for the view path (`:5308`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17590,10 +17682,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5660, :12476, :12639, :12904, :13129, :13165, :13407, :13408, :13497, :13507, :13518, :13616, :14135, :17506, :20422, :20434, :20583, :24360, :24361, :24463, :24528, :24590, :25554, :25556, :25594, :26122, :29029`).
+    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12544, :12707, :12972, :13197, :13233, :13475, :13476, :13565, :13575, :13586, :13684, :14203, :17598, :20514, :20526, :20675, :24452, :24453, :24555, :24620, :24682, :25703, :25705, :25743, :26271, :29183`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10783, :11519, :15792, :27055. This makes union identity
+    OWN prior sid alone: :10851, :11587, :15884, :27204. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18299,8 +18391,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10783, :11519, :15792,
-    # :27055) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10851, :11587, :15884,
+    # :27204) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18308,7 +18400,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1088`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17480`).
+        # names this gate as its reason (`:17572`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18670,7 +18762,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14106`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14174`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -24684,6 +24776,13 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
                            or _is_supervisor_shaped(row.get("name")))]
     busy_children = _sup_guard_busy_children(
         body_rows, sup.get("heartbeat_age_seconds"), process_tree_fn)
+    stream_plan = {"action": "none"}
+    if (state == "held" and isinstance(body_record, dict)
+            and not body_record.get("archived_at")):
+        try:
+            stream_plan = stream_retry_plan(body_name, body_record, entries)
+        except Exception:  # noqa: BLE001 -- an unreadable tail is no evidence
+            stream_plan = {"action": "none"}
     return {
         "snapshot": snapshot,
         "registry_ok": bool(snapshot.get("ok", True))
@@ -24717,7 +24816,26 @@ def _sup_guard_observe(snapshot_fn=None, roster_fn=None, process_tree_fn=None):
         "parked_active": parked["parked_active"],
         "parked_expired": parked["parked_expired"],
         "parked_finished_lanes": sorted(parked_finished_lanes),
+        "stream_retry": stream_plan,
     }
+
+
+def _sup_guard_stream_verdict(obs, detail):
+    """Stream-retry verdict for an idle/gone holder with no rival body, or None."""
+    plan = obs.get("stream_retry") or {}
+    action = plan.get("action")
+    if action == "retry":
+        detail["stream_retry_attempt"] = plan.get("attempt")
+        return "WAKE", obs.get("body_name") or SUPERVISOR_BODY_NAME
+    if action == "exhausted":
+        return "PAGE", (f"supervisor turn died on an API stream error; "
+                        f"{plan.get('attempts')} retries exhausted")
+    if action == "api-error":
+        return "PAGE", "supervisor turn ended on an API error"
+    if action == "wait":
+        detail["quiet"] = True
+        return "OK", "supervisor stream retry pending"
+    return None
 
 
 def _sup_guard_decide(observation):
@@ -24733,6 +24851,7 @@ def _sup_guard_decide(observation):
          "parked_expired", "parked_finished_lanes", "busy_children",
          "unread_mail_age_seconds")
     }
+    detail["stream_retry"] = (obs.get("stream_retry") or {}).get("action")
     detail.update({
         key: obs.get(key) for key in
         ("context_occupancy", "context_verdict")
@@ -24824,6 +24943,11 @@ def _sup_guard_decide(observation):
         if not isinstance(age, (int, float)):
             return "PAGE", "claim heartbeat unreadable", detail
         mail_age = obs.get("unread_mail_age_seconds")
+        if statuses == {"idle"} and not any(
+                row not in matching for row in obs.get("live_body_rows", [])):
+            stream = _sup_guard_stream_verdict(obs, detail)
+            if stream is not None:
+                return stream[0], stream[1], detail
         if (age <= SUPERVISOR_CLAIM_STALE_SECONDS and statuses == {"idle"}
                 and isinstance(mail_age, (int, float))
                 and mail_age > SUPERVISOR_UNREAD_MAIL_GRACE_SECONDS):
@@ -24848,6 +24972,10 @@ def _sup_guard_decide(observation):
     age = obs.get("heartbeat_age_seconds")
     if not isinstance(age, (int, float)):
         return "PAGE", "claim heartbeat unreadable", detail
+    if not obs.get("live_body_rows") and obs.get("idle_resumable_holder"):
+        stream = _sup_guard_stream_verdict(obs, detail)
+        if stream is not None:
+            return stream[0], stream[1], detail
     if age <= SUPERVISOR_CLAIM_STALE_SECONDS:
         return "PAGE", "fresh heartbeat but body is not roster-live", detail
     if any(row not in matching for row in obs.get("live_body_rows", [])):
@@ -24957,7 +25085,16 @@ def _sup_guard_lane_sweep(roster_fn=None) -> list:
         return []
 
 
-def _cmd_codex_sup_guard(args, lane_done=()) -> int:
+def _sup_guard_dead_sweep(roster_fn=None) -> dict:
+    """Run the lane-dead backstop; its failure never changes the verdict."""
+    try:
+        return sweep_lane_dead(roster_fn)
+    except Exception as exc:  # noqa: BLE001 -- the guard must still decide
+        print(f"fleet: sup-guard lane-dead sweep failed: {exc}", file=sys.stderr)
+        return {"stream_retried": [], "lane_dead_sent": []}
+
+
+def _cmd_codex_sup_guard(args, lane_done=(), lane_dead=None) -> int:
     do = getattr(args, "do", False)
     observation = _codex_sup_guard_observe()
     if do and observation.get("verdict") == "WAKE":
@@ -24985,7 +25122,8 @@ def _cmd_codex_sup_guard(args, lane_done=()) -> int:
     line = _sup_guard_line(verdict, reason, observation.get("body_name"))
     if getattr(args, "json", False):
         output = {**observation, "verdict": line, "sent": sent,
-                  "lane_done_sent": list(lane_done)}
+                  "lane_done_sent": list(lane_done),
+                  **(lane_dead or {"stream_retried": [], "lane_dead_sent": []})}
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
     else:
         print(line)
@@ -25001,10 +25139,12 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
     """
     claim = read_incarnation()
     do = getattr(args, "do", False)
-    # Lane-done backstop (SPEC §8) runs before the verdict.
+    # Lane-done and lane-dead backstops (SPEC §8) run before the verdict.
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
+    lane_dead = (_sup_guard_dead_sweep(roster_fn) if do
+                 else {"stream_retried": [], "lane_dead_sent": []})
     if isinstance(claim, dict) and claim.get("provider") == "codex":
-        return _cmd_codex_sup_guard(args, lane_done=lane_done)
+        return _cmd_codex_sup_guard(args, lane_done=lane_done, lane_dead=lane_dead)
     observation = _sup_guard_observe(
         snapshot_fn=snapshot_fn, roster_fn=roster_fn,
         process_tree_fn=process_tree_fn)
@@ -25018,6 +25158,13 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
             process_tree_fn=process_tree_fn)
     verdict, reason, detail = _sup_guard_decide(observation)
     sent, rc = False, 0
+    if do and verdict == "WAKE" and detail.get("stream_retry_attempt"):
+        body_name = observation.get("body_name")
+        registry = _registry_records_or_none() or {}
+        body_rec = (registry.get("workers") or {}).get(body_name)
+        if not (isinstance(body_rec, dict) and _record_stream_retry(
+                body_name, body_rec, observation["stream_retry"])):
+            verdict, reason = "PAGE", "supervisor stream retry could not be recorded"
     if do and verdict == "WAKE":
         try:
             for attempt in (1, 2):
@@ -25026,7 +25173,9 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
                         rc = cmd_send(SimpleNamespace(
                             name=SUPERVISOR_BODY_NAME,
                             message=f"@{supervisor_wake_brief_path()}", nonce=None,
-                            _fleet_structured_notice=True))
+                            _fleet_structured_notice=True,
+                            _fleet_stream_retry=bool(
+                                detail.get("stream_retry_attempt"))))
                     break
                 except TransientSendRefusal:
                     if attempt == 2:
@@ -25052,7 +25201,7 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
     line = _sup_guard_line(verdict, reason, detail.get("body_name"))
     if getattr(args, "json", False):
         output = {"verdict": line, "reason": reason, **detail, "sent": sent,
-                  "lane_done_sent": lane_done}
+                  "lane_done_sent": lane_done, **lane_dead}
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
     else:
         print(line)
@@ -28225,6 +28374,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_lane_done = sub.add_parser("lane-done", help=argparse.SUPPRESS)
     p_lane_done.add_argument("--sid", required=True)
+    p_stream_recover = sub.add_parser("stream-recover", help=argparse.SUPPRESS)
+    p_stream_recover.add_argument("--sid", required=True)
+    p_stream_recover.add_argument("--wait", action="store_true")
 
     p_interrupt = sub.add_parser("interrupt", help="kill a worker's running turn")
     p_interrupt.add_argument("name")
@@ -28936,6 +29088,8 @@ def main(argv=None) -> int:
                 sys.modules[__name__], args)
         if args.command == "lane-done":
             return cmd_lane_done(args)
+        if args.command == "stream-recover":
+            return cmd_stream_recover(args)
         if args.command == "interrupt":
             return cmd_interrupt(args)
         if args.command == "attach":
@@ -29247,20 +29401,8 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
         if claim.get("provider") != "codex" and _lane_done_queued(parent_name, message):
             _settle_lane_done(name, sid, turn_key, delivered=True, head=head, **settle)
             return False
-        for attempt in (1, 2):
-            try:
-                with redirect_stdout(io.StringIO()):
-                    if claim.get("provider") == "codex":
-                        rc = _cmd_send_codex_supervisor(parent_name, message)
-                    else:
-                        rc = _cmd_send_native(parent_name, message)
-                break
-            except TransientSendRefusal:
-                if attempt == 2:
-                    raise
-                sleep(LANE_DONE_RETRY_SECONDS)
-        if rc != 0:
-            raise FleetCliError(f"{name}: completion mail send failed ({rc})")
+        _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
+                           what=f"{name}: completion mail")
     except Exception:
         _settle_lane_done(name, sid, turn_key,
                           expected_mcx_id=expected_mcx_id,
@@ -29270,6 +29412,25 @@ def notify_lane_done(name, status, *, expected_sid=None, expected_mcx_id=None,
         raise
     _settle_lane_done(name, sid, turn_key, delivered=True, head=head, **settle)
     return True
+
+
+def _deliver_lane_mail(claim, parent_name, message, *, sleep=time.sleep,
+                       what="lane mail") -> None:
+    """Notice to the holder row (mail if busy, wake if idle); G9 retried once."""
+    for attempt in (1, 2):
+        try:
+            with redirect_stdout(io.StringIO()):
+                if claim.get("provider") == "codex":
+                    rc = _cmd_send_codex_supervisor(parent_name, message)
+                else:
+                    rc = _cmd_send_native(parent_name, message)
+            break
+        except TransientSendRefusal:
+            if attempt == 2:
+                raise
+            sleep(LANE_DONE_RETRY_SECONDS)
+    if rc != 0:
+        raise FleetCliError(f"{what} send failed ({rc})")
 
 
 def _settle_lane_done(name, sid, turn_key, *, expected_mcx_id=None,
@@ -29385,6 +29546,422 @@ def cmd_lane_done(args) -> int:
             break
     return 0
 
+
+
+# Turns that end on an API error: in-session stream retry and LANE-DEAD (SPEC §8).
+STREAM_RETRY_DELAYS_SECONDS = (30.0, 120.0, 480.0)  # after the error record
+STREAM_RETRY_JITTER_FRACTION = 0.5  # per-session spread so a burst does not resume at once
+STREAM_RETRY_MAX_IN_FLIGHT = 2  # per home; the rest wait for the next sweep
+STREAM_RETRY_IN_FLIGHT_SECONDS = 300.0
+STREAM_RECOVER_MAX_WAIT_SECONDS = 600.0
+STREAM_RECOVER_SETTLE_SECONDS = 60.0  # re-check a row the roster still shows busy
+STREAM_RECOVER_POLL_SECONDS = 10.0
+STREAM_RETRY_MESSAGE = (
+    "Your previous turn ended on a transient API error (connection lost, "
+    "overloaded or a server error mid-response). The transcript is intact. "
+    "Continue the task from where it stopped; do not redo finished steps.")
+LANE_DEAD_MAX_AGE_SECONDS = 24 * 3600
+
+
+def stopfailure_marker_path(sid: str) -> Path:
+    return state_dir() / "stopfailure" / f"{sid}.json"
+
+
+def _write_stopfailure_marker(sid: str) -> None:
+    """Fleet-owned proof that Claude Code fired StopFailure for `sid`."""
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid):
+        return
+    path = stopfailure_marker_path(sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{sid}.tmp.{os.getpid()}")
+    tmp.write_text(json.dumps({"at": now_iso()}), encoding="utf-8")
+    os.replace(str(tmp), str(path))
+
+
+def _stopfailure_since(sid, since) -> bool:
+    """True when a StopFailure marker for `sid` is at or after `since`."""
+    if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid):
+        return False
+    try:
+        at = _parse_iso(json.loads(
+            stopfailure_marker_path(sid).read_text(encoding="utf-8"))["at"])
+        anchor = _parse_iso(since) - timedelta(seconds=OUTCOME_FRESH_SLACK_SECONDS)
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    return at >= anchor
+
+
+def _turn_ended_on_api_error(name: str, rec: dict, entries: list):
+    """`(kind, error_record)` when this native turn ended on an API error and
+    neither the roster (busy) nor a fresh outcome says otherwise. Transcript
+    text alone is worker-writable, so a StopFailure marker for this dispatch
+    is also required."""
+    if (not isinstance(rec, dict) or rec.get("archived_at")
+            or _is_codex_record(rec)
+            or rec.get("status") not in ("working", "idle", "dead-suspected")):
+        return None, None
+    sid = rec.get("session_id")
+    if not sid:
+        return None, None
+    entry = _roster_entry_for(entries, sid)
+    if isinstance(entry, dict) and entry.get("status") in ("busy", "waiting"):
+        return None, None
+    since = rec.get("last_dispatch_at") or rec.get("created")
+    if has_fresh_outcome(name, sid, since):
+        return None, None
+    if not _stopfailure_since(sid, since):
+        return None, None
+    return _api_error_ended_dispatch(name, rec)
+
+
+def _stream_retry_attempts(name: str, rec: dict, now=None) -> int:
+    """Attempts spent on this death. The count belongs to the failing turn and
+    the retries it chained (`anchor` -> `dispatch_at`); only a completed turn
+    or a dispatch the retry did not write resets it. Elapsed time never does,
+    so an exhausted lane stays exhausted."""
+    state = rec.get("stream_retry")
+    if not isinstance(state, dict):
+        return 0
+    attempts = state.get("attempts")
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        return 0
+    try:
+        last = _parse_iso(state.get("last_at"))
+    except (TypeError, ValueError):
+        return 0
+    chain = {state.get(k) for k in ("anchor", "dispatch_at")} - {None}
+    if chain and rec.get("last_dispatch_at") not in chain:
+        return 0
+    for outcome in read_outcomes(name):
+        if outcome.get("kind") != "result":
+            continue
+        try:
+            if _parse_iso(str(outcome.get("ts", ""))) > last:
+                return 0
+        except (TypeError, ValueError):
+            continue
+    return attempts
+
+
+def stream_retry_plan(name: str, rec: dict, entries: list, now=None) -> dict:
+    """action: none | wait | retry (attempt `attempt` due) | exhausted | api-error."""
+    now = now or datetime.now(timezone.utc)
+    kind, err = _turn_ended_on_api_error(name, rec, entries)
+    if kind == "api-error":
+        return {"action": "api-error", "reason": "api-error"}
+    if kind != "stream":
+        return {"action": "none"}
+    attempts = _stream_retry_attempts(name, rec, now)
+    if attempts >= len(STREAM_RETRY_DELAYS_SECONDS):
+        return {"action": "exhausted", "attempts": attempts,
+                "reason": "stream-error-retries-exhausted"}
+    error_at = _record_time(err) or now
+    delay = STREAM_RETRY_DELAYS_SECONDS[attempts]
+    due_at = error_at + timedelta(
+        seconds=delay * (1 + STREAM_RETRY_JITTER_FRACTION
+                         * _stream_retry_jitter(rec.get("session_id"))))
+    return {"action": "retry" if now >= due_at else "wait",
+            "attempt": attempts + 1, "due_at": due_at, "error_at": error_at}
+
+
+def _stream_retry_jitter(sid) -> float:
+    """Stable fraction in [0, 1) per session."""
+    digest = hashlib.sha256(str(sid or "").encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") / 2 ** 32
+
+
+def _stream_retries_in_flight(data: dict, name: str) -> int:
+    """Other rows of this home whose retry was spent in the last window."""
+    now = datetime.now(timezone.utc)
+    count = 0
+    for other, rec in (data.get("workers") or {}).items():
+        state = rec.get("stream_retry") if isinstance(rec, dict) else None
+        if other == name or not isinstance(state, dict) or state.get("exhausted_at"):
+            continue
+        try:
+            age = (now - _parse_iso(state.get("last_at"))).total_seconds()
+        except (TypeError, ValueError):
+            continue
+        if 0 <= age < STREAM_RETRY_IN_FLIGHT_SECONDS:
+            count += 1
+    return count
+
+
+def _record_stream_retry(name: str, before: dict, plan: dict) -> bool:
+    """Spend attempt `plan["attempt"]` before the send. False when the row
+    moved on, another recoverer spent this attempt first, or the home already
+    has `STREAM_RETRY_MAX_IN_FLIGHT` retries running (the next sweep retries)."""
+    with fleet_lock():
+        data = load_registry()
+        cur = data["workers"].get(name)
+        if (not isinstance(cur, dict)
+                or cur.get("session_id") != before.get("session_id")
+                or cur.get("last_dispatch_at") != before.get("last_dispatch_at")
+                or _stream_retry_attempts(name, cur) != plan["attempt"] - 1):
+            return False
+        if _stream_retries_in_flight(data, name) >= STREAM_RETRY_MAX_IN_FLIGHT:
+            return False
+        error_at = plan.get("error_at")
+        cur["stream_retry"] = {
+            "attempts": plan["attempt"], "last_at": now_iso(),
+            "anchor": cur.get("last_dispatch_at"),
+            "error_at": (error_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                         if isinstance(error_at, datetime) else None)}
+        save_registry(data)
+    append_event("stream_retry", name, attempt=plan["attempt"],
+                 sid=before.get("session_id"))
+    return True
+
+
+def recover_lane(name: str, entries: list, *, now=None, run=subprocess.run,
+                 which=shutil.which, sleep=time.sleep) -> dict:
+    """One step for a lane without an outcome: retry, wait, or LANE-DEAD.
+    Returns the plan plus `done` (retried | retry-failed | lane-dead | None)."""
+    data = read_registry_no_repair()
+    rec = data["workers"].get(name)
+    if (not isinstance(rec, dict) or rec.get("archived_at")
+            or _is_supervisor_shaped(name)
+            or rec.get("lane_state") in ("landed", "abandoned")):
+        return {"action": "none", "done": None}
+    if _is_codex_record(rec):
+        plan = {"action": "none"}
+        status = rec.get("status")
+    else:
+        plan = stream_retry_plan(name, rec, entries, now=now)
+        status = recompute_worker_native(name, rec, entries).get("status")
+    plan["done"] = None
+    action = plan["action"]
+    if action == "wait":
+        return plan
+    if action == "retry":
+        if not _record_stream_retry(name, rec, plan):
+            return {"action": "none", "done": None}
+        try:
+            with redirect_stdout(io.StringIO()):
+                rc = _cmd_send_native(name, STREAM_RETRY_MESSAGE, run=run,
+                                      which=which, sleep=sleep, stream_retry=True)
+        except Exception as exc:  # noqa: BLE001 -- the attempt stays counted
+            plan["done"], plan["error"] = "retry-failed", str(exc)
+            return plan
+        plan["done"] = "retried" if rc == 0 else "retry-failed"
+        return plan
+    if action in ("exhausted", "api-error"):
+        reason = plan["reason"]
+        if action == "exhausted" and _mark_stream_retry_exhausted(name, rec):
+            append_event("stream_retry_exhausted", name,
+                         attempts=plan.get("attempts"))
+    elif status == "dead-suspected" and not _is_codex_record(rec):
+        reason = "no-outcome"
+    elif status == "dead":
+        sid = rec.get("session_id")
+        last = latest_outcome(name, sid) if sid else None
+        if isinstance(last, dict) and last.get("kind") in TOMBSTONE_KINDS:
+            return plan  # killed / stopped on purpose: not a silent death
+        reason = "dead"
+    else:
+        return plan
+    if notify_lane_dead(name, reason, run=run, sleep=sleep, now=now):
+        plan["done"] = "lane-dead"
+        plan["reason"] = reason
+    return plan
+
+
+def _mark_stream_retry_exhausted(name: str, before: dict) -> bool:
+    """Stamp `exhausted_at` once per death; True on the first stamp."""
+    with fleet_lock():
+        data = load_registry()
+        cur = data["workers"].get(name)
+        state = cur.get("stream_retry") if isinstance(cur, dict) else None
+        if (not isinstance(state, dict) or state.get("exhausted_at")
+                or cur.get("last_dispatch_at") != before.get("last_dispatch_at")):
+            return False
+        state["exhausted_at"] = now_iso()
+        save_registry(data)
+    return True
+
+
+def _lane_death_at(name: str, rec: dict):
+    """Error record time, else transcript mtime, else the dispatch anchor."""
+    sid = rec.get("session_id")
+    if sid and not _is_codex_record(rec):
+        path = find_transcript_path(name, sid)
+        scan = _api_error_tail_hook
+        if scan is not None:
+            kind, err = scan(sid, transcript_path=path)
+            at = _record_time(err) if kind else None
+            if at is not None:
+                return at
+        try:
+            if path is not None:
+                return datetime.fromtimestamp(Path(path).stat().st_mtime, timezone.utc)
+        except OSError:
+            pass
+    try:
+        return _parse_iso(rec.get("last_dispatch_at") or rec.get("created"))
+    except (TypeError, ValueError):
+        return None
+
+
+def notify_lane_dead(name, reason, *, run=subprocess.run, sleep=time.sleep,
+                     now=None) -> bool:
+    """`LANE-DEAD <name> <reason>` to the owner once per death, LANE-DONE's path."""
+    if _is_supervisor_shaped(name):
+        return False
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+        return False
+    if not isinstance(reason, str) or not re.fullmatch(r"[a-z0-9-]+", reason):
+        return False
+    now = now or datetime.now(timezone.utc)
+    with fleet_lock():
+        data = read_registry_no_repair()
+        rec = data["workers"].get(name)
+        if not isinstance(rec, dict) or rec.get("archived_at"):
+            return False
+        claim = read_incarnation()
+        if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+            return False
+        if not _lane_owned_by_claim(rec, claim, data):
+            return False
+        parent_name = _claim_holder_row_name(claim, data)
+        if parent_name is None:
+            return False
+        if data["workers"][parent_name].get("status") in {
+                "dead", "interrupted", "dead-suspected", "limited", "over_ceiling"}:
+            return False
+        key = [rec.get("session_id") or rec.get("codex_thread_id") or rec.get("mcx_id"),
+               rec.get("last_dispatch_at") or rec.get("created")]
+        if rec.get("lane_dead_notified") == key:
+            return False
+        died_at = _lane_death_at(name, rec)
+        if died_at is None or (now - died_at).total_seconds() > LANE_DEAD_MAX_AGE_SECONDS:
+            return False
+        pending = rec.get("lane_dead_pending")
+        if isinstance(pending, dict) and pending.get("key") == key:
+            try:
+                age = (now - _parse_iso(pending["at"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                age = None
+            if age is not None and age < LANE_DONE_PENDING_SECONDS:
+                return False
+        rec["lane_dead_pending"] = {"key": key, "at": now_iso()}
+        save_registry(data)
+    message = f"LANE-DEAD {name} {reason}"
+    try:
+        if not (claim.get("provider") != "codex"
+                and _lane_done_queued(parent_name, message)):
+            _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
+                               what=f"{name}: LANE-DEAD mail")
+    except Exception:
+        _settle_lane_dead(name, key, delivered=False)
+        raise
+    _settle_lane_dead(name, key, delivered=True)
+    _append_event_quiet("lane_dead_sent", name, reason=reason, to=parent_name)
+    return True
+
+
+def _settle_lane_dead(name, key, *, delivered) -> None:
+    with fleet_lock():
+        data = read_registry_no_repair()
+        cur = data["workers"].get(name)
+        if not isinstance(cur, dict):
+            return
+        pending = cur.get("lane_dead_pending")
+        if isinstance(pending, dict) and pending.get("key") == key:
+            cur.pop("lane_dead_pending", None)
+        if delivered:
+            cur["lane_dead_notified"] = key
+        save_registry(data)
+
+
+def sweep_lane_dead(roster_fn=None, *, run=subprocess.run, sleep=time.sleep,
+                    now=None) -> dict:
+    """`sup-guard --do` backstop: `recover_lane` for every owned lane."""
+    result = {"stream_retried": [], "lane_dead_sent": []}
+    roster_fn = roster_fn or _fetch_agents_roster
+    claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+        return result
+    data = read_registry_no_repair()
+    lanes = {n: r for n, r in data["workers"].items()
+             if isinstance(r, dict) and not r.get("archived_at")
+             and not _is_supervisor_shaped(n)
+             and _lane_owned_by_claim(r, claim, data)}
+    if not lanes:
+        return result
+    entries = []
+    if any(not _is_codex_record(r) for r in lanes.values()):
+        roster_ok, payload = roster_fn()
+        entries = payload if roster_ok and isinstance(payload, list) else []
+        if native_epoch_suspicious(roster_ok and isinstance(payload, list),
+                                   entries, lanes):
+            lanes = {n: r for n, r in lanes.items() if _is_codex_record(r)}
+    for n in sorted(lanes):
+        try:
+            step = recover_lane(n, entries, now=now, run=run, sleep=sleep)
+        except Exception as exc:  # noqa: BLE001 -- one lane never stops the sweep
+            print(f"fleet: lane-dead sweep: {n}: {exc}", file=sys.stderr)
+            continue
+        if step.get("done") == "retried":
+            result["stream_retried"].append(n)
+        elif step.get("done") == "lane-dead":
+            result["lane_dead_sent"].append(n)
+    return result
+
+
+def cmd_stream_recover(args, *, roster_fn=None, sleep=time.sleep,
+                       now_fn=None) -> int:
+    """StopFailure bridge; `--wait` sleeps to the due attempt. Supervisors go
+    to `sup-guard --do`. Always exits 0."""
+    roster_fn = roster_fn or _fetch_agents_roster
+    now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+    sid = getattr(args, "sid", None)
+    wait = bool(getattr(args, "wait", False))
+    data = read_registry_no_repair()
+    name = next((n for n, r in data["workers"].items()
+                 if isinstance(r, dict) and r.get("session_id") == sid), None)
+    if name is None or not sid:
+        return 0
+    try:
+        _write_stopfailure_marker(sid)
+    except OSError as exc:
+        print(f"fleet: stream-recover: marker: {exc}", file=sys.stderr)
+    if _is_supervisor_shaped(name):
+        if wait:
+            sleep(STREAM_RETRY_DELAYS_SECONDS[0])
+        try:
+            with redirect_stdout(io.StringIO()):
+                cmd_sup_guard(SimpleNamespace(do=True, json=False),
+                              roster_fn=roster_fn)
+        except Exception as exc:  # noqa: BLE001 -- a bridge never fails its hook
+            print(f"fleet: stream-recover: {exc}", file=sys.stderr)
+        return 0
+    settled = 0.0
+    for _ in range(len(STREAM_RETRY_DELAYS_SECONDS) + 8):
+        roster_ok, payload = roster_fn()
+        entries = payload if roster_ok and isinstance(payload, list) else []
+        rec = read_registry_no_repair()["workers"].get(name)
+        if (not isinstance(rec, dict) or rec.get("session_id") != sid
+                or native_epoch_suspicious(roster_ok and isinstance(payload, list),
+                                           entries, {name: rec})):
+            return 0
+        try:
+            step = recover_lane(name, entries, now=now_fn(), sleep=sleep)
+        except Exception as exc:  # noqa: BLE001 -- a bridge never fails its hook
+            print(f"fleet: stream-recover: {exc}", file=sys.stderr)
+            return 0
+        if not wait:
+            return 0
+        if step["action"] == "wait":
+            delay = (step["due_at"] - now_fn()).total_seconds()
+            sleep(min(max(delay, 1.0), STREAM_RECOVER_MAX_WAIT_SECONDS))
+            continue
+        if (step["action"] == "none" and step.get("done") is None
+                and settled < STREAM_RECOVER_SETTLE_SECONDS):
+            sleep(STREAM_RECOVER_POLL_SECONDS)
+            settled += STREAM_RECOVER_POLL_SECONDS
+            continue
+        return 0
+    return 0
 
 
 _NATIVE_ADDRESS_LIVE = ("idle", "busy", "waiting")

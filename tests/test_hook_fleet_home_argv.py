@@ -68,7 +68,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = REPO / "bin" / "hooks"
 HOOK_SCRIPTS = ("postcompact_journal.py", "posttooluse_mailbox.py",
-                "stop_mailbox.py", "stop_outcome.py")
+                "stop_mailbox.py", "stop_outcome.py", "stopfailure_recover.py")
 
 sys.path.insert(0, str(REPO / "bin"))
 import fleet  # noqa: E402
@@ -143,12 +143,12 @@ class TestTheTemplateBakesTheHome:
         for cmd in _hook_commands(_template_text()):
             assert '--fleet-home "{{FLEET_HOME}}"' in cmd, cmd
 
-    def test_all_four_are_still_rooted_at_the_install(self):
+    def test_every_hook_is_still_rooted_at_the_install(self):
         """Slice 0's split is not undone by slice (c): the SCRIPT comes from
         the install (code plane), the HOME argument from the home (data
         plane). Both placeholders in one command is the whole point."""
         cmds = _hook_commands(_template_text())
-        assert len(cmds) == 4
+        assert len(cmds) == len(HOOK_SCRIPTS)
         for cmd in cmds:
             assert "{{FLEET_INSTALL}}/bin/hooks/" in cmd, cmd
 
