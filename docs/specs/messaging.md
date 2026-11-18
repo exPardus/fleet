@@ -6,7 +6,8 @@ paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
 `ingest()`, the one receiver path, and the §7 `Transport` Protocol in
 `bin/fleet_msg_transport.py` (§5.1 lists
 what PR 1 fixed that this spec left open). **Built (plan PR 3):** the §11
-rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). Every other section is proposed,
+rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). **Built (plan PR 4):**
+the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). Every other section is proposed,
 not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -290,6 +291,52 @@ longer holds its envelope. Peers come from `~/.claude/fleet-homes.list`.
 A file failing JSON or `body_sha256` is retried, then `rejected: corrupt` after
 three passes.
 
+#### 7.1.1 Built contract (plan PR 4)
+
+`bin/fleet_msg_fs.py` implements the five methods as `FsTransport(store,
+peer_home, peer_site, prims)`. Fleet helpers come in as `prims`
+(`hosted(home)` lists the identities a home hosts); the module imports only
+`fleet_msg_core` and `fleet_msg_transport`. The sync driver, not this module,
+calls `ingest()` on each pulled entry and then `commit()`.
+
+- **`site.json`** holds `{"site": LABEL}`. `hello` refuses a peer whose label
+  differs from the one in `peers.json`, or equals the local one. The reported
+  clock is the local one: both homes share a machine, so fs never warns of skew.
+- **Read-only peer.** `pull` and `commit` only read the peer's tree. A symlinked
+  component under `state/msg/` or a symlinked entry makes `pull` or `commit`
+  raise `TransportError`: the chain is checked at the start of each call. A
+  swap between that check and the read is not defended (same-user homes get
+  provenance, not privilege, §14).
+- **`entry_id(qseq)`** returns the id in an entry's file name after `pull`, so
+  the driver can commit an entry whose bytes do not parse.
+- **Corrupt files.** Only `corrupt` (not JSON, non-canonical, `body_sha256`
+  mismatch) is retried. `pull` withholds such an entry on its first two passes
+  and returns it on the third, so `ingest()` keeps it as `rejected: corrupt`.
+  The count lives in `state/msg/fs-strikes/<peer>/<id>`, so it survives
+  `sync --once`; its unit is one `pull` call, so concurrent syncs or a retried
+  `pull` add strikes faster. Other failures (`schema`, `size`) are returned at
+  once.
+- **Receipts.** `commit(ids)` writes one `kind: receipt` envelope per id
+  through `enqueue()`: from the original `to`, to the original `from`, `re` the
+  original id, body `delivered` or `rejected: <why>` (the reason from the local
+  `rejected/` record), `from_auth` `unverified` with detail `receipt`. An id
+  the home neither published nor rejected gets none. Receipt ids are derived
+  from the id they answer (first 32 hex of a sha256), so a re-emitted
+  `delivered` finds the stored receipt and makes no second one. Committing a
+  receipt moves the local envelope it answers to `sent/`; a receipt is never
+  receipted.
+- **Settling.** Each `pull` moves a local receipt entry to `sent/` once the
+  envelope it answers is no longer in the peer's `q/`. When the peer's `q/`
+  directory is absent, `pull` settles nothing.
+- **No receipt.** A corrupt entry never reaches a parseable `from`. An entry
+  that fails `schema` (for example a future `SCHEMA`) or `size` is
+  unparseable here, so `commit` finds nothing to answer. All three stay in the
+  sender's `q/`, are re-pulled each pass, and show only as queue age in
+  `fleet msg queue`. So does an envelope whose id another sender already used
+  (ids are global, §5): the home's `delivered` is for the stored envelope's
+  sender only, so the second sender gets no receipt and a `receipt-withheld`
+  ledger line records it.
+
 ### 7.2 ssh transport (two machines, one dials)
 
 The reachable machine is the **server**; the other is the **client** and is
@@ -511,6 +558,7 @@ none in v1.
 | compromised lane | sends `task` as the supervisor | method comes from caller evidence; supervisor tasks need a nonce | a same-user process can write files directly; provenance, not prevention |
 | compromised lane | reads or acks another identity's queue | holder check on non-peek inbox and ack; ledger names the reader | direct file moves remain possible; ledger and spool disagree visibly |
 | compromised lane | floods or ping-pongs | size, rate, task budget, hop, path, notice coalescing; no steer | 20 notes/hour per pair still cost reader attention |
+| compromised lane | copies a pending id from a peer's outbox and sends it first | the receiver never confirms `delivered` to a sender other than the stored envelope's | the real message is `duplicate` and not delivered; it shows as queue age, not loss without trace (ids and markers are global, §5) |
 | compromised lane | injects instructions via notices | notices carry no body; inbox prints the method | an agent may still obey an `UNVERIFIED` body it reads |
 | zombie supervisor body | tasks lanes with the live sid | `supervisor-sid` is never direction; tasks need a live nonce | notes from the zombie still arrive, labelled `supervisor-sid` |
 | zombie supervisor body | reads the supervisor queue first | ledger names the reading body; `inbox --all` shows read-but-unacked messages to the live body | the zombie sees the content; reads are not secret between same-sid bodies |
