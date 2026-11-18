@@ -7,7 +7,8 @@ paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
 `bin/fleet_msg_transport.py` (§5.1 lists
 what PR 1 fixed that this spec left open). **Built (plan PR 3):** the §11
 rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). **Built (plan PR 4):**
-the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). Every other section is proposed,
+the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):** the §9 notice and
+`## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). Every other section is proposed,
 not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -412,6 +413,26 @@ wake is a notice line, `FLEET MSG <id> from <from> (<method>). Run fleet
   registry. To act on an idle body now, the sender runs `fleet send` itself,
   with its own gates. A Claude sender may also `SendMessage` a pointer;
   fleet never does.
+
+### 9.1 Built contract (plan PR 5)
+
+`bin/fleet_msg_wake.py` holds the wake as functions over an injected
+`WakePrims` (`fleet_home`, `adapter_of(name)`, `holder_sid(name)`,
+`append_mailbox(sid, text)`). It imports only `fleet_msg_core`, takes no lock
+and writes no registry.
+
+- **Notice.** `notice_line(env, home)` is the §9 line: id, sender, method. It
+  never holds a body. `make_notify(store, prims)` is the `notify` hook for
+  `publish()`; a failure raises and `publish()` logs `notice-failed`.
+- **Per adapter.** `adapter_of` returns `claude`, `codex`, `pi`, `interface`
+  or `unbound`. Only `claude` with a holder sid gets `append_mailbox`. The
+  others return `drain-only`: their wake is the drain block or `msg inbox`.
+- **Coalescing.** `notice_due`: no notice while another message from the same
+  sender is in the identity's `new/`. After a read the next message notices.
+- **Drain block.** `drain_block(store, prims, name)` returns `## MESSAGES`, one
+  `- <id> from <from> (<method>)` line per unread message (at most 20, then
+  `- ... N more`), and the inbox command; `""` when nothing is unread. It
+  lists `new/` only and moves nothing.
 
 ## 10. Caller authentication
 
