@@ -3,7 +3,8 @@
 **Status:** revision 2 after review. Build plan:
 `docs/plans/messaging-plan.md`. **Built (plan PR 1):** §4 envelope, §5 store
 paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
-and the §7 `Transport` Protocol in `bin/fleet_msg_transport.py` (§5.1 lists
+`ingest()`, the one receiver path, and the §7 `Transport` Protocol in
+`bin/fleet_msg_transport.py` (§5.1 lists
 what PR 1 fixed that this spec left open). Every other section is proposed,
 not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
@@ -132,7 +133,7 @@ outbox/<site>/tmp/           private tmp names
 outbox/<site>/q/<qseq>-<id>.json   waiting for a remote site; qseq 12 digits
 outbox/<site>/sent/          moved here when the peer confirms
 spool/<name>/tmp|new|cur|done/<id>.json
-rejected/<id>.json           with reason and the original bytes
+rejected/<id>-<sha16>.json   with reason and the original bytes
 seen/<id[:2]>/<id>           dedup markers
 ledger.jsonl                 append-only operational log
 archive/<yyyymm>/            compaction target (§6)
@@ -180,8 +181,40 @@ PR 1 fixed these points, which the text above left open:
   notify=None)` returns `delivered`, `duplicate` or `queued` with the
   envelope. `rules(draft)` returns a refusal reason or None and runs under
   the sender lock before any allocation. `notify(name, env)` is the §9 hook;
-  it runs after the spool lock is released, and its failure is a
-  `notice-failed` ledger line only.
+  it runs after every lock (sender and spool) is released, so a hook may
+  itself send, and its failure is a `notice-failed` ledger line only.
+- **Retry dedup at the sender.** Before allocating, `enqueue` looks for the
+  id: locally the marker or the spool file, remotely `outbox/<site>/q|sent`.
+  A found id returns the stored envelope (`duplicate`, or `queued` while
+  still in `q/`) and allocates no seq or qseq, so one id never maps to two
+  byte strings.
+- **`ingest(store, raw, peer_site, hosted, now, admit, notify)`** is the
+  one receiver path. Every transport calls it and nothing lower. In order:
+  the raw size bound, `parse`, `to` names this site, `from` is on the
+  transport-authenticated `peer_site` and in its hosted names (`auth`), the
+  §6 clock bounds (`future`, `stale`), `admit(env)` for the §11 per-peer
+  ingest cap and retired lanes (supplied by later PRs), then `publish`. A
+  refusal goes to `reject()`. It returns the §7 push-result vocabulary:
+  `accepted`, `duplicate`, `rejected:<why>`.
+- **Hostile bytes.** `parse` checks `ENVELOPE_MAX_BYTES` (64 KiB, above the
+  largest valid envelope) before decoding, and every failure is an
+  `EnvelopeError` with a §6 reason, never another exception: a peer cannot
+  wedge a queue with one unclassifiable entry. Digit classes are ASCII only.
+  `outbox_entries` reads at most the bound plus one byte per entry and skips
+  an entry a concurrent commit moved to `sent/`.
+- **No symlinks under `state/msg/`.** Every directory component is checked
+  with `lstat`; lock, tmp, marker and counter files open with `O_NOFOLLOW`;
+  the ledger, spool and outbox entries must be regular files. A planted
+  link is refused with `StoreError`, never followed, and never yields a
+  marker without a message.
+- **Directory fsync** goes through `PLATFORM.fsync_dir`: on POSIX every
+  error raises; on Windows it is a documented no-op in the adapter only.
+- **Renames never overwrite.** `move` and `outbox_commit` refuse an existing
+  target under the owning lock.
+- **Rejects never collide.** A rejected envelope is kept as
+  `rejected/<id>-<sha256[:16]>.json` (`sha-<sha256[:32]>.json` without an
+  id), so distinct bytes claiming one id are all kept; an identical re-reject
+  writes nothing and logs nothing.
 - **Reads and acks** move a file `new → cur` or `cur → done` with `move()`,
   under the same spool lock as ingest, so an ingest never sees the file in
   neither state.
@@ -448,6 +481,8 @@ none in v1.
 | hostile peer site | forges names of another site | the peer may only send names it hosts; no relay | it can say anything as its own identities |
 | hostile peer site | directs local lanes with a `task` stamped `supervisor-nonce` | direction only from the local supervisor, the named Interface site, or a `direct: true` peer; otherwise `remote-task` note | a `direct: true` peer is trusted fully |
 | hostile peer site | replays or floods | markers, stale and future bounds, per-pair rate, 200/h per-peer ingest cap | disk grows by at most the cap; compaction packs and never deletes, so the operator watches `queue` |
+| same-user process | plants a symlink under `state/msg/` to redirect writes or swallow an id | every component is `lstat`-checked, files open `O_NOFOLLOW`, a planted link is refused; never a marker without a message | it can still edit or move regular files directly (boundary 1) |
+| hostile peer site | sends an oversized, deeply nested or invalid-UTF-8 envelope to wedge the queue | size bound before decode; every parse failure is a classified reject | none beyond disk use of the kept reject |
 | any body | leaks a nonce through `detail` or the ledger | `detail` holds only `nonce_seq` and an 8-hex prefix | none |
 | network attacker | tampers or replays on the wire | ssh channel; frame sha; dedup | none beyond ssh's own |
 | misconfigured forced command | client chooses its own site | `serve` refuses without `--peer`; live test pins it | a wrong `--peer` in `authorized_keys` trusts the wrong site |

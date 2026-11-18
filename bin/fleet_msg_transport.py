@@ -1,7 +1,8 @@
 """The messaging Transport contract (docs/specs/messaging.md §7).
 
 A transport moves canonical envelope bytes between two sites. It never
-publishes: the receiving side calls `fleet_msg_core.publish()`. Same-home
+publishes: the receiving side calls `fleet_msg_core.ingest()`, which parses,
+checks auth and clock bounds, and rejects or publishes. Same-home
 delivery does not use a transport. Stdlib only; never imports `fleet.py`.
 """
 from __future__ import annotations
@@ -35,22 +36,22 @@ class SiteInfo:
 
     @classmethod
     def from_json(cls, data) -> "SiteInfo":
-        try:
-            info = cls(site=data["site"], schemas=tuple(data["schemas"]),
-                       clock=data["clock"], hosted=tuple(data["hosted"]))
-        except (TypeError, KeyError) as exc:
-            raise TransportError(f"bad hello: {exc}") from None
-        if not core.valid_name(info.site):
+        """Strict parse of a hello: exact types, never coerced."""
+        if type(data) is not dict or set(data) != {"site", "schemas", "clock", "hosted"}:
+            raise TransportError("bad hello: not an object with exactly site, schemas, clock, hosted")
+        site, schemas, clock, hosted = (data["site"], data["schemas"],
+                                        data["clock"], data["hosted"])
+        if not core.valid_name(site):
             raise TransportError("bad hello: site label")
-        if not all(type(s) is int for s in info.schemas):
+        if type(schemas) is not list or not all(type(s) is int for s in schemas):
             raise TransportError("bad hello: schemas")
-        if not all(core.valid_name(n) for n in info.hosted):
+        if type(hosted) is not list or not all(core.valid_name(n) for n in hosted):
             raise TransportError("bad hello: hosted names")
         try:
-            core.parse_iso_utc(info.clock)
-        except core.EnvelopeError:
+            core.parse_iso_utc(clock)
+        except (core.EnvelopeError, ValueError):
             raise TransportError("bad hello: clock") from None
-        return info
+        return cls(site=site, schemas=tuple(schemas), clock=clock, hosted=tuple(hosted))
 
 
 @runtime_checkable

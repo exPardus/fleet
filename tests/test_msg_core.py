@@ -442,7 +442,14 @@ def test_t6_publish_fsyncs_file_and_directory_before_returning(tmp_path):
     new = store.spool("lane-2", "new")
     store._ensure_dir(new)  # setup only; count the publish's own calls below
     events.clear()
+    store.fault = lambda at: events.append(("fault", at))
     core.publish(store, "lane-2", env)
+    tmp_fsync = next(i for i, (k, v) in enumerate(events)
+                     if k == "file" and "/tmp/" in str(v)) if os.path.exists(
+        "/proc/self/fd") else 0
+    assert tmp_fsync < events.index(("fault", "linked")), "tmp fsynced before link()"
+    assert (events.index(("fault", "linked")) < events.index(("dir", str(new)))
+            < events.index(("fault", "marked")))
     kinds = [k for k, _ in events]
     assert kinds.count("file") >= 2, "envelope tmp file and marker are fsynced"
     assert ("dir", str(new)) in events, "new/ is fsynced after link()"
@@ -644,24 +651,380 @@ def test_no_fleet_or_fleet_lock_import_and_stdlib_only(name):
         assert needle not in _source(name)
 
 
+# Destructive calls and the only functions allowed to make them: `unlink`
+# removes a private tmp name already linked into place; `replace` renames a
+# counter tmp over its counter, or moves a message whose target was checked
+# absent under the owning lock.
+DESTRUCTIVE = ("unlink", "remove", "rmdir", "rmtree", "replace", "rename",
+               "removedirs", "truncate")
+ALLOWED_DESTRUCTIVE = {
+    # parse_iso_utc's `replace` is datetime.replace(tzinfo=...), not a rename.
+    "fleet_msg_core.py": {("_write_new", "unlink"), ("_counter_next", "replace"),
+                          ("parse_iso_utc", "replace"),
+                          ("move", "replace"), ("outbox_commit", "replace")},
+    "fleet_msg_transport.py": set(),
+}
+
+
+def _destructive_sites(source):
+    """(enclosing def or '<module>', attr) for every destructive call or
+    reference anywhere: module level, lambdas, async defs, nested defs."""
+    tree = ast.parse(source)
+    sites = set()
+
+    def visit(node, owner):
+        for child in ast.iter_child_nodes(node):
+            inner = owner
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name
+            elif isinstance(child, ast.Lambda):
+                inner = f"{owner}:<lambda>"
+            if isinstance(child, ast.Attribute) and child.attr in DESTRUCTIVE:
+                sites.add((owner, child.attr))
+            if isinstance(child, ast.Name) and child.id in DESTRUCTIVE:
+                sites.add((owner, child.id))
+            if isinstance(child, ast.alias) and child.name.split(".")[-1] in DESTRUCTIVE:
+                sites.add((owner, child.name))
+            visit(child, inner)
+
+    visit(tree, "<module>")
+    return sites
+
+
 @pytest.mark.parametrize("name", MODULES)
-def test_unlink_only_of_private_tmp_names(name):
-    """No unlink of a message, marker or ledger outside a purge seam."""
-    tree = ast.parse(_source(name))
-    sites = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            for inner in ast.walk(node):
-                if (isinstance(inner, ast.Attribute)
-                        and inner.attr in ("unlink", "remove", "rmdir", "rmtree")):
-                    sites.append(node.name)
-    allowed = {"_write_new"} if name == "fleet_msg_core.py" else set()
-    assert set(sites) <= allowed, sites
+def test_no_destructive_call_outside_the_allow_list(name):
+    """No unlink, overwrite or rename of a message, marker or ledger outside
+    a purge seam (plan §4 doctrine pin)."""
+    sites = _destructive_sites(_source(name))
+    assert sites <= ALLOWED_DESTRUCTIVE[name], sites - ALLOWED_DESTRUCTIVE[name]
+
+
+@pytest.mark.parametrize("snippet", [
+    "import os\nos.unlink('x')\n",
+    "import os\nf = lambda p: os.replace(p, 'y')\n",
+    "import os\nasync def g():\n    os.rename('a', 'b')\n",
+    "from os import remove\n",
+    "import shutil\ndef h():\n    shutil.rmtree('d')\n",
+])
+def test_destructive_scan_sees_every_node_type(snippet):
+    assert _destructive_sites(snippet), snippet
+
+
+def test_moves_refuse_to_overwrite_a_target(tmp_path):
+    store = make_store(tmp_path)
+    env = envelope()
+    core.publish(store, "lane-2", env)
+    cur = store.spool("lane-2", "cur")
+    cur.mkdir(parents=True)
+    (cur / f"{env['id']}.json").write_bytes(b"other")
+    with pytest.raises(core.StoreError, match="already exists"):
+        core.move(store, "lane-2", env["id"], "new", "cur")
+    assert (cur / f"{env['id']}.json").read_bytes() == b"other"
+    queued = core.enqueue(store, draft(to="hub@b"))[1]
+    sent = store.outbox("b", "sent")
+    sent.mkdir(parents=True)
+    name = f"{1:012d}-{queued['id']}.json"
+    (sent / name).write_bytes(b"other")
+    with pytest.raises(core.StoreError, match="already exists"):
+        core.outbox_commit(store, "b", [queued["id"]])
+    assert (sent / name).read_bytes() == b"other"
+
+
+FLOOR = (3, 10)
 
 
 def test_modules_import_under_python_310_floor():
-    code = ("import sys; sys.path.insert(0, sys.argv[1]); "
-            "import fleet_msg_core, fleet_msg_transport")
-    subprocess.run([sys.executable, "-c", code, str(BIN)], check=True)
+    """Import both modules on a real 3.10 interpreter: under 3.10 directly,
+    otherwise through `uv run --python 3.10` (skipped loudly without uv)."""
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); "
+             "assert sys.version_info[:2] == (3, 10), sys.version; "
+             "import fleet_msg_core, fleet_msg_transport")
+    if sys.version_info[:2] == FLOOR:
+        argv = [sys.executable, "-I", "-c", probe, str(BIN)]
+    else:
+        import shutil
+        uv = shutil.which("uv")
+        if uv is None:
+            pytest.skip("SKIP: no uv to reach a Python 3.10 interpreter; "
+                        "the 3.10 suite run covers this pin")
+        argv = [uv, "run", "--no-project", "--python", "3.10", "python", "-I",
+                "-c", probe, str(BIN)]
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, result.stderr[-2000:]
     for name in MODULES:
-        ast.parse(_source(name), name, feature_version=(3, 10))
+        ast.parse(_source(name), name, feature_version=FLOOR)
+
+
+# --- review w485 pins (P1-1, P2-1 .. P2-10) ------------------------------------
+
+def _raw(**changes):
+    env = envelope()
+    env.update(changes)
+    return core.canonical(env)
+
+
+@pytest.mark.parametrize("raw, reason", [
+    (_raw(sent_at="2026-13-45T00:00:00Z"), "schema"),
+    (_raw(sent_at="2026-02-30T00:00:00Z"), "schema"),
+    (_raw(sent_at="\u0662\u0660\u0662\u0666-11-18T00:00:00Z"), "schema"),
+    (b'{"body":"\\ud800"}', "schema"),
+    (b"[" * 60000, "corrupt"),
+    (b"\xff\xfe", "corrupt"),
+    (b"null", "schema"),
+    (b'{"a":1e999999}', "schema"),
+    (b"x" * (core.ENVELOPE_MAX_BYTES + 1), "size"),
+])
+def test_p1_1_hostile_bytes_raise_only_envelope_error(raw, reason):
+    with pytest.raises(core.EnvelopeError) as err:
+        core.parse(raw)
+    assert err.value.reason == reason
+
+
+def test_p1_1_lone_surrogate_body_in_a_full_envelope():
+    env = envelope()
+    text = core.canonical(env).replace(b'"body":"hello"', b'"body":"\\ud800"')
+    with pytest.raises(core.EnvelopeError) as err:
+        core.parse(text)
+    assert err.value.reason == "schema"
+    with pytest.raises(core.EnvelopeError):
+        draft(body="\ud800")
+
+
+def test_p1_1_hello_with_impossible_clock_is_a_transport_error():
+    bad = {"site": "b", "schemas": [1], "clock": "2026-02-30T00:00:00Z", "hosted": []}
+    with pytest.raises(transport.TransportError):
+        transport.SiteInfo.from_json(bad)
+
+
+def test_p2_1_size_bound_before_decode_and_largest_valid_fits():
+    big = core.make_draft("lane-1@a", "lane-2@a", "\x01" * 8192, from_auth=AUTH,
+                          sent_at=core.iso_utc(NOW))
+    raw = core.canonical(dict(big, seq=1))
+    assert len(raw) <= core.ENVELOPE_MAX_BYTES
+    assert core.parse(raw)["body"] == "\x01" * 8192
+    with pytest.raises(core.EnvelopeError) as err:
+        core.parse(b" " * (50 * 1024 * 1024))
+    assert err.value.reason == "size"
+
+
+def test_p2_1_outbox_entries_bound_the_read(tmp_path):
+    store = make_store(tmp_path)
+    q = store.outbox("b", "q")
+    q.mkdir(parents=True)
+    (q / f"{1:012d}-{'a' * 32}.json").write_bytes(b"x" * (3 * core.ENVELOPE_MAX_BYTES))
+    [(qseq, raw)] = core.outbox_entries(store, "b")
+    assert qseq == 1 and len(raw) == core.ENVELOPE_MAX_BYTES + 1
+    with pytest.raises(core.EnvelopeError) as err:
+        core.parse(raw)
+    assert err.value.reason == "size"
+
+
+def test_p2_2_ascii_digits_only_in_names(tmp_path):
+    store = make_store(tmp_path)
+    q = store.outbox("b", "q")
+    q.mkdir(parents=True)
+    (q / f"\u0661\u0662-{'b' * 32}.json").write_bytes(b"{}")
+    assert core.outbox_entries(store, "b") == []
+    seq = store.seq_path("lane-1@a", "lane-2@a")
+    seq.parent.mkdir(parents=True)
+    seq.write_text("\u0661\u0662\n", encoding="utf-8")
+    with pytest.raises(core.StoreError, match="corrupt counter"):
+        core.enqueue(store, draft())
+
+
+def test_p2_3_commit_between_listing_and_read_is_skipped(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    envs = [core.enqueue(store, draft(to="hub@b"))[1] for _ in range(2)]
+    real_read = core._read_regular
+    raced = []
+
+    def racing_read(path, limit):
+        if not raced:
+            raced.append(path)
+            core.outbox_commit(store, "b", [envs[0]["id"]])
+        return real_read(path, limit)
+
+    monkeypatch.setattr(core, "_read_regular", racing_read)
+    ids = [core.parse(r)["id"] for _, r in core.outbox_entries(store, "b")]
+    assert ids == [envs[1]["id"]]
+
+
+def test_p2_4_notice_runs_after_every_lock_is_released(tmp_path):
+    store = make_store(tmp_path, lock_timeout=0)
+    held = []
+
+    def notify(name, env):
+        for kind, who in (("from", "lane-1"), ("spool", "lane-2")):
+            with store.locked(kind, who):  # timeout 0: raises if still held
+                held.append(kind)
+
+    status, _ = core.enqueue(store, draft(), notify=notify)
+    assert status == "delivered" and held == ["from", "spool"]
+    assert [r["event"] for r in ledger(store)] == ["delivered"]
+
+
+def test_p2_4_notify_may_send_from_the_same_identity(tmp_path):
+    store = make_store(tmp_path, lock_timeout=0)
+    sent = []
+
+    def notify(name, env):
+        if not sent:
+            sent.append(core.enqueue(store, draft(body="receipt"))[0])
+
+    assert core.enqueue(store, draft(), notify=notify)[0] == "delivered"
+    assert sent == ["delivered"]
+
+
+def test_p2_5_posix_fsync_dir_raises_instead_of_skipping(tmp_path):
+    from fleet_platform import PLATFORM
+    if PLATFORM.is_windows:
+        pytest.skip("POSIX-only pin; the Windows adapter is a documented no-op")
+    PLATFORM.fsync_dir(tmp_path)
+    with pytest.raises(OSError):
+        PLATFORM.fsync_dir(tmp_path / "missing")
+    target = tmp_path / "real"
+    target.mkdir()
+    (tmp_path / "link").symlink_to(target)
+    with pytest.raises(OSError):
+        PLATFORM.fsync_dir(tmp_path / "link")
+    source = (BIN / "fleet_msg_core.py").read_text(encoding="utf-8")
+    assert "PermissionError" not in source
+
+
+@pytest.mark.parametrize("where", ["spool", "new", "ledger", "lock", "marker"])
+def test_p2_6_symlinks_are_refused_not_followed(tmp_path, where):
+    store = make_store(tmp_path)
+    env = envelope()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    store._ensure_dir(store.root)
+    if where == "spool":
+        (store.root / "spool").mkdir()
+        (store.root / "spool" / "lane-2").symlink_to(elsewhere)
+    elif where == "new":
+        store._ensure_dir(store.spool("lane-2", "new"))
+        (store.spool("lane-2", "new") / f"{env['id']}.json").symlink_to(
+            elsewhere / "dangling")
+    elif where == "ledger":
+        store.ledger_path.symlink_to(elsewhere / "log")
+    elif where == "lock":
+        store._ensure_dir(store.root / "locks")
+        store.lock_path("spool", "lane-2").symlink_to(elsewhere / "lock")
+    else:
+        store._ensure_dir(store.marker(env["id"]).parent)
+        store.marker(env["id"]).symlink_to(elsewhere / "marker")
+    with pytest.raises(core.StoreError):
+        core.publish(store, "lane-2", env)
+    assert list(elsewhere.iterdir()) == []
+    if where != "marker":
+        assert not os.path.lexists(store.marker(env["id"])), \
+            "never a marker without a message"
+
+
+def test_p2_6_outbox_entry_symlink_is_refused(tmp_path):
+    store = make_store(tmp_path)
+    secret = tmp_path / "secret"
+    secret.write_text("not for the peer")
+    q = store.outbox("b", "q")
+    store._ensure_dir(q)
+    (q / f"{1:012d}-{'c' * 32}.json").symlink_to(secret)
+    with pytest.raises(core.StoreError):
+        core.outbox_entries(store, "b")
+
+
+def test_p2_7_local_retry_returns_the_stored_envelope(tmp_path):
+    store = make_store(tmp_path)
+    first = draft()
+    status, env = core.enqueue(store, first)
+    retry = core.make_draft("lane-1@a", "lane-2@a", "hello", from_auth=AUTH,
+                            sent_at=core.iso_utc(NOW + 5), msg_id=first["id"])
+    rules_calls = []
+    status2, env2 = core.enqueue(store, retry, rules=lambda d: rules_calls.append(d))
+    assert (status, status2) == ("delivered", "duplicate")
+    assert env2 == env and env2["seq"] == 1
+    assert store.last_seq("lane-1@a", "lane-2@a") == 1, "no seq allocated"
+    assert rules_calls == []
+    assert core.enqueue(store, draft())[1]["seq"] == 2
+
+
+def test_p2_7_remote_retry_writes_no_second_file(tmp_path):
+    store = make_store(tmp_path)
+    first = draft(to="hub@b")
+    _, env = core.enqueue(store, first)
+    retry = core.make_draft("lane-1@a", "hub@b", "hello", from_auth=AUTH,
+                            sent_at=core.iso_utc(NOW + 5), msg_id=first["id"])
+    assert core.enqueue(store, retry) == ("queued", env)
+    assert len(os.listdir(store.outbox("b", "q"))) == 1
+    core.outbox_commit(store, "b", [env["id"]])
+    assert core.enqueue(store, retry) == ("duplicate", env)
+    assert store.last_seq("lane-1@a", "hub@b") == 1
+    assert core.outbox_entries(store, "b") == []
+
+
+def test_p2_8_distinct_rejects_of_one_id_both_kept(tmp_path):
+    store = make_store(tmp_path)
+    msg_id = "d" * 32
+    one = core.reject(store, b"first", "corrupt", msg_id=msg_id)
+    two = core.reject(store, b"second", "corrupt", msg_id=msg_id)
+    assert one != two
+    import base64
+    assert base64.b64decode(json.loads(two.read_bytes())["raw_b64"]) == b"second"
+    again = core.reject(store, b"second", "corrupt", msg_id=msg_id)
+    assert again == two
+    assert len([r for r in ledger(store) if r["event"] == "rejected"]) == 2
+
+
+@pytest.mark.parametrize("data", [
+    {"site": "b", "schemas": [1], "clock": core.iso_utc(NOW), "hosted": "ops"},
+    {"site": "b", "schemas": {1: 1}, "clock": core.iso_utc(NOW), "hosted": []},
+    {"site": "b", "schemas": [True], "clock": core.iso_utc(NOW), "hosted": []},
+    {"site": ["b"], "schemas": [1], "clock": core.iso_utc(NOW), "hosted": []},
+    {"site": "b", "schemas": [1], "clock": core.iso_utc(NOW), "hosted": [], "x": 1},
+    ["b", [1], "", []],
+])
+def test_p2_9_hello_parse_never_coerces(data):
+    with pytest.raises(transport.TransportError):
+        transport.SiteInfo.from_json(data)
+
+
+def _remote(**kw):
+    kw.setdefault("frm", "hub@b")
+    kw.setdefault("to", "lane-2@a")
+    return core.canonical(envelope(**kw))
+
+
+def test_p2_10_ingest_accepts_then_dedups(tmp_path):
+    store = make_store(tmp_path)
+    raw = _remote()
+    notices = []
+    kw = dict(peer_site="b", hosted=["hub"], notify=lambda n, e: notices.append(n))
+    assert core.ingest(store, raw, **kw) == "accepted"
+    assert core.ingest(store, raw, **kw) == "duplicate"
+    assert notices == ["lane-2"]
+    assert transport.parse_push_result("accepted") == ("accepted", None)
+
+
+@pytest.mark.parametrize("make, kw, reason", [
+    (lambda: _remote(frm="ops@b"), {}, "auth"),
+    (lambda: _remote(frm="hub@c"), {}, "auth"),
+    (lambda: _remote(to="lane-2@c"), {}, "auth"),
+    (lambda: _remote(sent_at=core.iso_utc(NOW + 3600)), {}, "future"),
+    (lambda: _remote(sent_at=core.iso_utc(NOW - 31 * 86400)), {}, "stale"),
+    (lambda: b"[" * 60000, {}, "corrupt"),
+    (lambda: b"x" * (core.ENVELOPE_MAX_BYTES + 1), {}, "size"),
+    (lambda: _remote(), {"admit": lambda env: "rate"}, "rate"),
+    (lambda: _remote(), {"admit": lambda env: "retired"}, "retired"),
+])
+def test_p2_10_ingest_rejects_and_keeps(tmp_path, make, kw, reason):
+    store = make_store(tmp_path)
+    result = core.ingest(store, make(), peer_site="b", hosted=["hub"], **kw)
+    assert result == "rejected:" + reason
+    assert transport.parse_push_result(result) == ("rejected", reason)
+    assert core.list_spool(store, "lane-2", "new") == []
+    assert len(os.listdir(store.rejected_dir)) >= 1
+    assert [r["reason"] for r in ledger(store) if r["event"] == "rejected"] == [reason]
+
+
+def test_p2_10_ingest_refuses_its_own_label(tmp_path):
+    with pytest.raises(core.StoreError):
+        core.ingest(make_store(tmp_path), _remote(), peer_site="a", hosted=["hub"])
