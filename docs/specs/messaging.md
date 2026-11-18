@@ -1,7 +1,11 @@
 # Spec: `fleet msg` — one messaging layer for every harness
 
-**Status:** proposed, not built; revision 2 after review. Build plan:
-`docs/plans/messaging-plan.md`. Where this spec and later code differ, the
+**Status:** revision 2 after review. Build plan:
+`docs/plans/messaging-plan.md`. **Built (plan PR 1):** §4 envelope, §5 store
+paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
+and the §7 `Transport` Protocol in `bin/fleet_msg_transport.py` (§5.1 lists
+what PR 1 fixed that this spec left open). Every other section is proposed,
+not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
 **Builds on:** `docs/specs/mailman.md` (mail format, crash-safe filing,
@@ -60,7 +64,8 @@ $ grep -n "^def cmd_steer" bin/fleet_pi.py
 An **identity** is a stable name. A **holder** is the body that reads for it
 now. Messages address identities, never bodies.
 
-- Grammar `^[a-z][a-z0-9-]{0,39}$`; qualified form `name@site`.
+- Grammar `^[a-z][a-z0-9-]{0,39}$`; qualified form `name@site`. A site
+  label uses the same grammar.
 - An unqualified name always means the local site. No cross-site search.
 - A **site** is one home's label, set by `fleet msg init --site LABEL`. `init`
   and `sync` refuse a label that another listed home uses; `hello` refuses a
@@ -89,7 +94,10 @@ with an empty queue.
 ## 4. Envelope
 
 One JSON object, UTF-8, canonical form `json.dumps(sort_keys=True,
-separators=(",", ":"))`. Immutable once written.
+separators=(",", ":"))`. Immutable once written. Stored and transferred bytes
+equal the canonical form; other bytes are `rejected: corrupt`. The field set
+is exact: a missing or extra field is `rejected: schema`.
+`from_auth.detail` is null or printable ASCII of at most 128 characters.
 
 | field | meaning |
 |---|---|
@@ -99,10 +107,10 @@ separators=(",", ":"))`. Immutable once written.
 | `from_auth` | `{method, detail}` set by the sending site from caller evidence (§10) |
 | `kind` | `note` (default), `task`, `receipt` |
 | `needs_answer` | default `false` |
-| `re`, `thread` | parent id or null; root id |
-| `hop`, `path` | parent `hop` + 1; identities visited in the thread (sender-enforced, §11) |
+| `re`, `thread` | parent id or null; root id (a root's `thread` is its own `id`) |
+| `hop`, `path` | parent `hop` + 1 (root 0); the senders of the thread chain, root first and ending at `from`, so `len(path) = hop + 1` (sender-enforced, §11) |
 | `seq` | per (`from`, `to`) counter (§5) |
-| `sent_at` | sender clock, advisory |
+| `sent_at` | sender clock, advisory, `YYYY-MM-DDTHH:MM:SSZ` |
 | `body`, `body_sha256` | ≤120 words, ≤8 KiB |
 
 Receiver facts (`received_at` by the receiver's clock, `via`, state) live in
@@ -115,13 +123,16 @@ Under each home's ignored `state/msg/`:
 ```
 site.json, peers.json, config.json
 ids/<name>.json              named roles only
-locks/<identity>.lock        OS-released locks (mailman's lock backend)
+locks/from-<name>.lock       sender lock (OS-released, mailman's lock backend)
+locks/spool-<name>.lock      ingest lock, one per spool
 locks/outbox-<site>.lock     one per outbox: qseq allocation and file write
-seq/<from>__<to>             last seq allocated
-outbox/<site>/q/<qseq>-<id>.json   waiting for a remote site
+seq/<from>__<to>             last seq allocated (both `name@site`)
+outbox/<site>/qseq           last qseq allocated
+outbox/<site>/tmp/           private tmp names
+outbox/<site>/q/<qseq>-<id>.json   waiting for a remote site; qseq 12 digits
 outbox/<site>/sent/          moved here when the peer confirms
 spool/<name>/tmp|new|cur|done/<id>.json
-rejected/<id>.json           with reason
+rejected/<id>.json           with reason and the original bytes
 seen/<id[:2]>/<id>           dedup markers
 ledger.jsonl                 append-only operational log
 archive/<yyyymm>/            compaction target (§6)
@@ -142,7 +153,7 @@ ingest repairs it: it creates the marker and runs step 3's ledger line and the
 §9 notice once, then returns `duplicate`. The lock removes the
 concurrent-ingest race.
 
-**`enqueue(from, to, envelope)`**, under `locks/<from>.lock`: run every §11
+**`enqueue(from, to, envelope)`**, under `locks/from-<name>.lock`: run every §11
 rule first, then allocate `seq` (read, increment, write a unique tmp name,
 fsync, rename), then `publish` (local `to`) or, for a remote `to`, take
 `locks/outbox-<site>.lock`, allocate `qseq` and write
@@ -151,6 +162,42 @@ order therefore equals `qseq` order. A refusal allocates nothing, so a refused
 send leaves no seq gap.
 
 No path takes `fleet.lock` or writes the registry.
+
+### 5.1 Built contract (plan PR 1)
+
+PR 1 fixed these points, which the text above left open:
+
+- **Lock names carry a fixed prefix** (`from-`, `spool-`, `outbox-`).
+  Revision 2 named the sender lock `locks/<identity>.lock`; an identity named
+  `spool-x` then shared the ingest lock of spool `x`, and a send from
+  `spool-x` to `x` deadlocked on its own lock. Lock order is always sender
+  lock, then spool or outbox lock. Lock files are never unlinked.
+- **`qseq` has its own counter** `outbox/<site>/qseq`, allocated like `seq`.
+  Deriving it from a listing of `q/` and `sent/` would reuse numbers after
+  `compact` moves `sent/` away.
+- **Signatures**: `publish(store, name, env, notify=None)` returns
+  `delivered` or `duplicate`; `enqueue(store, draft, rules=None,
+  notify=None)` returns `delivered`, `duplicate` or `queued` with the
+  envelope. `rules(draft)` returns a refusal reason or None and runs under
+  the sender lock before any allocation. `notify(name, env)` is the §9 hook;
+  it runs after the spool lock is released, and its failure is a
+  `notice-failed` ledger line only.
+- **Reads and acks** move a file `new → cur` or `cur → done` with `move()`,
+  under the same spool lock as ingest, so an ingest never sees the file in
+  neither state.
+- **Crash windows after the marker.** A crash after step 2 is repaired
+  exactly once, as above. A crash between the marker and the ledger line
+  loses that ledger line; a crash between the ledger line and the notice
+  loses the notice (the drain rule still lists the message). Neither
+  duplicates or loses the message.
+- **Outbox reads and commits**: `outbox_entries(site, hint_qseq)` returns
+  every entry in `q/` ascending (the hint never filters);
+  `outbox_commit(site, ids)` moves exactly those ids to `sent/` under the
+  outbox lock.
+- **Ledger appends** use `fleet_platform.PLATFORM.atomic_append_bytes`, the
+  backend `_atomic_append_bytes` calls, because the new modules never import
+  `bin/fleet.py`.
+- Reject reasons are those of §6 plus `retired` (§3).
 
 ## 6. Delivery, receipts, retention
 
