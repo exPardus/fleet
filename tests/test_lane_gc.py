@@ -162,8 +162,18 @@ def test_autoclean_dry_run_stops_nothing(home, monkeypatch, capsys):
     assert stops == [] and "idle: would stop" in capsys.readouterr().out
 
 
+def _own_lane(home):
+    """Make the lane owned by a held claim whose holder is the SUP row."""
+    data = fleet.load_registry()
+    data["workers"][LANE]["spawned_by"] = SUP_SID
+    fleet.save_registry(data)
+    fleet.write_incarnation({"state": "held", "session_id": SUP_SID,
+                             "heartbeat_at": _iso(NOW)})
+
+
 def test_sup_guard_do_runs_the_idle_sweep(home, monkeypatch, capsys):
     stops = _stops(monkeypatch)
+    _own_lane(home)
     monkeypatch.setattr(fleet, "status_snapshot", lambda: {
         "ok": True, "workers": [], "supervisor": {"goals_active": False,
                                                   "state": "held"}})
@@ -221,3 +231,153 @@ def test_linux_rss_reads_proc(monkeypatch):
     if not fleet.PLATFORM.is_linux:
         pytest.skip("Linux /proc only")
     assert fleet.PLATFORM.process_rss_mb(os.getpid()) > 0
+
+
+# ---------------------------------------------------------------- w485 review pins
+
+def _set(**fields):
+    data = fleet.load_registry()
+    data["workers"][LANE].update(fields)
+    fleet.save_registry(data)
+
+
+@pytest.mark.parametrize("where", ["row-sid", "retired-sid"])
+def test_p1_registered_interface_session_is_never_stopped(home, monkeypatch, where):
+    """#75 P1-1: a lane that continued as interface keeps its session, in
+    both arms, with the TTL long expired and no caller sid (keeper tick)."""
+    stops = _stops(monkeypatch)
+    sid = SID if where == "row-sid" else OLD
+    (home / "state" / "interface-session").write_text(sid + "\n")
+    _run(caller=None)
+    assert sid not in stops and stops == []
+
+
+def test_p1_codex_interface_thread_is_protected(home, monkeypatch):
+    stops = _stops(monkeypatch)
+    (home / "state" / "interface-codex.json").write_text(json.dumps({"thread_id": OLD}))
+    _run()
+    assert OLD not in stops and SID not in stops
+
+
+@pytest.mark.parametrize("payload", ["pane-only", "unreadable-codex"])
+def test_p1_unresolvable_interface_registration_stops_nothing(home, monkeypatch, payload):
+    stops = _stops(monkeypatch)
+    if payload == "pane-only":
+        (home / "state" / "interface-pane").write_text("%3\n")
+    else:
+        (home / "state" / "interface-codex.json").write_text("{not json")
+    assert _run() == [] and stops == []
+
+
+def test_p1_supervisor_claim_sid_on_a_lane_row_is_never_stopped(home, monkeypatch):
+    stops = _stops(monkeypatch)
+    fleet.write_incarnation({"state": "held", "session_id": SID,
+                             "heartbeat_at": _iso(NOW)})
+    _run()
+    assert SID not in stops and OLD not in stops
+
+
+@pytest.mark.parametrize("kind", [None, "codex-app-server", "mcx"])
+def test_p1_rows_fleet_did_not_bg_spawn_are_never_stopped(home, monkeypatch, kind):
+    stops = _stops(monkeypatch)
+    _set(dispatch_kind=kind)
+    assert _run() == [] and stops == []
+
+
+def test_p1_attached_row_keeps_every_session(home, monkeypatch):
+    stops = _stops(monkeypatch)
+    _set(status="attached")
+    assert _run() == [] and stops == []
+
+
+def test_p2_1_row_that_moves_after_classification_is_not_stopped(home, monkeypatch):
+    """A send pre-claims the row while the roster is being fetched."""
+    stops = _stops(monkeypatch)
+
+    def roster():
+        _set(status="working", last_dispatch_at=fleet.now_iso())
+        return True, list(ROSTER)
+    stopped = fleet.stop_idle_sessions(roster_fn=roster)
+    assert SID not in stops and f"{LANE}:idle-ttl" not in stopped
+
+
+def test_p2_1_mail_arriving_before_the_stop_keeps_the_session(home, monkeypatch):
+    stops = _stops(monkeypatch)
+
+    def roster():
+        fleet.append_mailbox(SID, "late follow-up")
+        return True, list(ROSTER)
+    fleet.stop_idle_sessions(roster_fn=roster)
+    assert SID not in stops
+
+
+def test_p2_2_retired_fork_with_live_background_work_is_kept(home, monkeypatch):
+    stops = _stops(monkeypatch)
+    monkeypatch.setattr(fleet, "_lane_background_live",
+                        lambda name, sid, now=None: ["task"] if sid == OLD else [])
+    _run()
+    assert OLD not in stops and SID in stops
+
+
+def test_p2_3_guard_sweep_never_stops_a_lane_its_claim_does_not_own(home, monkeypatch):
+    stops = _stops(monkeypatch)
+    fleet.write_incarnation({"state": "held", "session_id": SUP_SID,
+                             "heartbeat_at": _iso(NOW)})
+    assert fleet._sup_guard_idle_sweep(lambda: (True, list(ROSTER))) == []
+    assert stops == []
+    _own_lane(home)
+    assert sorted(fleet._sup_guard_idle_sweep(lambda: (True, list(ROSTER)))) == [
+        f"{LANE}:idle-ttl", f"{LANE}:retired"]
+
+
+def test_p2_4_respawn_refuses_under_the_available_floor(home, monkeypatch):
+    _config(home, min_available_mb=2048)
+    monkeypatch.setattr(fleet.PLATFORM, "memory_available_mb", lambda: 900)
+    monkeypatch.setattr(fleet, "dispatch_bg", lambda *a, **k: pytest.fail("dispatched"))
+    with pytest.raises(fleet.FleetCliError, match="respawn: .*gc.min_available_mb 2048"):
+        fleet._cmd_respawn_native(SimpleNamespace(name=LANE, task=None),
+                                  fleet.load_registry()["workers"][LANE])
+
+
+def test_p2_4_stream_retry_defers_under_the_available_floor(home, monkeypatch):
+    _config(home, min_available_mb=2048)
+    monkeypatch.setattr(fleet.PLATFORM, "memory_available_mb", lambda: 900)
+    monkeypatch.setattr(fleet, "stream_retry_plan", lambda *a, **k: {
+        "action": "retry", "attempt": 1, "due_at": NOW, "error_at": NOW})
+    monkeypatch.setattr(fleet, "_cmd_send_native",
+                        lambda *a, **k: pytest.fail("retried under the floor"))
+    step = fleet.recover_lane(LANE, list(ROSTER))
+    assert step == {"action": "deferred", "done": None}
+    assert "stream_retry" not in fleet.load_registry()["workers"][LANE]
+
+
+@pytest.mark.parametrize("guard", [
+    "supervisor-body", "roster-only-sid", "background-live", "epoch-suspicious",
+    "retired-mail"])
+def test_p2_5_gc_guards_hold(home, monkeypatch, guard):
+    """Each guard the GC claims, by fault injection; TTL expired throughout."""
+    stops = _stops(monkeypatch)
+    roster = list(ROSTER)
+    if guard == "supervisor-body":
+        data = fleet.load_registry()
+        data["workers"][SUP].update(dispatch_kind="bg", last_activity=_iso(
+            NOW - timedelta(hours=5)))
+        fleet.save_registry(data)
+    elif guard == "roster-only-sid":
+        roster.append(_entry("spare-pool-sid", pid=40))
+    elif guard == "background-live":
+        monkeypatch.setattr(fleet, "_lane_background_live",
+                            lambda name, sid, now=None: ["task"])
+    elif guard == "epoch-suspicious":
+        _set(status="working")
+        roster = []
+    else:
+        fleet.append_mailbox(OLD, "for the old fork")
+    fleet.stop_idle_sessions(roster_fn=lambda: (True, roster))
+    assert SUP_SID not in stops and "spare-pool-sid" not in stops
+    if guard == "background-live":
+        assert stops == []
+    if guard == "epoch-suspicious":
+        assert stops == []
+    if guard == "retired-mail":
+        assert OLD not in stops

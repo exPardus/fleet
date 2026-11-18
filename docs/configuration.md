@@ -35,7 +35,7 @@ with a retirement record, not by editing the file.
 | `supervisor/GOALS.md` | you | what "done" means for the campaign, the departments, the repository's rules | no |
 | `supervisor/wave-close.json` | you, optional | the test floor that `wave-close` and `land` use for this repository | no |
 | `logs/`, `mailbox/`, `docs/lanes/`, `knowledge/projects/` | fleet | worker logs, mail, lane results, per-project notes | no |
-| `state/config.json` | you, optional | `{"sdd": {"enabled": true}}` turns on the spec gate (`fleet spec`, `spawn --spec`); absent or unreadable means off. `{"gc": {"idle_ttl_minutes": 30, "memory_budget_mb": 6000, "min_available_mb": 1536}}` sets lane garbage collection: idle lane sessions stop after the TTL (default 30, 0 turns it off), and `spawn` refuses over the home's memory budget or under the available-memory floor (both off by default) | no |
+| `state/config.json` | you, optional | `{"sdd": {"enabled": true}}` turns on the spec gate (`fleet spec`, `spawn --spec`); absent or unreadable means off. `{"gc": {"idle_ttl_minutes": 30, "memory_budget_mb": 6000, "min_available_mb": 1536}}` sets lane garbage collection: idle lane sessions that fleet spawned stop after the TTL (default 30, 0 turns it off; the registered interface and the supervisor are never stopped), and `spawn` refuses over the home's memory budget or under the available-memory floor (both off by default; the floor also refuses `respawn` and defers a stream retry) | no |
 | `state/specs/`, `state/spec-verify/` | `fleet spec` | campaign specs and the latest `fleet spec verify` stamp per campaign | no |
 
 The runtime directories are local. The fleet source checkout ignores them by

@@ -1014,15 +1014,15 @@ def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
 
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14183) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15485) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:18944) -- upgrades need complete records.
+      * `_sweep_husks` (:14189) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15578) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:19037) -- upgrades need complete records.
       * `_acting_worker_identity` (:4555) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5320) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15733) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18822) -- name the incident-specific absence.
+      * `_doctor_check_registry` (:15826) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18915) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8575) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20571) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20664) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4537,7 +4537,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:18944`), because legacy upgrades also require a complete registry.
+    (`:19037`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -9533,6 +9533,9 @@ def _cmd_send_native(name: str, message: str,
     append_mailbox(old_sid, message)
     append_event("mail_sent", name, sid=old_sid, status="idle",
                  caller_sid=caller_sid)
+    if _memory_floor_refusal("send"):
+        # A send is never refused on memory; the event makes the pressure visible.
+        _append_event_quiet("send_under_memory_floor", name, sid=old_sid)
 
     # Cut 1 (w87): a supervisor body's continuity is the incarnation file plus
     # the journal/checkpoint trail sup-boot already reads, not the transcript --
@@ -11510,6 +11513,9 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
         raise FleetCliError(
             "no USD budget under native dispatch (contract G3) -- use --token-ceiling"
         )
+    _floor_refusal = _memory_floor_refusal("respawn")
+    if _floor_refusal is not None:
+        raise FleetCliError(_floor_refusal)
 
     old_sid = before.get("session_id")
     if old_sid is None:
@@ -12568,7 +12574,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12447` / `cmd_respawn:11722`, before
+    # resolution that runs from `cmd_kill:12453` / `cmd_respawn:11728`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12599,9 +12605,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12447` / `cmd_respawn:11722`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12453` / `cmd_respawn:11728`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11743-11750` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11749-11756` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -14460,24 +14466,71 @@ def _idle_since(name: str, rec: dict, sid: str):
     return None
 
 
+def _gc_protected_sids(data: dict):
+    """Sids GC never stops: the registered interface (Claude session or Codex
+    thread) and the supervisor claim's sid union. None (stop nothing) when an
+    interface registration is present but names no readable sid."""
+    state = state_dir()
+    protected = set()
+    session = _registration_token(state / "interface-session")
+    if session:
+        protected.add(session)
+    elif (_registration_path_present(state / "interface-session")
+          or _registration_path_present(state / "interface-pane")):
+        return None
+    codex = state / "interface-codex.json"
+    if _registration_path_present(codex):
+        try:
+            thread = json.loads(codex.read_text(encoding="utf-8"))["thread_id"]
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+        if not isinstance(thread, str) or not thread:
+            return None
+        protected.add(thread)
+    claim = read_incarnation()
+    if isinstance(claim, dict):
+        if isinstance(claim.get("session_id"), str):
+            protected.add(claim["session_id"])
+        protected |= set(supervisor_claim_sids(claim, data) or [])
+    return protected
+
+
+def _gc_owned_names(data: dict):
+    """Rows the current supervisor claim owns (§8), or None without a claim."""
+    claim = read_incarnation()
+    if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
+        return None
+    return {n for n, r in (data.get("workers") or {}).items()
+            if isinstance(r, dict) and _lane_owned_by_claim(r, claim, data)}
+
+
 def idle_stop_candidates(workers: dict, entries: list, *, now=None, ttl_minutes=None,
-                         caller=None, only=None) -> list:
+                         caller=None, only=None, protected=frozenset(),
+                         owned=None) -> list:
     """`(name, sid, reason)` for idle live lane sessions fleet may stop.
     Reasons: "retired" (an idle fork left behind), "landed"/"abandoned",
-    "idle-ttl", or the reason `only` names. Supervisors, Codex rows, the
-    caller, unread mail, a running turn and live background tasks are kept."""
+    "idle-ttl", or the reason `only` names. Only rows fleet spawned
+    (`dispatch_kind` "bg") qualify, and `owned` (a name set) narrows them.
+    Supervisors, Codex rows, the caller, `protected` sids (interface,
+    supervisor claim), an attached row, unread mail, a running turn and live
+    background tasks are kept, for retired forks as for the current sid."""
     now = now or datetime.now(timezone.utc)
     out = []
     for name, rec in sorted(workers.items()):
         if (not isinstance(rec, dict) or rec.get("archived_at")
                 or _is_supervisor_shaped(name) or _is_codex_record(rec)
+                or rec.get("dispatch_kind") != "bg"
+                or rec.get("status") == "attached"
                 or (only is not None and name not in only)
-                or (caller and caller in _record_sids(rec))):
+                or (owned is not None and name not in owned)
+                or (caller and caller in _record_sids(rec))
+                or (protected and protected & _record_sids(rec))):
             continue
         sid = rec.get("session_id")
         for old in rec.get("retired_sids") or []:
             if (isinstance(old, str) and old != sid and _roster_idle_live(entries, old)
-                    and not _reap_mail_pending(old)):
+                    and not _reap_mail_pending(old)
+                    and not _lane_background_live(name, old)):
                 out.append((name, old, "retired"))
         if (not sid or not _roster_idle_live(entries, sid) or _reap_mail_pending(sid)
                 or recompute_worker_native(name, rec, entries).get("status") != "idle"
@@ -14497,14 +14550,40 @@ def idle_stop_candidates(workers: dict, entries: list, *, now=None, ttl_minutes=
     return out
 
 
+def _gc_still_stoppable(name: str, sid: str, before: dict) -> bool:
+    """Re-read under the lock just before a stop: the row must not have moved
+    (status, dispatch, sid), the sid must have no mail and still be unprotected."""
+    with fleet_lock():
+        data = read_registry_no_repair()
+        cur = data["workers"].get(name)
+        protected = _gc_protected_sids(data)
+        return (isinstance(cur, dict) and protected is not None
+                and sid not in protected
+                and not (protected & _record_sids(cur))
+                and all(cur.get(k) == before.get(k) for k in
+                        ("status", "last_dispatch_at", "session_id", "archived_at"))
+                and not _reap_mail_pending(sid))
+
+
 def stop_idle_sessions(*, dry_run=False, run=subprocess.run, which=shutil.which,
-                       roster_fn=None, now=None, only=None, caller=None) -> list:
+                       roster_fn=None, now=None, only=None, caller=None,
+                       owned_only=False) -> list:
     """Stop idle lane sessions (`idle_stop_candidates`); rows and transcripts stay,
-    so a send or respawn resumes them. Returns `name:reason` per stopped sid."""
+    so a send or respawn resumes them. `owned_only` (the supervisor guard)
+    limits the sweep to lanes the current claim owns. Returns `name:reason`
+    per stopped sid."""
     ok, _reason, data = _read_registry_readonly()
     if not ok:
         return []
     workers = data.get("workers", {})
+    protected = _gc_protected_sids(data)
+    if protected is None:
+        print("idle: interface registration names no session -- stopping nothing",
+              file=sys.stderr)
+        return []
+    owned = _gc_owned_names(data) if owned_only else None
+    if owned_only and not owned:
+        return []
     if not any(isinstance(r, dict) and not r.get("archived_at")
                and not _is_supervisor_shaped(n) and not _is_codex_record(r)
                for n, r in workers.items()):
@@ -14518,9 +14597,13 @@ def stop_idle_sessions(*, dry_run=False, run=subprocess.run, which=shutil.which,
     stopped = []
     for name, sid, reason in idle_stop_candidates(
             workers, payload, now=now, caller=caller or current_caller_session(),
-            ttl_minutes=gc_config()["idle_ttl_minutes"], only=only):
+            ttl_minutes=gc_config()["idle_ttl_minutes"], only=only,
+            protected=protected, owned=owned):
         if dry_run:
             print(f"idle: would stop {sid} ({name}, {reason})")
+            continue
+        if not _gc_still_stoppable(name, sid, workers[name]):
+            print(f"idle: {sid} ({name}) moved on -- not stopped", file=sys.stderr)
             continue
         stop_ok, outcome = _stop_native_session_status(sid, run=run, which=which)
         if stop_ok:
@@ -14583,20 +14666,30 @@ def _process_usage_line(workers: dict, entries: list) -> str:
     return line + (f" (budget {budget} MB)" if budget else "")
 
 
+def _memory_floor_refusal(verb="spawn"):
+    """Refusal text when the host is under `gc.min_available_mb`; None when
+    unset or unmeasurable. Gates spawn, respawn and the stream retry."""
+    floor = gc_config()["min_available_mb"]
+    if not floor:
+        return None
+    try:
+        available = PLATFORM.memory_available_mb()
+    except UnsupportedPlatformError:
+        return None
+    if available is not None and available < floor:
+        return (f"{verb}: available memory {available} MB is below "
+                f"gc.min_available_mb {floor} -- reap idle lanes "
+                "(fleet autoclean) or lower the floor")
+    return None
+
+
 def _memory_budget_refusal(run=subprocess.run, which=shutil.which):
     """Spawn refusal text when the home is over `gc.memory_budget_mb` or the
     host is under `gc.min_available_mb`; None when unset or unmeasurable."""
-    cfg = gc_config()
-    floor, budget = cfg["min_available_mb"], cfg["memory_budget_mb"]
-    if floor:
-        try:
-            available = PLATFORM.memory_available_mb()
-        except UnsupportedPlatformError:
-            available = None
-        if available is not None and available < floor:
-            return (f"spawn: available memory {available} MB is below "
-                    f"gc.min_available_mb {floor} -- reap idle lanes "
-                    "(fleet autoclean) or lower the floor")
+    budget = gc_config()["memory_budget_mb"]
+    floor_text = _memory_floor_refusal()
+    if floor_text:
+        return floor_text
     if budget:
         roster_ok, payload = _fetch_agents_roster(which=which, run=run)
         ok, _reason, data = _read_registry_readonly()
@@ -17893,10 +17986,10 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12550, :12713, :12978, :13203, :13239, :13481, :13482, :13571, :13581, :13592, :13690, :14209, :17809, :20725, :20737, :20886, :24663, :24664, :24766, :24831, :24893, :25925, :25927, :25965, :26493, :29409`).
+    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12556, :12719, :12984, :13209, :13245, :13487, :13488, :13577, :13587, :13598, :13696, :14215, :17902, :20818, :20830, :20979, :24756, :24757, :24859, :24924, :24986, :26018, :26020, :26058, :26586, :29502`).
 
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10856, :11593, :16095, :27426. This makes union identity
+    OWN prior sid alone: :10859, :11599, :16188, :27519. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18602,8 +18695,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10856, :11593, :16095,
-    # :27426) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10859, :11599, :16188,
+    # :27519) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18611,7 +18704,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1088`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17783`).
+        # names this gate as its reason (`:17876`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -18973,7 +19066,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14180`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14186`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -25299,7 +25392,7 @@ def _sup_guard_lane_sweep(roster_fn=None) -> list:
 def _sup_guard_idle_sweep(roster_fn=None) -> list:
     """Run the idle-session stop (lane GC, §11); never changes the verdict."""
     try:
-        return stop_idle_sessions(roster_fn=roster_fn)
+        return stop_idle_sessions(roster_fn=roster_fn, owned_only=True)
     except Exception as exc:  # noqa: BLE001 -- the guard must still decide
         print(f"fleet: sup-guard idle sweep failed: {exc}", file=sys.stderr)
         return []
@@ -29960,6 +30053,8 @@ def recover_lane(name: str, entries: list, *, now=None, run=subprocess.run,
     if action == "wait":
         return plan
     if action == "retry":
+        if _memory_floor_refusal("stream retry"):
+            return {"action": "deferred", "done": None}  # the next sweep retries
         if not _record_stream_retry(name, rec, plan):
             return {"action": "none", "done": None}
         try:
