@@ -13,10 +13,11 @@ when a verb becomes user-visible.
 `uv run --no-project --python 3.10 --with pytest python -m pytest -q` and the
 3.12 equivalent, over the PR's tests plus `tests/test_receipts.py`,
 `tests/test_views_doctrine.py`, `tests/test_doc_claims.py` and
-`tests/test_public_hygiene.py`. **Known red on main:**
-`tests/test_docs_currency.py::test_branch_docs_currency` fails on commits
-1942a432 and 6085e308 ("bin/*.py changed without docs/ or Docs: n/a"). A lane
-reports it as pre-existing and does not fix it; PR 0 below repairs it.
+`tests/test_public_hygiene.py`. **Repaired by PR 0:**
+`tests/test_docs_currency.py::test_branch_docs_currency` failed on commits
+1942a432 and 6085e308 ("bin/*.py changed without docs/ or Docs: n/a"); PR 0
+adds both to `HISTORICAL_METADATA_EXEMPTIONS`. A lane branched before PR 0
+merges reports the failure as pre-existing and does not fix it.
 
 **No irreversible deletion.** No PR adds a code path that deletes a message,
 marker, receipt or ledger line. Retention moves data into `archive/`. Any
