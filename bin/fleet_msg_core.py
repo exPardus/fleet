@@ -34,6 +34,7 @@ SCHEMA = 1
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 KINDS = ("note", "task", "receipt")
+NEEDS_ANSWER_DEFAULT = False    # no reply required; adapters never auto-reply
 METHODS = ("lane-registry", "supervisor-nonce", "supervisor-sid",
            "interface-registration", "bound-holder", "unverified",
            "legacy-unverified")
@@ -130,7 +131,7 @@ def canonical(envelope: dict) -> bytes:
 
 
 def make_draft(frm: str, to: str, body: str, *, from_auth: dict,
-               sent_at: str, kind: str = "note", needs_answer: bool = False,
+               sent_at: str, kind: str = "note", needs_answer: bool = NEEDS_ANSWER_DEFAULT,
                parent: dict | None = None, msg_id: str | None = None) -> dict:
     """An envelope without `seq`; `enqueue()` allocates it.
 

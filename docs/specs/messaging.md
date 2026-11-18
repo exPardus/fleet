@@ -5,7 +5,8 @@
 paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
 `ingest()`, the one receiver path, and the §7 `Transport` Protocol in
 `bin/fleet_msg_transport.py` (§5.1 lists
-what PR 1 fixed that this spec left open). Every other section is proposed,
+what PR 1 fixed that this spec left open). **Built (plan PR 3):** the §11
+rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). Every other section is proposed,
 not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -422,6 +423,42 @@ only when it holds the parent.
 - **Visible queue**: `fleet msg queue` prints per identity unread, unacked,
   needs-answer, oldest age, and per-peer outbox depth and oldest age. Views
   may show counts by directory listing only.
+
+### 11.1 Built contract (plan PR 3)
+
+`bin/fleet_msg_rules.py` holds every rule above as a pure function: inputs,
+including the clock and the history of earlier sends, are arguments, and the
+result is a refusal string `"<code>: <message>"` or None. It reads no file,
+takes no lock and imports only `fleet_msg_core`.
+
+- **Hooks.** `make_rules(limits, history, clock)` returns the `rules(draft)`
+  hook for `enqueue()`; `make_admit(...)` returns the `admit(env)` hook for
+  `ingest()` (`retired`, and `rate` past the per-peer cap). The caller reads
+  the history: `history(draft)` returns the (from, to) pair's earlier sends,
+  both directions, as `Sent(ts, frm, to, kind)`.
+- **Settings** in `config.json`: `max_hop` (6), `task_budget` (4),
+  `rate` (20), `peer_ingest` (200), `loop_alternating` (4). A value is an
+  integer of at least 1; a bad value raises `RulesError`. Size is not a
+  setting: ≤120 words and ≤8 KiB, no override.
+- **Windows.** Rate, task budget and ingest cap count entries newer than one
+  hour (an entry exactly one hour old no longer counts). The sender bounds are
+  per (`from`, `to`) pair: the 20th message in an hour is sent, the 21st is
+  refused; the 4th task is sent, the 5th is refused; the 200th envelope from a
+  peer is accepted, the 201st is `rejected: rate`.
+- **Hop and loop.** A reply whose `hop` exceeds `max_hop` is refused
+  (`hop`). A `task` to an identity in its `path` is refused (`loop`), and so
+  is a task that would continue four alternating tasks between one pair.
+- **Receipts** are system traffic: only the size rule checks them, and they
+  do not count toward rate, budget or the ingest cap (`check_admit` accepts a
+  receipt past the cap; the caller leaves receipts out of `recent_ts`). A draft
+  is a receipt only with `re` set and body `delivered` or `rejected: <reason>`
+  (a §6 reason); any other `kind: receipt` draft is refused as `schema`. PR 6
+  `send` never accepts `--kind receipt`, and no adapter auto-replies
+  (`core.NEEDS_ANSWER_DEFAULT` is False; pinned in PR 6).
+- **Clock steps.** The windows have no upper bound: an entry stamped after
+  `now` (clock stepped back) still counts. `max_hop` cannot exceed
+  `PATH_MAX - 1` (63); a larger value raises `RulesError`.
+- **Notice coalescing** (§9) is `notice_due(unread_from_sender)`.
 
 ## 12. Migration
 
