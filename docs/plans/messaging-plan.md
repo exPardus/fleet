@@ -30,8 +30,9 @@ any of them is a spec PR first.
 1. **Envelope** (spec §4): fields, types, canonical JSON, random id.
 2. **Store and primitives** (spec §5): paths, `publish()` and `enqueue()`
    with their locks, fsync and marker-after-file order.
-3. **Transport** (spec §7): five methods; `pull(after_qseq)` and
-   `commit(ids)` by exact id.
+3. **Transport** (spec §7): five methods; `pull` returns every entry still in
+   `q/` (the qseq is a paging hint only), `commit(ids)` by exact id; `qseq`
+   allocated and written under one per-outbox lock.
 
 ## 2. PRs in order
 
@@ -50,7 +51,7 @@ any of them is a spec PR first.
 | 9b | **Migration hooks**: `relay-ack` acks rendered mail, `mail verify` reads both stores, `_issue_verified_supervisor_mail` writes an envelope, bridge argv in the mailman seed | `bin/fleet.py`, `bin/fleet_mailman.py` (A) | existing `tests/test_mailman.py`, `tests/test_interface_watch.py` green; new hook tests | 9a |
 | 10 | **Retention**: `msg compact` into `archive/`, `purge` seam off by default | `bin/fleet_msg_core.py` (A) | `tests/test_msg_compact.py`: nothing leaves the tree; purge refuses unless enabled | 2 |
 | 11 | **Views**: queue counts in `status_snapshot()` and the statusline, by listing only | `bin/fleet_statusline.py`, `bin/fleet.py` (A) | `tests/test_views_doctrine.py` extended; `tests/test_msg_views.py` | 6 |
-| 12 | **Tier machinery** (after the operator ruling, spec §13): per-subcommand tiers in `verb_effect_tier`, table and pin edits | `bin/fleet.py`, multi-fleet pins (A) | `tests/test_round7_defect_pins.py` and tier tests | ruling |
+| 12 | **Tier machinery** (ruling given, spec §13; unblocked): per-subcommand tiers in `verb_effect_tier`, table and pin edits | `bin/fleet.py`, multi-fleet pins (A) | `tests/test_round7_defect_pins.py` and tier tests | 2 |
 
 `bin/fleet.py` is edited only by lane A (PRs 0, 2, 6, 9b, 11, 12), so the
 file stays single-writer. Lanes B and C import only `fleet_msg_core` and
@@ -65,7 +66,7 @@ as `bin/fleet_mailman.py` does. They never import `bin/fleet.py`.
 | 1 | PR 2 | PR 3, then PR 4 | PR 5 |
 | 2 | PR 6 | PR 7 | review PR 6 |
 | 3 | PR 9b, PR 10 | review | PR 8, PR 9a |
-| 4 | PR 11, PR 12 (after ruling) | — | — |
+| 4 | PR 11, PR 12 | — | — |
 
 File ownership is disjoint inside every wave. One reviewer lane reviews each
 wave's PRs as a batch.
@@ -77,25 +78,30 @@ network. Tests are named by the PR that owns the code.
 
 | # | case | asserts |
 |---|---|---|
-| T1 | crash injection in `publish` between every step | the message exists in exactly one place; a re-run finishes with no duplicate; never a marker without a file |
+| T1 | crash injection in `publish` between every step | the message exists in exactly one place; a re-run finishes with no duplicate; never a marker without a file; repair after step 2 writes the ledger line and the notice exactly once |
 | T2 | two concurrent `publish` of one id (threads and processes) | one file in `new/`, one `duplicate` |
 | T3 | reader moves `new → cur` during a second ingest | no copy reappears in `new/` |
 | T4 | concurrent senders on one (`from`, `to`) | distinct, gap-free seqs |
 | T5 | a send refused by a rule, and a crash after seq allocation | no permanent seq gap from a refusal; a crash gap is shown and blocks nothing |
 | T6 | fsync calls on file and directory | `publish` calls both before returning |
-| T7 | fork-steer with unread messages, old sid still live | messages go to the registry's new sid; the old body fails the holder check |
+| T7 | fork-steer with unread messages, old sid still live; also for a named role bound `lane:<worker>` | the registry's new sid passes the holder check; the old body fails it; no rebind needed |
 | T8 | respawn; Codex thread rotation; pi job change | the lane identity follows with no rebind |
 | T9 | process restart and reboot simulation with messages in `new/`, `cur/` and outbox | all survive; outbox resumes |
-| T10 | two bodies claim one identity; a lane runs non-peek `inbox supervisor` | the non-holder is refused; `--peek` works; ledger records the reader |
+| T10 | two bodies claim one identity; a lane runs non-peek `inbox supervisor` | the non-holder is refused; `--peek` works; ledger records the reader; `inbox --all` lists `cur/` with the reader |
+| T10b | send to an archived lane; archive then reuse of the name | `rejected: retired`; the new lane's spool is empty and the old spool is in `archive/` |
 | T11 | fs: duplicate after crash before receipt | `delivered` is re-emitted; the sender's outbox drains; receipt entries move to `sent/` |
 | T12 | notice | no body text; one pending notice per (identity, sender); no steer, no `fleet.lock`, no registry write |
 | T13 | two homes: lane in home A to `supervisor@b` | delivered, receipt back, outbox drains, FIFO with gap display |
 | T14 | `--kind task` from the supervisor without a nonce; with a zombie sid | refused; a note is labelled `supervisor-sid` |
+| T14b | a peer site sends `kind: task`, `from=supervisor@peer`, method `supervisor-nonce`; then the same with the peer marked `direct: true`; then from the configured `interface_site` | shown as `remote-task` note and not in the lane's direction set; direction; direction |
+| T14c | nonce in `detail` and ledger (pin) | the envelope and ledger contain no nonce value, only `nonce_seq` and an 8-hex prefix |
 | T15 | ssh on a pipe: the test replaces `ssh` with `python bin/fleet.py --fleet-home B msg serve --peer a`; a wrapper drops after N bytes, corrupts a byte, duplicates a frame, replays a session, delays `commit` | no loss, no duplicate, nothing torn published |
 | T15b | clock skew across `commit`: one side's clock 10 min slow, a late enqueue below the cursor | the late envelope is still sent and committed by id |
 | T15c | `from` not hosted by the peer; same label on both ends | `rejected: auth`; `hello` refuses |
+| T15d | two concurrent remote senders to one site, the second's file made visible first (injected delay inside the first writer), client pulls between them | both are pulled and committed; no entry is ever skipped; qseq order equals visibility order |
+| T15e | a peer sends 201 envelopes in an hour from many names | the 201st is `rejected: rate` |
 | T16 | live, `FLEET_LIVE_SSH=1`: user-level `sshd` on a random high localhost port, temp keys, forced-command `authorized_keys` | the server pins the client site; non-default port; skips loudly without `sshd`; the user's real ssh config is never touched |
-| T17 | bind without nonce; worker-turn bind; epoch on rebind | refused; refused; epoch +1 and ledger line |
+| T17 | bind without nonce; worker-turn bind; epoch on rebind; `lane:<worker>` binding across fork-steer and respawn | refused; refused; epoch +1 and ledger line; binding follows the lane with no rebind |
 
 Doctrine pins: no `fleet_lock` import or registry write in any `fleet_msg*`
 module (source scan); no unlink of a message, marker or ledger outside the
@@ -108,7 +114,7 @@ host, port or key (public hygiene).
 | Risk | Mitigation |
 |---|---|
 | "Verified" read as security on a same-user host | spec §10 and §14 say provenance only; inbox prints the method |
-| Tier ruling slow; `msg` destructive meanwhile | every shipped argv carries `--fleet-home`; PR 12 waits on the ruling and blocks nothing else |
+| Tier machinery not landed; `msg` destructive meanwhile | every shipped argv carries `--fleet-home`; PR 12 is unblocked and blocks nothing else |
 | Forced command misconfigured | `serve` refuses without `--peer`; T16 pins the key-to-site mapping |
 | Client sync stalls after reboot | the mailman bridge pass syncs; `queue` warns on outbox age |
 | Archive growth | `compact` packs monthly; disk is the operator's call through the purge setting |
@@ -156,6 +162,21 @@ host, port or key (public hygiene).
 | P2-12 | sync owned by the mailman bridge pass; outbox-age warning | spec §7.2 |
 | P2-13 | PR 9 split into 9a (C) and 9b (A); `bin/fleet.py` owner list corrected | plan §2 |
 | P2-14 | known failure named; PR 0 repairs it | plan gates, PR 0 |
+
+Delta review (d60fb6b3):
+
+| id | fix | section |
+|---|---|---|
+| N1 | `qseq` allocated and written under one per-outbox lock; `pull` returns every entry still in `q/`, the qseq is a hint only | spec §5, §7; T15d |
+| N2 | direction decided by the receiver: local `supervisor-nonce`, the named `interface_site`, or a `direct: true` peer; else `remote-task` note | spec §10, §14; T14b |
+| N3 | named roles may bind `lane:<worker>`, resolved through the registry; concrete bindings only outside the registry | spec §3, §14; T7, T17 |
+| N4 | tiers ruled and recorded; `ids` restored; `init` ordinary, `compact` disruptive, `purge` destructive; PR 12 unblocked | spec §8, §13; plan PR 12 |
+| N5 | "operator-confirmed" = confirmed at setup (`peers.json`, `authorized_keys`) plus the nonce gate | spec §13 |
+| N6 | supervisor reads use `supervisor-sid`, ledger names the reader; `inbox --all` restored; zombie-reads row | spec §6, §8, §10, §14; T10 |
+| N7 | `detail` and ledger hold no nonce, at most `nonce_seq` and an 8-hex prefix | spec §10, §14; T14c |
+| N8 | 200/h per-peer ingest cap; residual corrected | spec §11, §14; T15e |
+| N9 | repair runs the ledger line and the notice once; `done/` archived only with a marker | spec §5, §6; T1 |
+| N10 | send to an archived lane `rejected: retired`; spool archived on archive; lane epoch = registry `created` | spec §3; T10b |
 
 ## 8. Deferred review items
 

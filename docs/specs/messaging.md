@@ -68,16 +68,23 @@ now. Messages address identities, never bodies.
 
 | identity | holder resolved at each read | file |
 |---|---|---|
-| lane `<worker>` | the registry row's current sid, Codex thread or pi job (read lock-free) | none: implicit from the row; gone when the row is archived |
+| lane `<worker>` | the registry row's current sid, Codex thread or pi job (read lock-free) | none: implicit from the row; its epoch is the row's `created` value |
 | `supervisor` | the claim holder (INCARNATION) | none |
 | `interface` | the current Interface registration | none |
-| `ops` and other named roles (`hub`, `reviewer`, …) | a concrete binding: `session:<sid>`, `codex-thread:<id>` or `pi-job:<id>` | `ids/<name>.json` `{schema, name, role, binding, epoch, bound_at, bound_by}` |
+| `ops` and other named roles (`hub`, `reviewer`, …) | `lane:<worker>` (resolved through the registry, as a lane identity is) or, only for a body outside the registry, a concrete `session:<sid>`, `codex-thread:<id>` or `pi-job:<id>` | `ids/<name>.json` `{schema, name, role, binding, epoch, bound_at, bound_by}` |
 
 Lane, supervisor and interface identities follow fork-steer, respawn,
 handoff and reboot with no rebind, because the registry, the claim and the
-registration already follow them. A named role needs `fleet msg bind` after a
-body swap. `ops` is its own identity with its own queue; unbound, it queues.
-Each bind increments `epoch` and appends a `bound` ledger line.
+registration already follow them. A named role bound `lane:<worker>` follows
+the same way, so after a fork-steer the retired body fails the holder check and
+the live body passes with no rebind. Only a concrete binding needs
+`fleet msg bind` after a body swap. `ops` is its own identity with its own
+queue; unbound, it queues. Each bind increments `epoch` and appends a `bound`
+ledger line.
+
+**Archived lanes.** A send to an archived lane is `rejected: retired`. On
+archive the lane's spool moves to `archive/`, so a reused worker name starts
+with an empty queue.
 
 ## 4. Envelope
 
@@ -108,7 +115,8 @@ Under each home's ignored `state/msg/`:
 ```
 site.json, peers.json, config.json
 ids/<name>.json              named roles only
-locks/<identity>.lock        OS-released locks (fleet_platform / mailman backend)
+locks/<identity>.lock        OS-released locks (mailman's lock backend)
+locks/outbox-<site>.lock     one per outbox: qseq allocation and file write
 seq/<from>__<to>             last seq allocated
 outbox/<site>/q/<qseq>-<id>.json   waiting for a remote site
 outbox/<site>/sent/          moved here when the peer confirms
@@ -129,15 +137,18 @@ Both primitives live in `bin/fleet_msg_core.py`; every path calls them.
 3. Create `seen/<id>`, fsync. Append `delivered` to the ledger.
 
 The marker is written after the file, so a marker never exists without a
-message. A crash after step 2 leaves a file and no marker; step 1 of the next
-ingest repairs that. The lock removes the concurrent-ingest race.
+message. A crash after step 2 leaves a file and no marker. Step 1 of the next
+ingest repairs it: it creates the marker and runs step 3's ledger line and the
+§9 notice once, then returns `duplicate`. The lock removes the
+concurrent-ingest race.
 
 **`enqueue(from, to, envelope)`**, under `locks/<from>.lock`: run every §11
 rule first, then allocate `seq` (read, increment, write a unique tmp name,
-fsync, rename), then `publish` (local `to`) or write
-`outbox/<site>/q/<qseq>-<id>.json` with fsync (remote `to`). A refusal
-allocates nothing, so a refused send leaves no seq gap. `qseq` is the
-server-local enqueue counter for that outbox.
+fsync, rename), then `publish` (local `to`) or, for a remote `to`, take
+`locks/outbox-<site>.lock`, allocate `qseq` and write
+`outbox/<site>/q/<qseq>-<id>.json` with fsync inside that one lock. Visibility
+order therefore equals `qseq` order. A refusal allocates nothing, so a refused
+send leaves no seq gap.
 
 No path takes `fleet.lock` or writes the registry.
 
@@ -149,7 +160,9 @@ queued ──transfer──▶ delivered ──inbox──▶ read ──ack─�
 ```
 
 - `send` prints `DELIVERED <id>` (local) or `QUEUED <id>` (remote).
-- `inbox` moves `new → cur`; `--peek` moves nothing. `ack` moves `cur → done`.
+- `inbox` moves `new → cur`; `--peek` moves nothing; `--all` also lists
+  `cur/` (read, not acked) with the reader the ledger names. `ack` moves
+  `cur → done`.
 - **Receipts**: only `delivered` and `rejected`, as `kind: receipt` envelopes
   to `from`. A duplicate re-emits `delivered`. A receipt never gets a receipt.
   Read and ack stay local ledger facts, shown by `fleet msg status`.
@@ -161,7 +174,8 @@ queued ──transfer──▶ delivered ──inbox──▶ read ──ack─�
   `dedup_days + max_skew` after receipt by the receiver's clock.
 - **Retention (no irreversible deletion).** `fleet msg compact` moves
   `done/`, `rejected/`, `outbox/*/sent/`, old markers and rotated ledger
-  files into `archive/<yyyymm>/` (packed, never dropped). Any purge sits
+  files into `archive/<yyyymm>/` (packed, never dropped). A `done/` file is
+  archived only when its marker exists. Any purge sits
   behind one `purge` seam, off by default, and needs an explicit setting.
 
 ## 7. Transport interface
@@ -170,13 +184,15 @@ queued ──transfer──▶ delivered ──inbox──▶ read ──ack─�
 class Transport(Protocol):
     def hello(self, local: SiteInfo) -> SiteInfo: ...              # versions, clock, hosted identities
     def push(self, envelopes: list[bytes]) -> dict[str, str]: ...  # id -> accepted|duplicate|rejected:<why>
-    def pull(self, after_qseq: int) -> list[tuple[int, bytes]]: ...  # (qseq, envelope), ascending
+    def pull(self, hint_qseq: int) -> list[tuple[int, bytes]]: ...   # every entry still in q/, ascending
     def commit(self, ids: list[str]) -> None: ...                  # exactly these ids were published
     def close(self) -> None: ...
 ```
 
-`commit` names ids, never a high-water mark, so a late enqueue below any
-cursor is still sent. The peer moves only committed ids to `sent/`. `peers.json`
+`commit` names ids, never a high-water mark. `pull` returns every entry still
+in `q/` (committed entries are already in `sent/`); `hint_qseq` only orders
+paging and never filters. With the per-outbox lock (§5), no entry can be
+skipped. The peer moves only committed ids to `sent/`. `peers.json`
 maps `<site>` to `{"transport": "fs"|"ssh", ...}`. A later transport (for
 example tailnet) implements the same five methods. Same-home delivery calls
 `publish` directly. Relay through a third site is out of scope (§13).
@@ -233,11 +249,11 @@ Every shipped argv, hook and notice names `--fleet-home` explicitly (§13).
 ```
 fleet msg init    --site LABEL
 fleet msg send    TO (TEXT | @FILE | -) [--re ID] [--kind note|task] [--needs-answer] [--nonce N]
-fleet msg inbox   [NAME] [--peek] [--json] [--wait S]
+fleet msg inbox   [NAME] [--peek] [--all] [--json] [--wait S]
 fleet msg ack     ID...
 fleet msg status  ID
 fleet msg queue   [--json]
-fleet msg whois   NAME
+fleet msg ids     | whois NAME
 fleet msg bind    NAME --binding B --nonce N  |  retire NAME --nonce N
 fleet msg sync    --peer P (--once | --watch --interval S)
 fleet msg serve   --peer SITE        (ssh forced command only)
@@ -284,11 +300,21 @@ Same-user homes give provenance, not privilege (§14). `send` stamps
 | `unverified` | none of the above |
 
 - `kind: task` from `supervisor` requires `supervisor-nonce`; otherwise
-  `send` refuses. Lanes treat only `supervisor-nonce` and
-  `interface-registration` tasks as direction.
+  `send` refuses.
+- **Direction** is decided by the receiving site, never by the stamp alone. A
+  `task` is direction only when it is (a) `supervisor-nonce` from the
+  receiver's own site, (b) `interface-registration` from the site named in
+  `config.json` `interface_site`, or (c) from a peer that `peers.json` marks
+  `direct: true`. Any other `task` is shown and handled as a note, labelled
+  `remote-task`.
+- **`detail` carries no secret.** For a nonce it holds at most `nonce_seq`
+  and an 8-hex sha prefix (claim-nonce §5.9); never the nonce. The ledger
+  follows the same rule.
 - **Read and ack** of NAME (non-peek `inbox`, `ack`) require the caller to
-  resolve as NAME's holder by the same evidence. Anyone may `--peek`. The
-  ledger records the reading body's evidence.
+  resolve as NAME's holder by the same evidence. For `supervisor` that
+  evidence is `supervisor-sid` (a nonce per read is too costly); the ledger
+  names the reading body, and `inbox --all` shows what another body read.
+  Anyone may `--peek`.
 - `bind` and `retire` require `supervisor-nonce` or `interface-registration`;
   a worker turn cannot bind. `msg` joins `GATE_VERBS_ACCEPTING_NONCE`.
 - **Across machines** the receiver checks that the transport-authenticated
@@ -310,7 +336,9 @@ only when it holds the parent.
 - **Loop**: a `task` cannot go to an identity already in its `path`; four
   alternating `task`s between one pair refuse a fifth.
 - **Task budget** per (`from`, `to`), ignoring threads: 4 `task`s per hour.
-- **Rate**: 20 messages per hour per (`from`, `to`).
+- **Rate**: 20 messages per hour per (`from`, `to`), and at most 200
+  ingested envelopes per hour per peer site (`rejected: rate`), however many
+  names the peer hosts.
 - **Visible queue**: `fleet msg queue` prints per identity unread, unacked,
   needs-answer, oldest age, and per-peer outbox depth and oldest age. Views
   may show counts by directory listing only.
@@ -336,14 +364,18 @@ only when it holds the parent.
 
 - No `fleet.lock`, no registry write, no steer, no injection outside fleet's
   own bound bodies. Views count files only.
-- **Tier: pending operator ruling.** Every `msg` verb appends to
-  `ledger.jsonl`, and multi-fleet's E2 ground says an irreversible append is
-  an irreversible effect. The ruling must name the ledger's status: an
-  operational log (then `send`, `inbox`, `ack`, `status`, `queue`, `whois`
-  ordinary; the rest disruptive), or evidence (then `msg` stays destructive).
-  Until then `msg` is in no tuple, so it is destructive, and every shipped
-  argv carries `--fleet-home`. Per-subcommand tiers need new
-  `verb_effect_tier` machinery and its own PR.
+- **Tiers: ruled (operator, 2026-11-18).** `ledger.jsonl` is an operational
+  log, not evidence, so the E2 ground does not apply to its appends.
+  Ordinary: `send`, `inbox`, `ack`, `status`, `queue`, `ids`, `whois`, and
+  `init` by residual (like `fleet init`). Disruptive: `bind`, `retire`,
+  `sync`, `serve`, `import`, `compact`. Destructive: a future `purge`.
+- **"Operator-confirmed" means confirmed at setup**, not per call: `sync`
+  and `serve` run unattended, so the confirmation is the operator writing
+  `peers.json` and `authorized_keys`; `bind`, `retire` and `import` also need
+  `supervisor-nonce` or `interface-registration`.
+- Per-subcommand tiers need new `verb_effect_tier` machinery (plan PR 12).
+  Until it lands, `msg` is in no tuple and every shipped argv carries
+  `--fleet-home`.
 - Out of scope in v1: relay through a third site, groups, attachments,
   encryption at rest, fleet calling `SendMessage`.
 
@@ -364,7 +396,11 @@ none in v1.
 | compromised lane | floods or ping-pongs | size, rate, task budget, hop, path, notice coalescing; no steer | 20 notes/hour per pair still cost reader attention |
 | compromised lane | injects instructions via notices | notices carry no body; inbox prints the method | an agent may still obey an `UNVERIFIED` body it reads |
 | zombie supervisor body | tasks lanes with the live sid | `supervisor-sid` is never direction; tasks need a live nonce | notes from the zombie still arrive, labelled `supervisor-sid` |
+| zombie supervisor body | reads the supervisor queue first | ledger names the reading body; `inbox --all` shows read-but-unacked messages to the live body | the zombie sees the content; reads are not secret between same-sid bodies |
+| retired lane body after fork-steer | reads a named role's queue | `lane:<worker>` bindings resolve to the registry's live sid | a concrete binding still needs a rebind |
 | hostile peer site | forges names of another site | the peer may only send names it hosts; no relay | it can say anything as its own identities |
-| hostile peer site | replays or floods | markers, stale and future bounds, per-pair rate | disk growth until compaction |
+| hostile peer site | directs local lanes with a `task` stamped `supervisor-nonce` | direction only from the local supervisor, the named Interface site, or a `direct: true` peer; otherwise `remote-task` note | a `direct: true` peer is trusted fully |
+| hostile peer site | replays or floods | markers, stale and future bounds, per-pair rate, 200/h per-peer ingest cap | disk grows by at most the cap; compaction packs and never deletes, so the operator watches `queue` |
+| any body | leaks a nonce through `detail` or the ledger | `detail` holds only `nonce_seq` and an 8-hex prefix | none |
 | network attacker | tampers or replays on the wire | ssh channel; frame sha; dedup | none beyond ssh's own |
 | misconfigured forced command | client chooses its own site | `serve` refuses without `--peer`; live test pins it | a wrong `--peer` in `authorized_keys` trusts the wrong site |
