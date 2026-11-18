@@ -21,6 +21,10 @@ ADAPTERS = (CLAUDE, CODEX, PI, INTERFACE, UNBOUND)
 NOTICE_ADAPTERS = (CLAUDE,)
 DRAIN_HEADING = "## MESSAGES"
 DRAIN_MAX_LINES = 20
+# Notice scan bound: at most this many `new/` entries are read per notify, so
+# a long unread backlog cannot make each ingest O(N). Past it the scan fails
+# open: the notice is sent rather than lost.
+NOTICE_SCAN_MAX = 200
 
 
 @dataclass
@@ -42,17 +46,22 @@ def notice_line(env: dict, fleet_home: str) -> str:
             f"Run fleet --fleet-home {fleet_home} msg inbox.")
 
 
-def unread(store: core.Store, name: str) -> list[dict]:
-    """Envelopes in `new/` for `name`, oldest first. Listing and reads only:
-    no lock, nothing moves. An entry that vanished or fails to parse is skipped."""
+def unread(store: core.Store, name: str, limit: "int | None" = None) -> list[dict]:
+    """Messages in `new/` for `name`, oldest first. Listing and reads only:
+    no lock, nothing moves. An entry that vanished or fails to parse is
+    skipped. Receipts are bookkeeping, not mail (§9.1): never listed. `limit`
+    bounds the entries read."""
     out = []
-    for msg_id in core.list_spool(store, name, "new"):
+    ids = core.list_spool(store, name, "new")
+    for msg_id in ids if limit is None else ids[:limit]:
         try:
             raw = core._read_regular(store.spool(name, "new") / f"{msg_id}.json",
                                      core.ENVELOPE_MAX_BYTES)
             if raw is None:
                 continue
-            out.append(core.parse(raw))
+            env = core.parse(raw)
+            if env["kind"] != "receipt":
+                out.append(env)
         except (core.EnvelopeError, core.StoreError):
             continue
     out.sort(key=lambda e: (e["sent_at"], e["id"]))
@@ -61,21 +70,25 @@ def unread(store: core.Store, name: str) -> list[dict]:
 
 def notice_due(env: dict, unread_envs: list[dict]) -> bool:
     """§9 coalescing: one pending notice per (identity, sender). No notice
-    while another unread message from the same sender is waiting."""
-    return not any(u["from"] == env["from"] and u["id"] != env["id"]
-                   for u in unread_envs)
+    while an earlier unread message from the same sender is waiting, so the
+    earliest of a concurrent batch always notices. A receipt never notices."""
+    if env["kind"] == "receipt":
+        return False
+    key = (env["sent_at"], env["id"])
+    return not any(u["from"] == env["from"] and u["kind"] != "receipt"
+                   and (u["sent_at"], u["id"]) < key for u in unread_envs)
 
 
 def wake(store: core.Store, prims: WakePrims, name: str, env: dict) -> str:
     """Notice for `env`, delivered to spool `name`. Returns what happened:
-    `noticed`, `coalesced`, or `drain-only`. A failure raises, and
+    `noticed`, `coalesced` (also a receipt), or `drain-only`. A failure raises, and
     `publish()` logs it as `notice-failed`."""
     adapter = prims.adapter_of(name)
     if adapter not in ADAPTERS:
         raise ValueError(f"unknown adapter {adapter!r}")
     if adapter not in NOTICE_ADAPTERS:
         return "drain-only"
-    if not notice_due(env, unread(store, name)):
+    if not notice_due(env, unread(store, name, NOTICE_SCAN_MAX)):
         return "coalesced"
     sid = prims.holder_sid(name)
     if not sid:

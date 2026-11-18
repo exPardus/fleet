@@ -139,6 +139,67 @@ def test_wake_takes_no_lock_steer_or_registry(tmp_path):
     assert not (store.home / "fleet.lock").exists()
 
 
+def receipt(frm="w2@b", to="w1@a", n=5):
+    d = core.make_draft(frm, to, "delivered", from_auth=AUTH, kind="receipt",
+                        sent_at=core.iso_utc(NOW + n), msg_id=f"{n:032x}")
+    d["seq"] = n + 1
+    return d
+
+
+def test_receipt_never_notices_or_coalesces_reply(tmp_path):
+    """#73 P1-1: receipt then reply from the same sender -> one notice, the reply."""
+    store, pr = make(tmp_path, {"w1": wake.CLAUDE}, {"w1": "s"})
+    send(store, pr, receipt(), name="w1")
+    assert pr.mail == []
+    reply = env("w2@b", "w1@a", n=6)
+    send(store, pr, reply, name="w1")
+    assert len(pr.mail) == 1 and reply["id"] in pr.mail[0][1]
+
+
+def test_receipt_not_unread_not_in_drain(tmp_path):
+    store, pr = make(tmp_path, {"w1": wake.CODEX})
+    send(store, pr, receipt(), name="w1")
+    assert wake.unread(store, "w1") == []
+    assert wake.drain_block(store, pr.p, "w1") == ""
+    assert wake.notice_due(receipt(), []) is False
+
+
+def test_concurrent_batch_earliest_notices(tmp_path):
+    """#73 P2-1: both published before either notify runs."""
+    store, pr = make(tmp_path, {"w2": wake.CLAUDE}, {"w2": "s"})
+    e0, e1 = env(n=0), env(n=1)
+    core.publish(store, "w2", e0)
+    core.publish(store, "w2", e1)
+    wake.wake(store, pr.p, "w2", e0)
+    wake.wake(store, pr.p, "w2", e1)
+    assert len(pr.mail) == 1 and e0["id"] in pr.mail[0][1]
+
+
+def test_notice_scan_bounded(tmp_path):
+    """#73 P2-2: the notice reads at most NOTICE_SCAN_MAX entries."""
+    store, pr = make(tmp_path, {"w2": wake.CLAUDE}, {"w2": "s"})
+    for n in range(5):
+        core.publish(store, "w2", env("w3@a", n=n))
+    reads = []
+    real = core._read_regular
+    core._read_regular = lambda *a, **k: (reads.append(a), real(*a, **k))[1]
+    try:
+        wake.NOTICE_SCAN_MAX, old = 2, wake.NOTICE_SCAN_MAX
+        wake.wake(store, pr.p, "w2", env("w4@a", n=9))
+    finally:
+        wake.NOTICE_SCAN_MAX = old
+        core._read_regular = real
+    assert len(reads) == 2
+
+
+def test_wake_source_has_no_registry_or_write_calls():
+    """#73 P2-3: source scan, not a tmp-home absence check."""
+    src = (BIN / "fleet_msg_wake.py").read_text()
+    src = src.replace(ast.get_docstring(ast.parse(src)), "")
+    for token in ("registry", "fleet_lock", "fleet.lock", "open(", "write"):
+        assert token not in src, token
+
+
 def test_unknown_adapter_raises(tmp_path):
     store, pr = make(tmp_path, {"w2": "bogus"})
     with pytest.raises(ValueError):

@@ -406,7 +406,8 @@ wake is a notice line, `FLEET MSG <id> from <from> (<method>). Run fleet
 | unbound role | none; `fleet msg queue` shows it |
 
 - One pending notice per (identity, sender): no new notice while the identity
-  has an unread message from that sender.
+  has an unread message from that sender. Receipts (§6) are bookkeeping, not
+  mail: they never notice, never coalesce and never appear in `## MESSAGES`.
 - `compose_prompt` adds `## MESSAGES` (ids, senders, methods) for the lane's
   identity. It does not mark anything read.
 - No adapter steers, forks, dispatches, takes `fleet.lock` or writes the
@@ -427,8 +428,13 @@ and writes no registry.
 - **Per adapter.** `adapter_of` returns `claude`, `codex`, `pi`, `interface`
   or `unbound`. Only `claude` with a holder sid gets `append_mailbox`. The
   others return `drain-only`: their wake is the drain block or `msg inbox`.
-- **Coalescing.** `notice_due`: no notice while another message from the same
-  sender is in the identity's `new/`. After a read the next message notices.
+- **Coalescing.** `notice_due`: no notice while an earlier message (by
+  `(sent_at, id)`) from the same sender is in the identity's `new/`, so the
+  earliest of a concurrent batch always notices. After a read the next message
+  notices. The scan reads at most 200 `new/` entries and fails open.
+- **Receipts are bookkeeping, not mail.** `unread()`, `notice_due()` and
+  `drain_block()` ignore `kind: receipt` entirely: a receipt never counts as
+  unread, never coalesces a real message and never appears in the drain block.
 - **Drain block.** `drain_block(store, prims, name)` returns `## MESSAGES`, one
   `- <id> from <from> (<method>)` line per unread message (at most 20, then
   `- ... N more`), and the inbox command; `""` when nothing is unread. It
