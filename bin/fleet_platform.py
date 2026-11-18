@@ -59,6 +59,10 @@ class _WindowsPlatform:
         """Windows has no portable MemAvailable implementation in Fleet."""
         raise UnsupportedPlatformError("available memory is unsupported on Windows")
 
+    def process_rss_mb(self, pid: int) -> int:
+        """Windows has no portable per-process memory read in Fleet."""
+        raise UnsupportedPlatformError("process memory is unsupported on Windows")
+
     def process_tree(self, root_pid: int) -> list:
         script = (
             "$ErrorActionPreference='SilentlyContinue';"
@@ -171,6 +175,20 @@ class _PosixPlatform:
             raise UnsupportedPlatformError(
                 "Linux MemAvailable is unavailable") from None
         raise UnsupportedPlatformError("Linux MemAvailable is unavailable")
+
+    def process_rss_mb(self, pid: int) -> int:
+        """Resident memory of one process from Linux /proc; other POSIX is a gap."""
+        if not self.is_linux:
+            raise UnsupportedPlatformError(
+                "process memory is unsupported on this POSIX platform")
+        try:
+            for line in Path(f"/proc/{int(pid)}/status").read_text(
+                    encoding="ascii", errors="replace").splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+        except (OSError, ValueError, IndexError):
+            raise UnsupportedPlatformError(f"process {pid} memory is unreadable") from None
+        raise UnsupportedPlatformError(f"process {pid} memory is unreadable")
 
     def process_tree(self, root_pid: int) -> list:
         script = r'''

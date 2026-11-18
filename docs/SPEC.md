@@ -680,8 +680,41 @@ Maintenance failures are reported without suppressing the one-shot nonce or
 undoing a completed claim transition; an unreadable registry defers maintenance.
 The boot context states the reap rule, **3 live worker sessions max** across
 Claude and Codex (each Codex lane is one), and a **1.5 GB available-memory floor**
-before any dispatch. These resource limits are supervisor instructions, not new
-admission-control code. Supervisors have no hand-run autoclean/archive step.
+before any dispatch. The session cap and that floor are supervisor instructions;
+`spawn` itself refuses only past the optional `gc` budget below. Supervisors have
+no hand-run autoclean/archive step.
+
+**Idle-session stop (lane GC).** A stopped session keeps its registry row, mail
+and transcript, so `send` (fork-steer) or `respawn` resumes it; only its process
+and memory go. `stop_idle_sessions` stops, through `claude stop`, the idle
+(roster `status: idle` with a pid) sessions of non-archived native lane rows
+that fleet spawned (`dispatch_kind: bg`): every retired fork sid with no unread
+mail and no live background task, and the current sid when the row recomputes
+`idle`, has no unread mail and no live background task, and is `lane_state` landed or
+abandoned or has been idle (latest outcome, else `last_activity`) longer than
+`gc.idle_ttl_minutes` (default 30; 0 or null turns the TTL off). Never stopped:
+supervisor-shaped rows, Codex rows, attached rows, the caller's SID union, and any
+row carrying a protected sid — the registered interface (`state/interface-session`,
+or the thread in `state/interface-codex.json`) and the supervisor claim's sid
+union. An interface registration that names no readable sid (`interface-pane`
+alone, an unreadable Codex claim) stops nothing. Roster sessions without a row
+(the daemon spare pool, user sessions) are never candidates. Right before each
+stop the row is re-read under `fleet.lock`; if its status, dispatch or sid moved,
+mail arrived, or its sid became protected, it is skipped. It runs as the
+autoclean `idle` tier (`idle_stopped` in the stamp, event and summary line,
+`--dry-run` prints `idle: would stop`), in `sup-guard --do` limited to the lanes
+the current claim owns (§8; `idle_stopped` in its JSON, so the keeper tick
+applies the TTL to those), right after `abandon`, and after a
+GREEN `fleet land --fleet-home` for the rows whose name or branch is the lane.
+Each stop appends `idle_session_stopped` with its reason (`retired`, `landed`,
+`abandoned`, `idle-ttl`, `landed-green`). `fleet status` (text) prints
+`processes: N live, rss=M MB` for this home's roster pids (current and retired
+sids; Linux `/proc` VmRSS through the platform adapter, `UNREADABLE` elsewhere)
+and the budget when one is set. `spawn` refuses when that RSS is at or above
+`gc.memory_budget_mb`, or when available memory is below `gc.min_available_mb`;
+both are unset by default, and an unreadable measurement never refuses. The floor
+also refuses `respawn` and defers a stream retry to the next sweep; a fork-steer
+`send` is never refused, but appends `send_under_memory_floor`.
 
 Autoclean tier 1 reuses the archive writer with an age-independent criterion:
 explicit registry `lane_state: landed|abandoned` or matching latest outcome kind

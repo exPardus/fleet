@@ -344,6 +344,9 @@ class TestTheCensus:
             # whether a lane's background tasks or queued wakes will start
             # another turn, so LANE-DONE waits until nothing can re-wake it.
             "_lane_background_live",
+            # w489b lane GC: an idle roster row with a pid is a resident
+            # process the idle-session stop may reclaim.
+            "_roster_idle_live",
         }
         excluded = {
             # roster PLUMBING, not a liveness verdict
