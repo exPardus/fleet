@@ -439,6 +439,10 @@ subparser, `cmd_msg` and `_msg_prims()`. Every verb needs an explicit
   `enqueue()`, so §11 bounds other than size and the §9 notice do not run;
   no `sync`. Archiving a lane does not yet move its spool to `archive/`
   (T10b). A pi lane has no caller evidence and sends `unverified`.
+  Deferred from the PR 2 review, due with or before PR 6 wires rules:
+  unverified `--from` sends need their own seq/gap namespace (else
+  per-sender bounds charge the real identity); a `done/` gap high-water
+  mark; logging of refused `--nonce` presentations for `fleet doctor`.
 
 ## 9. Wake: notice only
 

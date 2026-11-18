@@ -2,6 +2,7 @@
 plan PR 2, T7-T10)."""
 import ast
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -345,7 +346,14 @@ def _rewrite(path, env):
 
 
 def test_huge_seq_is_refused_and_gaps_are_ranges_in_bounded_memory(home, monkeypatch, capsys):
-    import resource
+    resource = pytest.importorskip("resource")
+    cap = 512 * 2 ** 20
+    try:
+        vsz = int(open("/proc/self/statm").read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError):
+        vsz = None
+    if vsz is None or vsz > cap // 2:
+        pytest.skip("cannot lower RLIMIT_AS safely in this process")
     as_body(monkeypatch, sid=SID_OLD)
     for _ in range(3):
         assert msg(home, "send", "supervisor", "x") == 0
@@ -359,7 +367,7 @@ def test_huge_seq_is_refused_and_gaps_are_ranges_in_bounded_memory(home, monkeyp
     env["seq"] = 2 ** 53 + 1
     _rewrite(files[1], env)
     soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (512 * 2 ** 20, hard))
+    resource.setrlimit(resource.RLIMIT_AS, (cap, hard))
     try:
         assert msg(home, "inbox", "supervisor", "--peek", "--json") == 0
     finally:

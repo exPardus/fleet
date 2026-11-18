@@ -49,7 +49,7 @@ any of them is a spec PR first.
 | 3 | **Anti-gridlock rules** as pure functions | `bin/fleet_msg_rules.py` (B) | `tests/test_msg_rules.py`: each rule at bound and bound+1 | 1 |
 | 4 | **fs transport** per spec §7.1 | `bin/fleet_msg_fs.py` (B) | `tests/test_msg_fs.py` (T11) | 1 |
 | 5 | **Notice wake + drain block** as functions over injected prims | `bin/fleet_msg_wake.py` (C) | `tests/test_msg_wake.py` (T12) | 1 |
-| 6 | **Wiring**: rules into `enqueue`, fs into `sync`/`inbox`, notice after publish, `## MESSAGES` in `compose_prompt`, `msg` into `GATE_VERBS_ACCEPTING_NONCE` for `--kind task` and `bind` | `bin/fleet_msg.py`, `bin/fleet.py` (A) | `tests/test_msg_two_home.py` (T13–T14) | 2, 3, 4, 5 |
+| 6 | **Wiring**: rules into `enqueue`, fs into `sync`/`inbox`, notice after publish, `## MESSAGES` in `compose_prompt`, `msg` into `GATE_VERBS_ACCEPTING_NONCE` for `--kind task` and `bind`; PR 2 review deferrals (spec §8.1): unverified `--from` seq namespace, `done/` gap high-water mark, refused-nonce log | `bin/fleet_msg.py`, `bin/fleet.py` (A) | `tests/test_msg_two_home.py` (T13–T14) | 2, 3, 4, 5 |
 | 7 | **ssh transport**: frame codec, `serve` (refuses without `--peer`), `sync --peer`, exit 4 | `bin/fleet_msg_ssh.py` (B) | `tests/test_msg_ssh.py` (T15), `tests/integration/test_msg_ssh_live.py` (T16, gated) | 1, 4 |
 | 8 | **Named roles**: `bind/retire`, concrete bindings, epoch | `bin/fleet_msg_bind.py` (C) | `tests/test_msg_bind.py` (T17) | 2, 6 |
 | 9a | **Migration module**: render to `to-fleet/`, `import`, receipt-store fold reader | `bin/fleet_msg_migrate.py` (C) | `tests/test_msg_migrate.py` | 6 |
