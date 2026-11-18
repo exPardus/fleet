@@ -30785,7 +30785,8 @@ def _msg_prims():
         is_supervisor_shaped=_is_supervisor_shaped,
         lane_sender=_registered_lane_mail_sender,
         interface_source=_registered_interface_mail_source,
-        caller_sid=lambda: None if os.environ.get("MCX_WORKER") == "1"
+        caller_sid=lambda: None if (os.environ.get("MCX_WORKER") == "1"
+                                    or os.environ.get("CODEX_THREAD_ID"))
         else current_caller_session(),
         codex_thread=lambda: os.environ.get("CODEX_THREAD_ID") or None,
         claim=read_incarnation,

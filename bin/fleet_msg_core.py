@@ -42,6 +42,8 @@ REJECT_REASONS = ("size", "rate", "auth", "stale", "future", "schema",
                   "corrupt", "retired")
 BODY_MAX_WORDS = 120
 BODY_MAX_BYTES = 8 * 1024
+SEQ_MAX = 2 ** 53
+"""Largest accepted `seq`; a larger one is refused as `schema`."""
 # Bound on raw envelope bytes, checked before any decode. The largest valid
 # envelope (an 8 KiB body of control characters, each escaped to 6 bytes,
 # plus a full path) is about 55 KiB, so this never refuses a valid one.
@@ -221,7 +223,7 @@ def validate(env, *, draft: bool = False) -> dict:
     if draft:
         if seq is not None:
             raise EnvelopeError("schema", "draft carries a seq")
-    elif type(seq) is not int or seq < 1:
+    elif type(seq) is not int or not 1 <= seq <= SEQ_MAX:
         raise EnvelopeError("schema", "bad seq")
     parse_iso_utc(env["sent_at"])
     _check_body(env["body"])

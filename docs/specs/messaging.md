@@ -391,7 +391,7 @@ fleet msg compact
 fleet msg import  --dir DIR --to NAME@SITE
 ```
 
-`inbox --wait` blocks until a message or timeout (exit 3), like `fleet watch`.
+`inbox --wait` blocks until a message or timeout (exit 3), like `fleet watch`; S must be finite and >= 0.
 
 ### 8.1 Built contract (plan PR 2)
 
@@ -425,7 +425,13 @@ subparser, `cmd_msg` and `_msg_prims()`. Every verb needs an explicit
 - **Display.** Each message prints `VERIFIED <from> <method> via local/<site>`
   (or `peer/<site>`) or `UNVERIFIED <method>`. A `task` shows as `task` only
   under the §10 direction rule, else `remote-task`. Missing seqs per sender
-  across `new|cur|done` print as `GAP` lines and block nothing.
+  across `new|cur|done` print as `GAP` lines (ranges `a-b`, at most 20 per
+  sender) and block nothing. `seq` above 2**53 is refused as `schema`. An
+  unparseable `new|cur` file prints as `CORRUPT <state>/<id>` and is counted
+  by `queue`. `--nonce` accepts only a live generation: a `pending` one
+  refuses with "run a gated verb first". `supervisor-sid` is not proven when
+  `CODEX_THREAD_ID` is set (an inherited Claude sid). A body from `-` or
+  `@FILE` is read up to 8 KiB + 1 byte, then refused as `size`.
 - **Read-only verbs.** `status`, `queue`, `ids`, `whois` and `inbox --peek`
   write nothing under `state/msg/`. `queue` counts by listing and file age;
   it warns on an outbox entry older than `outbox_warn_s` (900).

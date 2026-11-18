@@ -336,3 +336,105 @@ def test_fleet_msg_imports_no_fleet_and_no_lock():
     source = (BIN / "fleet_msg.py").read_text(encoding="utf-8")
     assert "fleet_lock" not in source and "save_registry" not in source
     assert "unlink(" not in source
+
+
+# --- w495b review fixes (PR #76: P1-1, P2-1..P2-3, P2-5..P2-7, P2-9) ---------
+
+def _rewrite(path, env):
+    path.write_bytes(fleet_msg.core.canonical(env))
+
+
+def test_huge_seq_is_refused_and_gaps_are_ranges_in_bounded_memory(home, monkeypatch, capsys):
+    import resource
+    as_body(monkeypatch, sid=SID_OLD)
+    for _ in range(3):
+        assert msg(home, "send", "supervisor", "x") == 0
+    capsys.readouterr()
+    files = sorted((home / "state" / "msg" / "spool" / "supervisor" / "new").glob("*.json"),
+                   key=lambda f: json.loads(f.read_text())["seq"])
+    env = json.loads(files[2].read_text())
+    env["seq"] = 2 ** 53
+    _rewrite(files[2], env)
+    env = json.loads(files[1].read_text())
+    env["seq"] = 2 ** 53 + 1
+    _rewrite(files[1], env)
+    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+    resource.setrlimit(resource.RLIMIT_AS, (512 * 2 ** 20, hard))
+    try:
+        assert msg(home, "inbox", "supervisor", "--peek", "--json") == 0
+    finally:
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+    data = json.loads(capsys.readouterr().out)
+    assert len(data["messages"]) == 2            # seq > SEQ_MAX refused as corrupt
+    assert len(data["corrupt"]) == 1
+    assert data["gaps"] == [{"from": "lane-a@alpha", "missing": [[2, 2 ** 53 - 1]]}]
+    assert len(json.dumps(data)) < 4096
+
+
+def test_gap_ranges_are_capped(home, monkeypatch, capsys):
+    as_body(monkeypatch, sid=SID_OLD)
+    for _ in range(fleet_msg.GAP_RANGES_MAX + 5):
+        assert msg(home, "send", "supervisor", "x") == 0
+    capsys.readouterr()
+    for f in (home / "state" / "msg" / "spool" / "supervisor" / "new").glob("*.json"):
+        env = json.loads(f.read_text())
+        env["seq"] *= 3                          # 3, 6, 9...: a gap before each
+        _rewrite(f, env)
+    store = fleet_msg.core.Store(home, "alpha")
+    (_sender, ranges), = fleet_msg._gaps(store, "supervisor")
+    assert len(ranges) == fleet_msg.GAP_RANGES_MAX and ranges[0] == [1, 2]
+
+
+def test_supervisor_sid_ignored_when_codex_thread_is_set(home, monkeypatch, capsys):
+    claim(home)
+    as_body(monkeypatch, sid=SID_OLD)
+    assert msg(home, "send", "supervisor", "x") == 0
+    capsys.readouterr()
+    as_body(monkeypatch, sid=SUP_SID, thread="thread-unregistered")
+    assert msg(home, "inbox", "supervisor") == 1
+    assert "does not hold" in capsys.readouterr().err
+    assert msg(home, "send", "lane-a", "n", "--from", "supervisor") == 0
+    out = capsys.readouterr().out
+    assert "unverified" in out and "supervisor-sid" not in out
+
+
+def test_nonce_pending_and_prior_generations_are_refused(home, monkeypatch, capsys):
+    claim(home)
+    path = home / "supervisor" / "INCARNATION"
+    data = json.loads(path.read_text())
+    data["pending_nonce_hash"] = fleet.nonce_digest("pend")
+    data["prior_pending_hash"] = fleet.nonce_digest("prior")
+    path.write_text(json.dumps(data))
+    as_body(monkeypatch, sid=SUP_SID)
+    assert msg(home, "send", "lane-a", "t", "--kind", "task", "--nonce", "pend") == 1
+    assert "pending generation" in capsys.readouterr().err
+    assert msg(home, "send", "lane-a", "t", "--kind", "task", "--nonce", "prior") == 1
+    assert "does not match" in capsys.readouterr().err
+    assert spool(home, "lane-a", "new") == []
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-1"])
+def test_inbox_wait_refuses_non_finite_or_negative(home, monkeypatch, capsys, bad):
+    as_body(monkeypatch, sid=SID_OLD)
+    assert msg(home, "inbox", "--wait", bad) == 1
+    assert "--wait must be" in capsys.readouterr().err
+
+
+def test_corrupt_spool_entry_is_printed_not_hidden(home, monkeypatch, capsys):
+    as_body(monkeypatch, sid=SID_OLD)
+    d = home / "state" / "msg" / "spool" / "lane-a" / "new"
+    d.mkdir(parents=True, exist_ok=True)
+    msg_id = "a" * 32
+    (d / f"{msg_id}.json").write_text("{not json")
+    assert msg(home, "inbox", "--peek") == 0
+    out = capsys.readouterr().out
+    assert f"CORRUPT new/{msg_id}" in out and "EMPTY" not in out
+
+
+def test_body_read_is_bounded(home, monkeypatch, capsys, tmp_path):
+    big = tmp_path / "big"
+    big.write_bytes(b"a " * 2 ** 20)
+    as_body(monkeypatch, sid=SID_OLD)
+    assert fleet_msg._read_body(f"@{big}").__len__() == fleet_msg.core.BODY_MAX_BYTES + 1
+    assert msg(home, "send", "supervisor", f"@{big}") == 1
+    assert "refused" in capsys.readouterr().err

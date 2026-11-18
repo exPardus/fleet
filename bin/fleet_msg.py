@@ -13,6 +13,7 @@ Rules, the fs transport and the notice are wired in plan PR 6, not here.
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 import sys
@@ -186,7 +187,10 @@ def caller_proofs(prims: MsgPrims, nonce: "str | None" = None) -> list:
     if nonce:
         held = (isinstance(claim, dict) and claim.get("state") != "released"
                 and ("nonce_hash" in claim or "state" in claim))
-        if not held or prims.nonce_presentation(claim, nonce) is None:
+        presented = prims.nonce_presentation(claim, nonce) if held else None
+        if presented == "pending":
+            raise MsgError("--nonce is a pending generation: run a gated verb first")
+        if presented != "live":
             raise MsgError("--nonce does not match the current supervisor generation")
         detail = (f"nonce_seq={claim.get('nonce_seq', '?')} "
                   f"sha={prims.nonce_digest(nonce)[:8]}")
@@ -268,14 +272,14 @@ def _find(store: core.Store, msg_id: str):
     return None
 
 
-def _ledger(store: core.Store) -> list:
+def _ledger(store: core.Store):
+    """Ledger records, streamed line by line (the ledger only grows)."""
     try:
         st = os.lstat(store.ledger_path)
     except FileNotFoundError:
-        return []
+        return
     if not stat.S_ISREG(st.st_mode):
         raise MsgError("ledger.jsonl is not a regular file")
-    out = []
     with open(store.ledger_path, encoding="utf-8", errors="replace") as handle:
         for line in handle:
             try:
@@ -283,8 +287,7 @@ def _ledger(store: core.Store) -> list:
             except ValueError:
                 continue
             if isinstance(record, dict):
-                out.append(record)
-    return out
+                yield record
 
 
 def _readers(store: core.Store) -> dict:
@@ -320,8 +323,13 @@ def _verified_line(store: core.Store, env: dict) -> str:
     return f"VERIFIED {env['from']} {method} via {via}"
 
 
+GAP_RANGES_MAX = 20
+
+
 def _gaps(store: core.Store, name: str) -> list:
-    """Missing seqs per sender across new|cur|done (§6: shown, blocks nothing)."""
+    """Missing seqs per sender across new|cur|done (§6: shown, blocks nothing),
+    as `[first, last]` ranges: cost is O(messages), never O(max seq). At most
+    GAP_RANGES_MAX ranges per sender are kept."""
     seqs: dict = {}
     for state in ("new", "cur", "done"):
         for msg_id in core.list_spool(store, name, state):
@@ -330,10 +338,20 @@ def _gaps(store: core.Store, name: str) -> list:
                 seqs.setdefault(env["from"], set()).add(env["seq"])
     out = []
     for sender in sorted(seqs):
-        missing = sorted(set(range(1, max(seqs[sender]) + 1)) - seqs[sender])
+        missing, prev = [], 0
+        for seq in sorted(seqs[sender]):
+            if seq > prev + 1:
+                missing.append([prev + 1, seq - 1])
+                if len(missing) >= GAP_RANGES_MAX:
+                    break
+            prev = seq
         if missing:
             out.append((sender, missing))
     return out
+
+
+def _range_text(span: list) -> str:
+    return str(span[0]) if span[0] == span[1] else f"{span[0]}-{span[1]}"
 
 
 # --- verbs ------------------------------------------------------------------
@@ -370,11 +388,13 @@ def cmd_init(prims: MsgPrims, args, out) -> int:
 
 
 def _read_body(text: str) -> str:
+    cap = core.BODY_MAX_BYTES + 1            # one byte over: make_draft refuses it
     if text == "-":
-        return sys.stdin.read()
+        return sys.stdin.buffer.read(cap).decode("utf-8", errors="replace")
     if text.startswith("@"):
         try:
-            return Path(text[1:]).read_text(encoding="utf-8")
+            with open(text[1:], "rb") as handle:
+                return handle.read(cap).decode("utf-8")
         except (OSError, UnicodeError) as exc:
             raise MsgError(f"cannot read {text[1:]}: {type(exc).__name__}") from None
     return text
@@ -445,6 +465,8 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
     name = args.name or _default_name(prims)
     if not core.valid_name(name) or resolve(prims, store, name) is None:
         raise MsgError(f"unknown identity {name!r}")
+    if args.wait is not None and not (math.isfinite(args.wait) and args.wait >= 0):
+        raise MsgError("--wait must be a finite number of seconds >= 0")
     proof = None if args.peek else _require_holder(prims, name)
     if args.wait is not None:
         deadline = prims.clock() + args.wait
@@ -455,12 +477,14 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
             prims.sleep(WAIT_POLL_S)
     states = ("new", "cur") if args.all else ("new",)
     readers = _readers(store) if args.all else {}
-    entries = []
+    entries, corrupt = [], []
     for state in states:
         for msg_id in core.list_spool(store, name, state):
             env = _load(store, name, state, msg_id)
             if env is not None:
                 entries.append(_entry(store, env, state, readers.get(msg_id)))
+            else:
+                corrupt.append(f"{state}/{msg_id}")
     entries.sort(key=lambda e: (e["from"], e["seq"], e["id"]))
     if proof is not None:
         reader = f"{proof[1]}/{_reader_body(prims)}"
@@ -471,11 +495,14 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
     gaps = _gaps(store, name)
     if args.json:
         print(json.dumps({"identity": f"{name}@{store.site}", "messages": entries,
-                          "gaps": [{"from": s, "missing": m} for s, m in gaps]},
+                          "gaps": [{"from": s, "missing": m} for s, m in gaps],
+                          "corrupt": corrupt},
                          sort_keys=True), file=out)
         return 0
-    if not entries:
+    if not entries and not corrupt:
         print(f"EMPTY {name}@{store.site}", file=out)
+    for item in corrupt:
+        print(f"CORRUPT {item} (unreadable envelope; queue counts it)", file=out)
     for entry in entries:
         flags = " needs-answer" if entry["needs_answer"] else ""
         flags += f" re={entry['re']}" if entry["re"] else ""
@@ -488,7 +515,7 @@ def cmd_inbox(prims: MsgPrims, args, out) -> int:
             print(f"READ BY {entry['reader']}", file=out)
         print("", file=out)
     for sender, missing in gaps:
-        print(f"GAP from {sender}: seq {','.join(map(str, missing))} missing", file=out)
+        print(f"GAP from {sender}: seq {','.join(map(_range_text, missing))} missing", file=out)
     return 0
 
 
