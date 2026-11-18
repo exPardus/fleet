@@ -30,10 +30,10 @@ DEFAULT_TASK_BUDGET = 4        # tasks per hour per (from, to)
 DEFAULT_RATE = 20              # messages per hour per (from, to)
 DEFAULT_PEER_INGEST = 200      # ingested envelopes per hour per peer site
 DEFAULT_LOOP_ALTERNATING = 4   # alternating tasks between one pair; the next is refused
-NEEDS_ANSWER_DEFAULT = False   # no reply required; adapters never auto-reply
 
 # `config.json` keys. Size is not a setting (§11: no override); a limit may
-# only be lowered, never raised past the envelope bound (§4).
+# only be lowered, never raised past the envelope bound (§4): `max_hop` above
+# `core.PATH_MAX - 1` raises RulesError.
 SETTINGS = ("max_hop", "task_budget", "rate", "peer_ingest", "loop_alternating")
 
 
@@ -71,6 +71,8 @@ class Limits:
                 value = config[key]
                 if type(value) is not int or value < 1:
                     raise RulesError(f"{key} must be an integer >= 1, got {value!r}")
+                if key == "max_hop" and value > core.PATH_MAX - 1:
+                    raise RulesError(f"max_hop must be <= {core.PATH_MAX - 1} (envelope path bound), got {value}")
                 values[key] = value
         return cls(**values)
 
@@ -127,7 +129,7 @@ def check_loop(frm: str, to: str, kind: str, path: list[str], history: Iterable[
 
 
 def _within_hour(entries: Iterable[Sent], now: float) -> list[Sent]:
-    return [s for s in entries if now - HOUR_S < s.ts <= now]
+    return [s for s in entries if s.ts > now - HOUR_S]
 
 
 def check_task_budget(frm: str, to: str, kind: str, history: Iterable[Sent], now: float,
@@ -155,8 +157,9 @@ def check_rate(frm: str, to: str, history: Iterable[Sent], now: float,
 def check_peer_ingest(recent_ts: Iterable[float], now: float,
                       limits: Limits = Limits()) -> str | None:
     """At most `peer_ingest` envelopes per hour per peer site, however many
-    names the peer hosts. `recent_ts` are the receive times for that peer."""
-    used = sum(1 for ts in recent_ts if now - HOUR_S < ts <= now)
+    names the peer hosts. `recent_ts` are the receive times for that peer;
+    the caller leaves receipts out. A clock step back never shrinks the window."""
+    used = sum(1 for ts in recent_ts if ts > now - HOUR_S)
     if used >= limits.peer_ingest:
         return f"rate: {used} envelopes from this peer in the last hour (limit {limits.peer_ingest})"
     return None
@@ -170,13 +173,27 @@ def notice_due(unread_from_sender: int) -> bool:
 
 # --- hooks for core.enqueue() and core.ingest() -------------------------------
 
+def _is_receipt(draft: dict) -> bool:
+    body = draft["body"]
+    if draft["re"] is None:
+        return False
+    if body == "delivered":
+        return True
+    reason = body[len("rejected: "):]
+    return body.startswith("rejected: ") and reason in core.REJECT_REASONS
+
+
 def check_draft(draft: dict, history: Iterable[Sent], now: float,
                 limits: Limits = Limits()) -> str | None:
-    """Every sender-side rule over one draft, first refusal wins. A receipt is
-    system traffic: only its size is checked, so receipts never gridlock."""
+    """Every sender-side rule over one draft, first refusal wins. A genuine
+    receipt (`re` set, body `delivered` or `rejected: <reason>`) is system
+    traffic: only size is checked, so receipts never gridlock. A draft that
+    claims `kind: receipt` without that shape is refused as `schema`."""
     reason = check_size(draft["body"], limits)
-    if reason or draft["kind"] == "receipt":
+    if reason:
         return reason
+    if draft["kind"] == "receipt":
+        return None if _is_receipt(draft) else "schema: not a receipt (needs re and a delivered/rejected body)"
     history = list(history)
     frm, to = draft["from"], draft["to"]
     return (check_hop(draft["hop"], draft["re"], limits)
@@ -202,6 +219,8 @@ def check_admit(env: dict, peer_site: str, recent_ts: Iterable[float], now: floa
     to_name, _site = core.split_qualified(env["to"])
     if to_name in set(retired):
         return "retired"
+    if env["kind"] == "receipt":
+        return None          # bounded by our own sends; never counted (§11.1)
     if check_peer_ingest(recent_ts, now, limits):
         return "rate"
     return None

@@ -449,7 +449,15 @@ takes no lock and imports only `fleet_msg_core`.
   (`hop`). A `task` to an identity in its `path` is refused (`loop`), and so
   is a task that would continue four alternating tasks between one pair.
 - **Receipts** are system traffic: only the size rule checks them, and they
-  do not count toward rate or budget.
+  do not count toward rate, budget or the ingest cap (`check_admit` accepts a
+  receipt past the cap; the caller leaves receipts out of `recent_ts`). A draft
+  is a receipt only with `re` set and body `delivered` or `rejected: <reason>`
+  (a §6 reason); any other `kind: receipt` draft is refused as `schema`. PR 6
+  `send` never accepts `--kind receipt`, and no adapter auto-replies
+  (`core.NEEDS_ANSWER_DEFAULT` is False; pinned in PR 6).
+- **Clock steps.** The windows have no upper bound: an entry stamped after
+  `now` (clock stepped back) still counts. `max_hop` cannot exceed
+  `PATH_MAX - 1` (63); a larger value raises `RulesError`.
 - **Notice coalescing** (§9) is `notice_due(unread_from_sender)`.
 
 ## 12. Migration

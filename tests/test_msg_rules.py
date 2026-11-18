@@ -54,7 +54,8 @@ def test_size_matches_the_envelope_bound():
 # --- no reply required ------------------------------------------------------
 
 def test_no_reply_required_by_default():
-    assert rules.NEEDS_ANSWER_DEFAULT is False
+    assert core.NEEDS_ANSWER_DEFAULT is False
+    assert not hasattr(rules, "NEEDS_ANSWER_DEFAULT")
     assert draft()["needs_answer"] is False
 
 
@@ -236,8 +237,7 @@ def test_check_draft_first_refusal_wins_and_receipts_only_size():
     oversize = dict(draft(), body=" ".join(["w"] * 121))   # bypasses make_draft's own bound
     assert rules.refusal_code(rules.check_draft(oversize, [], NOW)) == "size"
     assert rules.refusal_code(rules.check_draft(dict(oversize, kind="receipt"), [], NOW)) == "size"
-    receipt = draft(kind="receipt")
-    assert rules.check_draft(receipt, sends(99), NOW) is None
+    assert rules.check_draft(_receipt(), sends(99), NOW) is None
     assert rules.check_draft(draft(), sends(20), NOW) is not None
     assert rules.check_draft(draft(kind="task"), sends(4, kind="task"), NOW) is not None
 
@@ -290,3 +290,40 @@ def test_module_is_pure_and_stdlib_only():
     attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert not ({"open", "time"} & names)
     assert not ({"time", "now", "write_text", "read_text", "listdir", "unlink"} & attrs)
+
+
+# --- w485 review fixes -------------------------------------------------------
+
+def _receipt(body="delivered", re_="a" * 32):
+    return dict(draft(kind="receipt", body=body), re=re_)
+
+
+def test_receipt_exemption_needs_re_and_receipt_body():          # #71 P2-1
+    flood = sends(99)
+    assert rules.check_draft(_receipt(), flood, NOW) is None
+    assert rules.check_draft(_receipt("rejected: rate"), flood, NOW) is None
+    for bad in (_receipt(re_=None), _receipt("hello"), _receipt("rejected: nope"),
+                _receipt("delivered, and more")):
+        assert rules.refusal_code(rules.check_draft(bad, flood, NOW)) == "schema"
+
+
+def test_admit_does_not_count_or_reject_receipts():                # #71 P2-2
+    env = dict(_receipt(), to=f"w2@{A.split('@')[1]}")
+    assert rules.check_admit(env, "beta", [NOW - 5] * 500, NOW) is None
+    assert rules.check_admit(dict(env, kind="note"), "beta", [NOW - 5] * 500, NOW) == "rate"
+
+
+def test_clock_step_back_keeps_recent_sends_in_window():          # #71 P2-3
+    future = [Sent(NOW + 600, A, B, "note")] * 20
+    assert rules.check_rate(A, B, future, NOW) is not None
+    assert rules.check_peer_ingest([NOW + 600] * 200, NOW) is not None
+
+
+def test_max_hop_capped_at_path_bound():                          # #71 P2-4
+    assert Limits.from_config({"max_hop": core.PATH_MAX - 1}).max_hop == core.PATH_MAX - 1
+    with pytest.raises(rules.RulesError):
+        Limits.from_config({"max_hop": core.PATH_MAX})
+
+
+def test_scope_has_no_fs_transport():                             # #71 P2-5
+    assert not (Path(__file__).resolve().parents[1] / "bin" / "fleet_msg_fs.py").exists()
