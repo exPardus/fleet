@@ -32,6 +32,13 @@ HISTORICAL_METADATA_EXEMPTIONS = {
     # Prose-cap trim + citation refresh (no behaviour change) committed without
     # a trailer; lanes w400-w402 branched from it before the omission surfaced.
     "7600dc2a59e9109b4b8cf89e003629b19bb1d58b",
+    # Two behaviour fixes (abandon busy-guard reconcile; lane-done queued
+    # task notices) merged to main without a docs change or trailer. Both
+    # are internal bug fixes with no described surface to update; they are
+    # ancestors of main, so every lane inherited the failure (messaging
+    # plan PR 0).
+    "1942a432200aa4d9866b9d01807de05eeca65f4a",
+    "6085e308b345d6204e3db41d2a68f24777b07cd8",
 }
 
 
