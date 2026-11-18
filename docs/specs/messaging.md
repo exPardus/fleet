@@ -224,7 +224,7 @@ the only side that dials. Nothing assumes the server can reach the client.
   `len` bytes. Ops: `hello`, `push`, `result`, `pull`, `batch`, `commit`,
   `bye`.
 - Session: `hello` both ways → `push` client outbox → `result` per id →
-  `pull(after_qseq)` → `batch` → client publishes → `commit(ids)` → `bye`.
+  `pull(hint_qseq)` → `batch` → client publishes → `commit(ids)` → `bye`.
 
 | failure | effect |
 |---|---|
