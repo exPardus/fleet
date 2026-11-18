@@ -324,6 +324,3 @@ def test_max_hop_capped_at_path_bound():                          # #71 P2-4
     with pytest.raises(rules.RulesError):
         Limits.from_config({"max_hop": core.PATH_MAX})
 
-
-def test_scope_has_no_fs_transport():                             # #71 P2-5
-    assert not (Path(__file__).resolve().parents[1] / "bin" / "fleet_msg_fs.py").exists()

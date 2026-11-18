@@ -133,7 +133,7 @@ class FsTransport:
     def pull(self, hint_qseq: int) -> list[tuple[int, bytes]]:
         try:
             self._settle_receipts()
-            names = self._peer_names()
+            names = self._peer_names() or {}
             entries = core.outbox_entries(self._peer, self.store.site, hint_qseq)
         except core.StoreError as exc:
             raise transport.TransportError(str(exc)) from None
@@ -180,12 +180,14 @@ class FsTransport:
         _require_plain_chain(self.peer_home, path)
         return path
 
-    def _peer_names(self) -> dict[int, str]:
-        """qseq -> id from the file names in the peer's `q/`."""
+    def _peer_names(self) -> "dict[int, str] | None":
+        """qseq -> id from the file names in the peer's `q/`, or None when the
+        directory is absent (moved home, wrong path, mount not ready): then
+        nothing is known about the peer's queue."""
         try:
             listing = os.listdir(self._peer_q())
         except FileNotFoundError:
-            return {}
+            return None
         names = {}
         for entry in listing:
             match = core._QFILE_RE.fullmatch(entry)
@@ -196,6 +198,7 @@ class FsTransport:
     def _peer_envelopes(self, wanted: set[str]) -> list[tuple[str, dict]]:
         """Parsed envelopes of the peer's `q/` entries whose id is in `wanted`.
         An id the peer no longer holds, or whose file is corrupt, is skipped."""
+        self._peer_q()                  # same plain-chain check as `pull`
         found = []
         for _qseq, raw in core.outbox_entries(self._peer, self.store.site):
             try:
@@ -217,7 +220,8 @@ class FsTransport:
         return False
 
     def _strike(self, msg_id: str) -> int:
-        """Count one more failed pass for `msg_id`, in a local counter file."""
+        """Count one more failed pass for `msg_id`, in a local counter file.
+        The unit is one `pull` call, not one sync pass."""
         path = self.store.root / "fs-strikes" / self.peer_site / msg_id
         with self.store.locked("outbox", self.peer_site):
             return self.store._counter_next(path)
@@ -232,7 +236,13 @@ class FsTransport:
         _from_name, from_site = core.split_qualified(env["from"])
         if to_site != self.store.site or from_site != self.peer_site:
             return                                   # not addressed through this transport
-        if self.store._marked(env["id"]) or self.store._held(to_name, env["id"]):
+        held = self.store._held(to_name, env["id"])
+        if held is not None and self._held_from(held) != env["from"]:
+            # Another sender's envelope took this id (ids are global, §5): not
+            # ours to confirm. No receipt; the entry stays queued, visibly.
+            self.store.ledger("receipt-withheld", id=env["id"], reason="id-owner")
+            return
+        if self.store._marked(env["id"]) or held is not None:
             body = "delivered"
         else:
             reason = self._reject_reason(env["id"])
@@ -248,6 +258,14 @@ class FsTransport:
             self.store.ledger("receipt-failed", id=env["id"], reason=exc.reason)
             return
         core.enqueue(self.store, draft)
+
+    @staticmethod
+    def _held_from(path: Path) -> "str | None":
+        try:
+            raw = core._read_regular(path, core.ENVELOPE_MAX_BYTES)
+            return core.parse(raw)["from"] if raw is not None else None
+        except (core.EnvelopeError, core.StoreError):
+            return None
 
     def _reject_reason(self, msg_id: str) -> str | None:
         try:
@@ -267,8 +285,11 @@ class FsTransport:
 
     def _settle_receipts(self) -> None:
         """Move a local receipt entry to `sent/` once the envelope it answers
-        is no longer in the peer's `q/`."""
-        held = set(self._peer_names().values())
+        is no longer in the peer's `q/`. An absent peer `q/` settles nothing."""
+        names = self._peer_names()
+        if names is None:
+            return                      # peer q/ not listed: settle nothing
+        held = set(names.values())
         settled = []
         for _qseq, raw in core.outbox_entries(self.store, self.peer_site):
             try:

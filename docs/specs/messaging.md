@@ -303,15 +303,19 @@ calls `ingest()` on each pulled entry and then `commit()`.
   differs from the one in `peers.json`, or equals the local one. The reported
   clock is the local one: both homes share a machine, so fs never warns of skew.
 - **Read-only peer.** `pull` and `commit` only read the peer's tree. A symlinked
-  component under `state/msg/` or a symlinked entry makes `pull` raise
-  `TransportError`; nothing is followed.
+  component under `state/msg/` or a symlinked entry makes `pull` or `commit`
+  raise `TransportError`: the chain is checked at the start of each call. A
+  swap between that check and the read is not defended (same-user homes get
+  provenance, not privilege, §14).
 - **`entry_id(qseq)`** returns the id in an entry's file name after `pull`, so
   the driver can commit an entry whose bytes do not parse.
 - **Corrupt files.** Only `corrupt` (not JSON, non-canonical, `body_sha256`
   mismatch) is retried. `pull` withholds such an entry on its first two passes
   and returns it on the third, so `ingest()` keeps it as `rejected: corrupt`.
   The count lives in `state/msg/fs-strikes/<peer>/<id>`, so it survives
-  `sync --once`. Other failures (`schema`, `size`) are returned at once.
+  `sync --once`; its unit is one `pull` call, so concurrent syncs or a retried
+  `pull` add strikes faster. Other failures (`schema`, `size`) are returned at
+  once.
 - **Receipts.** `commit(ids)` writes one `kind: receipt` envelope per id
   through `enqueue()`: from the original `to`, to the original `from`, `re` the
   original id, body `delivered` or `rejected: <why>` (the reason from the local
@@ -322,9 +326,16 @@ calls `ingest()` on each pulled entry and then `commit()`.
   receipt moves the local envelope it answers to `sent/`; a receipt is never
   receipted.
 - **Settling.** Each `pull` moves a local receipt entry to `sent/` once the
-  envelope it answers is no longer in the peer's `q/`.
-- A corrupt entry never reaches a parseable `from`, so it gets no receipt and
-  stays in the sender's `q/`; `fleet msg queue` shows its age.
+  envelope it answers is no longer in the peer's `q/`. When the peer's `q/`
+  directory is absent, `pull` settles nothing.
+- **No receipt.** A corrupt entry never reaches a parseable `from`. An entry
+  that fails `schema` (for example a future `SCHEMA`) or `size` is
+  unparseable here, so `commit` finds nothing to answer. All three stay in the
+  sender's `q/`, are re-pulled each pass, and show only as queue age in
+  `fleet msg queue`. So does an envelope whose id another sender already used
+  (ids are global, §5): the home's `delivered` is for the stored envelope's
+  sender only, so the second sender gets no receipt and a `receipt-withheld`
+  ledger line records it.
 
 ### 7.2 ssh transport (two machines, one dials)
 
@@ -547,6 +558,7 @@ none in v1.
 | compromised lane | sends `task` as the supervisor | method comes from caller evidence; supervisor tasks need a nonce | a same-user process can write files directly; provenance, not prevention |
 | compromised lane | reads or acks another identity's queue | holder check on non-peek inbox and ack; ledger names the reader | direct file moves remain possible; ledger and spool disagree visibly |
 | compromised lane | floods or ping-pongs | size, rate, task budget, hop, path, notice coalescing; no steer | 20 notes/hour per pair still cost reader attention |
+| compromised lane | copies a pending id from a peer's outbox and sends it first | the receiver never confirms `delivered` to a sender other than the stored envelope's | the real message is `duplicate` and not delivered; it shows as queue age, not loss without trace (ids and markers are global, §5) |
 | compromised lane | injects instructions via notices | notices carry no body; inbox prints the method | an agent may still obey an `UNVERIFIED` body it reads |
 | zombie supervisor body | tasks lanes with the live sid | `supervisor-sid` is never direction; tasks need a live nonce | notes from the zombie still arrive, labelled `supervisor-sid` |
 | zombie supervisor body | reads the supervisor queue first | ledger names the reading body; `inbox --all` shows read-but-unacked messages to the live body | the zombie sees the content; reads are not secret between same-sid bodies |

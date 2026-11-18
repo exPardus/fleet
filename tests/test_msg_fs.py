@@ -334,6 +334,63 @@ def test_strike_pass_count_is_a_setting(pair):
     assert len(link.pull(0)) == 1
 
 
+# --- w485 review fixes -------------------------------------------------------
+
+def test_missing_peer_q_settles_no_receipt(pair, tmp_path):          # #72 P2-1
+    env = core.enqueue(pair.a, draft())[1]
+    sync(pair, pair.b)
+    [receipt] = [core.parse(raw) for _q, raw in core.outbox_entries(pair.b, "alpha")]
+    q = pair.a.outbox("beta", "q")
+    q.rename(tmp_path / "moved")                      # peer q/ briefly absent
+    pair.link(pair.b).pull(0)
+    assert q_ids(pair.b, "alpha") == [receipt["id"]] and sent_ids(pair.b, "alpha") == []
+    (tmp_path / "moved").rename(q)                    # back: still pending
+    pair.link(pair.b).pull(0)
+    assert q_ids(pair.b, "alpha") == [receipt["id"]]
+    assert env["id"] in listing(q)[0]
+
+
+def test_commit_refuses_a_symlinked_peer_directory(pair, tmp_path):   # #72 P2-2
+    env = core.enqueue(pair.a, draft())[1]
+    link = pair.link(pair.b)
+    link.pull(0)
+    q = pair.a.outbox("beta", "q")
+    q.rename(tmp_path / "elsewhere")
+    q.symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(transport.TransportError, match="plain directory"):
+        link.commit([env["id"]])
+
+
+def test_schema_and_size_failures_get_no_receipt(pair):              # #72 P2-3
+    env = core.enqueue(pair.a, draft())[1]
+    path = next(pair.a.outbox("beta", "q").iterdir())
+    path.write_bytes(core.canonical(dict(env, kind="bogus")))
+    link = pair.link(pair.b)
+    assert sync(pair, pair.b, link=link) == {env["id"]: "rejected:schema"}
+    assert q_ids(pair.b, "alpha") == []               # no receipt written
+    assert len(listing(pair.a.outbox("beta", "q"))) == 1   # stays queued at the sender
+
+
+def test_second_sender_with_a_used_id_gets_no_delivered(tmp_path):   # #72 P2-4
+    pair = Pair(tmp_path)
+    real = core.enqueue(pair.a, draft())[1]
+    # a third home got there first with the same id
+    forged = draft(frm="x@gamma", msg_id=real["id"])
+    forged["seq"] = 1
+    assert core.publish(pair.b, "lane-2", forged) == "delivered"
+    link = pair.link(pair.b)
+    link.commit([real["id"]])
+    assert q_ids(pair.b, "alpha") == []               # no `delivered` for the wrong sender
+    assert "receipt-withheld" in pair.b.ledger_path.read_text()
+
+
+def test_strike_unit_is_one_pull_call(pair):                         # #72 P2-5
+    plant(pair.a, "beta", 1, b"junk")
+    link = pair.link(pair.b)
+    assert link.pull(0) == [] and link.pull(0) == []
+    assert len(link.pull(0)) == 1                     # three calls on one instance
+
+
 # --- doctrine pins ----------------------------------------------------------------
 
 def _tree(name):
