@@ -8,8 +8,9 @@ paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
 what PR 1 fixed that this spec left open). **Built (plan PR 3):** the §11
 rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). **Built (plan PR 4):**
 the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):** the §9 notice and
-`## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). Every other section is proposed,
-not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
+`## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). **Built (plan PR 2):**
+`fleet msg init/send/inbox/ack/status/queue/ids/whois` in one home in `bin/fleet_msg.py` (§8.1).
+Every other section is proposed, not built; rules, transports and the notice are not wired yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
 **Builds on:** `docs/specs/mailman.md` (mail format, crash-safe filing,
@@ -377,7 +378,7 @@ Every shipped argv, hook and notice names `--fleet-home` explicitly (§13).
 
 ```
 fleet msg init    --site LABEL
-fleet msg send    TO (TEXT | @FILE | -) [--re ID] [--kind note|task] [--needs-answer] [--nonce N]
+fleet msg send    TO (TEXT | @FILE | -) [--re ID] [--kind note|task] [--needs-answer] [--nonce N] [--from NAME]
 fleet msg inbox   [NAME] [--peek] [--all] [--json] [--wait S]
 fleet msg ack     ID...
 fleet msg status  ID
@@ -391,6 +392,47 @@ fleet msg import  --dir DIR --to NAME@SITE
 ```
 
 `inbox --wait` blocks until a message or timeout (exit 3), like `fleet watch`.
+
+### 8.1 Built contract (plan PR 2)
+
+`bin/fleet_msg.py` implements `init`, `send`, `inbox`, `ack`, `status`,
+`queue`, `ids` and `whois` over an injected `MsgPrims` (registry read
+lock-free, the two mail-provenance helpers, the claim, the nonce check, the
+homes list). It imports `fleet_msg_core` only. `bin/fleet.py` adds the `msg`
+subparser, `cmd_msg` and `_msg_prims()`. Every verb needs an explicit
+`--fleet-home`, and every verb but `init` needs `site.json`.
+
+- **`init`** writes `site.json` once (`link()`, never overwrites). The same
+  label again is a no-op; another label is refused, as is a label that
+  another home in the homes list already uses.
+- **Identities.** `supervisor` and `interface` always exist. A lane is a
+  registry row that is not supervisor-shaped; an archived row is
+  `rejected: retired`. A named role exists only as `ids/<name>.json`
+  (written by plan PR 8). Any other local name is refused. A remote
+  `name@site` needs the site in `peers.json` and is `QUEUED`.
+- **Caller proofs** (§10), best first: `supervisor-nonce` (a `--nonce` that
+  matches the held claim; a non-matching nonce refuses the call),
+  `lane-registry`, `supervisor-sid` (caller sid, or Codex thread, equals the
+  claim holder), `interface-registration`. `send` uses the first proof, or
+  the proof for `--from NAME`; `--from` that the caller cannot prove is
+  stamped `unverified`. With no proof and no `--from`, `send` refuses.
+  `detail` for a nonce is `nonce_seq=<n> sha=<8 hex>`, never the nonce.
+- **Read and ack.** Non-peek `inbox` and `ack` need a proof for the
+  identity; the ledger `read` and `acked` lines carry `reader` as
+  `<method>/<body>` (`session:<sid>`, `codex-thread:<id>`, `pane:<p>` or
+  `shell`). `ack` of an unread id moves it `new → cur → done`. `inbox` with
+  no NAME reads the caller's first proven identity.
+- **Display.** Each message prints `VERIFIED <from> <method> via local/<site>`
+  (or `peer/<site>`) or `UNVERIFIED <method>`. A `task` shows as `task` only
+  under the §10 direction rule, else `remote-task`. Missing seqs per sender
+  across `new|cur|done` print as `GAP` lines and block nothing.
+- **Read-only verbs.** `status`, `queue`, `ids`, `whois` and `inbox --peek`
+  write nothing under `state/msg/`. `queue` counts by listing and file age;
+  it warns on an outbox entry older than `outbox_warn_s` (900).
+- **Not yet wired** (plan PR 6): `rules` and `notify` are not passed to
+  `enqueue()`, so §11 bounds other than size and the §9 notice do not run;
+  no `sync`. Archiving a lane does not yet move its spool to `archive/`
+  (T10b). A pi lane has no caller evidence and sends `unverified`.
 
 ## 9. Wake: notice only
 

@@ -4,6 +4,10 @@ Spec: `docs/specs/messaging.md` (revision 2). This plan orders the build into
 small PRs, splits them across at most three parallel lanes with disjoint
 files, and names the tests, risks and exclusions.
 
+**Status:** PRs 0, 1, 3, 4 and 5 merged; PR 2 (local core) built in
+`bin/fleet_msg.py` with `tests/test_msg_local.py` (T7–T10). T10b's spool
+archive on `fleet archive` moves to PR 6.
+
 Every PR carries its own tests and the doc changes for what it ships: the
 spec section it implements moves from "proposed" to "built", plus
 `docs/SPEC.md` §9, `docs/cli-reference.md` and `skills/fleet/SKILL.md` rows

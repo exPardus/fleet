@@ -75,6 +75,15 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet mailman init`](#fleet-mailman-init) — seed mailman.json in the home
   - [`fleet mailman run`](#fleet-mailman-run) — block until a mail needs the interface (exit 0) or timeout (3)
   - [`fleet mailman digest`](#fleet-mailman-digest) — rollup of filed mail
+- [`fleet msg`](#fleet-msg) — durable messages between identities in this home (docs/specs/messaging.md)
+  - [`fleet msg init`](#fleet-msg-init) — set this home's site label
+  - [`fleet msg send`](#fleet-msg-send) — send one message; DELIVERED or QUEUED
+  - [`fleet msg inbox`](#fleet-msg-inbox) — read NAME's queue (new -> cur)
+  - [`fleet msg ack`](#fleet-msg-ack) — acknowledge read messages (cur -> done)
+  - [`fleet msg status`](#fleet-msg-status) — where one message is and its ledger
+  - [`fleet msg queue`](#fleet-msg-queue) — unread, unacked and outbox counts
+  - [`fleet msg ids`](#fleet-msg-ids) — list the identities of this home
+  - [`fleet msg whois`](#fleet-msg-whois) — resolve one identity to its holder
 - [`fleet relay-ack`](#fleet-relay-ack) — append an interface relay and acknowledge one mail file
 - [`fleet wave-close`](#fleet-wave-close) — reap, floor, account, land, push, and notify one wave boundary
 - [`fleet sup-heartbeat`](#fleet-sup-heartbeat) — refresh the supervisor claim heartbeat (no journal write)
@@ -1032,6 +1041,127 @@ usage: fleet mailman digest [-h] [--since WHEN]
 options:
   -h, --help    show this help message and exit
   --since WHEN  <n>m|h|d or ISO UTC timestamp (default 24h)
+```
+
+### fleet msg
+
+```text
+usage: fleet msg [-h] {init,send,inbox,ack,status,queue,ids,whois} ...
+
+positional arguments:
+  {init,send,inbox,ack,status,queue,ids,whois}
+    init                set this home's site label
+    send                send one message; DELIVERED or QUEUED
+    inbox               read NAME's queue (new -> cur)
+    ack                 acknowledge read messages (cur -> done)
+    status              where one message is and its ledger
+    queue               unread, unacked and outbox counts
+    ids                 list the identities of this home
+    whois               resolve one identity to its holder
+
+options:
+  -h, --help            show this help message and exit
+```
+
+#### fleet msg init
+
+```text
+usage: fleet msg init [-h] --site LABEL
+
+options:
+  -h, --help    show this help message and exit
+  --site LABEL
+```
+
+#### fleet msg send
+
+```text
+usage: fleet msg send [-h] [--re ID] [--kind {note,task}] [--needs-answer]
+                      [--nonce N] [--from NAME]
+                      TO TEXT
+
+positional arguments:
+  TO                  NAME or NAME@SITE
+  TEXT                the body, @FILE, or - for stdin
+
+options:
+  -h, --help          show this help message and exit
+  --re ID             reply to this message
+  --kind {note,task}
+  --needs-answer
+  --nonce N           the current supervisor generation (supervisor-nonce)
+  --from NAME         sender identity; unverified unless the caller proves it
+```
+
+#### fleet msg inbox
+
+```text
+usage: fleet msg inbox [-h] [--peek] [--all] [--json] [--wait S] [NAME]
+
+positional arguments:
+  NAME
+
+options:
+  -h, --help  show this help message and exit
+  --peek      read nothing; anyone may peek
+  --all       also list read, unacked messages
+  --json
+  --wait S    block until a message or S seconds (exit 3)
+```
+
+#### fleet msg ack
+
+```text
+usage: fleet msg ack [-h] ID [ID ...]
+
+positional arguments:
+  ID
+
+options:
+  -h, --help  show this help message and exit
+```
+
+#### fleet msg status
+
+```text
+usage: fleet msg status [-h] ID
+
+positional arguments:
+  ID
+
+options:
+  -h, --help  show this help message and exit
+```
+
+#### fleet msg queue
+
+```text
+usage: fleet msg queue [-h] [--json]
+
+options:
+  -h, --help  show this help message and exit
+  --json
+```
+
+#### fleet msg ids
+
+```text
+usage: fleet msg ids [-h]
+
+options:
+  -h, --help  show this help message and exit
+```
+
+#### fleet msg whois
+
+```text
+usage: fleet msg whois [-h] NAME
+
+positional arguments:
+  NAME
+
+options:
+  -h, --help  show this help message and exit
 ```
 
 ### fleet relay-ack
