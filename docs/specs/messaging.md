@@ -7,7 +7,8 @@ paths and the `publish()`/`enqueue()` primitives in `bin/fleet_msg_core.py`,
 `bin/fleet_msg_transport.py` (§5.1 lists
 what PR 1 fixed that this spec left open). **Built (plan PR 3):** the §11
 rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). **Built (plan PR 4):**
-the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). Every other section is proposed,
+the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):** the §9 notice and
+`## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). Every other section is proposed,
 not built; no `fleet msg` verb ships yet. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -405,13 +406,39 @@ wake is a notice line, `FLEET MSG <id> from <from> (<method>). Run fleet
 | unbound role | none; `fleet msg queue` shows it |
 
 - One pending notice per (identity, sender): no new notice while the identity
-  has an unread message from that sender.
+  has an unread message from that sender. Receipts (§6) are bookkeeping, not
+  mail: they never notice, never coalesce and never appear in `## MESSAGES`.
 - `compose_prompt` adds `## MESSAGES` (ids, senders, methods) for the lane's
   identity. It does not mark anything read.
 - No adapter steers, forks, dispatches, takes `fleet.lock` or writes the
   registry. To act on an idle body now, the sender runs `fleet send` itself,
   with its own gates. A Claude sender may also `SendMessage` a pointer;
   fleet never does.
+
+### 9.1 Built contract (plan PR 5)
+
+`bin/fleet_msg_wake.py` holds the wake as functions over an injected
+`WakePrims` (`fleet_home`, `adapter_of(name)`, `holder_sid(name)`,
+`append_mailbox(sid, text)`). It imports only `fleet_msg_core`, takes no lock
+and writes no registry.
+
+- **Notice.** `notice_line(env, home)` is the §9 line: id, sender, method. It
+  never holds a body. `make_notify(store, prims)` is the `notify` hook for
+  `publish()`; a failure raises and `publish()` logs `notice-failed`.
+- **Per adapter.** `adapter_of` returns `claude`, `codex`, `pi`, `interface`
+  or `unbound`. Only `claude` with a holder sid gets `append_mailbox`. The
+  others return `drain-only`: their wake is the drain block or `msg inbox`.
+- **Coalescing.** `notice_due`: no notice while an earlier message (by
+  `(sent_at, id)`) from the same sender is in the identity's `new/`, so the
+  earliest of a concurrent batch always notices. After a read the next message
+  notices. The scan reads at most 200 `new/` entries and fails open.
+- **Receipts are bookkeeping, not mail.** `unread()`, `notice_due()` and
+  `drain_block()` ignore `kind: receipt` entirely: a receipt never counts as
+  unread, never coalesces a real message and never appears in the drain block.
+- **Drain block.** `drain_block(store, prims, name)` returns `## MESSAGES`, one
+  `- <id> from <from> (<method>)` line per unread message (at most 20, then
+  `- ... N more`), and the inbox command; `""` when nothing is unread. It
+  lists `new/` only and moves nothing.
 
 ## 10. Caller authentication
 
