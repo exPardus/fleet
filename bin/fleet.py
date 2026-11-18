@@ -28941,6 +28941,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--since", default=fleet_mailman.DIGEST_DEFAULT_SINCE, metavar="WHEN",
         help="<n>m|h|d or ISO UTC timestamp (default 24h)")
 
+    p_msg = sub.add_parser(
+        "msg", help="durable messages between identities in this home (docs/specs/messaging.md)")
+    msg_sub = p_msg.add_subparsers(dest="msg_command", required=True)
+    msg_sub.add_parser("init", help="set this home's site label").add_argument(
+        "--site", required=True, metavar="LABEL")
+    p_msg_send = msg_sub.add_parser("send", help="send one message; DELIVERED or QUEUED")
+    p_msg_send.add_argument("to", metavar="TO", help="NAME or NAME@SITE")
+    p_msg_send.add_argument("text", metavar="TEXT", help="the body, @FILE, or - for stdin")
+    p_msg_send.add_argument("--re", default=None, metavar="ID", help="reply to this message")
+    p_msg_send.add_argument("--kind", choices=("note", "task"), default="note")
+    p_msg_send.add_argument("--needs-answer", action="store_true")
+    p_msg_send.add_argument("--nonce", default=None, metavar="N",
+                            help="the current supervisor generation (supervisor-nonce)")
+    p_msg_send.add_argument("--from", dest="sender", default=None, metavar="NAME",
+                            help="sender identity; unverified unless the caller proves it")
+    p_msg_inbox = msg_sub.add_parser("inbox", help="read NAME's queue (new -> cur)")
+    p_msg_inbox.add_argument("name", nargs="?", default=None, metavar="NAME")
+    p_msg_inbox.add_argument("--peek", action="store_true", help="read nothing; anyone may peek")
+    p_msg_inbox.add_argument("--all", action="store_true", help="also list read, unacked messages")
+    p_msg_inbox.add_argument("--json", action="store_true")
+    p_msg_inbox.add_argument("--wait", type=float, default=None, metavar="S",
+                             help="block until a message or S seconds (exit 3)")
+    msg_sub.add_parser("ack", help="acknowledge read messages (cur -> done)").add_argument(
+        "ids", nargs="+", metavar="ID")
+    msg_sub.add_parser("status", help="where one message is and its ledger").add_argument(
+        "id", metavar="ID")
+    msg_sub.add_parser("queue", help="unread, unacked and outbox counts").add_argument(
+        "--json", action="store_true")
+    msg_sub.add_parser("ids", help="list the identities of this home")
+    msg_sub.add_parser("whois", help="resolve one identity to its holder").add_argument(
+        "name", metavar="NAME")
+
     p_relay = sub.add_parser(
         "relay-ack", help="append an interface relay and acknowledge one mail file")
     p_relay.add_argument("--mail", required=True, metavar="FILE")
@@ -29451,6 +29483,8 @@ def main(argv=None) -> int:
             return cmd_relay_ack(args)
         if args.command == "mailman":
             return cmd_mailman(args)
+        if args.command == "msg":
+            return cmd_msg(args)
         if args.command == "wave-close":
             return cmd_wave_close(args)
         if args.command == "sup-heartbeat":
@@ -30734,6 +30768,38 @@ def cmd_mailman(args) -> int:
     return fleet_mailman.cmd_run(
         home, _mailman_prims(), timeout=args.timeout, interval=args.interval,
         dry_run=args.dry_run, include_reported=args.include_reported)
+
+
+def _msg_prims():
+    """Read-only fleet helpers for `fleet_msg` (no lock, no registry write)."""
+    import fleet_msg
+
+    def workers():
+        records = _registry_records_or_none()
+        found = records.get("workers") if isinstance(records, dict) else None
+        return found if isinstance(found, dict) else None
+
+    return fleet_msg.MsgPrims(
+        fleet_home=Path(FLEET_HOME),
+        workers=workers,
+        is_supervisor_shaped=_is_supervisor_shaped,
+        lane_sender=_registered_lane_mail_sender,
+        interface_source=_registered_interface_mail_source,
+        caller_sid=lambda: None if (os.environ.get("MCX_WORKER") == "1"
+                                    or os.environ.get("CODEX_THREAD_ID"))
+        else current_caller_session(),
+        codex_thread=lambda: os.environ.get("CODEX_THREAD_ID") or None,
+        claim=read_incarnation,
+        nonce_presentation=_nonce_presentation,
+        nonce_digest=nonce_digest,
+        homes=lambda: list(read_homes_list().get("members") or []))
+
+
+def cmd_msg(args) -> int:
+    if not getattr(args, "_fleet_home_explicit", False):
+        raise FleetCliError("msg requires an explicit --fleet-home")
+    import fleet_msg
+    return fleet_msg.run(args, _msg_prims())
 
 
 LANE_DONE_SHA_KEEP = 32

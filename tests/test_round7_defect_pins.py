@@ -585,6 +585,10 @@ RATIFIED_BUT_UNBUILT = ()
 # (new, accept) or a verify stamp under `state/spec-verify/`; it dispatches
 # nothing and steers no worker. Its tier is operator-owned and waits here
 # under the fail-safe `destructive` default.
+# `msg` (docs/specs/messaging.md, plan PR 2) writes envelopes into the home's
+# message spool and moves them between spool states (`ack`); it dispatches and
+# steers nothing and wakes nothing yet. Its tier is operator-owned and waits
+# here under the fail-safe `destructive` default.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
                                      "lane-done", "stream-recover",
                                      "sup-reconcile", "codex-respond",
@@ -593,7 +597,7 @@ UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief
                                      "codex-settle-preaccept",
                                      "codex-settle-rejected",
                                      "codex-recover-failed-client", "mailman",
-                                     "spec")
+                                     "spec", "msg")
 
 
 def _classified_verbs():

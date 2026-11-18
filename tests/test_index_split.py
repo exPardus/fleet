@@ -93,8 +93,10 @@ def test_modules_use_only_stdlib_and_approved_siblings(module):
         # (docs/specs/codex-native-integration.md §5); it is stdlib-only too.
         # fleet_codex_failed_client_recovery is imported lazily by its verb
         # (docs/specs/codex-failed-client-recovery.md).
+        # fleet_msg is imported lazily by the `msg` verb (docs/specs/messaging.md).
         "fleet": {"fleet_index", "fleet_errors", "fleet_codex", "fleet_lock",
-                  "fleet_platform", "fleet_codex_failed_client_recovery"},
+                  "fleet_platform", "fleet_codex_failed_client_recovery",
+                  "fleet_msg"},
         "fleet_index": {"fleet_errors"},
         "fleet_errors": set(),
         "fleet_codex": {"fleet_errors", "fleet_platform"},
