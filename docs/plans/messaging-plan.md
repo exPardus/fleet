@@ -189,3 +189,9 @@ Delta review (d60fb6b3):
 - **P2-7, cutting the generic named-role identity**: refused. Persistent named
   roles beyond lanes, supervisor and interface (for example `ops`, `hub`) are
   a stated requirement of this work; they stay, with concrete bindings only.
+
+## PR 6 review deferrals (PR #77)
+
+- The §11 history in `msg send` (`_history`) still scans the whole ledger once per
+  send. A tail or time-window read is deferred; the per-sync-pass ingest cap and
+  retired-name reads are cached in `sync_fs_peer`.

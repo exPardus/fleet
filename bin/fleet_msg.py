@@ -201,6 +201,8 @@ def _log_nonce_rejection(prims: MsgPrims, claim, nonce: str, presented) -> None:
     to log never changes the refusal."""
     if prims.log_nonce_rejection is None or not isinstance(claim, dict):
         return
+    if presented == "pending":
+        return                           # a legitimate generation, not second-body evidence
     kind = "superseded-pending" if presented == "prior" else "refused"
     try:
         prims.log_nonce_rejection(kind, claim, nonce)
@@ -355,6 +357,7 @@ def _verified_line(store: core.Store, env: dict) -> str:
 
 
 GAP_RANGES_MAX = 20
+HOSTED_REGISTRY_MAX = 8 * 1024 * 1024   # a peer registry past this is not read
 
 
 def _ns_key(env: dict) -> str:
@@ -380,10 +383,10 @@ def _hwm_apply(marks: dict, key: str, seq: int) -> None:
     while True:
         while mark["upto"] + 1 in above:
             mark["upto"] += 1
-            above.discard(mark["upto"])
+        above = {s for s in above if s > mark["upto"]}
         if len(above) <= HWM_ABOVE_MAX:
             break
-        mark["upto"] = min(above)
+        mark["upto"] = min(above)        # settles the oldest hole; the next pass prunes it
     mark["above"] = sorted(above)
 
 
@@ -540,19 +543,24 @@ def hosted_names(prims: MsgPrims, home: Path) -> list:
     """Identities the home at `home` hosts (§3): supervisor, interface, every
     non-supervisor-shaped registry row, and named roles. Read-only."""
     names = {SUPERVISOR, INTERFACE}
+    home = Path(home)
     try:
-        data = json.loads((Path(home) / "state" / "fleet.json").read_text(encoding="utf-8"))
+        fsx._require_plain_chain(home, home / "state")
+        raw = core._read_regular(home / "state" / "fleet.json", HOSTED_REGISTRY_MAX)
+        data = json.loads(raw.decode("utf-8")) if raw and len(raw) <= HOSTED_REGISTRY_MAX else None
         workers = data.get("workers") if isinstance(data, dict) else None
         if isinstance(workers, dict):
             names.update(n for n in workers if core.valid_name(n)
                          and not prims.is_supervisor_shaped(n))
-    except (OSError, UnicodeError, ValueError):
+    except (OSError, UnicodeError, ValueError, core.StoreError, transport.TransportError):
         pass
     try:
-        for entry in os.listdir(Path(home) / "state" / "msg" / "ids"):
+        ids = home / "state" / "msg" / "ids"
+        fsx._require_plain_chain(home, ids)
+        for entry in os.listdir(ids):
             if entry.endswith(".json") and core.valid_name(entry[:-5]):
                 names.add(entry[:-5])
-    except OSError:
+    except (OSError, transport.TransportError):
         pass
     return sorted(names)
 
@@ -592,8 +600,12 @@ def sync_fs_peer(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> d
             hosted=tuple(hosted_names(prims, prims.fleet_home)))
         remote = fs.hello(local)
         limits = _limits(store)
-        admit = rules.make_admit(limits, site, lambda s: _recent_ingests(store, s),
-                                 lambda: _retired_names(prims), prims.clock)
+        # One ledger and registry read per pass; accepted receive times are
+        # appended in memory so the §11 cap still counts this pass's envelopes.
+        recent = _recent_ingests(store, site)
+        retired = _retired_names(prims)
+        admit = rules.make_admit(limits, site, lambda _s: recent, lambda: retired,
+                                 prims.clock)
         notify = _notify(prims, store)
         counts = {"pulled": 0, "accepted": 0, "duplicate": 0, "rejected": 0}
         ids = []
@@ -603,7 +615,10 @@ def sync_fs_peer(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> d
                                  now=prims.clock(), admit=admit, notify=notify)
             counts["rejected" if result.startswith("rejected") else result] += 1
             try:
-                msg_id = core.parse(raw)["id"]
+                parsed = core.parse(raw)
+                msg_id = parsed["id"]
+                if result == "accepted" and parsed.get("kind") != "receipt":
+                    recent.append(prims.clock())
             except core.EnvelopeError:
                 msg_id = fs.entry_id(qseq)
             if msg_id is not None:
@@ -666,8 +681,8 @@ def archive_spool(prims: MsgPrims, name: str) -> "Path | None":
             stamp = time.strftime("%Y%m", time.gmtime(now))
             target = store.root / "archive" / stamp / f"spool-{name}-{int(now)}"
             store._ensure_dir(target.parent)
-            if os.path.lexists(target):
-                return None
+            if os.path.lexists(target):      # same-second re-archive: never leave the old spool
+                target = target.parent / f"{target.name}-{core.new_id()[:8]}"
             os.replace(str(source), str(target))
             store.fsync_dir(target.parent)
             store.fsync_dir(source.parent)

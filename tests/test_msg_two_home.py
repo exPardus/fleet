@@ -2,6 +2,7 @@
 §10, §11; plan PR 6, T13, T14, T14b, T14c, T10b and the PR 2 review
 deferrals)."""
 import inspect
+import dataclasses
 import json
 import re
 from datetime import datetime, timezone
@@ -361,16 +362,24 @@ def test_hwm_is_bounded_and_read_only_verbs_write_no_mark(two, monkeypatch, caps
     for seq in range(2, 2 * fleet_msg.HWM_ABOVE_MAX + 2, 2):         # every other seq
         fleet_msg._hwm_apply(marks, "k", seq)
     assert len(marks["k"]["above"]) <= fleet_msg.HWM_ABOVE_MAX
+    # One past the bound with a hole after every seq: must terminate (P1-1).
+    marks = {}
+    for seq in range(2, 2 * (fleet_msg.HWM_ABOVE_MAX + 2) + 2, 2):
+        fleet_msg._hwm_apply(marks, "k", seq)
+    assert len(marks["k"]["above"]) <= fleet_msg.HWM_ABOVE_MAX
+    assert all(s > marks["k"]["upto"] for s in marks["k"]["above"])
     as_body(monkeypatch, sid=SID_A)
     assert msg(a, "send", "lane-b", "x") == 0
-    capsys.readouterr()
-    for argv in (("queue",), ("ids",), ("inbox", "lane-b", "--peek"), ("whois", "lane-b")):
+    msg_id = sent_id(capsys)
+    for argv in (("queue",), ("ids",), ("inbox", "lane-b", "--peek"), ("whois", "lane-b"),
+                 ("status", msg_id)):
         assert msg(a, *argv) == 0
     assert not (a / "state/msg/hwm").exists()
 
 
 @pytest.mark.parametrize("which,kind", [("wrong", "refused"),
-                                        ("prior", "superseded-pending")])
+                                        ("prior", "superseded-pending"),
+                                        ("pending", None)])
 def test_refused_nonce_presentation_is_logged_for_doctor(two, monkeypatch, capsys, which, kind):
     a, _b = two
     claim(a)
@@ -380,15 +389,39 @@ def test_refused_nonce_presentation_is_logged_for_doctor(two, monkeypatch, capsy
         data["prior_pending_hash"] = fleet.nonce_digest(prior)
         (a / "supervisor" / "INCARNATION").write_text(json.dumps(data), encoding="utf-8")
     presented = prior if which == "prior" else "wrong-nonce-value"
+    log = a / "state" / "supervisor-nonce-rejections.jsonl"
+    if which == "pending":
+        pending = "the-pending-generation-nonce"
+        data["pending_nonce_hash"] = fleet.nonce_digest(pending)
+        (a / "supervisor" / "INCARNATION").write_text(json.dumps(data), encoding="utf-8")
+        presented = pending
     as_body(monkeypatch, sid=SUP_SID)
     assert msg(a, "send", "lane-a", "x", "--nonce", presented) == 1
     capsys.readouterr()
-    log = a / "state" / "supervisor-nonce-rejections.jsonl"
+    if kind is None:                     # a pending generation is not second-body evidence
+        assert not log.exists() or presented not in log.read_text()
+        assert not log.exists() or '"refused"' not in log.read_text()
+        assert spool(a, "lane-a", "new") == []
+        return
     record = json.loads(log.read_text().splitlines()[-1])
     assert record["kind"] == kind and record["verb"] == "msg"
     assert record["presented_prefix"] == fleet.nonce_digest(presented)[:8]
     assert presented not in log.read_text()
     assert spool(a, "lane-a", "new") == []
+
+
+def test_hosted_names_ignores_a_symlinked_peer_fleet_json(two, tmp_path):   # P2-3
+    a, b = two
+    prims = fleet._msg_prims()
+    registry(b, {"lane-b": _lane(SID_B)})
+    assert "lane-b" in fleet_msg.hosted_names(prims, b)
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"workers": {"lane-evil": {}}}), encoding="utf-8")
+    (b / "state" / "fleet.json").unlink()
+    (b / "state" / "fleet.json").symlink_to(outside)
+    names = fleet_msg.hosted_names(prims, b)
+    assert "lane-evil" not in names and "lane-b" not in names
+    assert {"supervisor", "interface"} <= set(names)
 
 
 # --- T10b --------------------------------------------------------------------
@@ -410,6 +443,23 @@ def test_t10b_archive_moves_the_spool_and_a_reused_name_starts_empty(two, monkey
     assert msg(a, "inbox") == 0
     assert "EMPTY" in capsys.readouterr().out
     assert fleet_msg.archive_spool(fleet._msg_prims(), "lane-a") is None   # nothing to move
+
+
+def test_archive_spool_same_second_collision_is_uniquified(two, monkeypatch, capsys):
+    a, _b = two
+    targets, frozen = [], None
+    for text in ("first", "second"):
+        as_body(monkeypatch, sid=SID_B)
+        assert msg(a, "send", "lane-a", text) == 0
+        capsys.readouterr()
+        base = fleet._msg_prims()               # FLEET_HOME is set by the msg call
+        frozen = frozen or base.clock()
+        prims = dataclasses.replace(base, clock=lambda: frozen)
+        t = fleet_msg.archive_spool(prims, "lane-a")
+        assert t is not None, text
+        targets.append(t)
+        assert not (a / "state/msg/spool/lane-a").exists()
+    assert targets[0] != targets[1] and all(t.is_dir() for t in targets)
 
 
 def test_cmd_archive_moves_the_spool_after_each_move_phase():

@@ -469,7 +469,9 @@ and the gate call.
   `FAILED <site>: ...`, exits 1, and never stops the others. A non-peek
   `inbox` runs the same pass first, naming a failing peer on stderr; `--peek`
   never syncs. `hosted` for a home is `supervisor`, `interface`, its
-  non-supervisor-shaped registry rows and its `ids/` roles. `ssh` peers are
+  non-supervisor-shaped registry rows and its `ids/` roles, read through a
+  plain-directory chain and a size-capped regular-file reader (a symlinked or
+  oversized peer `fleet.json` contributes nothing). `ssh` peers are
   skipped until plan PR 7.
 - **Unverified namespace.** A send with method `unverified` or
   `legacy-unverified` draws its seq from `seq/<from>__<to>.unv`, is counted
@@ -496,7 +498,8 @@ and the gate call.
 - **Spool archive (T10b).** `fleet archive` of a lane renames
   `spool/<name>/` to `archive/<yyyymm>/spool-<name>-<epoch>/` after the
   lane's own move phase; nothing is deleted and a failure never fails the
-  archive. A later lane of the same name starts with an empty spool. Seq
+  archive. A same-second collision takes a `-<id8>` suffix. A later lane of the
+  same name starts with an empty spool. Seq
   counters stay.
 
 ## 9. Wake: notice only
