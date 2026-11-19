@@ -340,3 +340,79 @@ def test_fold_ignores_bad_ids_and_planted_links(tmp_path):
     path.symlink_to(other)
     folded = mig.fold(store, env["id"])
     assert folded is not None and folded.envelope is None and folded.verified is False
+
+
+# --- review fixes (w485 PR 83) ----------------------------------------------
+
+def _age_all(root, seconds):
+    for dirpath, _dirs, files in os.walk(root):
+        for f in files:
+            p = os.path.join(dirpath, f)
+            os.utime(p, (NOW - seconds, NOW - seconds))
+
+
+def test_import_stays_duplicate_after_compact_remote(tmp_path):
+    store, out = make_store(tmp_path), tmp_path / "out"
+    mail(out, "a.mail", "from: ops\nkind: note\n\nhi\n")
+    first = mig.import_dir(store, out, "hub@b")
+    assert len(first.imported) == 1
+    store.outbox("b", "sent").mkdir(parents=True, exist_ok=True)
+    for n in os.listdir(store.outbox("b", "q")):
+        os.rename(store.outbox("b", "q") / n, store.outbox("b", "sent") / n)
+    _age_all(store.root, 40 * 86400)
+    assert core.compact(store, now=NOW + 1)["sent"] == 1
+    second = mig.import_dir(store, out, "hub@b")
+    assert second.imported == [] and second.duplicate == first.imported
+    assert not os.listdir(store.outbox("b", "q"))
+
+
+def test_import_compact_after_ack_local(tmp_path):
+    store, out = make_store(tmp_path), tmp_path / "out"
+    mail(out, "a.mail", "from: ops\nkind: note\n\nhi\n")
+    mig.import_dir(store, out, "hub@a")
+    (store.spool("hub", "done")).mkdir(parents=True, exist_ok=True)
+    for n in os.listdir(store.spool("hub", "new")):
+        os.rename(store.spool("hub", "new") / n, store.spool("hub", "done") / n)
+    _age_all(store.root, 40 * 86400)
+    counts = core.compact(store, now=NOW + 1)
+    assert counts["done"] == 1
+    again = mig.import_dir(store, out, "hub@a")
+    assert again.imported == [] and len(again.duplicate) == 1
+    assert not os.listdir(store.spool("hub", "new"))
+
+
+def test_declared_msg_id_collision_is_skipped(tmp_path):
+    store, out = make_store(tmp_path), tmp_path / "out"
+    known = "cd" * 16
+    mail(out, "a.mail", f"from: ops\nkind: note\nmsg-id: {known}\n\nfirst\n")
+    mig.import_dir(store, out, "hub@a")
+    mail(out, "b.mail", f"from: ops\nkind: note\nmsg-id: {known}\n\nedited\n")
+    mail(out, "c.mail", f"from: ops\nkind: note\nmsg-id: {known}\n\nfirst\n")
+    result = mig.import_dir(store, out, "hub@a")
+    assert ("b.mail", mig.COLLISION) in result.skipped
+    assert [n for n, _ in result.duplicate] == ["a.mail", "c.mail"]
+    assert len(os.listdir(store.spool("hub", "new"))) == 1
+
+
+def test_declared_msg_id_collision_other_recipient(tmp_path):
+    store, out = make_store(tmp_path), tmp_path / "out"
+    known = "ef" * 16
+    mail(out, "a.mail", f"from: ops\nkind: note\nmsg-id: {known}\n\nhi\n")
+    mig.import_dir(store, out, "hub@a")
+    result = mig.import_dir(store, out, "other@a")
+    assert result.skipped == [("a.mail", mig.COLLISION)]
+    assert result.imported == []
+
+
+def test_duplicate_writes_missing_imported_ledger_line(tmp_path):
+    store, out = make_store(tmp_path), tmp_path / "out"
+    mail(out, "a.mail", "from: ops\nkind: note\n\nhi\n")
+    raw = (out / "a.mail").read_bytes()
+    draft = mig._envelope_for(store, "a.mail", raw, "hub@a")
+    core.enqueue(store, draft)          # delivered, crash before the `imported` line
+    assert not any(e == "imported" for _t, e in mig._events(store, draft["id"]))
+    result = mig.import_dir(store, out, "hub@a")
+    assert len(result.duplicate) == 1
+    assert [e for _t, e in mig._events(store, draft["id"]) if e == "imported"] == ["imported"]
+    mig.import_dir(store, out, "hub@a")
+    assert [e for _t, e in mig._events(store, draft["id"]) if e == "imported"] == ["imported"]

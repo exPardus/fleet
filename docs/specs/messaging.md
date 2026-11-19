@@ -823,7 +823,14 @@ takes no lock and imports only `fleet_msg_core`.
   (`legacy` when nothing valid remains), `sent_at` at import time. The id is
   the file's `msg-id` header when it is a valid id (so a rendered mail
   imported back dedups against the original), else a hash of file name and
-  bytes. A crash at any step and a second run send each file at most once.
+  bytes. Before `enqueue` the import writes a durable record
+  `state/msg/imported/<id>` (recipient and body hash) and after it `<id>.ok`;
+  `compact` never touches that directory, so a second run sends each file at
+  most once even after the spool, outbox and markers are archived. A declared
+  `msg-id` is accepted only when the stored envelope (or the record) has the
+  same body and recipient; otherwise the file is skipped with `msg-id collides
+  with a different message`. A duplicate with no `imported` ledger line writes
+  it. A mailman `kind: task` arrives as a `note`.
   Hidden names, `*.tmp`, symlinks, non-regular and oversize (over 1 MiB)
   files, malformed mail and bodies over the envelope bounds are skipped and
   left in place with a reason. The `re` header is not imported (the parent is
@@ -835,6 +842,12 @@ takes no lock and imports only `fleet_msg_core`.
   marked or ledger; `envelope`; `events`; `verified`, true only for a stored
   envelope whose method is not unverified). Read-only: no lock, no write.
   PR 9b makes `fleet mail verify` read it before the old store.
+- **Tolerated in v1.** The render checks `done/` and then links, so mailman
+  filing the same name between the two steps can deliver the mail twice
+  (narrow window, separate process). `state/msg/render/` keeps one staged
+  file per mail to `interface` and `compact` does not cover it. `fold` reads
+  the live store only: a compacted message reads as unknown, so PR 9b's
+  `mail verify` covers the live window and falls through for older ids.
 
 ## 13. Doctrine and tiers
 

@@ -39,6 +39,7 @@ import fleet_msg_core as core
 
 MAIL_MAX_BYTES = 1024 * 1024          # mailman's bound (docs/specs/mailman.md §3)
 LEGACY_SENDER = "legacy"
+COLLISION = "msg-id collides with a different message"
 RENDER_PREFIX = "msg-"
 INTERFACE = "interface"
 _HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):[ \t]*(.*)$")
@@ -250,6 +251,78 @@ def _envelope_for(store: core.Store, name: str, raw: bytes, to: str) -> dict:
         msg_id=msg_id)
 
 
+def _body_sha(body: str) -> str:
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _record_path(store: core.Store, msg_id: str, suffix: str = "") -> Path:
+    return store.root / "imported" / (msg_id + suffix)
+
+
+def _read_record(store: core.Store, msg_id: str):
+    """The intent record of `msg_id` as a dict, None when absent or unreadable."""
+    try:
+        raw = core._read_regular(_record_path(store, msg_id), 4096)
+        data = json.loads(raw.decode("utf-8")) if raw else None
+    except (core.StoreError, OSError, UnicodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _matches(record: dict, draft: dict) -> bool:
+    return (record.get("to") == draft["to"]
+            and record.get("body_sha") == _body_sha(draft["body"]))
+
+
+def _declared_collides(store: core.Store, draft: dict) -> bool:
+    """True when a stored message already owns `draft`'s id with a different
+    body or recipient, or with content that can no longer be compared."""
+    known = fold(store, draft["id"])
+    if known is None:
+        return False
+    env = known.envelope
+    return not (env and env.get("to") == draft["to"]
+                and env.get("body") == draft["body"])
+
+
+def _import_one(store: core.Store, draft: dict, to: str, name: str, rules) -> tuple:
+    """Import one draft. Returns ("imported"|"duplicate", None) or
+    ("skip", reason).
+
+    The durable record `state/msg/imported/<id>` (intent, before enqueue) and
+    `<id>.ok` (after) live outside `compact`, so a re-run stays a duplicate
+    after the spool, outbox and markers are archived.
+    """
+    msg_id = draft["id"]
+    record = _read_record(store, msg_id)
+    if record is not None and not _matches(record, draft):
+        return "skip", COLLISION
+    if record is not None and os.path.lexists(_record_path(store, msg_id, ".ok")):
+        _ledger_import(store, msg_id, to, name)
+        return "duplicate", None
+    if record is None and _declared_collides(store, draft):
+        return "skip", COLLISION
+    if record is None:
+        data = json.dumps({"to": to, "body_sha": _body_sha(draft["body"])},
+                          sort_keys=True).encode("utf-8")
+        store._write_new(store.root / "imported" / "tmp",
+                         _record_path(store, msg_id), data, msg_id)
+    status, _env = core.enqueue(store, draft, rules=rules)
+    store._write_new(store.root / "imported" / "tmp",
+                     _record_path(store, msg_id, ".ok"), b"ok\n", msg_id)
+    if status in ("delivered", "queued"):
+        store.ledger("imported", id=msg_id, to=to, source=name[:64])
+        return "imported", None
+    _ledger_import(store, msg_id, to, name)
+    return "duplicate", None
+
+
+def _ledger_import(store: core.Store, msg_id: str, to: str, name: str) -> None:
+    """Write the `imported` line when a crash or `compact` left none."""
+    if not any(event == "imported" for _ts, event in _events(store, msg_id)):
+        store.ledger("imported", id=msg_id, to=to, source=name[:64])
+
+
 def import_dir(store: core.Store, directory, to: str, *,
                rules=None) -> ImportResult:
     """Send each mailman-format file of `directory` to `to` (`name@site`).
@@ -281,14 +354,16 @@ def import_dir(store: core.Store, directory, to: str, *,
             result.skipped.append((name, str(exc) or type(exc).__name__))
             continue
         try:
-            status, env = core.enqueue(store, draft, rules=rules)
+            decision = _import_one(store, draft, to, name, rules)
         except core.Refused as exc:
             result.skipped.append((name, f"refused: {exc}"))
             continue
-        bucket = result.imported if status in ("delivered", "queued") else result.duplicate
-        bucket.append((name, draft["id"]))
-        if status in ("delivered", "queued"):
-            store.ledger("imported", id=draft["id"], to=to, source=name[:64])
+        if decision[0] == "skip":
+            result.skipped.append((name, decision[1]))
+        elif decision[0] == "imported":
+            result.imported.append((name, draft["id"]))
+        else:
+            result.duplicate.append((name, draft["id"]))
     return result
 
 
