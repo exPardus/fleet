@@ -28890,6 +28890,15 @@ def build_parser() -> argparse.ArgumentParser:
     ).add_argument("--peer", default=None, metavar="SITE")
     msg_sub.add_parser("compact", help="pack old messages and ledger into archive/<yyyymm>/")
     msg_sub.add_parser("ids", help="list the identities of this home")
+    p_msg_bind = msg_sub.add_parser(
+        "bind", help="bind a named role to a concrete holder (epoch +1)")
+    p_msg_bind.add_argument("name", metavar="NAME")
+    p_msg_bind.add_argument("--binding", required=True, metavar="B",
+                            help="lane:<worker>, session:<sid>, codex-thread:<id> or pi-job:<id>")
+    p_msg_bind.add_argument("--nonce", default=None, metavar="N", help=GATE_NONCE_ARG_HELP)
+    p_msg_retire = msg_sub.add_parser("retire", help="retire a named role (kept, not deleted)")
+    p_msg_retire.add_argument("name", metavar="NAME")
+    p_msg_retire.add_argument("--nonce", default=None, metavar="N", help=GATE_NONCE_ARG_HELP)
     msg_sub.add_parser("whois", help="resolve one identity to its holder").add_argument(
         "name", metavar="NAME")
 
@@ -30758,7 +30767,8 @@ def cmd_msg(args) -> int:
     if not getattr(args, "_fleet_home_explicit", False):
         raise FleetCliError("msg requires an explicit --fleet-home")
     import fleet_msg
-    if (args.msg_command == "send" and args.kind == "task"
+    if (((args.msg_command == "send" and args.kind == "task")
+         or args.msg_command in ("bind", "retire"))
             and _registered_lane_mail_sender() is None
             and _registered_interface_mail_source() is None):
         # A task is direction (§10): a caller that is neither a registered

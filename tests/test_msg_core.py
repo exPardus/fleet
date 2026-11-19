@@ -16,7 +16,7 @@ import fleet_msg_core as core
 import fleet_msg_transport as transport
 
 BIN = Path(__file__).resolve().parents[1] / "bin"
-MODULES = ("fleet_msg_core.py", "fleet_msg_transport.py")
+MODULES = ("fleet_msg_core.py", "fleet_msg_transport.py", "fleet_msg_bind.py")
 NOW = 1_800_000_000.0
 AUTH = {"method": "unverified", "detail": None}
 
@@ -666,6 +666,8 @@ ALLOWED_DESTRUCTIVE = {
                           ("_archive_move", "replace"), ("_compact_ledger", "replace"), ("_reseed", "replace"),
                           ("purge", "rmtree")},
     "fleet_msg_transport.py": set(),
+    # a role record is rewritten tmp -> rename under the spool lock (epoch +1)
+    "fleet_msg_bind.py": {("_write_role", "replace")},
 }
 
 

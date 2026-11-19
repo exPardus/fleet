@@ -12,6 +12,7 @@ the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):*
 `fleet msg init/send/inbox/ack/status/queue/ids/whois` in one home in `bin/fleet_msg.py` (§8.1).
 **Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
 **Built (plan PR 10):** `fleet msg compact` and the `purge` seam in `bin/fleet_msg_core.py` (§6.1).
+**Built (plan PR 8):** named roles, `fleet msg bind` and `retire`, in `bin/fleet_msg_bind.py` (§8.3).
 Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -588,7 +589,7 @@ and the gate call.
   from a caller that is neither a registered lane nor the registered
   Interface calls `_supervisor_gate("msg", nonce=...)` first (exit 4 under a
   fresh claim without a live nonce). `bind` is gated the same way when plan
-  PR 8 adds it. `cmd_send` still refuses a supervisor task without a live
+  PR 8 added it (§8.3). `cmd_send` still refuses a supervisor task without a live
   nonce.
 - **Spool archive (T10b).** `fleet archive` of a lane renames
   `spool/<name>/` to `archive/<yyyymm>/spool-<name>-<epoch>/` after the
@@ -596,6 +597,49 @@ and the gate call.
   archive. A same-second collision takes a `-<id8>` suffix. A later lane of the
   same name starts with an empty spool. Seq
   counters stay.
+
+### 8.3 Built contract (plan PR 8, named roles)
+
+`bin/fleet_msg_bind.py` (imports `fleet_msg_core` only) owns the role record
+`ids/<name>.json`; `bin/fleet_msg.py` adds `cmd_bind` and `cmd_retire`, and
+`bin/fleet.py` adds the two subparsers and the gate arm in `cmd_msg`.
+
+```
+fleet msg bind   NAME --binding B [--nonce N]
+fleet msg retire NAME [--nonce N]
+```
+
+- **Who.** `bind` and `retire` need `supervisor-nonce` or
+  `interface-registration` (`bound_by`). A worker turn (a registered lane with
+  no live nonce) is refused. The gate arm is the one `send --kind task` uses:
+  a caller that is neither a registered lane nor the registered Interface goes
+  through `_supervisor_gate("msg", nonce=...)` (exit 4 under a fresh claim
+  without a live nonce).
+- **Bindings are concrete.** `lane:<worker>` (a live, non-archived registry
+  lane), `session:<sid>`, `codex-thread:<id>` or `pi-job:<id>` (an id of
+  `[A-Za-z0-9._-]`, at most 128). `supervisor`, `interface` and every
+  registry lane name are refused as role names.
+- **Resolution.** A `lane:<worker>` binding resolves through the registry at
+  each read, so it follows fork-steer, respawn and Codex thread rotation with
+  no rebind: the retired body fails the holder check and the live body
+  passes. A concrete `session:`, `codex-thread:` or `pi-job:` binding is
+  compared verbatim and needs `bind` after a body swap. An archived bound lane
+  leaves the role with no holder; it queues.
+- **Holder proof.** A caller whose body is a live role's holder proves the
+  role with method `bound-holder`, for non-peek `inbox` and `ack` and for
+  `send --from NAME`. A retired role proves nothing.
+- **Epoch.** The record is `{schema, name, role, binding, epoch, bound_at,
+  bound_by}`. First bind is epoch 1; each `bind` and `retire` adds 1 and
+  appends one ledger line (`bound` with `binding` and `previous`, or
+  `retired`). The record is replaced atomically under the role's spool lock.
+  The ledger holds no nonce.
+- **`retire`** marks the record (`retired_at`, no binding) and keeps it and its
+  queue: nothing is deleted. A send to a retired role is `rejected: retired`;
+  retiring twice is a no-op; a later `bind` revives the name at the next
+  epoch. `whois` and `ids` print `RETIRED`.
+- **Still open.** Tiers for the two verbs stay with PR 12 (unclassified,
+  fail-safe). A pi lane has no caller evidence, so a pi-job role is read only
+  through `--peek` until pi gains evidence.
 
 ## 9. Wake: notice only
 
