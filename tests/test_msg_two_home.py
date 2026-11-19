@@ -481,3 +481,24 @@ def test_archive_spool_without_a_store_is_a_no_op(tmp_path, monkeypatch):
 
 def test_msg_is_in_the_nonce_gate_set():
     assert "msg" in fleet.GATE_VERBS_ACCEPTING_NONCE
+
+
+def test_sync_rejects_mail_for_a_retired_role_and_names_the_reason(two, monkeypatch, capsys):
+    a, b = two                                      # w508 P2-1: retired roles, not only lanes
+    claim(a)
+    as_body(monkeypatch, sid=SUP_SID)
+    assert msg(a, "bind", "ops", "--binding", "session:sid-x", "--nonce", NONCE) == 0
+    assert msg(a, "retire", "ops", "--nonce", NONCE) == 0
+    as_body(monkeypatch)
+    assert msg(b, "send", "ops@alpha", "late", "--from", "lane-x") == 0
+    capsys.readouterr()
+    assert msg(a, "sync", "--peer", "beta") == 0
+    assert "rejected=1" in capsys.readouterr().out
+    assert spool(a, "ops", "new") == []
+    assert list((a / "state" / "msg" / "rejected").glob("*.json"))
+    assert fleet_msg._retired_names(fleet._msg_prims()) == ["ops"]
+    assert msg(b, "sync", "--peer", "alpha") == 0   # the sender learns the verdict
+    capsys.readouterr()
+    receipts = [json.loads(p.read_text()) for p in
+                (b / "state/msg/spool/lane-x/new").glob("*.json")]
+    assert [r["body"] for r in receipts] == ["rejected: retired"]

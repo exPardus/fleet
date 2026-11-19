@@ -86,6 +86,8 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet msg serve`](#fleet-msg-serve) — ssh forced command: serve frames for one client site (needs --peer)
   - [`fleet msg compact`](#fleet-msg-compact) — pack old messages and ledger into archive/<yyyymm>/
   - [`fleet msg ids`](#fleet-msg-ids) — list the identities of this home
+  - [`fleet msg bind`](#fleet-msg-bind) — bind a named role to a concrete holder (epoch +1)
+  - [`fleet msg retire`](#fleet-msg-retire) — retire a named role (kept, not deleted)
   - [`fleet msg whois`](#fleet-msg-whois) — resolve one identity to its holder
 - [`fleet relay-ack`](#fleet-relay-ack) — append an interface relay and acknowledge one mail file
 - [`fleet wave-close`](#fleet-wave-close) — reap, floor, account, land, push, and notify one wave boundary
@@ -1050,11 +1052,11 @@ options:
 
 ```text
 usage: fleet msg [-h]
-                 {init,send,inbox,ack,status,queue,sync,serve,compact,ids,whois}
+                 {init,send,inbox,ack,status,queue,sync,serve,compact,ids,bind,retire,whois}
                  ...
 
 positional arguments:
-  {init,send,inbox,ack,status,queue,sync,serve,compact,ids,whois}
+  {init,send,inbox,ack,status,queue,sync,serve,compact,ids,bind,retire,whois}
     init                set this home's site label
     send                send one message; DELIVERED or QUEUED
     inbox               read NAME's queue (new -> cur)
@@ -1067,6 +1069,8 @@ positional arguments:
                         (needs --peer)
     compact             pack old messages and ledger into archive/<yyyymm>/
     ids                 list the identities of this home
+    bind                bind a named role to a concrete holder (epoch +1)
+    retire              retire a named role (kept, not deleted)
     whois               resolve one identity to its holder
 
 options:
@@ -1192,6 +1196,38 @@ usage: fleet msg ids [-h]
 
 options:
   -h, --help  show this help message and exit
+```
+
+#### fleet msg bind
+
+```text
+usage: fleet msg bind [-h] --binding B [--nonce N] NAME
+
+positional arguments:
+  NAME
+
+options:
+  -h, --help   show this help message and exit
+  --binding B  lane:WORKER, session:ID, codex-thread:ID or pi-job:ID
+  --nonce N    the current supervisor generation (claim-nonce §5.3): clears
+               §7's claim gate for a mutating verb while a fresh claim is
+               held, and proves the lineage that owns a rotated body's workers
+               (§6.2)
+```
+
+#### fleet msg retire
+
+```text
+usage: fleet msg retire [-h] [--nonce N] NAME
+
+positional arguments:
+  NAME
+
+options:
+  -h, --help  show this help message and exit
+  --nonce N   the current supervisor generation (claim-nonce §5.3): clears
+              §7's claim gate for a mutating verb while a fresh claim is held,
+              and proves the lineage that owns a rotated body's workers (§6.2)
 ```
 
 #### fleet msg whois

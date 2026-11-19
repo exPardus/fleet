@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import fleet_msg_bind as bind
 import fleet_msg_core as core
 import fleet_msg_fs as fsx
 import fleet_msg_rules as rules
@@ -166,11 +167,27 @@ def resolve(prims: MsgPrims, store: core.Store, name: str) -> "dict | None":
         return {"name": name, "kind": "lane", "holder": _lane_holder(record),
                 "retired": record.get("archived_at") is not None,
                 "epoch": record.get("created")}
-    role = _read_json(store.root / "ids" / f"{name}.json")
-    if isinstance(role, dict):
-        return {"name": name, "kind": "role", "holder": role.get("binding"),
-                "retired": False}
+    role = bind.read_role(store, name)
+    if role is not None:
+        return {"name": name, "kind": "role", "retired": bind.is_retired(role),
+                "holder": bind.role_holder(role, lambda w: _registry_lane_holder(prims, w)),
+                "epoch": role["epoch"]}
     return None
+
+
+def _registry_lane_holder(prims: MsgPrims, worker: str) -> "str | None":
+    """The registry's current body for a live lane (`lane:<worker>` bindings
+    resolve through here at every read, so they follow fork-steer and respawn)."""
+    workers = prims.workers() or {}
+    record = workers.get(worker) if isinstance(workers, dict) else None
+    if (not isinstance(record, dict) or record.get("archived_at") is not None
+            or prims.is_supervisor_shaped(worker)):
+        return None
+    return _lane_holder(record)
+
+
+def _live_lane(prims: MsgPrims, worker: str) -> bool:
+    return _registry_lane_holder(prims, worker) is not None
 
 
 def _reader_body(prims: MsgPrims) -> str:
@@ -238,7 +255,26 @@ def caller_proofs(prims: MsgPrims, nonce: "str | None" = None) -> list:
     if source is not None:
         proofs.append((INTERFACE, "interface-registration",
                        str(source.get("kind", ""))[:core.DETAIL_MAX] or None))
+    proofs.extend(_bound_proofs(prims))
     return proofs
+
+
+def _bound_proofs(prims: MsgPrims) -> list:
+    """`bound-holder` (§10): the caller's body is a live named role's holder.
+    Read-only; a retired or unbound role proves nothing."""
+    thread = prims.codex_thread()
+    sid = prims.caller_sid()
+    body = f"codex-thread:{thread}" if thread else (f"session:{sid}" if sid else None)
+    if body is None:
+        return []
+    store = open_store(prims)
+    found = []
+    for name in bind.role_names(store):
+        role = bind.read_role(store, name)
+        if role is not None and bind.role_holder(
+                role, lambda w: _registry_lane_holder(prims, w)) == body:
+            found.append((name, "bound-holder", None))
+    return found
 
 
 def _proof_for(proofs: list, name: str):
@@ -625,11 +661,23 @@ def hosted_names(prims: MsgPrims, home: Path) -> list:
     return sorted(names)
 
 
-def _retired_names(prims: MsgPrims) -> list:
+def _retired_names(prims: MsgPrims, store: "core.Store | None" = None) -> list:
+    """Archived lanes plus retired roles: the names an ingest rejects as retired."""
     workers = prims.workers() or {}
-    return sorted(n for n, rec in workers.items() if isinstance(rec, dict)
-                  and rec.get("archived_at") is not None and core.valid_name(n)
-                  and not prims.is_supervisor_shaped(n))
+    names = {n for n, rec in workers.items() if isinstance(rec, dict)
+             and rec.get("archived_at") is not None and core.valid_name(n)
+             and not prims.is_supervisor_shaped(n)}
+    if store is None:      # a caller without a store (the ssh ingest) still sees roles
+        try:
+            store = open_store(prims)
+        except (OSError, MsgError, core.StoreError):
+            store = None
+    if store is not None:
+        for name in bind.role_names(store):
+            role = bind.read_role(store, name)
+            if role is not None and bind.is_retired(role):
+                names.add(name)
+    return sorted(names)
 
 
 def _peer_home(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> Path:
@@ -663,7 +711,7 @@ def sync_fs_peer(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> d
         # One ledger and registry read per pass; accepted receive times are
         # appended in memory so the §11 cap still counts this pass's envelopes.
         recent = _recent_ingests(store, site)
-        retired = _retired_names(prims)
+        retired = _retired_names(prims, store)
         admit = rules.make_admit(limits, site, lambda _s: recent, lambda: retired,
                                  prims.clock)
         notify = _notify(prims, store)
@@ -965,7 +1013,7 @@ def cmd_send(prims: MsgPrims, args, out) -> int:
         if ident is None:
             raise MsgError(f"unknown identity {to_name!r} on site {store.site!r}")
         if ident["retired"]:
-            raise MsgError(f"rejected: retired ({to_name!r} is an archived lane)")
+            raise MsgError(f"rejected: retired ({to_name!r} is retired)")
     elif to_site not in _peers(store):
         raise MsgError(f"unknown site {to_site!r}: not in peers.json")
     parent = None
@@ -1255,9 +1303,52 @@ def cmd_compact(prims: MsgPrims, args, out) -> int:
     return 0
 
 
+def _bind_caller(prims: MsgPrims, args) -> str:
+    """§10: `bind` and `retire` need `supervisor-nonce` or
+    `interface-registration`; a worker turn cannot bind."""
+    methods = {proof[1] for proof in caller_proofs(prims, getattr(args, "nonce", None))}
+    for method in bind.BOUND_BY:
+        if method in methods:
+            return method
+    raise MsgError("refused: bind and retire need a live --nonce or the registered "
+                   "Interface; a worker turn cannot bind")
+
+
+def _reserved(prims: MsgPrims, name: str) -> bool:
+    if name in (SUPERVISOR, INTERFACE):
+        return True
+    workers = prims.workers() or {}
+    return isinstance(workers, dict) and name in workers and not prims.is_supervisor_shaped(name)
+
+
+def cmd_bind(prims: MsgPrims, args, out) -> int:
+    store = open_store(prims)
+    who = _bind_caller(prims, args)
+    try:
+        record = bind.bind(store, args.name, args.binding, who,
+                           reserved=lambda n: _reserved(prims, n),
+                           lane_ok=lambda w: _live_lane(prims, w))
+    except bind.BindError as exc:
+        raise MsgError(str(exc)) from None
+    print(f"BOUND {args.name}@{store.site} {record['binding']} epoch={record['epoch']}",
+          file=out)
+    return 0
+
+
+def cmd_retire(prims: MsgPrims, args, out) -> int:
+    store = open_store(prims)
+    who = _bind_caller(prims, args)
+    try:
+        record = bind.retire(store, args.name, who)
+    except bind.BindError as exc:
+        raise MsgError(str(exc)) from None
+    print(f"RETIRED {args.name}@{store.site} epoch={record['epoch']}", file=out)
+    return 0
+
+
 VERBS = {"init": cmd_init, "send": cmd_send, "inbox": cmd_inbox, "ack": cmd_ack,
          "sync": cmd_sync, "serve": cmd_serve, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois,
-         "compact": cmd_compact}
+         "compact": cmd_compact, "bind": cmd_bind, "retire": cmd_retire}
 
 
 def run(args, prims: MsgPrims, out=None) -> int:
