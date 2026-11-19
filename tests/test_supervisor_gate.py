@@ -321,7 +321,7 @@ class TestGateExitCode:
 # --- every mutating lifecycle verb is behind the gate ----------------------
 
 GATED_VERBS = ["spawn", "sup-spawn", "send", "respawn", "kill", "clean",
-               "interrupt", "archive", "resume-limited", "release", "init", "abandon"]
+               "interrupt", "archive", "resume-limited", "release", "init", "abandon", "msg"]
 
 
 def _gated_argv(verb, home):
@@ -332,6 +332,11 @@ def _gated_argv(verb, home):
     A name that does not exist is fine: the gate runs BEFORE the verb's own
     work, so the gate refusal (exit 4) precedes any unknown-worker error (exit
     1). That ordering is part of the assertion."""
+    if verb == "msg":
+        # `--fleet-home` is validated first: the home must be initialized.
+        registry = Path(home) / "state" / "fleet.json"
+        if not registry.exists():
+            registry.write_text('{"workers": {}}', encoding="utf-8")
     return {"spawn": ["spawn", "w", "--dir", str(home), "--task", "go"],
             "sup-spawn": ["sup-spawn", "--task", "go"],
             "send": ["send", "w", "hi"],
@@ -343,7 +348,10 @@ def _gated_argv(verb, home):
             "resume-limited": ["resume-limited"],
             "release": ["release", "w"],
             "abandon": ["abandon", "w", "--reason", "x"],
-            "init": ["init"]}[verb]
+            "init": ["init"],
+            # `msg send --kind task` is gated for a caller that is no lane (§10).
+            "msg": ["--fleet-home", str(home), "msg", "send", "w", "hi",
+                    "--kind", "task"]}[verb]
 
 
 def _chdir_for_verb(verb, home, monkeypatch):
@@ -498,10 +506,23 @@ class TestTheRefusalNeverNamesAnUnreachableRemedy:
             if not isinstance(action, argparse._SubParsersAction):
                 continue
             for name, sub in action.choices.items():
-                if any("--nonce" in getattr(a, "option_strings", ())
-                       for a in sub._actions):
+                if TestTheRefusalNeverNamesAnUnreachableRemedy._declares_nonce(sub):
                     out.add(name)
         return out
+
+    @staticmethod
+    def _declares_nonce(parser):
+        """True when the parser, or a nested subcommand (`msg send --nonce`),
+        declares `--nonce`."""
+        import argparse
+        for action in parser._actions:
+            if "--nonce" in getattr(action, "option_strings", ()):
+                return True
+            if isinstance(action, argparse._SubParsersAction) and any(
+                    TestTheRefusalNeverNamesAnUnreachableRemedy._declares_nonce(sub)
+                    for sub in action.choices.values()):
+                return True
+        return False
 
     def test_the_walk_can_see_a_nonce_flag_at_all(self):
         """SEED CHECK, not optional: a derivation that resolved nothing would

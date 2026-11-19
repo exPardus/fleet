@@ -210,9 +210,11 @@ def test_t10_two_bodies_one_identity_only_the_registry_holder_reads(home, monkey
 def test_supervisor_task_needs_a_live_nonce_and_never_stores_it(home, monkeypatch, capsys):
     claim(home)
     as_body(monkeypatch, sid=SUP_SID)
-    assert msg(home, "send", "lane-a", "do x", "--kind", "task") == 1
-    assert "needs --nonce" in capsys.readouterr().err
-    assert msg(home, "send", "lane-a", "do x", "--kind", "task", "--nonce", "wrong") == 1
+    # PR 6: a non-lane caller under a fresh claim meets the gate first (rc 4).
+    assert msg(home, "send", "lane-a", "do x", "--kind", "task") == fleet.SUPERVISOR_CONTINUITY_RC
+    assert "--nonce" in capsys.readouterr().err
+    assert msg(home, "send", "lane-a", "do x", "--kind", "task",
+               "--nonce", "wrong") == fleet.SUPERVISOR_CONTINUITY_RC
     assert msg(home, "send", "lane-a", "do x", "--kind", "task", "--nonce", NONCE) == 0
     msg_id = sent_id(capsys)
     raw = (home / "state" / "msg" / "spool" / "lane-a" / "new" / f"{msg_id}.json").read_bytes()
@@ -381,6 +383,7 @@ def test_huge_seq_is_refused_and_gaps_are_ranges_in_bounded_memory(home, monkeyp
 
 def test_gap_ranges_are_capped(home, monkeypatch, capsys):
     as_body(monkeypatch, sid=SID_OLD)
+    (home / "state" / "msg" / "config.json").write_text('{"rate": 100}', encoding="utf-8")
     for _ in range(fleet_msg.GAP_RANGES_MAX + 5):
         assert msg(home, "send", "supervisor", "x") == 0
     capsys.readouterr()

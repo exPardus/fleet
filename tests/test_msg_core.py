@@ -346,7 +346,7 @@ def test_t4_concurrent_senders_get_distinct_gap_free_seqs(tmp_path):
     for t in threads:
         t.join()
     assert sorted(seqs) == list(range(1, 31))
-    assert store.last_seq("lane-1@a", "lane-2@a") == 30
+    assert store.last_seq("lane-1@a", "lane-2@a", unverified=True) == 30
 
 
 _ENQUEUE_CHILD = """
@@ -410,7 +410,7 @@ def test_rules_run_under_the_sender_lock_before_allocation(tmp_path):
     seen = []
 
     def rules(d):
-        seen.append((d["seq"], store.last_seq(d["from"], d["to"])))
+        seen.append((d["seq"], store.last_seq(d["from"], d["to"], unverified=True)))
         return None
 
     core.enqueue(store, draft(), rules=rules)
@@ -825,7 +825,7 @@ def test_p2_2_ascii_digits_only_in_names(tmp_path):
     q.mkdir(parents=True)
     (q / f"\u0661\u0662-{'b' * 32}.json").write_bytes(b"{}")
     assert core.outbox_entries(store, "b") == []
-    seq = store.seq_path("lane-1@a", "lane-2@a")
+    seq = store.seq_path("lane-1@a", "lane-2@a", unverified=True)
     seq.parent.mkdir(parents=True)
     seq.write_text("\u0661\u0662\n", encoding="utf-8")
     with pytest.raises(core.StoreError, match="corrupt counter"):
@@ -942,7 +942,7 @@ def test_p2_7_local_retry_returns_the_stored_envelope(tmp_path):
     status2, env2 = core.enqueue(store, retry, rules=lambda d: rules_calls.append(d))
     assert (status, status2) == ("delivered", "duplicate")
     assert env2 == env and env2["seq"] == 1
-    assert store.last_seq("lane-1@a", "lane-2@a") == 1, "no seq allocated"
+    assert store.last_seq("lane-1@a", "lane-2@a", unverified=True) == 1, "no seq allocated"
     assert rules_calls == []
     assert core.enqueue(store, draft())[1]["seq"] == 2
 
@@ -957,7 +957,7 @@ def test_p2_7_remote_retry_writes_no_second_file(tmp_path):
     assert len(os.listdir(store.outbox("b", "q"))) == 1
     core.outbox_commit(store, "b", [env["id"]])
     assert core.enqueue(store, retry) == ("duplicate", env)
-    assert store.last_seq("lane-1@a", "hub@b") == 1
+    assert store.last_seq("lane-1@a", "hub@b", unverified=True) == 1
     assert core.outbox_entries(store, "b") == []
 
 

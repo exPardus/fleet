@@ -435,14 +435,72 @@ subparser, `cmd_msg` and `_msg_prims()`. Every verb needs an explicit
 - **Read-only verbs.** `status`, `queue`, `ids`, `whois` and `inbox --peek`
   write nothing under `state/msg/`. `queue` counts by listing and file age;
   it warns on an outbox entry older than `outbox_warn_s` (900).
-- **Not yet wired** (plan PR 6): `rules` and `notify` are not passed to
-  `enqueue()`, so §11 bounds other than size and the §9 notice do not run;
-  no `sync`. Archiving a lane does not yet move its spool to `archive/`
-  (T10b). A pi lane has no caller evidence and sends `unverified`.
-  Deferred from the PR 2 review, due with or before PR 6 wires rules:
-  unverified `--from` sends need their own seq/gap namespace (else
-  per-sender bounds charge the real identity); a `done/` gap high-water
-  mark; logging of refused `--nonce` presentations for `fleet doctor`.
+- **Still open.** A pi lane has no caller evidence and sends `unverified`.
+  `bind` and `retire`, the ssh transport and the tier machinery are later PRs.
+
+### 8.2 Built contract (plan PR 6, wiring)
+
+`bin/fleet_msg.py` passes the PR 3 `rules`, the PR 5 `notify` and the PR 4
+fs transport into the PR 2 verbs. `bin/fleet.py` adds `sync` to the parser,
+the wake prims, the `## MESSAGES` call in `compose_prompt`, the archive hook
+and the gate call.
+
+- **Rules in `send`.** `enqueue()` gets `make_rules(Limits.from_config(
+  config.json), history, clock)`. `history(draft)` reads the `delivered` and
+  `queued` ledger lines of the (from, to) pair, both directions, in the
+  draft's own sender namespace (below). A refusal prints
+  `refused: <code>: <message>` and allocates nothing. A bad `config.json`
+  value refuses the send.
+- **Notice.** `enqueue()` and `ingest()` get `make_notify`. Fleet's adapter
+  map: `supervisor` follows the claim's provider; a lane is `claude`, `codex`
+  or `pi` by its registry row; an archived or supervisor-shaped row is
+  `unbound`. Only a Claude holder gets `append_mailbox`. Coalescing orders one
+  sender's messages by `(sent_at, seq, id)`, so two sends in one second still
+  coalesce.
+- **Drain block.** `compose_prompt` adds `## MESSAGES` for the lane after the
+  manager-message block and before the task. No store, no unread message, or
+  any error gives no block; the block never marks anything read.
+- **`sync [--peer SITE] [--once | --watch --interval S]`.** For each fs peer
+  in `peers.json` (`{"transport": "fs", "home": PATH}`; without `home` the
+  homes-list member whose `site.json` names the peer): `hello`, `pull`,
+  `core.ingest()` per entry with `make_admit` (retired lanes and the per-peer
+  ingest cap, counted from the ledger), then `commit(ids)` for every pulled id,
+  which sends receipts and drains the peer's outbox. One failing peer prints
+  `FAILED <site>: ...`, exits 1, and never stops the others. A non-peek
+  `inbox` runs the same pass first, naming a failing peer on stderr; `--peek`
+  never syncs. `hosted` for a home is `supervisor`, `interface`, its
+  non-supervisor-shaped registry rows and its `ids/` roles, read through a
+  plain-directory chain and a size-capped regular-file reader (a symlinked or
+  oversized peer `fleet.json` contributes nothing). `ssh` peers are
+  skipped until plan PR 7.
+- **Unverified namespace.** A send with method `unverified` or
+  `legacy-unverified` draws its seq from `seq/<from>__<to>.unv`, is counted
+  apart by the §11 history, and shows in GAP lines as `<from> (unverified)`.
+  A spoofed `--from` is never charged to, and never leaves a gap for, the
+  real identity.
+- **`done/` high-water mark.** `ack` folds the acked seq into
+  `hwm/<name>.json` (`{sender: {"upto": N, "above": [...]}}`, under the spool
+  lock; at most 1000 out-of-order seqs per sender, then the oldest hole is
+  settled). GAP display reads `new|cur` plus the marks, so its cost no longer
+  grows with acked history and does not change when `done/` is archived. A
+  spool with no mark file is read from `done/` once and the first `ack`
+  writes the file; read-only verbs write none.
+- **Refused nonce log.** A `--nonce` that is not live (wrong, pending, prior)
+  appends one record to the supervisor nonce-rejection log (`kind` `refused`
+  or `superseded-pending`, verb `msg`, an 8-hex digest prefix, never the
+  value), which `fleet doctor` reads.
+- **Gate.** `msg` is in `GATE_VERBS_ACCEPTING_NONCE`. `msg send --kind task`
+  from a caller that is neither a registered lane nor the registered
+  Interface calls `_supervisor_gate("msg", nonce=...)` first (exit 4 under a
+  fresh claim without a live nonce). `bind` is gated the same way when plan
+  PR 8 adds it. `cmd_send` still refuses a supervisor task without a live
+  nonce.
+- **Spool archive (T10b).** `fleet archive` of a lane renames
+  `spool/<name>/` to `archive/<yyyymm>/spool-<name>-<epoch>/` after the
+  lane's own move phase; nothing is deleted and a failure never fails the
+  archive. A same-second collision takes a `-<id8>` suffix. A later lane of the
+  same name starts with an empty spool. Seq
+  counters stay.
 
 ## 9. Wake: notice only
 
