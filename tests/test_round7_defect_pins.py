@@ -587,8 +587,10 @@ RATIFIED_BUT_UNBUILT = ()
 # under the fail-safe `destructive` default.
 # `msg` (docs/specs/messaging.md, plan PR 2) writes envelopes into the home's
 # message spool and moves them between spool states (`ack`); it dispatches and
-# steers nothing and wakes nothing yet. Its tier is operator-owned and waits
-# here under the fail-safe `destructive` default.
+# steers nothing and wakes nothing yet. Its tier is ruled per subcommand
+# (messaging §13) and carried by `fleet.VERB_EFFECT_SUBCOMMANDS`, so the verb
+# stays out of the flat tuples and is listed here only as unclassified by the
+# ratified table.
 UNCLASSIFIED_BY_THE_RATIFIED_TABLE = ("sup-notify", "wave-close", "land", "brief",
                                      "lane-done", "stream-recover",
                                      "sup-reconcile", "codex-respond",

@@ -4,7 +4,8 @@ Spec: `docs/specs/messaging.md` (revision 2). This plan orders the build into
 small PRs, splits them across at most three parallel lanes with disjoint
 files, and names the tests, risks and exclusions.
 
-**Status:** PRs 0 to 6 merged. PR 7 (ssh transport) built: `bin/fleet_msg_ssh.py`, `msg serve`,
+**Status:** PRs 0 to 6 merged. PR 12 (per-subcommand tiers: `VERB_EFFECT_SUBCOMMANDS`,
+`tests/test_msg_tiers.py`) built. PR 7 (ssh transport) built: `bin/fleet_msg_ssh.py`, `msg serve`,
 `sync` over ssh peers, `tests/test_msg_ssh.py` (T15, T15b-e) and the gated
 `tests/integration/test_msg_ssh_live.py` (T16). PR 8 (named roles: `bind`/`retire`, concrete
 bindings, epoch, the `bind` gate arm; `tests/test_msg_bind.py`, T17) built.
@@ -125,7 +126,7 @@ host, port or key (public hygiene).
 | Risk | Mitigation |
 |---|---|
 | "Verified" read as security on a same-user host | spec §10 and §14 say provenance only; inbox prints the method |
-| Tier machinery not landed; `msg` destructive meanwhile | every shipped argv carries `--fleet-home`; PR 12 is unblocked and blocks nothing else |
+| Tier machinery (built, PR 12) | `msg` tiers by subcommand; an unlisted subcommand fails closed; shipped argv still carries `--fleet-home` |
 | Forced command misconfigured | `serve` refuses without `--peer`; T16 pins the key-to-site mapping |
 | Client sync stalls after reboot | the mailman bridge pass syncs; `queue` warns on outbox age |
 | Archive growth | `compact` packs monthly; disk is the operator's call through the purge setting |

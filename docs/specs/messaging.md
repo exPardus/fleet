@@ -816,9 +816,10 @@ takes no lock and imports only `fleet_msg_core`.
   and `serve` run unattended, so the confirmation is the operator writing
   `peers.json` and `authorized_keys`; `bind`, `retire` and `import` also need
   `supervisor-nonce` or `interface-registration`.
-- Per-subcommand tiers need new `verb_effect_tier` machinery (plan PR 12).
-  Until it lands, `msg` is in no tuple and every shipped argv carries
-  `--fleet-home`.
+- **Per-subcommand tiers: built (plan PR 12).** `verb_effect_tier` resolves
+  `msg` through `VERB_EFFECT_SUBCOMMANDS` on the `msg_command` dest; `msg` is
+  in no flat tuple. A missing or unlisted subcommand is destructive, never
+  ordinary. `purge` has no parser yet and its tier is reserved.
 - Out of scope in v1: relay through a third site, groups, attachments,
   encryption at rest, fleet calling `SendMessage`.
 

@@ -334,6 +334,8 @@ one provider removes the other's identity files under the target home's shared
 fleet lock, and a receipt fails verification
 if both provider families coexist.
 
+**Subcommand-tiered verbs.** `msg` is tiered per subcommand by `VERB_EFFECT_SUBCOMMANDS` in `bin/fleet.py`, not by a flat tuple (spec `docs/specs/messaging.md` §13). Ordinary: `send`, `inbox`, `ack`, `status`, `queue`, `ids`, `whois`, `init`. Disruptive: `bind`, `retire`, `sync`, `serve`, `import`, `compact`. Destructive: `purge`. A missing or unknown subcommand is destructive.
+
 **When armed: destructive via env/legacy requires the flag; disruptive via env/legacy
 proceeds but renders its resolution provenance in output** (a wrong-home kill is loud where a
 wrong-home clean would have been fatal); ordinary flows. Lookup-hit resolutions are exempt
