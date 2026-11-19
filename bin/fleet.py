@@ -152,9 +152,7 @@ fleet_index.build_parser = lambda: build_parser()
 # on this constant. Keep compatibility with distro Python 3.10.
 MIN_PYTHON_VERSION = (3, 10)
 
-# ---------------------------------------------------------------------------
 # Paths (SPEC §3)
-# ---------------------------------------------------------------------------
 
 # Home selection is captured at import; each path helper re-reads this global
 # so tests and explicit home resolution can redirect all state paths together.
@@ -888,12 +886,9 @@ def now_iso() -> str:
 # === PLATFORM ADAPTER START (SPEC §14 portability mandate) ===
 from fleet_platform import PLATFORM, _WindowsPlatform, _PosixPlatform, UnsupportedPlatformError
 # === PLATFORM ADAPTER END ===
-# ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
 # Registry lock (SPEC §4): atomic-create lock file, retry, stale-break.
-# ---------------------------------------------------------------------------
 
 from fleet_lock import (
     LOCK_TIMEOUT_SECONDS, LOCK_STALE_SECONDS, LOCK_RETRY_INTERVAL_SECONDS,
@@ -915,9 +910,7 @@ def fleet_lock(timeout: float = LOCK_TIMEOUT_SECONDS, *, home=None):
         yield
 
 
-# ---------------------------------------------------------------------------
 # Registry CRUD (SPEC §4)
-# ---------------------------------------------------------------------------
 
 NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
@@ -1012,17 +1005,16 @@ def _quarantine_registry(path: Path):
 
 def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
-
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14189) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15578) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:19037) -- upgrades need complete records.
-      * `_acting_worker_identity` (:4555) -- only fresh absence proves no records.
-      * `_read_registry_readonly` (:5320) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15826) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18915) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8575) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20664) -- render the release explanation.
+      * `_sweep_husks` (:14171) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15558) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:19011) -- upgrades need complete records.
+      * `_acting_worker_identity` (:4517) -- only fresh absence proves no records.
+      * `_read_registry_readonly` (:5278) -- expose that distinction to views.
+      * `_doctor_check_registry` (:15829) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18889) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8528) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20627) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -1198,10 +1190,9 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
     return {
         "session_id": session_id,
         "cwd": str(cwd),
-        # The lane branch the worker was dispatched on, kept beside `cwd`
-        # because the worktree is deleted by routine tidy-up. `wave-close` joins
-        # a merge subject to this record by branch. None on a non-git cwd and
-        # on older records, which fall back to the worktree.
+        # The lane branch the worker was dispatched on, kept beside `cwd` because
+        # routine tidy-up deletes the worktree; `wave-close` joins a merge subject
+        # to it by branch. None on a non-git cwd and older records (worktree join).
         "branch": branch,
         # Share the cap with read_brief: equality means the snapshot may be truncated.
         "task": task[:LEGACY_TASK_SNAPSHOT_CHARS],
@@ -1251,9 +1242,7 @@ def new_worker_record(session_id, cwd, task, mode, model=None, created=None,
     }
 
 
-# ---------------------------------------------------------------------------
 # Events (fleet.py is the only writer of state/events.jsonl)
-# ---------------------------------------------------------------------------
 
 def append_event(kind: str, name: str, **fields) -> None:
     """Atomically append one JSON event {"ts", "kind", "name", **fields}.
@@ -1287,9 +1276,7 @@ def _append_event_quiet(kind: str, name: str, **fields) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
 # Timestamp parsing (registry ISO format)
-# ---------------------------------------------------------------------------
 
 def _parse_iso(ctime_iso: str) -> datetime:
     return datetime.strptime(ctime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -1351,18 +1338,14 @@ def _launch_claim_expired(last_activity_iso) -> bool:
     return age > LAUNCH_CLAIM_MAX_AGE_SECONDS
 
 
-# ---------------------------------------------------------------------------
 # Stream-jsonl parsing (SPEC §6, §5 peek/result rows)
-# ---------------------------------------------------------------------------
 
 def _truncate(text, limit) -> str:
     text = text if isinstance(text, str) else str(text)
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-# ---------------------------------------------------------------------------
 # Mailbox drain + prompt composition (SPEC §5 drain rule, §7, §8)
-# ---------------------------------------------------------------------------
 
 def _claimed_path(sid: str) -> Path:
     return mailbox_dir() / f"{sid}.md.claimed.{os.getpid()}"
@@ -1912,9 +1895,7 @@ def assert_brief_carried(name: str, brief: str, prompt_body: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Permission mode mapping (SPEC §6)
-# ---------------------------------------------------------------------------
 
 MODE_FLAGS = {
     "bypass": ["--dangerously-skip-permissions"],
@@ -1935,9 +1916,7 @@ def mode_flags(mode: str) -> list:
         raise ValueError(f"invalid mode {mode!r}: choices are {choices}")
 
 
-# ---------------------------------------------------------------------------
 # Claude executable resolution + worker environment (shared by dispatch_bg).
-# ---------------------------------------------------------------------------
 
 class ClaudeNotFoundError(Exception):
     """Raised when the `claude` executable cannot be resolved on PATH."""
@@ -2016,7 +1995,6 @@ def _worker_env(name: str) -> dict:
 
 def _ensure_claude_directory_trusted(directory) -> None:
     """Record Claude's accepted workspace-trust bit before Fleet launches there.
-
     Claude has no supported launch flag for accepting the workspace trust
     dialog. Keep this edit narrowly scoped to the resolved project entry.
     """
@@ -2060,16 +2038,11 @@ def _ensure_claude_directory_trusted(directory) -> None:
             f"cannot accept Claude workspace trust in {config_path}: {exc}") from exc
 
 
-# ---------------------------------------------------------------------------
 # OpenRouter substrate (item 24): `--model openrouter:<slug>` dispatch.
-#
-# THE FORK (state/tasks/w93.md): `--bg` hands the session to the resident
-# daemon's pre-warmed spare pool, so an env var set on the `claude --bg`
-# invocation never reaches the session. A `--settings` `"env"` block does, but
-# `"$VAR"` is not expanded. `apiKeyHelper` is a shell command the session runs
-# at auth time; point it at the key file (never the key's value). Proven
-# end-to-end against `stealth/union-alpha` (2026-09-17).
-# ---------------------------------------------------------------------------
+# `--bg` hands the session to the resident daemon's pre-warmed spare pool, so an
+# env var set on the `claude --bg` invocation never reaches the session, and a
+# `--settings` `"env"` block does not expand `"$VAR"`. `apiKeyHelper` is a shell
+# command the session runs at auth time; point it at the key file, never the value.
 
 _OPENROUTER_MODEL_RE = re.compile(r"^openrouter:(?P<slug>.+)$")
 
@@ -2165,24 +2138,17 @@ def _openrouter_substrate(model):
     return f"openrouter/{slug}" if slug is not None else None
 
 
-# ---------------------------------------------------------------------------
 # Codex compatibility substrate: explicit `--codex-adapter mcx` dispatch.
-#
 # mcx (on PATH) spawns and steers Codex CLI workers: `mcx spawn -m MODEL
 # "instructions"` prints an 8-char worker id and keeps one directory per worker
 # under $MCX_DIR holding `log`, `events.jsonl`, `result` and `state`.
 # `mcx result <id>` exits 2 while live, 0 when done, 1 when stopped or unknown.
 # `mcx steer <id> -` RESTARTS the run on the same Codex thread; `mcx stop <id>`
-# kills the process group.
-#
-# A Codex worker CANNOT commit under mcx's `codex exec -a never --sandbox
-# workspace-write`: a lane worktree's gitdir lives under the main repo's
-# .git/worktrees/, outside the worker's cwd. `fleet land` commits a dirty
-# worktree's listed files on its behalf (`fleet_land._commit_dirty`).
-#
-# mcx state lives in the lane worktree's gitignored `.mcx/` (MCX_DIR pinned),
-# so every later verb finds the job from the registry row's `mcx_id` alone.
-# ---------------------------------------------------------------------------
+# kills the process group. A Codex worker CANNOT commit under mcx's `codex exec
+# -a never --sandbox workspace-write` (a lane worktree's gitdir lives outside the
+# worker's cwd), so `fleet land` commits a dirty worktree's listed files
+# (`fleet_land._commit_dirty`). mcx state lives in the lane worktree's gitignored
+# `.mcx/` (MCX_DIR pinned); later verbs find the job from the row's `mcx_id`.
 
 _CODEX_MODEL_RE = re.compile(r"^codex:(?P<bare>.+)$")
 _CODEX_WORKER_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
@@ -3558,7 +3524,6 @@ def _call_codex_supervisor_claimed(client, incarnation_id, authority,
                                    operation, timeout, *, allowed_states=None,
                                    pre_call_guard=None):
     """Call only while the exact provider holder still owns the claim.
-
     This is the mutation boundary for the initial supervisor slice. A supplied
     provider ID is inert unless the current exact-home claim binds it.
     """
@@ -3997,9 +3962,7 @@ def dispatch_codex(name, cwd, prompt_body, model, mode="dontask", effort="medium
     return {"mcx_id": mcx_id}
 
 
-# ---------------------------------------------------------------------------
 # Status recompute helpers (SPEC §4, §5 status row)
-# ---------------------------------------------------------------------------
 
 STALE_ATTACH_SECONDS = 3 * 3600  # doctor/status nag threshold (SPEC §9)
 
@@ -4063,7 +4026,6 @@ def _cost_cell(value, width: int = 9) -> str:
 
 def _int_cell(value, width: int) -> str:
     """A right-aligned integer column (TURNS, MAIL), or `?`.
-
     bool is rejected even though it is an int subclass -- a JSON true in the
     turn counter is corruption, not a count of one."""
     if isinstance(value, bool) or not isinstance(value, int):
@@ -4073,7 +4035,6 @@ def _int_cell(value, width: int) -> str:
 
 def _text_cell(value, width: int) -> str:
     """A left-aligned text column (NAME, STATUS), or `?`.
-
     A non-string is not coerced with str(): `7` or `None` is a corrupt record
     and must not read as a real status. Long values are clipped with an
     ellipsis so they cannot shift later columns."""
@@ -4117,10 +4078,8 @@ _LOCAL_UTC_ALIAS_NAMES = ("UTC", "UCT", "Universal", "Zulu", "Greenwich",
 _LOCAL_UTC_ALIASES = "|".join(
     re.escape(name)
     for name in sorted(_LOCAL_UTC_ALIAS_NAMES, key=len, reverse=True))
-# Case-folded membership set for the resolver. The regex is IGNORECASE (a
-# bare `(utc)` is admitted -- see `test_lowercase_single_segment_admitted`),
-# so the resolver must fold too or it would admit a name it then cannot
-# convert.
+# Case-folded alias set for the resolver: the regex is IGNORECASE (see
+# `test_lowercase_single_segment_admitted`), so the resolver must fold too.
 _LOCAL_UTC_ALIAS_LOOKUP = frozenset(name.lower() for name in _LOCAL_UTC_ALIAS_NAMES)
 
 _LIMIT_RESET_LOCAL_RE = re.compile(
@@ -4512,7 +4471,6 @@ def _record_is_supervisor_claim_holder(record, claim=None):
 # Fleet identity resolves registry sid unions; FLEET_WORKER is a diagnostic witness.
 # The worker-turn claim gate uses registry identity (SPEC.md:204). The ceiling's
 # stamp-absence exemption has a separate limitation documented at its predicate.
-#
 # RATIFIED DOCTRINE -- claim-nonce §18: The daemon substitutes the session
 # environment wholesale, therefore no FLEET_WORKER observation, present or
 # absent, is evidence about this body. The registry sid union is the only
@@ -4541,9 +4499,9 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:19037`), because legacy upgrades also require a complete registry.
+    (`:19011`), because legacy upgrades also require a complete registry.
     `load_registry`
-    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1095`) -- and
+    QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1087`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
     """
     if sid is None:
@@ -4661,7 +4619,6 @@ def _ceiling_refuses_dispatch(verb, now=None, force_band=False):
     The stamp-absence exemption can also exempt a hosted supervisor because the
     daemon substitutes its environment; this is a current limitation (§18.4).
     SPEC.md:204's worker-turn claim prohibition concerns the separate claim gate.
-
     RATIFIED DOCTRINE -- claim-nonce §18: The daemon substitutes the session
     environment wholesale, therefore no FLEET_WORKER observation, present or
     absent, is evidence about this body.
@@ -4758,10 +4715,8 @@ def transcript_limit_scan(sid: str, transcript_path=None):
                      if isinstance(c, dict) and c.get("type") == "text"]
             reset_at, kind = _parse_limit_signal("\n".join(parts), now=_record_time(rec))
             return True, reset_at, kind
-        # First qualifying (error-shaped or substantive) record does not
-        # match the limit shape -- it is the authoritative "last thing
-        # that happened" and the scan stops here, never mind an older
-        # stale wall further back.
+        # The first qualifying (error-shaped or substantive) record that is not a
+        # limit is the authoritative last event: stop, whatever older walls exist.
         return False, None, None
     return False, None, None
 
@@ -5165,10 +5120,9 @@ def _worker_flags(record: dict) -> list:
     # `fleet status`, mirroring how over_budget shows up as its own status.
     if status == "over_ceiling":
         flags.append("over-ceiling")
-    # UL1 (item 11 / F31): surface a parked worker's reset horizon and, once
-    # the horizon has passed, its resume-eligibility -- a read-only FLAG only,
-    # never an auto-launch (invariant 1 daemonless: status derives views, it
-    # does not start turns; the operator runs `fleet resume-limited`).
+    # UL1 (item 11 / F31): flag a parked worker's reset horizon and, once passed, its
+    # resume-eligibility. Read-only, never an auto-launch (status derives views,
+    # it starts no turns); the operator runs `fleet resume-limited`.
     if status == "limited":
         reset = record.get("limit_reset_at")
         flags.append(f"limited (resets {reset})" if reset else "limited (reset unknown)")
@@ -5595,7 +5549,6 @@ TERMINUS_EXEMPT_FLAGS = {"init": ("home",)}
 
 def machine_exempting_flags(command, args) -> tuple:
     """The `TERMINUS_EXEMPT_FLAGS` dests that are SET on this invocation.
-
     Returns option spellings (`--home`), not dests, because the only consumer
     puts them in a refusal an operator reads. Empty tuple = this invocation acts
     on a home and takes §5's order."""
@@ -5707,10 +5660,9 @@ def lookup_home_for_sid(sid, population=None, install=None) -> dict:
     out["states"] = []
     for ident in pop["homes"]:
         ok, reason, data = read_registry_at(ident)
-        # ONE SNAPSHOT PER HOME (§5.2), so the census is filled from the read
-        # that was already happening rather than by a second pass. A second
-        # `read_registry_at` here would double the cost of every sid-carrying
-        # invocation on a surface that has been O(1) forever.
+        # ONE SNAPSHOT PER HOME (§5.2): fill the census from the read already
+        # happening; a second `read_registry_at` would double the cost of every
+        # sid-carrying invocation on a surface that has been O(1) forever.
         out["states"].append({"home": ident, "ok": ok, "reason": reason,
                                "workers": len(data["workers"])})
         if not ok:
@@ -5723,10 +5675,9 @@ def lookup_home_for_sid(sid, population=None, install=None) -> dict:
     if not hits:
         out["state"] = "miss"
     elif len(hits) == 1 or all(homes_are_same(hits[0], h) for h in hits[1:]):
-        # Two spellings of ONE directory are one hit, not an ambiguity: §5's
-        # two-plus refusal is about a sid claimed by two FLEETS. `homes_are_same`
-        # is affordable here and not in the population because the hit set is
-        # at most one entry per listed home that actually matched.
+        # Two spellings of ONE directory are one hit: §5's two-plus refusal is about
+        # a sid claimed by two FLEETS. `homes_are_same` is affordable here because
+        # the hit set is at most one entry per matching listed home.
         out["state"], out["home"] = "hit", hits[0]
     else:
         out["state"] = "ambiguous"
@@ -8367,7 +8318,6 @@ def _pr_poll_json_output(stdout: str) -> dict:
 
 def cmd_pr_poll(args, *, run=subprocess.run, which=shutil.which) -> int:
     """Read a PR head SHA through gh and compare it with a recorded SHA.
-
     A view: it never writes fleet state, takes the lock, or updates the recorded
     SHA. ``gh`` is the only network boundary (one short, bounded call).
     """
@@ -8489,9 +8439,8 @@ def cmd_status(args) -> int:
     after = {}
     for n in names:
         if n not in active_names or (epoch_frozen and not _is_codex_record(before[n])):
-            # Archived: frozen, never recomputed. Epoch-frozen (G9): roster
-            # suspicious -- no NATIVE record is recomputed or written this
-            # invocation; display whatever is last-committed. A codex lane's
+            # Archived: frozen. Epoch-frozen (G9, roster suspicious): no NATIVE record
+            # is recomputed or written; show the last-committed one. A codex lane's
             # verdict does not depend on the Claude roster, so it recomputes.
             after[n] = before[n]
         else:
@@ -9541,21 +9490,19 @@ def _cmd_send_native(name: str, message: str,
         # A send is never refused on memory; the event makes the pressure visible.
         _append_event_quiet("send_under_memory_floor", name, sid=old_sid)
 
-    # Cut 1 (w87): a supervisor body's continuity is the incarnation file plus
-    # the journal/checkpoint trail sup-boot already reads, not the transcript --
-    # so waking one never needs the vendor's `--bg --resume` fork (G2, which
-    # ratified fork-with-transcript ONLY because ordinary workers have no
-    # other continuity channel). Ordinary workers still fork below, unchanged.
+    # Cut 1 (w87): a supervisor body's continuity is the incarnation file plus the
+    # journal/checkpoint trail sup-boot reads, not the transcript, so waking one
+    # never needs the vendor's `--bg --resume` fork (G2). Ordinary workers still
+    # fork below.
     if _is_supervisor_shaped(name):
         return _wake_supervisor_native(name, old_sid, cwd, mode, model,
                                        setting_sources, prior_last_dispatch_at,
                                        run=run, which=which, sleep=sleep)
 
     prompt, claim, mail = compose_prompt(name, cwd, "", old_sid)
-    # A resumed session must receive the message inline, not only behind a pointer.
-    # Use all drained mail when it fits. Over the head-first cap, use this message
-    # itself: it is at the drain's tail and must not be truncated from a reported
-    # success. Empty drain also falls back to the message after mailbox read failure.
+    # A resumed session must receive the message inline. Use all drained mail when
+    # it fits; over the head-first cap use this message itself (the drain's tail,
+    # never truncated from a reported success). An empty drain falls back to it too.
     inline = mail if (mail and len(mail) <= NATIVE_INLINE_STEER_MAX) else message
     try:
         result = dispatch_bg(
@@ -9703,7 +9650,6 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
                             setting_sources, prior_last_dispatch_at, *,
                             run, which, sleep) -> int:
     """Wake an idle supervisor without forking its transcript.
-
     The pending nonce preserves the incarnation; failure restores the caller's
     pre-claimed row and old-sid mail.
     """
@@ -9726,12 +9672,11 @@ def _wake_supervisor_native(name: str, old_sid: str, cwd, mode, model,
         claim = read_incarnation()
         if (claim is None or claim.get("incarnation_id") != incarnation_id
                 or claim.get("state") == "released"):
-            # Another body already changed this claim since the roster snapshot
-            # made this a WAKE, so nothing could resume it. Refuse loudly. Do NOT
-            # require claim["session_id"] == old_sid (it may name an EARLIER
-            # retired sid until the fresh body restamps); the wake_nonce is the
-            # continuity proof. Defer rollback and raise until the lock is
-            # released -- fleet_lock is not reentrant.
+            # Another body changed this claim since the roster snapshot made this a
+            # WAKE, so nothing could resume it: refuse loudly. Do NOT require
+            # claim["session_id"] == old_sid (it may name an EARLIER retired sid
+            # until the fresh body restamps); wake_nonce is the continuity proof.
+            # Defer rollback and raise until the lock is released (not reentrant).
             claim_changed = True
         else:
             wake_nonce = _mint_wake_nonce(claim)
@@ -11563,10 +11508,8 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     if old_live:
         force = getattr(args, "force", False)
         # A stream death leaves the session process resident with no outcome
-        # record, so the roster says live while the status probe says
-        # dead-suspected and the safe verb demanded the unsafe flag (item 31).
-        # Accept that row without --force; the stop below still runs, because
-        # the acceptance is about the flag, never about skipping the teardown.
+        # record: the roster says live, the probe says dead-suspected (item 31).
+        # Accept that row without --force; the stop below still runs.
         if not force and not _dead_suspected_hung_stream(name, before, entries):
             raise FleetCliError(
                 f"{name}: turn is running -- pass --force to interrupt it first, "
@@ -12185,10 +12128,9 @@ def _cmd_kill_native(name: str, rec: dict, run=subprocess.run, which=shutil.whic
         _authoritative = _fresh if isinstance(_fresh, dict) else rec
 
     sid = _authoritative.get("session_id") or rec.get("session_id")
-    # Use the captured native_short_id when available. A rejected guessed ref can
+    # Use the captured native_short_id when available: a rejected guessed ref can
     # look like gone and falsely report success while the session keeps running.
-    # Fast-completion ids can themselves be derived; retired ids have only the
-    # _native_job_ref fallback. Classified gone remains success-equivalent.
+    # Retired and fast-completion ids fall back to _native_job_ref; gone stays success.
     stop_outcome = "no-sid"
     if sid:
         captured_ref = _authoritative.get("native_short_id") or rec.get("native_short_id")
@@ -12578,7 +12520,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12453` / `cmd_respawn:11728`, before
+    # resolution that runs from `cmd_kill:12435` / `cmd_respawn:11711`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12609,9 +12551,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12453` / `cmd_respawn:11728`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12435` / `cmd_respawn:11711`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11753-11760` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11732-11739` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -13083,7 +13025,6 @@ def _restore_clean_moves(moved: list[tuple[Path, Path]]) -> None:
 def _archive_clean_evidence(name, sid, retired_sids=(), *,
                             moved_out=None, created_out=None):
     """Move clean's evidence to a recoverable archive before deletion.
-
     ``fleet clean`` is the irreversible registry/file-deletion verb, so a
     failed move must keep the worker row and its source files intact.  The
     normal archive mapping is shared for the brief/journal/task/outcome/mail
@@ -13592,7 +13533,6 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
 
 def _terminal_lane_idle_spare(record: dict, sid: str, entry: dict) -> bool:
     """Whether a retired sid is only an idle daemon pre-warm spare.
-
     A landed/abandoned row's current sid is the authoritative lane body.  A
     retired sid with a real PID and idle status can be a daemon spare left by
     fork-steer; it must not strand the terminal row.  Busy/statusless entries
@@ -13904,10 +13844,10 @@ _NATIVE_BG_UNREACHABLE_RE = re.compile(
     r"couldn't reach the background service"
     r"|background service did not become reachable", re.I)
 
-# Dispatch and doctor share the daemon recovery guidance. Timeout does not
-# prove a stale lock: a slow healthy daemon can produce it too. Require proof
-# the holder is dead before removing its singleton lock, or a second daemon
-# could start. Label PowerShell and cmd.exe forms separately for shell syntax.
+# Dispatch and doctor share the daemon recovery guidance. Timeout does not prove a
+# stale lock (a slow healthy daemon can cause it): require proof the holder is dead
+# before removing its singleton lock, or a second daemon could start. Label
+# PowerShell and cmd.exe forms separately.
 NATIVE_DAEMON_WEDGE_REMEDY = (
     "REMEDY -- PRECONDITION FIRST: only if NO `claude` session is running and "
     "`claude daemon status` reports `not running`. If a daemon IS live the lock "
@@ -15151,7 +15091,6 @@ def _doctor_check_codex_adapters(workers: dict, which=shutil.which):
 
 def _reconcile_dead_suspected_codex_completions() -> list[str]:
     """Repair legacy native-Codex completion verdicts with a full-row CAS.
-
     Snapshot unarchived ``dead-suspected`` native rows under the lock, release
     it for exact-turn evidence and host reads, then commit the ordinary w129
     verdict only if the row is unchanged. Concurrent mutations win; missing or
@@ -15211,7 +15150,6 @@ def _reconcile_dead_suspected_codex_completions() -> list[str]:
 
 def _reconcile_dead_suspected_codex_system_errors() -> list[str]:
     """Settle dead-suspected native rows whose exact turn ended under systemError.
-
     Same snapshot/CAS discipline as the completion reconciler: read the full
     public turn outside the lock, commit only when the whole row is unchanged.
     A non-terminal, unreadable, or mismatched read changes nothing.
@@ -16963,7 +16901,6 @@ def read_tier_policy() -> dict:
 def _enforce_tier_policy(role: str, explicit_model=None, policy: dict = None):
     """Refuse spawn when GOALS contains a misplaced model map or forbids the
     provider default but leaves the requested role unresolved.
-
     The check is deliberately provider-agnostic: an explicit model (including
     ``openrouter:`` or ``codex:``) is already an operator choice, while an
     omitted model under ``forbid-default`` would silently select Anthropic.
@@ -17724,7 +17661,6 @@ def _journal_roll_header_hint(line: str) -> bool:
 
 def roll_supervisor_journal(home=None) -> dict:
     """Losslessly roll old supervisor entries off the committed journal board.
-
     Parsed as UTF-8 lines, but the moved and retained regions are byte slices
     of the original, so the content check is independent of line counts and
     keeps line endings and non-ASCII bytes. A malformed entry-looking heading
@@ -17918,10 +17854,10 @@ def _holder_is_limited(holder_sid) -> bool:
 def _registry_records_or_none():
     """Read registry records for identity, or None when unreadable.
     `load_registry`
-    QUARANTINES a corrupt registry -- it renames the file aside (`:1088`) --
+    QUARANTINES a corrupt registry -- it renames the file aside (`:1080`) --
     so using it here would write from the read-only supervisor gate.
     Quarantine belongs to explicit lock-held mutation. D4's
-    rule for the view path (`:5308`) applies here too. An unreadable registry
+    rule for the view path (`:5266`) applies here too. An unreadable registry
     leaves callers with their bare-sid comparison, never a quarantine side effect.
     """
     ok, _reason, data = _read_registry_readonly()
@@ -17992,10 +17928,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4364, :4399, :4429, :4468, :4505, :4562, :4641, :5716, :12556, :12719, :12984, :13209, :13245, :13487, :13488, :13577, :13587, :13598, :13696, :14215, :17902, :20818, :20830, :20979, :24756, :24757, :24859, :24924, :24986, :26018, :26020, :26058, :26586, :29502`).
-
+    sites that already key on the union (`:4327, :4362, :4392, :4431, :4468, :4524, :4603, :5672, :12538, :12701, :12966, :13190, :13226, :13468, :13469, :13557, :13567, :13578, :13676, :14197, :14472, :14473, :14508, :14596, :17880, :20780, :20792, :20939, :24712, :24713, :24813, :24877, :24939, :25968, :25970, :26007, :26535, :29491`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10859, :11599, :16188, :27519. This makes union identity
+    OWN prior sid alone: :10808, :11582, :16168, :27467. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18180,7 +18115,6 @@ def _supervisor_standing_directives() -> list[str]:
 
 def _supervisor_git_board(repo=None, run=subprocess.run) -> dict:
     """Compute git identity and cleanliness for checkpoint/boot-board output.
-
     The default is the resolved fleet home, NOT the process cwd: a board read
     from whatever directory the caller happened to be in is the one failure
     this board cannot have -- another git repository answers every question
@@ -18240,7 +18174,6 @@ def _supervisor_lane_partition(snap: dict) -> tuple[list, list]:
 
 def _supervisor_live_lanes(snap: dict, run=subprocess.run) -> list[str]:
     """Join live registry lanes to this repo's durable git worktree table.
-
     Reads the worktree table of the resolved fleet home for the same reason
     `_supervisor_git_board` does: the process cwd is not the subject. Only
     live lanes (`_supervisor_lane_partition`) are joined; idle rows are one
@@ -18319,7 +18252,6 @@ def _render_computed_board(snap: dict, caller_sid=None, run=subprocess.run) -> l
 
 def _select_boot_journal_inline_indices(tail: list) -> set:
     """Which indices of the boot journal tail window get their body inlined.
-
     Only `SUPERVISOR_JOURNAL_SUBSTANTIVE_KINDS` (CHECKPOINT/PROPOSAL/PARKED)
     entries are eligible; terse bookkeeping entries stay pointers wherever they
     sit. Walking newest-first, at least `SUPERVISOR_BOOT_INLINE_MIN` are
@@ -18701,16 +18633,16 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10859, :11599, :16188,
-    # :27519) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10808, :11582, :16168,
+    # :27467) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
         # load_registry QUARANTINES a corrupt registry -- it RENAMES the
-        # file aside (`:1088`), which is a write. Routing the identity read
+        # file aside (`:1080`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17876`).
+        # names this gate as its reason (`:17854`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -19072,7 +19004,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14186`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14168`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -19251,7 +19183,6 @@ def cmd_sup_checkpoint(args) -> int:
 
 def cmd_journal_roll(args) -> int:
     """`fleet journal-roll` -- keep only the newest three checkpoints.
-
     A malformed board is reported and left untouched.  The command takes the
     same single-writer lock as supervisor journal append so an explicit roll
     cannot race a checkpoint.
@@ -19491,7 +19422,6 @@ def _wave_registry_worker_count():
 
 def _wave_lane_worktree(repo, lane, run=subprocess.run):
     """Return the worktree registered for a landed lane branch.
-
     The merge subject identifies the branch, but it does not identify the
     worker substrate. Git's worktree table is the durable join between that
     branch and the lane's own worker records.
@@ -19528,7 +19458,6 @@ def _wave_worktree_entries(repo, run=subprocess.run):
 
 def _wave_prune_landed_worktrees(repo, tip, run=subprocess.run):
     """Remove clean lane worktrees whose branches are ancestors of ``tip``.
-
     This is intentionally conservative: a dirty, unmerged, protected, or
     otherwise failed entry is reported and left in place. In particular,
     ``git worktree remove`` is never given ``--force`` and a branch is deleted
@@ -19599,7 +19528,6 @@ def _wave_same_path(left, right):
 
 def _wave_registry_workers(repo) -> dict:
     """Read this repo's worker records read-only, without repair or a lock.
-
     `wave-close` derives every figure it publishes from these records, so an
     unreadable registry must read as "no records" -- the callers then report
     UNJOINED or UNMEASURED rather than a zero they did not measure.
@@ -19643,7 +19571,6 @@ def _wave_default_branches(repo, run=subprocess.run) -> set:
 
 def _wave_lane_join(repo, lane, run=subprocess.run, workers=None, aliases=None):
     """Join a merge-subject lane token to its registry record and worktree.
-
     The token is the lane BRANCH, which the record keeps beside ``cwd`` so the
     join survives ``git worktree remove``. Order: ``--alias``, recorded branch,
     worktree ``cwd``, then a worker NAMED like the token. Several candidates
@@ -19715,7 +19642,6 @@ def _wave_aliases(repo, raw) -> dict:
 
 def _wave_unjoined_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Return the lanes that parsed from a merge subject but joined to nothing.
-
     Such a lane is as unattributable as an unparsed merge: every figure derived
     from it would be a confident zero. `cmd_wave_close` refuses on this list
     and names the lane instead of printing `unknown`.
@@ -19771,7 +19697,6 @@ def _wave_record_substrate(repo, worktree, record=None):
 
 def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
     """Return full SHAs of lane-internal base-sync merges in ``base..HEAD``.
-
     Identified structurally, not by subject: off the first-parent mainline,
     with every non-first parent an ancestor of the first parent of the
     mainline merge that brought it in -- it only merged in what the base
@@ -19806,7 +19731,6 @@ def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
 
 def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
-
     ``lanes`` holds every worker merge whose subject matches `merge(<lane>):`,
     with its worktree-derived substrate; ``merge(hotfix/<name>):`` bookkeeping
     is reported by ``_wave_hotfix_merges``. ``unparsed`` holds short SHAs of
@@ -19867,7 +19791,6 @@ def _wave_landed_lanes(repo, base, run=subprocess.run):
 
 def _wave_mark_landed_lanes(repo, lanes, run=subprocess.run, aliases=None) -> list:
     """Write lane_state=landed on each landed lane's registry record.
-
     A merged branch alone is not landing evidence for the reap predicate
     (SUPERVISOR_REAP_RULE); this is the writer. Joins lane branch -> record by
     the recorded branch, falling back to the worktree table for older records.
@@ -20161,11 +20084,9 @@ def _wave_external_lines(repo, lanes, base, run=subprocess.run, aliases=None):
     for lane, _substrate, _sha in lanes:
         worktree, name, _record = _wave_lane_join(
             repo, lane, run=run, workers=workers, aliases=aliases)
-        # A record joined by branch is this repo's lane even after its
-        # worktree is pruned: the branch is a ref of THIS repository (that is
-        # where the merge subject was read), so its lines landed here. Only a
-        # lane that joins to neither is indistinguishable from one that
-        # worked in another repository (queue item 16).
+        # A record joined by branch is this repo's lane even after its worktree is
+        # pruned (the branch is a ref of THIS repository). Only a lane that joins
+        # to neither is indistinguishable from another repository's (item 16).
         if worktree is None and name is None:
             unresolved.append(lane)
     if unresolved:
@@ -20835,7 +20756,6 @@ def _legacy_supervisor_rows(registry):
 
 def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
     """Validate one stale Claude holder against public roster and local identity.
-
     The registry status is deliberately not liveness proof. Unrelated workers
     are neither inspected for liveness nor changed by this transition.
     """
@@ -20899,7 +20819,6 @@ def _legacy_retirement_proof(claim, registry, entries, expect_inc, expect_sid):
 
 def _retire_stale_supervisor_rows(dry_run=False) -> int:
     """Mark dead every supervisor-shaped row of a non-current incarnation.
-
     Current = `supervisor/INCARNATION`'s incarnation_id; with no readable claim
     nothing can be called stale and the verb refuses. `working` rows are left
     (they may be doing something) and so are already-dead and archived rows.
@@ -20952,7 +20871,6 @@ def _retire_stale_supervisor_rows(dry_run=False) -> int:
 
 def cmd_sup_retire_legacy(args, roster_fn=None) -> int:
     """Retire an exact absent legacy holder from the registered Codex Interface.
-
     Provider calls stay outside fleet.lock. The lock protects an exact claim and
     supervisor-row CAS; unrelated worker rows, mail and journals are untouched.
     """
@@ -22629,7 +22547,6 @@ def _restored_history_owned_record(path, maximum=1024 * 1024):
 
 def _restored_resolved_callback(record):
     """Require the fields written by record_request and resolve, including identity.
-
     A resolved callback may have been pending, responded, or unknown before
     resolve. Response fields and a turn/item ID are therefore not universal.
     """
@@ -22667,7 +22584,6 @@ def _restored_continuation_inventory(
         registry, binding, *, pending_operation_id=None, history=None,
         current_host=None):
     """Account for every other row and its durable host evidence, without writes.
-
     A model name does not identify the adapter.  A historical native row is
     excluded only with terminal intent evidence; a bound thread additionally
     needs a fresh public notLoaded observation before the host may be stopped.
@@ -24285,7 +24201,6 @@ def _codex_cancel_record_digest(binding, request_id):
 
 def cmd_sup_reconcile(args) -> int:
     """Explicitly resume one exact native holder after a host-process restart.
-
     This verb never creates a thread, body, or turn. Ambiguous accepted resume
     evidence freezes the claim so an operator cannot accidentally replay it.
     """
@@ -24781,7 +24696,6 @@ def cmd_sup_status(args) -> int:
 
 def _sup_guard_body_sids(claim):
     """Return the released body's sid union, or ``None`` if it is unknown.
-
     ``supervisor_claim_sids`` intentionally treats a released claim as having
     no holder.  The guard still needs the releaser's union so a release that
     has not yet stopped its body cannot authorize a second body.
@@ -24802,7 +24716,6 @@ def _sup_guard_body_sids(claim):
 
 def _seize_settled_by_a_heartbeat(claim):
     """True once the seizing body has beaten at least once after claiming.
-
     `sup-boot` writes `claimed_at` and `heartbeat_at` together, so they are
     equal only at the seizure. Any later beat settles the takeover; after that
     the stale/idle rules decide.
@@ -24886,7 +24799,6 @@ def _sup_guard_git_common_dir(path, *, scan_parents=True):
 
 def _sup_guard_row_in_home(row, registry=None):
     """Return whether a roster row belongs to the home being guarded.
-
     `claude agents --json --all` is machine-global, so a supervisor-shaped
     session from another registered fleet home must not look like a second body
     here. Keep rows when the homes list is unreadable or path ownership is
@@ -24939,7 +24851,6 @@ def _sup_guard_row_in_home(row, registry=None):
 
 def _fork_took_over_rows(entries):
     """Live rows that also prove a fork TOOK OVER, not merely that it exists.
-
     Stricter than `_sup_guard_live_rows`: a `state: done` bg-spare host with a
     live pid is reachable but has not assumed the work, and retiring the parent
     on that evidence would violate "never retire on the strength of the send".
@@ -25453,7 +25364,6 @@ def _cmd_codex_sup_guard(args, lane_done=(), lane_dead=None) -> int:
 def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
                   process_tree_fn=None) -> int:
     """Observe twice before action; only WAKE acts, and never spawns.
-
     JSON includes explicit sent/quiet flags so the keeper does not derive
     liveness again. Plain output uses the four-verdict interface, including OK.
     """
@@ -25773,14 +25683,12 @@ def _cmd_interface_register_codex(args, root: Path) -> int:
 
 def cmd_sup_decision(args) -> int:
     """`fleet sup-decision` -- three-tier §8 operator-gate routing.
-
       --raise QUESTION [--context-ref REF]   claim-holder routes a decision and
           PARKS; refuses if one is already open.
       --answer TEXT                          interface tier writes the operator's
           decision. NOT claim-gated: the interface holds no claim (§3.1).
       --clear                                remove the open decision.
       (no flag)                              show the current decision.
-
     The supervisor never writes its own answer (§8). This is ROUTING, not
     authorization: operator gates stay human under an unattended supervisor."""
     raising = getattr(args, "question", None) is not None
@@ -26069,7 +25977,6 @@ def _require_completed_legacy_retirement(claim, registry):
 def _dispatch_codex_supervisor_body(campaign, mode, model, *,
                                     setting_sources=None) -> int:
     """Create and boot one explicit native Codex supervisor.
-
     The public thread is created outside fleet.lock, then conditionally bound
     to a provider-tagged pending claim. The first turn can start only while that
     exact holder remains current. Claude and default sup-spawn routes do not
@@ -27523,10 +27430,9 @@ def cmd_sup_handoff_complete(args, run=subprocess.run, which=shutil.which,
                                   f"claim -> {args.expect_inc} sid={successor_sid}")
         # Carry lineage across planned succession so existing workers stay local.
         # The successor's nonce comes from HANDSHAKE; drop the predecessor token.
-        # Remove the winner's pending entry and carry all rivals, including torn
-        # members, so the new holder can abort them and their files stay protected.
-        # Invalidate rival boot eligibility: a rival must not overwrite the winner's
-        # HANDSHAKE after transfer.
+        # Remove the winner's pending entry; carry all rivals, torn members included,
+        # so the new holder can abort them. Invalidate rival boot eligibility so no
+        # rival overwrites the winner's HANDSHAKE after transfer.
         carried = [m for m in handoff_pending_members(claim)
                    if not (isinstance(m, dict)
                            and m.get("successor_inc") == args.expect_inc)]
@@ -28200,9 +28106,7 @@ def _doctor_check_supervisor_handoff():
     return ("supervisor-handoff", ok, " | ".join(parts))
 
 
-# ---------------------------------------------------------------------------
 # CLI: argparse wiring + main()
-# ---------------------------------------------------------------------------
 
 def _watch_interval_arg(value: str) -> float:
     try:
@@ -29258,7 +29162,6 @@ def _absorb_minted_flag_values(argv: list) -> list:
 
 def _wake_incarnation(name: str, old_sid: str) -> str:
     """The incarnation a wake of supervisor row `name` must resume.
-
     A seize keeps the body's sid but mints a new incarnation id and never
     renames the roster row, so the row name alone names a dead generation. When
     the live claim's holder record IS this body, the claim's incarnation wins;
