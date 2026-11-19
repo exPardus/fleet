@@ -266,8 +266,15 @@ queued ──transfer──▶ delivered ──inbox──▶ read ──ack─�
 
 ### 6.1 Built contract (plan PR 10)
 
-- **`fleet msg compact`** renames, never copies or deletes, so every file is in
-  exactly one place at every instant and a crash is finished by the next run.
+- **`fleet msg compact`** renames messages and markers, never copies or
+  deletes them, so each is in exactly one place at every instant and a crash
+  is finished by the next run. The ledger is rotated and its recent lines are
+  copied back (below). Before it scans a source directory it checks every
+  component from `state/msg` down: a symlinked or non-directory component is
+  skipped and counted as `skipped_symlink`, so compact never moves a file
+  from outside the message store. Before it moves anything out of a spool's
+  `done/`, it writes that spool's high-water mark file if none exists, so
+  the gap bootstrap from `done/` is never left with holes.
   Age is the file's mtime; `compact_days` in `config.json` (default 30) sets it.
   Targets under `archive/<yyyymm>/` (the month of the file's mtime):
   `done/<name>/<id>.json` (only with its marker), `rejected/<file>`,
@@ -276,14 +283,21 @@ queued ──transfer──▶ delivered ──inbox──▶ read ──ack─�
   in no spool state), and `ledger-<utc stamp>-<rand8>.jsonl`. `new/` and `cur/`
   never move. An existing target is left in place.
 - **The ledger** is rotated whole into a segment when it holds a line older
-  than the age; the recent lines are then appended back to the live ledger,
-  skipping lines already there, and a `.seeded` sidecar marks the segment
-  done. A crash between the two leaves the segment unseeded and the next
+  than the age; the recent lines are then merged by `ts` with the live lines
+  into a new file that replaces the live ledger (skipping lines already
+  there, so it stays ordered by time for the tail reader), and a `.seeded`
+  sidecar marks the segment done. `Store.ledger` appends and the whole
+  rotation run under one ledger lock, so no line lands in a segment after
+  its reseed read it. If the rename fails (Windows: the file is open
+  elsewhere), the run reports `ledger_rotated=0` and the next run retries. A crash between the two leaves the segment unseeded and the next
   `compact` finishes it. Segments hold every line, recent ones too.
 - **`purge`** is `fleet_msg_core.purge(store, config=...)`, the only function
   that deletes. It raises unless `config.json` has `purge_enabled: true` and
   `purge_after_days` (a positive integer); then it removes whole
-  `archive/<yyyymm>/` months that ended before that age. No verb calls it yet;
+  `archive/<yyyymm>/` months that ended before that age. It refuses when
+  `archive/` is a symlink, and it skips (and lists in the `purged` ledger
+  line) any month that holds an archived spool with entries in `new/` or
+  `cur/` or a ledger segment without its `.seeded` sidecar. No verb calls it yet;
   a `purge` verb needs its own tier (§13).
 - **History window.** The §11 history (`msg send`) and the per-peer ingest cap
   read the ledger tail for the last 24 h, not the whole file. A task

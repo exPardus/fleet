@@ -343,7 +343,7 @@ class Store:
     def lock_path(self, kind: str, name: str) -> Path:
         # Fixed prefixes keep the three lock families disjoint for every
         # name the grammar allows (spec §5.1).
-        if kind not in ("from", "spool", "outbox"):
+        if kind not in ("from", "spool", "outbox", "ledger"):
             raise StoreError(f"bad lock kind {kind!r}")
         _require_name(name)
         return self.root / "locks" / f"{kind}-{name}.lock"
@@ -360,9 +360,10 @@ class Store:
         """One operational log line. Never a body, never a nonce."""
         record = {"ts": iso_utc(self.clock()), "event": event, **fields}
         self._ensure_dir(self.root)
-        self._require_regular_or_absent(self.ledger_path)
         line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
-        self.append(self.ledger_path, line.encode("utf-8"))
+        with self.locked("ledger", "live"):   # compact rotates the file under this lock
+            self._require_regular_or_absent(self.ledger_path)
+            self.append(self.ledger_path, line.encode("utf-8"))
 
     def _require_regular_or_absent(self, path: Path) -> bool:
         """True if `path` is a regular file, False if absent; else refuse."""
@@ -939,13 +940,17 @@ def _line_ts(line: bytes) -> float | None:
 
 
 def _reseed(store: Store, segment: Path, cutoff: float) -> int:
-    """Append the segment's recent lines to the live ledger, skipping any line
-    the live ledger already holds (a re-run after a crash adds nothing), then
-    mark the segment seeded. Returns lines appended."""
+    """Merge the segment's recent lines into the live ledger by `ts`, skipping
+    any line the live ledger already holds (a re-run after a crash adds
+    nothing). The merge is written to a new file and renamed over the live
+    ledger, so the live file stays ordered by time (`_ledger_tail` relies on
+    it); then the segment is marked seeded. Caller holds the ledger lock.
+    Returns lines added."""
     sidecar = segment.with_name(segment.name + ".seeded")
     if os.path.lexists(sidecar):
         return 0
-    have = set(_ledger_lines(store.ledger_path))
+    live = _ledger_lines(store.ledger_path)
+    have = set(live)
     recent = []
     for line in _ledger_lines(segment):
         ts = _line_ts(line)
@@ -954,7 +959,20 @@ def _reseed(store: Store, segment: Path, cutoff: float) -> int:
             recent.append(line if line.endswith(b"\n") else line + b"\n")
     if recent:
         store._require_regular_or_absent(store.ledger_path)
-        store.append(store.ledger_path, b"".join(recent))
+        keyed = [(ts if ts is not None else float("-inf"), line)
+                 for ts, line in ((_line_ts(l), l) for l in recent + live)]
+        keyed.sort(key=lambda pair: pair[0])      # stable: ties keep segment-first order
+        tmp = store.root / f".ledger.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY | _NOFOLLOW, 0o600)
+        try:
+            view = memoryview(b"".join(line for _ts, line in keyed))
+            while view:
+                view = view[os.write(fd, view):]
+            store.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp), str(store.ledger_path))
+        store.fsync_dir(store.root)
     store.fault("compact-seeded")
     store._write_new(segment.parent, sidecar, b"", sidecar.name)
     return len(recent)
@@ -962,36 +980,70 @@ def _reseed(store: Store, segment: Path, cutoff: float) -> int:
 
 def _compact_ledger(store: Store, now: float, cutoff: float) -> dict:
     """Rotate the live ledger whole into `archive/<yyyymm>/ledger-*.jsonl`
-    when it holds a line older than `cutoff`, then copy the recent lines back.
+    when it holds a line older than `cutoff`, then merge the recent lines back.
     A segment keeps every line, recent ones included; the live ledger keeps
     only what the §11 history and `status` still read. A crash after the
-    rotation is finished by the next `compact` (unseeded segments first)."""
+    rotation is finished by the next `compact` (unseeded segments first). The
+    whole step runs under the ledger lock that `Store.ledger` also takes, so no
+    append lands in a segment after its reseed read it."""
     out = {"ledger_rotated": 0, "ledger_reseeded": 0}
     archive = store.root / "archive"
-    for month in _listdir(archive):
-        if _MONTH_RE.fullmatch(month):
-            for name in _listdir(archive / month):
-                if _SEGMENT_RE.fullmatch(name):
-                    out["ledger_reseeded"] += _reseed(store, archive / month / name, cutoff)
-    if not store._require_regular_or_absent(store.ledger_path):
-        return out
-    old = [ts for ts in map(_line_ts, _ledger_lines(store.ledger_path))
-           if ts is not None and ts < cutoff]
-    if not old:
-        return out
-    store._ensure_dir(archive / _month(now))
-    name = f"ledger-{time.strftime('%Y%m%d%H%M%S', time.gmtime(now))}-{secrets.token_hex(4)}.jsonl"
-    segment = archive / _month(now) / name
-    store.fault("compact-move")
-    os.replace(str(store.ledger_path), str(segment))  # target is a fresh unique name
-    store.fsync_dir(segment.parent)
-    store.fsync_dir(store.root)
-    out["ledger_rotated"] = 1
-    out["ledger_reseeded"] += _reseed(store, segment, cutoff)
+    with store.locked("ledger", "live"):
+        for month in _listdir(archive):
+            if _MONTH_RE.fullmatch(month):
+                for name in _listdir(archive / month):
+                    if _SEGMENT_RE.fullmatch(name):
+                        out["ledger_reseeded"] += _reseed(store, archive / month / name, cutoff)
+        if not store._require_regular_or_absent(store.ledger_path):
+            return out
+        old = [ts for ts in map(_line_ts, _ledger_lines(store.ledger_path))
+               if ts is not None and ts < cutoff]
+        if not old:
+            return out
+        store._ensure_dir(archive / _month(now))
+        name = f"ledger-{time.strftime('%Y%m%d%H%M%S', time.gmtime(now))}-{secrets.token_hex(4)}.jsonl"
+        segment = archive / _month(now) / name
+        store.fault("compact-move")
+        try:
+            os.replace(str(store.ledger_path), str(segment))  # target is a fresh unique name
+        except OSError:       # Windows: the ledger is open elsewhere; the next run retries
+            return out
+        store.fsync_dir(segment.parent)
+        store.fsync_dir(store.root)
+        out["ledger_rotated"] = 1
+        store.fault("compact-rotated")
+        out["ledger_reseeded"] += _reseed(store, segment, cutoff)
     return out
 
 
-def compact(store: Store, *, now: float | None = None, days: int = COMPACT_DAYS) -> dict:
+def _plain_dir(store: Store, path: Path) -> str:
+    """lstat every component from `state/msg` down to `path`: "ok" when each
+    is a plain directory, "absent" when one is missing, else "bad" (a symlink
+    or a non-directory). `listdir` and `rename` would follow a symlinked
+    parent out of the message store."""
+    root = store.root
+    parts = path.relative_to(root).parts
+    for component in [root] + [root.joinpath(*parts[:i]) for i in range(1, len(parts) + 1)]:
+        try:
+            st = os.lstat(component)
+        except FileNotFoundError:
+            return "absent"
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            return "bad"
+    return "ok"
+
+
+def _scan(store: Store, path: Path, counts: dict) -> list[str]:
+    """Entries of a compact source directory; `[]` for an absent one, and for
+    a symlinked or non-directory component (counted `skipped_symlink`)."""
+    state = _plain_dir(store, path)
+    if state == "bad":
+        counts["skipped_symlink"] += 1
+    return _listdir(path) if state == "ok" else []
+
+
+def compact(store: Store, *, now: float | None = None, days: int = COMPACT_DAYS,
+            seed_marks: Callable[[Store, str], None] | None = None) -> dict:
     """Pack old data into `archive/<yyyymm>/` (§6). Nothing is deleted: every
     step is one rename, so a crash at any point leaves each file in exactly
     one place and the next run finishes the job.
@@ -1000,18 +1052,25 @@ def compact(store: Store, *, now: float | None = None, days: int = COMPACT_DAYS)
     and `outbox/*/sent/` files older than `days`; markers older than
     `max(days, DEDUP_DAYS)` days plus `MAX_SKEW_S` whose message is in no
     spool state; the ledger (see `_compact_ledger`). Age is the file's mtime.
+    `seed_marks(store, name)` runs under a spool's lock before anything leaves
+    its `done/`; the verb passes the high-water-mark bootstrap, which lives in
+    `fleet_msg` (this module never imports it).
     """
     now = store.clock() if now is None else now
     if isinstance(days, bool) or not isinstance(days, int) or days < 1:
         raise StoreError("compact days must be a positive integer")
     cutoff = now - days * 86400.0
     marker_cutoff = now - max(days, DEDUP_DAYS) * 86400.0 - MAX_SKEW_S
-    counts = {"done": 0, "rejected": 0, "sent": 0, "markers": 0}
+    counts = {"done": 0, "rejected": 0, "sent": 0, "markers": 0, "skipped_symlink": 0}
     held: set[str] = set()
-    spools = [n for n in _listdir(store.root / "spool") if valid_name(n)]
+    spools = [n for n in _scan(store, store.root / "spool", counts) if valid_name(n)]
     for name in spools:
         with store.locked("spool", name):
-            for entry in _listdir(store.spool(name, "done")):
+            entries = _scan(store, store.spool(name, "done"), counts)
+            if entries:
+                if seed_marks is not None:   # `done/` is the mark bootstrap source: mark it before it shrinks
+                    seed_marks(store, name)
+            for entry in entries:
                 path = store.spool(name, "done") / entry
                 stem = entry[:-5]
                 if (entry.endswith(".json") and ID_RE.fullmatch(stem) and _aged(path, cutoff)
@@ -1021,19 +1080,19 @@ def compact(store: Store, *, now: float | None = None, days: int = COMPACT_DAYS)
     for name in spools:
         for state in ("new", "cur", "done"):
             held.update(list_spool(store, name, state))
-    for entry in _listdir(store.rejected_dir):
+    for entry in _scan(store, store.rejected_dir, counts):
         if entry.endswith(".json") and _aged(store.rejected_dir / entry, cutoff):
             counts["rejected"] += _archive_move(store, store.rejected_dir / entry,
                                                 f"rejected/{entry}")
-    for site in [s for s in _listdir(store.root / "outbox") if valid_name(s)]:
+    for site in [s for s in _scan(store, store.root / "outbox", counts) if valid_name(s)]:
         with store.locked("outbox", site):
-            for entry in _listdir(store.outbox(site, "sent")):
+            for entry in _scan(store, store.outbox(site, "sent"), counts):
                 path = store.outbox(site, "sent") / entry
                 if _QFILE_RE.fullmatch(entry) and _aged(path, cutoff):
                     counts["sent"] += _archive_move(store, path, f"outbox-sent/{site}/{entry}")
     seen = store.root / "seen"
-    for shard in _listdir(seen):
-        for msg_id in _listdir(seen / shard):
+    for shard in _scan(store, seen, counts):
+        for msg_id in _scan(store, seen / shard, counts):
             path = seen / shard / msg_id
             if (ID_RE.fullmatch(msg_id) and msg_id[:2] == shard and msg_id not in held
                     and _aged(path, marker_cutoff)):
@@ -1055,7 +1114,9 @@ def purge(store: Store, *, config: dict, now: float | None = None) -> list[str]:
         raise StoreError("purge needs purge_after_days, a positive integer, in config.json")
     now = store.clock() if now is None else now
     archive = store.root / "archive"
-    removed = []
+    if os.path.lexists(archive) and _plain_dir(store, archive) != "ok":
+        raise StoreError("archive/ is not a plain directory; purge refuses")
+    removed, skipped = [], []
     for month in _listdir(archive):
         path = archive / month
         if not _MONTH_RE.fullmatch(month) or os.path.islink(path) or not os.path.isdir(path):
@@ -1065,8 +1126,25 @@ def purge(store: Store, *, config: dict, now: float | None = None) -> list[str]:
             continue
         end = datetime(year + (mon == 12), mon % 12 + 1, 1, tzinfo=timezone.utc).timestamp()
         if end < now - days * 86400.0:
+            if _purge_blocker(path):
+                skipped.append(month)
+                continue
             shutil.rmtree(path)
             removed.append(month)
-    if removed:
-        store.ledger("purged", months=removed)
+    if removed or skipped:
+        store.ledger("purged", months=removed, skipped=skipped)
     return removed
+
+
+def _purge_blocker(month_dir: Path) -> bool:
+    """True when the month holds something purge must never delete: an archived
+    spool with unread (`new/`) or unacked (`cur/`) mail, or a ledger segment
+    not yet seeded back into the live ledger (§6)."""
+    names = _listdir(month_dir)
+    for name in names:
+        if name.startswith("spool-") and any(_listdir(month_dir / name / state)
+                                              for state in ("new", "cur")):
+            return True
+        if _SEGMENT_RE.fullmatch(name) and name + ".seeded" not in names:
+            return True
+    return False

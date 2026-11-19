@@ -448,6 +448,30 @@ def _read_hwm(store: core.Store, name: str) -> "dict | None":
     return data if isinstance(data, dict) else None
 
 
+def _hwm_write(store: core.Store, name: str, marks: dict) -> None:
+    path = _hwm_path(store, name)
+    store._ensure_dir(path.parent)
+    store._require_regular_or_absent(path)
+    tmp = path.parent / f"{name}.{os.getpid()}.{core.new_id()[:8]}.tmp"
+    data = json.dumps(marks, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.write(fd, data)
+        store.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(path))
+    store.fsync_dir(path.parent)
+
+
+def hwm_seed_locked(store: core.Store, name: str) -> None:
+    """Under the spool lock: write the mark file from `done/` if absent.
+    `compact` calls it before it moves anything out of `done/`."""
+    if _read_hwm(store, name) is None:
+        _hwm_write(store, name, _hwm_from_done(store, name))
+
+
 def _hwm_record(store: core.Store, name: str, env: dict) -> None:
     """After an ack: fold the acked envelope into the spool's marks, under the
     spool lock. The first write bootstraps from `done/`. Read-only verbs never
@@ -457,20 +481,7 @@ def _hwm_record(store: core.Store, name: str, env: dict) -> None:
         if marks is None:
             marks = _hwm_from_done(store, name)
         _hwm_apply(marks, _ns_key(env), env["seq"])
-        path = _hwm_path(store, name)
-        store._ensure_dir(path.parent)
-        store._require_regular_or_absent(path)
-        tmp = path.parent / f"{name}.{os.getpid()}.{core.new_id()[:8]}.tmp"
-        data = json.dumps(marks, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        try:
-            os.write(fd, data)
-            store.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(str(tmp), str(path))
-        store.fsync_dir(path.parent)
+        _hwm_write(store, name, marks)
 
 
 def _gaps(store: core.Store, name: str) -> list:
@@ -1239,7 +1250,7 @@ def cmd_compact(prims: MsgPrims, args, out) -> int:
     days = _config(store).get("compact_days", core.COMPACT_DAYS)
     if isinstance(days, bool) or not isinstance(days, int) or days < 1:
         raise MsgError("config compact_days must be a positive integer")
-    counts = core.compact(store, days=days)
+    counts = core.compact(store, days=days, seed_marks=hwm_seed_locked)
     print("COMPACTED " + " ".join(f"{k}={v}" for k, v in sorted(counts.items())), file=out)
     return 0
 

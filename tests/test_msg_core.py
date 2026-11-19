@@ -663,7 +663,7 @@ ALLOWED_DESTRUCTIVE = {
                           ("parse_iso_utc", "replace"),
                           ("move", "replace"), ("outbox_commit", "replace"),
                           # retention (§6): compact renames into archive/; purge is the only delete
-                          ("_archive_move", "replace"), ("_compact_ledger", "replace"),
+                          ("_archive_move", "replace"), ("_compact_ledger", "replace"), ("_reseed", "replace"),
                           ("purge", "rmtree")},
     "fleet_msg_transport.py": set(),
 }
