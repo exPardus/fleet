@@ -82,7 +82,8 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet msg ack`](#fleet-msg-ack) — acknowledge read messages (cur -> done)
   - [`fleet msg status`](#fleet-msg-status) — where one message is and its ledger
   - [`fleet msg queue`](#fleet-msg-queue) — unread, unacked and outbox counts
-  - [`fleet msg sync`](#fleet-msg-sync) — pull from fs peers and receive receipts (all peers, or --peer)
+  - [`fleet msg sync`](#fleet-msg-sync) — sync fs and ssh peers: pull, push, receipts (all peers, or --peer)
+  - [`fleet msg serve`](#fleet-msg-serve) — ssh forced command: serve frames for one client site (needs --peer)
   - [`fleet msg ids`](#fleet-msg-ids) — list the identities of this home
   - [`fleet msg whois`](#fleet-msg-whois) — resolve one identity to its holder
 - [`fleet relay-ack`](#fleet-relay-ack) — append an interface relay and acknowledge one mail file
@@ -1047,18 +1048,21 @@ options:
 ### fleet msg
 
 ```text
-usage: fleet msg [-h] {init,send,inbox,ack,status,queue,sync,ids,whois} ...
+usage: fleet msg [-h]
+                 {init,send,inbox,ack,status,queue,sync,serve,ids,whois} ...
 
 positional arguments:
-  {init,send,inbox,ack,status,queue,sync,ids,whois}
+  {init,send,inbox,ack,status,queue,sync,serve,ids,whois}
     init                set this home's site label
     send                send one message; DELIVERED or QUEUED
     inbox               read NAME's queue (new -> cur)
     ack                 acknowledge read messages (cur -> done)
     status              where one message is and its ledger
     queue               unread, unacked and outbox counts
-    sync                pull from fs peers and receive receipts (all peers, or
-                        --peer)
+    sync                sync fs and ssh peers: pull, push, receipts (all
+                        peers, or --peer)
+    serve               ssh forced command: serve frames for one client site
+                        (needs --peer)
     ids                 list the identities of this home
     whois               resolve one identity to its holder
 
@@ -1157,6 +1161,16 @@ options:
   --once        one pass (the default)
   --watch       repeat every --interval S
   --interval S
+```
+
+#### fleet msg serve
+
+```text
+usage: fleet msg serve [-h] [--peer SITE]
+
+options:
+  -h, --help   show this help message and exit
+  --peer SITE
 ```
 
 #### fleet msg ids
