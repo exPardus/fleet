@@ -759,9 +759,23 @@ def sync_all(prims: MsgPrims, store: core.Store, only: "str | None" = None) -> l
     return results
 
 
+_BODY_ENV = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "MCX_WORKER")
+
+
+def _refuse_serve(prims: MsgPrims, reason: str) -> "MsgError":
+    """A `serve-refused` ledger line (reason only; best effort), then exit 2."""
+    try:
+        open_store(prims).ledger("serve-refused", reason=reason)
+    except (MsgError, core.StoreError, OSError):
+        pass
+    return MsgError(f"serve refused: {reason}", code=2)
+
+
 def cmd_serve(prims: MsgPrims, args, out) -> int:
     """The ssh forced command (§7.2): speak frames on stdin/stdout for the
-    client the key pins as `--peer`. Refuses without `--peer`."""
+    client the key pins as `--peer`. Refuses without `--peer`, outside an sshd
+    session, under fleet body evidence, and for a site that is not an `ssh`
+    entry in `peers.json`."""
     if not args.peer:
         raise MsgError("serve requires --peer SITE (the key's forced command sets it)", code=2)
     if not core.valid_name(args.peer):
@@ -769,15 +783,25 @@ def cmd_serve(prims: MsgPrims, args, out) -> int:
     store = open_store(prims)
     if args.peer == store.site:
         raise MsgError("--peer is this home's own site label", code=2)
+    if not (os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_ORIGINAL_COMMAND")):
+        raise _refuse_serve(prims, "not-ssh")
+    if any(os.environ.get(var) for var in _BODY_ENV) or prims.lane_sender() is not None:
+        raise _refuse_serve(prims, "fleet-body")
+    peer = _peers(store).get(args.peer)
+    if not (isinstance(peer, dict) and peer.get("transport") == "ssh"):
+        raise _refuse_serve(prims, "peer-not-ssh")
     rfile, wfile = getattr(args, "_serve_in", None), getattr(args, "_serve_out", None)
     rfile = rfile or sys.stdin.buffer
     wfile = wfile or sys.stdout.buffer
+    deadline = sshx.arm_session_deadline()
     try:
         sshx.serve_session(store, args.peer, rfile, wfile, local=_local_info(prims, store),
                            ingest=_make_ingest(prims, store, args.peer),
                            after_ingest=sshx.make_receipter(store, args.peer))
     except (transport.TransportError, core.StoreError) as exc:
         raise MsgError(f"serve: {exc}") from None
+    finally:
+        deadline.cancel()
     return 0
 
 

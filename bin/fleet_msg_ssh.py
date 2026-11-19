@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import threading
 from pathlib import Path
@@ -97,7 +98,7 @@ def read_frame(stream: BinaryIO, expect: Iterable[str] | None = None) -> tuple[s
         raise FrameError("bad frame header")
     try:
         header = json.loads(line.decode("ascii"))
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         raise FrameError("frame header is not JSON") from None
     if type(header) is not dict or set(header) != _HEADER_KEYS:
         raise FrameError("frame header keys")
@@ -129,7 +130,7 @@ def dumps(obj) -> bytes:
 def loads(payload: bytes, what: str):
     try:
         return json.loads(payload.decode("utf-8"))
-    except (ValueError, UnicodeError):
+    except (ValueError, UnicodeError, RecursionError):
         raise FrameError(f"{what} payload is not JSON") from None
 
 
@@ -253,7 +254,9 @@ class SshTransport:
         """Send up to BATCH_MAX_ENTRIES envelopes; ids without a result stay
         queued. An envelope that does not parse is not sent."""
         items, sent = [], []
-        for raw in envelopes[:BATCH_MAX_ENTRIES]:
+        for raw in envelopes:                           # filter first, then cap
+            if len(items) >= BATCH_MAX_ENTRIES:
+                break
             msg_id = _id_of(raw)
             if msg_id is None:
                 continue
@@ -359,6 +362,15 @@ class _NoHosts:
 
 
 # --- server ---------------------------------------------------------------------
+
+def arm_session_deadline(timeout: float = SESSION_TIMEOUT_S, die: Callable[[int], None] = os._exit):
+    """A daemon timer that ends a `serve` process whose client went quiet.
+    No lock is held across reads, so exiting loses nothing. Cancel it on exit."""
+    timer = threading.Timer(timeout, lambda: die(3))
+    timer.daemon = True
+    timer.start()
+    return timer
+
 
 def serve_session(store: core.Store, peer_site: str, rfile: BinaryIO, wfile: BinaryIO, *,
                   local: transport.SiteInfo, ingest: Callable[[bytes, tuple], str],
@@ -478,9 +490,16 @@ def record_success(store: core.Store, site: str) -> None:
     if failures(store, site) == 0 and not path.exists():
         return
     with store.locked("outbox", site):
-        tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
-        tmp.write_text("0\n", encoding="ascii")
+        store._ensure_dir(path.parent)
+        tmp = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY | core._NOFOLLOW, 0o600)
+        try:
+            os.write(fd, b"0\n")
+            store.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(str(tmp), str(path))       # the failure counter only, never a message
+        store.fsync_dir(path.parent)
 
 
 def max_failures(peer: dict) -> int:

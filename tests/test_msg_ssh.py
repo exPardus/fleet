@@ -134,6 +134,7 @@ class _Down(io.RawIOBase):
 def _env():
     env = dict(os.environ)
     env.pop("CLAUDE_CODE_SESSION_ID", None)
+    env["SSH_CONNECTION"] = "127.0.0.1 1 127.0.0.1 22"     # what sshd sets for the forced command
     return env
 
 
@@ -451,22 +452,20 @@ def test_t15d_two_senders_pulled_between_are_never_skipped(two, capsys):
 
 # --- T15e: ingest cap -----------------------------------------------------------------
 
-def test_t15e_the_201st_envelope_from_a_peer_in_an_hour_is_rejected_rate(two, capsys):
+def test_t15e_the_peer_ingest_cap_plus_one_is_rejected_rate(two, capsys):
     a, b, _c, _p = two
-    lanes = {f"lane-{i:02d}": _lane(f"sid-{i:02d}") for i in range(21)}
-    registry(a, lanes)
-    total = 0
-    for lane in lanes:
-        for n in range(10):
-            enqueue(a, "alpha", f"{lane}@alpha", "supervisor@beta", f"{lane} {n}")
-            total += 1
-    assert total == 210
-    for _ in range(4):
-        assert sync(a, capsys)[0] == 0
-    accepted = len(spool(b, "supervisor", "new"))
+    (b / "state/msg/config.json").write_text(json.dumps({"peer_ingest": 5}))
+    for n in range(6):
+        enqueue(a, "alpha", "lane-a@alpha", "supervisor@beta", f"m {n}")
+    assert sync(a, capsys)[0] == 0
     rejected = [json.loads(p.read_text())["reason"] for p in (b / "state/msg/rejected").glob("*.json")]
-    assert accepted == 200 and rejected == ["rate"] * 10
+    assert len(spool(b, "supervisor", "new")) == 5 and rejected == ["rate"]
     assert outbox(a, "beta", "q") == []
+
+
+def test_default_peer_ingest_is_200():
+    import fleet_msg_rules as rules
+    assert rules.Limits.from_config({}).peer_ingest == 200
 
 
 # --- exit 4 -----------------------------------------------------------------------------
@@ -507,3 +506,112 @@ def test_serve_writes_only_frames_to_stdout(two):
     assert run.returncode == 0
     op, payload = sshx.read_frame(io.BytesIO(run.stdout))
     assert op == "hello" and json.loads(payload)["site"] == "beta"
+
+
+# --- w507: PR #80 review fixes ------------------------------------------------------
+
+def _serve(b, peer="alpha", env=None):
+    hello = transport.SiteInfo(site=peer, schemas=(core.SCHEMA,),
+                               clock=core.iso_utc(time.time()), hosted=("lane-a",))
+    return subprocess.run(server_argv(b, peer), capture_output=True, env=env or _env(), timeout=60,
+                          input=sshx.encode_frame("hello", sshx.dumps(hello.to_json()))
+                          + sshx.encode_frame("bye"))
+
+
+def _refusals(b):
+    path = b / "state/msg/ledger.jsonl"
+    rows = [json.loads(l) for l in path.read_text().splitlines()] if path.exists() else []
+    return [r for r in rows if r["event"] == "serve-refused"]
+
+
+def test_p1_serve_without_ssh_env_exits_2(two):
+    a, b, _c, _p = two
+    env = _env()
+    env.pop("SSH_CONNECTION")
+    env.pop("SSH_ORIGINAL_COMMAND", None)
+    run = _serve(b, env=env)
+    assert run.returncode == 2 and run.stdout == b"" and b"serve refused" in run.stderr
+    rows = _refusals(b)
+    assert [r["reason"] for r in rows] == ["not-ssh"] and set(rows[0]) == {"ts", "event", "reason"}
+
+
+def test_p1_serve_under_a_lane_sid_exits_2(two):
+    a, b, _c, _p = two
+    for var, val in (("CLAUDE_CODE_SESSION_ID", "sid-x"), ("CODEX_THREAD_ID", "t1"),
+                     ("MCX_WORKER", "1")):
+        env = _env()
+        env[var] = val
+        run = _serve(b, env=env)
+        assert run.returncode == 2 and run.stdout == b""
+    assert [r["reason"] for r in _refusals(b)] == ["fleet-body"] * 3
+
+
+def test_p1_serve_for_a_site_missing_or_not_ssh_in_peers_exits_2(two):
+    a, b, _c, _p = two
+    assert _serve(b, peer="gamma").returncode == 2
+    (b / "state/msg/peers.json").write_text(json.dumps({"alpha": {"transport": "fs"}}))
+    assert _serve(b).returncode == 2
+    assert [r["reason"] for r in _refusals(b)] == ["peer-not-ssh"] * 2
+    (b / "state/msg/peers.json").write_text(json.dumps({"alpha": {"transport": "ssh"}}))
+    assert _serve(b).returncode == 0
+
+
+def test_p2_nested_json_is_a_frame_error():
+    deep = b"[" * 200000
+    with pytest.raises(sshx.FrameError):
+        sshx.loads(deep, "hello")
+    header = b"[" * 200 + b"\n"
+    with pytest.raises(sshx.FrameError):
+        sshx.read_frame(io.BytesIO(header))
+
+
+def test_p2_serve_session_deadline_exits_the_process():
+    died = []
+    fired = threading.Event()
+
+    def die(code):
+        died.append(code)
+        fired.set()
+    timer = sshx.arm_session_deadline(0.05, die=die)
+    assert fired.wait(5) and died == [3]
+    timer.cancel()
+    idle = sshx.arm_session_deadline(30, die=die)
+    idle.cancel()
+    assert died == [3]
+
+
+def test_p2_push_filters_before_it_caps(two):
+    a, b, _c, _p = two
+    store = core.Store(a, "alpha")
+    sent = []
+
+    class Cap:
+        stdin = io.BytesIO()
+        stdout = io.BytesIO()
+    ssh = sshx.SshTransport(store, "beta", ["x"], spawn=lambda *a_, **k: Cap)
+    good = core.make_draft("lane-a@alpha", "supervisor@beta", "good",
+                           from_auth={"method": "lane-registry", "detail": "t"},
+                           sent_at=core.iso_utc(time.time()))
+    good_raw = core.enqueue(store, good)[1]
+    raw = (a / "state/msg/outbox/beta/q")
+    good_bytes = next(raw.glob("*.json")).read_bytes()
+    bad = [b"not json %d" % i for i in range(sshx.BATCH_MAX_ENTRIES + 1)]
+    ssh._send = lambda op, payload=b"": sent.append(json.loads(payload))
+    ssh._recv = lambda *e: sshx.dumps({"results": {good_raw["id"]: "accepted"}})
+    out = ssh.push(bad + [good_bytes])
+    assert [i["id"] for i in sent[0]["items"]] == [good_raw["id"]] and good_raw["id"] in out
+
+
+def test_p2_record_success_uses_the_store_tmp_chain(two):
+    a, _b, _c, _p = two
+    store = core.Store(a, "alpha")
+    sshx.record_failure(store, "beta")
+    sshx.record_success(store, "beta")
+    fails = a / "state/msg/ssh-fails"
+    assert sshx.failures(store, "beta") == 0
+    assert [n for n in os.listdir(fails) if n.endswith(".tmp")] == []
+    sshx.record_failure(store, "beta")
+    fails.rename(a / "state/msg/real-fails")
+    os.symlink(a / "state/msg/real-fails", fails)           # a planted directory link is refused
+    with pytest.raises(core.StoreError):
+        sshx.record_success(store, "beta")

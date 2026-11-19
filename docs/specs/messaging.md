@@ -11,7 +11,6 @@ the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):*
 `## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). **Built (plan PR 2):**
 `fleet msg init/send/inbox/ack/status/queue/ids/whois` in one home in `bin/fleet_msg.py` (§8.1).
 **Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
-**Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
 Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -389,9 +388,17 @@ receiver path (`ingest` with admit and notify) comes in as a callable.
   session non-zero and acts on nothing of that frame. Payloads are JSON; an
   envelope rides base64 so its canonical bytes arrive unchanged.
 - **Pinning.** `serve` exits 2 without `--peer`, with an invalid label, or with
-  this home's own label. The `hello` of the client must name the `--peer`
-  site, else the session ends before anything is read. Hosted names for
-  ingest come from that `hello`.
+  this home's own label. It also exits 2, with a `serve-refused` ledger line
+  (`reason` only: `not-ssh`, `fleet-body`, `peer-not-ssh`), unless
+  `SSH_CONNECTION` or `SSH_ORIGINAL_COMMAND` is set, when the caller has fleet
+  body evidence (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `MCX_WORKER` or a
+  registered lane), or when `peers.json[--peer]` is not a `transport: "ssh"`
+  entry. The `hello` of the client must name the `--peer` site, else the
+  session ends before anything is read. Hosted names for ingest come from that
+  `hello`: the site pin (the key's forced command) is the only authentication,
+  and `from not hosted -> rejected: auth` guards against stale clients, not
+  hostile ones. `serve` sends no error frame; a non-zero close and stderr are
+  the client's evidence. A `serve` process exits 3 after 120 s.
 - **Push.** Up to 64 envelopes per session. Each id gets its own `result`
   (`accepted`, `duplicate`, `rejected:<why>`); a result settles that id in the
   client's `q/` (a `rejected` one also writes a `rejected-by-peer` ledger line).
@@ -415,6 +422,10 @@ receiver path (`ingest` with admit and notify) comes in as a callable.
   own `max_failures` and this one agree on "the server is gone".
 - **Not built here.** The `inbox` auto-sync stays fs-only; ssh runs from
   `sync` and the mailman bridge command only.
+- **Still open.** One session moves at most 64 entries each way. A larger
+  backlog drains over several `sync` passes; looping `pull -> ingest -> commit`
+  (and `push`) inside one session while `more` holds and the deadline allows is
+  not built.
 
 ## 8. CLI
 
