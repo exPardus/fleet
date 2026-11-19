@@ -676,3 +676,25 @@ def test_the_receipt_section_is_present_and_cited():
            "tests/test_views_doctrine.py" in CLAUDE_MD.read_text(encoding="utf-8"), (
         "the documents no longer name this pin, so a reader correcting D4 has "
         "no way to know a test is holding them to it.")
+
+
+def test_the_statusline_read_path_does_not_touch_the_message_store(tmp_path, monkeypatch):
+    """Message queue counts (messaging §13) are directory listings: the
+    snapshot takes no fleet.lock and writes nothing under state/msg/."""
+    monkeypatch.setattr(fleet, "FLEET_HOME", tmp_path)
+    new = tmp_path / "state" / "msg" / "spool" / "interface" / "new"
+    new.mkdir(parents=True)
+    (new / ("a" * 32 + ".json")).write_text("{}", encoding="utf-8")
+
+    def before():
+        return sorted(str(p.relative_to(tmp_path)) + str(p.stat().st_mtime_ns)
+                      for p in tmp_path.rglob("*"))
+
+    def no_lock():
+        raise AssertionError("status_snapshot took fleet.lock")
+
+    monkeypatch.setattr(fleet, "fleet_lock", no_lock)
+    seen = before()
+    snap = fleet.status_snapshot()
+    assert snap["msg"]["unread"] == 1
+    assert before() == seen

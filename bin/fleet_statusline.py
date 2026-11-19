@@ -395,7 +395,7 @@ def render_statusline(snap: dict, color: bool = True,
         # that never ran `fleet init`, on the one surface the operator reads
         # continuously. `status_snapshot` distinguishes the two now; this is a
         # render, and renders nothing new of its own.
-        return f"{head}: {registry_fault_word(snap.get('reason'))}"
+        return _with_msg(f"{head}: {registry_fault_word(snap.get('reason'))}", snap, paint)
 
     # TOTAL OVER THE ROWS IT IS HANDED, not only over the rows
     # `status_snapshot` builds. `snap["workers"]` was a `KeyError` waiting for
@@ -405,7 +405,7 @@ def render_statusline(snap: dict, color: bool = True,
     if not isinstance(workers, list):
         workers = []
     if not workers:
-        return f"{head}: no workers"
+        return _with_msg(f"{head}: no workers", snap, paint)
 
     buckets: dict = {}
     for w in workers:
@@ -491,7 +491,28 @@ def render_statusline(snap: dict, color: bool = True,
     #
     # Two spaces between fields: wide enough to group `label count age` as one
     # unit without a separator glyph, which would cost width and ASCII purity.
+    msg = _msg_chunk(snap, paint)
+    if msg:
+        parts.append(msg)
     return "  ".join([head] + lead + parts)
+
+
+def _with_msg(line: str, snap: dict, paint) -> str:
+    msg = _msg_chunk(snap, paint)
+    return f"{line}  {msg}" if msg else line
+
+
+def _msg_chunk(snap: dict, paint) -> str:
+    msg = snap.get("msg")
+    if not isinstance(msg, dict):
+        return ""
+    unread, depth = msg.get("unread"), msg.get("outbox_depth")
+    unread = unread if isinstance(unread, int) and not isinstance(unread, bool) else 0
+    depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 0
+    if not unread and not depth:
+        return ""
+    plus = "+" if msg.get("capped") is True else ""
+    return paint(f"msg {unread}{plus} unread" + (f" {depth}{plus} out" if depth else ""), "")
 
 
 def _want_color() -> bool:

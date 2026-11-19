@@ -765,6 +765,70 @@ def list_spool(store: Store, name: str, state: str) -> list[str]:
                   if e.endswith(".json") and ID_RE.fullmatch(e[:-5]))
 
 
+#: A view counts at most this many names per directory, so a flooded queue
+#: cannot make a statusline render O(queue). A directory at the cap is shown
+#: as `N+` (`view_counts` sets `capped`); the exact depth is `msg queue`.
+VIEW_COUNT_CAP = 10_000
+
+
+def _is_plain_dir(path: Path) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _is_spool_name(name: str) -> bool:
+    return name.endswith(".json") and bool(ID_RE.fullmatch(name[:-5]))
+
+
+def _count_dir(path: Path, name_re) -> int:
+    """Names `list_spool` / the outbox reader would accept, by name only, up to the cap."""
+    if not _is_plain_dir(path):
+        return 0
+    n = 0
+    try:
+        with os.scandir(path) as it:
+            for e in it:
+                if name_re(e.name) and e.is_file(follow_symlinks=False):
+                    n += 1
+                    if n >= VIEW_COUNT_CAP:
+                        break
+    except OSError:
+        return n
+    return n
+
+
+def _plain_subdirs(path: Path) -> list[str]:
+    if not _is_plain_dir(path):
+        return []
+    try:
+        with os.scandir(path) as it:
+            return sorted(e.name for e in it
+                          if valid_name(e.name) and e.is_dir(follow_symlinks=False))
+    except OSError:
+        return []
+
+
+def view_counts(home) -> dict | None:
+    root = Path(home) / "state" / "msg"
+    try:
+        if not stat.S_ISDIR(os.lstat(root).st_mode):
+            return None
+    except OSError:
+        return None
+    store = Store(home, "view")
+    identities = [{"name": n, "unread": _count_dir(store.spool(n, "new"), _is_spool_name)}
+                  for n in _plain_subdirs(root / "spool")]
+    outbox = [{"site": s, "depth": _count_dir(store.outbox(s, "q"), lambda e: bool(_QFILE_RE.fullmatch(e)))}
+              for s in _plain_subdirs(root / "outbox")]
+    return {"identities": identities, "outbox": outbox,
+            "unread": sum(i["unread"] for i in identities),
+            "outbox_depth": sum(o["depth"] for o in outbox),
+            "capped": any(r.get("unread", r.get("depth", 0)) >= VIEW_COUNT_CAP
+                          for r in identities + outbox)}
+
+
 def move(store: Store, name: str, msg_id: str, src: str, dst: str, *,
          reader: str | None = None) -> bool:
     """new -> cur (read) or cur -> done (acked) under the spool lock.
