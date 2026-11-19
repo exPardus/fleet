@@ -12,6 +12,8 @@ bindings, epoch, the `bind` gate arm; `tests/test_msg_bind.py`, T17) built.
 PR 6 (wiring) built: rules, fs `sync` and
 inbox pull, notice, drain block, the `msg send --kind task` gate, the PR 2
 deferrals and T10b, with `tests/test_msg_two_home.py` (T13, T14, T14b, T14c).
+PR 9a (migration module: render, `import_dir`, `fold`) built: `bin/fleet_msg_migrate.py`,
+`tests/test_msg_migrate.py`; the `msg import` verb needs a `bin/fleet.py` subparser and moves to PR 9b.
 PR 10 (retention) built: `msg compact`,
 the `purge` seam, and the windowed `_history`, with `tests/test_msg_compact.py`.
 

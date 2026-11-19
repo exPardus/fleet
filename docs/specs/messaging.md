@@ -13,6 +13,7 @@ the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):*
 **Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
 **Built (plan PR 10):** `fleet msg compact` and the `purge` seam in `bin/fleet_msg_core.py` (§6.1).
 **Built (plan PR 8):** named roles, `fleet msg bind` and `retire`, in `bin/fleet_msg_bind.py` (§8.3).
+**Built (plan PR 9a):** the §12 steps 2-3 module `bin/fleet_msg_migrate.py` (§12.1); the `msg import` verb and the `bin/fleet.py` hooks are PR 9b.
 Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -802,6 +803,51 @@ takes no lock and imports only `fleet_msg_core`.
 5. **Receipts.** `_issue_verified_supervisor_mail` writes an envelope;
    `fleet mail verify <id>` reads the message store first, then the old store.
 6. **Retire.** The `to-fleet/` render becomes opt-in.
+
+### 12.1 Built contract (plan PR 9a)
+
+`bin/fleet_msg_migrate.py` imports `fleet_msg_core` only and calls no verb.
+
+- **`render_to_fleet(store, env)`** renders an envelope to `interface` as
+  mailman mail `mailbox/to-fleet/msg-<id>.mail` with headers `from`, `kind`,
+  `needs-answer`, `re` (when set) and `msg-id`, then the body. It stages the
+  bytes durably under `state/msg/render/` and hard-links them into
+  `to-fleet/`, so mailman sees the mail whole or not at all and a retry after
+  any crash links the staged copy. It returns `duplicate` when the name is in
+  `to-fleet/` or in `mailbox/done/` (mailman keeps the name, with a `.<sha12>`
+  suffix on a collision). A symlinked `mailbox`, `to-fleet` or `render`
+  component, or a planted staged link, is refused.
+- **`import_dir(store, dir, to)`** sends each mailman-format file of `dir` to
+  `to` with `core.enqueue`, method `legacy-unverified`, kind `note`,
+  `needs_answer` from the header, sender `<from label cleaned>@<site>`
+  (`legacy` when nothing valid remains), `sent_at` at import time. The id is
+  the file's `msg-id` header when it is a valid id (so a rendered mail
+  imported back dedups against the original), else a hash of file name and
+  bytes. Before `enqueue` the import writes a durable record
+  `state/msg/imported/<id>` (recipient and body hash) and after it `<id>.ok`;
+  `compact` never touches that directory, so a second run sends each file at
+  most once even after the spool, outbox and markers are archived. A declared
+  `msg-id` is accepted only when the stored envelope (or the record) has the
+  same body and recipient; otherwise the file is skipped with `msg-id collides
+  with a different message`. A duplicate with no `imported` ledger line writes
+  it. A mailman `kind: task` arrives as a `note`.
+  Hidden names, `*.tmp`, symlinks, non-regular and oversize (over 1 MiB)
+  files, malformed mail and bodies over the envelope bounds are skipped and
+  left in place with a reason. The `re` header is not imported (the parent is
+  unknown). **The source is never moved or deleted**: step 3's "moves the
+  original to `done/`" and the "retires when empty" step stay with the
+  operator until PR 9b.
+- **`fold(store, id)`** reads spool, outbox, `rejected/`, the marker and the
+  ledger into one `Folded` (`state` new, read, acked, queued, sent, rejected,
+  marked or ledger; `envelope`; `events`; `verified`, true only for a stored
+  envelope whose method is not unverified). Read-only: no lock, no write.
+  PR 9b makes `fleet mail verify` read it before the old store.
+- **Tolerated in v1.** The render checks `done/` and then links, so mailman
+  filing the same name between the two steps can deliver the mail twice
+  (narrow window, separate process). `state/msg/render/` keeps one staged
+  file per mail to `interface` and `compact` does not cover it. `fold` reads
+  the live store only: a compacted message reads as unknown, so PR 9b's
+  `mail verify` covers the live window and falls through for older ids.
 
 ## 13. Doctrine and tiers
 
