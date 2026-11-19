@@ -1166,6 +1166,17 @@ def compact(store: Store, *, now: float | None = None, days: int = COMPACT_DAYS,
     return counts
 
 
+def link_move(src, dst) -> bool:
+    """Move `src` to `dst` without overwrite: hard link, then drop the old
+    name (the inode, so every byte, lives on at `dst`). False if `dst` exists."""
+    try:
+        os.link(str(src), str(dst))
+    except FileExistsError:
+        return False
+    os.unlink(str(src))
+    return True
+
+
 def purge(store: Store, *, config: dict, now: float | None = None) -> list[str]:
     """The one delete seam (§6). Refuses unless `config.json` sets
     `purge_enabled: true` and `purge_after_days` to a positive integer; then

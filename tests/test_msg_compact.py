@@ -242,7 +242,8 @@ def test_purge_is_the_only_delete_seam():
                     if isinstance(node, ast.Attribute) and node.attr in deleters:
                         found.add((path.name, fn.name, node.attr))
     assert {(n, f) for n, f, _ in found} <= {("fleet_msg_core.py", "_write_new"),
-                                             ("fleet_msg_core.py", "purge")}, found
+                                             ("fleet_msg_core.py", "purge"),
+                                             ("fleet_msg_core.py", "link_move")}, found
     assert ("fleet_msg_core.py", "purge", "rmtree") in found
 
 

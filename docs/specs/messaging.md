@@ -879,11 +879,14 @@ The hooks live in `bin/fleet.py`; their logic is in `bin/fleet_msg.py`.
   `interface`. Any other file, or a caller without the proof, relays exactly
   as before and leaves the message unacked. The ack never fails the relay.
 - **`fleet mail verify <id>`** folds the message store first (the receipt uuid
-  without dashes is the envelope id). An envelope `interface@SITE` to
-  `supervisor@SITE` stamped `interface-registration` is `VERIFIED`; any other
-  stored envelope is `UNVERIFIED`. When the old receipt also exists it is
-  checked too (it holds registration continuity), so the new store never
-  widens what verify accepts. No site, an unknown or compacted id, or an
+  without dashes is the envelope id). An envelope from
+  `interface@SITE` to `supervisor@SITE` (SITE is this home's label) stamped
+  `interface-registration` is `VERIFIED`; any other method there is
+  `UNVERIFIED`. An envelope under other names, such as a peer's
+  `interface@peer`, counts as unknown and falls through. When the old receipt
+  also exists it is checked too (it holds registration continuity) and its
+  body must equal the envelope's, else `UNVERIFIED` (`message store and
+  receipt disagree`), so the new store never widens what verify accepts. No site, an unknown or compacted id, or an
   unreadable store falls through to the old receipt store. An envelope-only
   verdict is point-in-time: the method was stamped at send.
 - **`_issue_verified_supervisor_mail`** also writes that envelope (body, same
@@ -893,7 +896,8 @@ The hooks live in `bin/fleet.py`; their logic is in `bin/fleet_msg.py`.
   in the supervisor queue until acked.
 - **Mailman seed.** `fleet mailman init` writes the bridge command
   `[python, bin/fleet.py, --fleet-home, HOME, msg, sync, --once]` (absolute
-  paths, so no `fleet` on `PATH` is needed) when the home has a site label;
+  paths, so no `fleet` on `PATH` is needed; `python` is the base interpreter
+  of the running one, so a `uv run` cache environment is not pinned) when the home has a site label;
   a home without one keeps the empty bridge. An existing `mailman.json` is
   not rewritten.
 

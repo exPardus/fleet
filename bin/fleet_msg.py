@@ -1360,7 +1360,7 @@ def _import_caller(prims: MsgPrims, args) -> str:
 
 
 def _file_done(directory: Path, name: str) -> "str | None":
-    """Rename into `directory/done/`, never over a name; None, or a reason."""
+    """Move into `directory/done/`, never over a name; None, or a reason."""
     done = directory / IMPORT_DONE
     try:
         try:
@@ -1369,13 +1369,11 @@ def _file_done(directory: Path, name: str) -> "str | None":
             pass
         if not stat.S_ISDIR(os.lstat(done).st_mode):
             return f"{IMPORT_DONE} is not a plain directory"
-        target = done / name
-        if os.path.lexists(target):
-            digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()[:12]
-            target = done / f"{name}.{digest}"
-            if os.path.lexists(target):
-                return "already filed in done"
-        os.rename(directory / name, target)
+        if core.link_move(directory / name, done / name):
+            return None
+        digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()[:12]
+        if not core.link_move(directory / name, done / f"{name}.{digest}"):
+            return "already filed in done"
     except OSError as exc:
         return f"not moved: {type(exc).__name__}"
     return None

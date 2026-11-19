@@ -293,3 +293,56 @@ def test_mailman_init_without_a_site_keeps_the_empty_bridge(home):
     (home / "state" / "msg" / "site.json").unlink()
     assert fleet.main(["--fleet-home", str(home), "mailman", "init"]) == 0
     assert json.loads((home / "mailman.json").read_text()) == fleet_mailman.SEED_CONFIG
+
+
+# --- review fixes (PR 85) ---------------------------------------------------
+
+def test_peer_interface_envelope_neither_verifies_nor_downgrades(home, capsys):
+    mail_id = "1234abcd-0000-4000-8000-0123456789ab"
+    draft = core.make_draft(
+        "interface@peer", "supervisor@alpha", "peer body",
+        from_auth={"method": "interface-registration", "detail": "tmux-pane"},
+        sent_at=_iso(), msg_id=mail_id.replace("-", ""))
+    raw = core.canonical(core.validate(dict(draft, seq=1)))
+    assert core.ingest(store(home), raw, peer_site="peer",
+                       hosted=["interface"]) == "accepted"
+    capsys.readouterr()
+    assert _verify(mail_id) == 1
+    out = capsys.readouterr().out
+    assert "no Fleet receipt" in out and "VERIFIED" not in out.replace("UNVERIFIED", "")
+    assert not (home / "state" / "mail-receipts").exists()
+
+
+def test_verify_flags_a_store_and_receipt_body_mismatch(home, capsys):
+    mail_id = _issue("original body")
+    env_path = home / "state/msg/spool/supervisor/new" / f"{mail_id.replace('-', '')}.json"
+    env = json.loads(env_path.read_text())
+    env["body"] = "tampered body"
+    env["body_sha256"] = core.body_sha256("tampered body")
+    env_path.write_bytes(core.canonical(env))
+    capsys.readouterr()
+    assert _verify(mail_id) == 1
+    assert "message store and receipt disagree" in capsys.readouterr().out
+
+
+def test_import_move_never_overwrites_under_a_race(home, tmp_path, monkeypatch):
+    d = outbound(tmp_path, **{"a.mail": MAIL})
+    (d / "done").mkdir()
+    real_link = os.link
+    def racing(src, dst, *a, **k):
+        if str(dst).endswith("/done/a.mail"):
+            Path(dst).write_text("filed by someone else")
+        return real_link(src, dst, *a, **k)
+    monkeypatch.setattr(os, "link", racing)
+    assert msg(home, "import", "--dir", str(d), "--to", "interface@alpha") == 0
+    assert (d / "done" / "a.mail").read_text() == "filed by someone else"
+    assert any(n.startswith("a.mail.") for n in os.listdir(d / "done"))
+
+
+def test_mailman_seed_prefers_the_base_interpreter(home, monkeypatch, tmp_path):
+    base = tmp_path / "base-python"
+    base.write_text("")
+    monkeypatch.setattr(sys, "_base_executable", str(base), raising=False)
+    assert fleet._mailman_bridge_argv(home)[0] == str(base)
+    monkeypatch.setattr(sys, "_base_executable", str(tmp_path / "gone"), raising=False)
+    assert fleet._mailman_bridge_argv(home)[0] == sys.executable
