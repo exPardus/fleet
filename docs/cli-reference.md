@@ -85,6 +85,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet msg sync`](#fleet-msg-sync) — sync fs and ssh peers: pull, push, receipts (all peers, or --peer)
   - [`fleet msg serve`](#fleet-msg-serve) — ssh forced command: serve frames for one client site (needs --peer)
   - [`fleet msg compact`](#fleet-msg-compact) — pack old messages and ledger into archive/<yyyymm>/
+  - [`fleet msg import`](#fleet-msg-import) — import mailman-format files of a directory as legacy-unverified messages
   - [`fleet msg ids`](#fleet-msg-ids) — list the identities of this home
   - [`fleet msg bind`](#fleet-msg-bind) — bind a named role to a concrete holder (epoch +1)
   - [`fleet msg retire`](#fleet-msg-retire) — retire a named role (kept, not deleted)
@@ -1052,11 +1053,11 @@ options:
 
 ```text
 usage: fleet msg [-h]
-                 {init,send,inbox,ack,status,queue,sync,serve,compact,ids,bind,retire,whois}
+                 {init,send,inbox,ack,status,queue,sync,serve,compact,import,ids,bind,retire,whois}
                  ...
 
 positional arguments:
-  {init,send,inbox,ack,status,queue,sync,serve,compact,ids,bind,retire,whois}
+  {init,send,inbox,ack,status,queue,sync,serve,compact,import,ids,bind,retire,whois}
     init                set this home's site label
     send                send one message; DELIVERED or QUEUED
     inbox               read NAME's queue (new -> cur)
@@ -1068,6 +1069,8 @@ positional arguments:
     serve               ssh forced command: serve frames for one client site
                         (needs --peer)
     compact             pack old messages and ledger into archive/<yyyymm>/
+    import              import mailman-format files of a directory as legacy-
+                        unverified messages
     ids                 list the identities of this home
     bind                bind a named role to a concrete holder (epoch +1)
     retire              retire a named role (kept, not deleted)
@@ -1187,6 +1190,21 @@ usage: fleet msg compact [-h]
 
 options:
   -h, --help  show this help message and exit
+```
+
+#### fleet msg import
+
+```text
+usage: fleet msg import [-h] --dir DIR --to NAME@SITE [--nonce N]
+
+options:
+  -h, --help      show this help message and exit
+  --dir DIR
+  --to NAME@SITE
+  --nonce N       the current supervisor generation (claim-nonce §5.3): clears
+                  §7's claim gate for a mutating verb while a fresh claim is
+                  held, and proves the lineage that owns a rotated body's
+                  workers (§6.2)
 ```
 
 #### fleet msg ids

@@ -14,6 +14,7 @@ Plan PR 6 wires the rest: the §11 rules into `send`, the fs transport into
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -27,6 +28,7 @@ from typing import Callable
 import fleet_msg_bind as bind
 import fleet_msg_core as core
 import fleet_msg_fs as fsx
+import fleet_msg_migrate as migrate
 import fleet_msg_rules as rules
 import fleet_msg_ssh as sshx
 import fleet_msg_transport as transport
@@ -43,6 +45,7 @@ PROOF_ORDER = ("supervisor-nonce", "lane-registry", "supervisor-sid",
 UNVERIFIED_METHODS = core.UNVERIFIED_METHODS
 HWM_ABOVE_MAX = 1000                 # acked-out-of-order seqs kept per sender (§8.1)
 SYNC_POLL_S = 1.0
+IMPORT_DONE = "done"
 
 
 class MsgError(Exception):
@@ -1346,9 +1349,133 @@ def cmd_retire(prims: MsgPrims, args, out) -> int:
     return 0
 
 
+def _import_caller(prims: MsgPrims, args) -> str:
+    """§13: `import` needs `supervisor-nonce` or `interface-registration`."""
+    methods = {proof[1] for proof in caller_proofs(prims, getattr(args, "nonce", None))}
+    for method in bind.BOUND_BY:
+        if method in methods:
+            return method
+    raise MsgError("refused: import needs a live --nonce or the registered "
+                   "Interface; a worker turn cannot import")
+
+
+def _file_done(directory: Path, name: str) -> "str | None":
+    """Rename into `directory/done/`, never over a name; None, or a reason."""
+    done = directory / IMPORT_DONE
+    try:
+        try:
+            os.mkdir(done)
+        except FileExistsError:
+            pass
+        if not stat.S_ISDIR(os.lstat(done).st_mode):
+            return f"{IMPORT_DONE} is not a plain directory"
+        target = done / name
+        if os.path.lexists(target):
+            digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()[:12]
+            target = done / f"{name}.{digest}"
+            if os.path.lexists(target):
+                return "already filed in done"
+        os.rename(directory / name, target)
+    except OSError as exc:
+        return f"not moved: {type(exc).__name__}"
+    return None
+
+
+def cmd_import(prims: MsgPrims, args, out) -> int:
+    """§12 step 3: import `--dir`, then move each file to `<dir>/done/`."""
+    store = open_store(prims)
+    _import_caller(prims, args)
+    try:
+        core.split_qualified(args.to)
+        result = migrate.import_dir(store, args.dir, args.to)
+    except (migrate.MigrateError, core.EnvelopeError) as exc:
+        raise MsgError(f"refused: {exc}") from None
+    directory = Path(args.dir)
+    skipped = [(n, why) for n, why in result.skipped if n != IMPORT_DONE]
+    moved = 0
+    for name, _id in result.imported + result.duplicate:
+        why = _file_done(directory, name)
+        if why is None:
+            moved += 1
+        else:
+            skipped.append((name, why))
+    print(f"IMPORTED {len(result.imported)} DUPLICATE {len(result.duplicate)} "
+          f"MOVED {moved} SKIPPED {len(skipped)}", file=out)
+    for name, why in skipped:
+        print(f"SKIPPED {name}: {why}", file=out)
+    if not (result.imported or result.duplicate or skipped):
+        print(f"EMPTY {directory} has no mail left; the operator may retire it", file=out)
+    return 0
+
+
+# --- hooks called by fleet.py (§12.2) ---
+
+def ack_rendered(prims: MsgPrims, mail_name: str, raw: bytes) -> "str | None":
+    """`relay-ack` of `msg-<id>.mail` acks `<id>` (§12 step 2); the id or None."""
+    try:
+        if not (mail_name.startswith(migrate.RENDER_PREFIX) and mail_name.endswith(".mail")):
+            return None
+        msg_id = mail_name[len(migrate.RENDER_PREFIX):-len(".mail")]
+        if not core.ID_RE.fullmatch(msg_id):
+            return None
+        declared = migrate.parse_mail(raw)["headers"].get("msg-id") or []
+        if declared[:1] != [msg_id]:
+            return None
+        store = open_store(prims)
+        proof = _proof_for(caller_proofs(prims), INTERFACE)
+        if proof is None:
+            return None
+        reader = f"{proof[1]}/{_reader_body(prims)}"
+        core.move(store, INTERFACE, msg_id, "new", "cur", reader=reader)
+        if not core.move(store, INTERFACE, msg_id, "cur", "done", reader=reader):
+            return None
+        acked = _load(store, INTERFACE, "done", msg_id)
+        if acked is not None:
+            _hwm_record(store, INTERFACE, acked)
+        return msg_id
+    except Exception:
+        return None
+
+
+def mail_envelope_id(mail_id: str) -> str:
+    """The envelope id of a verified-mail receipt id (a dashed uuid)."""
+    return mail_id.replace("-", "").lower()
+
+
+def record_verified_mail(home: Path, mail_id: str, body: str, detail: "str | None",
+                         now_iso: str) -> bool:
+    """§12.2: write the envelope of a verified supervisor mail, best effort."""
+    try:
+        site = read_site(Path(home))
+        if site is None:
+            return False
+        store = core.Store(Path(home), site)
+        draft = core.make_draft(
+            f"{INTERFACE}@{site}", f"{SUPERVISOR}@{site}", body,
+            from_auth={"method": "interface-registration",
+                       "detail": (detail or "")[:core.DETAIL_MAX] or None},
+            sent_at=now_iso, msg_id=mail_envelope_id(mail_id))
+        core.enqueue(store, draft)
+        return True
+    except Exception:
+        return False
+
+
+def verified_mail(home: Path, mail_id: str) -> "migrate.Folded | None":
+    """`fold` of a receipt id for `mail verify`; None sends it to the old store."""
+    try:
+        site = read_site(Path(home))
+        if site is None:
+            return None
+        return migrate.fold(core.Store(Path(home), site), mail_envelope_id(mail_id))
+    except Exception:
+        return None
+
+
 VERBS = {"init": cmd_init, "send": cmd_send, "inbox": cmd_inbox, "ack": cmd_ack,
          "sync": cmd_sync, "serve": cmd_serve, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois,
-         "compact": cmd_compact, "bind": cmd_bind, "retire": cmd_retire}
+         "compact": cmd_compact, "bind": cmd_bind, "retire": cmd_retire,
+         "import": cmd_import}
 
 
 def run(args, prims: MsgPrims, out=None) -> int:

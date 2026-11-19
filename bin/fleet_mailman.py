@@ -194,14 +194,21 @@ def load_config(home):
         return None, f"{CONFIG_NAME} invalid: {exc}"
 
 
-def cmd_init(home, prims: Prims, force=False) -> int:
+def seed_config(bridge_command=None) -> dict:
+    cfg = json.loads(json.dumps(SEED_CONFIG))
+    if bridge_command:
+        cfg["bridge"]["command"] = [str(part) for part in bridge_command]
+    return cfg
+
+
+def cmd_init(home, prims: Prims, force=False, bridge_command=None) -> int:
     home = Path(home)
     path = config_path(home)
     if not home.is_dir():
         raise FleetCliError(f"fleet home {home} is not a directory")
     if path.exists() and not force:
         raise FleetCliError(f"{path} exists; pass --force to overwrite")
-    prims.write_json(path, SEED_CONFIG)
+    prims.write_json(path, seed_config(bridge_command))
     print(f"wrote {path}")
     return 0
 

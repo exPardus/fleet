@@ -14,6 +14,7 @@ the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):*
 **Built (plan PR 10):** `fleet msg compact` and the `purge` seam in `bin/fleet_msg_core.py` (§6.1).
 **Built (plan PR 8):** named roles, `fleet msg bind` and `retire`, in `bin/fleet_msg_bind.py` (§8.3).
 **Built (plan PR 9a):** the §12 steps 2-3 module `bin/fleet_msg_migrate.py` (§12.1); the `msg import` verb and the `bin/fleet.py` hooks are PR 9b.
+**Built (plan PR 9b):** `fleet msg import`, `relay-ack` of rendered mail, `fleet mail verify` over the message store, the verified-mail envelope and the mailman seed bridge argv (§12.2).
 **Built (plan PR 11):** the visible-queue counts in `status_snapshot()` (`msg` key) and the statusline (`msg U unread [O out]`), by directory listing only (§11, §13).
 Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
@@ -845,20 +846,56 @@ takes no lock and imports only `fleet_msg_core`.
   Hidden names, `*.tmp`, symlinks, non-regular and oversize (over 1 MiB)
   files, malformed mail and bodies over the envelope bounds are skipped and
   left in place with a reason. The `re` header is not imported (the parent is
-  unknown). **The source is never moved or deleted**: step 3's "moves the
-  original to `done/`" and the "retires when empty" step stay with the
-  operator until PR 9b.
+  unknown). **`import_dir` never moves or deletes a source**; the `msg import`
+  verb moves each imported or duplicate file to `<dir>/done/` (§12.2).
 - **`fold(store, id)`** reads spool, outbox, `rejected/`, the marker and the
   ledger into one `Folded` (`state` new, read, acked, queued, sent, rejected,
   marked or ledger; `envelope`; `events`; `verified`, true only for a stored
   envelope whose method is not unverified). Read-only: no lock, no write.
-  PR 9b makes `fleet mail verify` read it before the old store.
+  `fleet mail verify` reads it before the old store (§12.2).
 - **Tolerated in v1.** The render checks `done/` and then links, so mailman
   filing the same name between the two steps can deliver the mail twice
   (narrow window, separate process). `state/msg/render/` keeps one staged
   file per mail to `interface` and `compact` does not cover it. `fold` reads
-  the live store only: a compacted message reads as unknown, so PR 9b's
-  `mail verify` covers the live window and falls through for older ids.
+  the live store only: a compacted message reads as unknown, so `mail verify`
+  covers the live window and falls through for older ids.
+
+### 12.2 Built contract (plan PR 9b)
+
+The hooks live in `bin/fleet.py`; their logic is in `bin/fleet_msg.py`.
+
+- **`fleet msg import --dir DIR --to NAME@SITE [--nonce N]`** is disruptive
+  (§13) and needs a live `--nonce` or the registered Interface; a worker turn
+  is refused before any file is read. It runs `import_dir` with no §11 rules
+  (a bulk move of existing mail, gated), then moves each imported or duplicate
+  file to `DIR/done/` by hard link and unlink: a move that never overwrites
+  (a taken name gets a `.<sha12>` suffix) and loses no bytes. Skipped files
+  stay with the reason. It prints `IMPORTED n DUPLICATE n MOVED n SKIPPED n`,
+  one `SKIPPED name: reason` line each, and `EMPTY` when `DIR` holds no mail,
+  which is the signal the operator may retire the directory; nothing
+  is retired by code. The `done/` directory is not itself reported.
+- **`relay-ack`** of a file named `msg-<id>.mail` whose `msg-id` header is
+  `<id>` also acks `<id>` in the `interface` queue, when the caller proves
+  `interface`. Any other file, or a caller without the proof, relays exactly
+  as before and leaves the message unacked. The ack never fails the relay.
+- **`fleet mail verify <id>`** folds the message store first (the receipt uuid
+  without dashes is the envelope id). An envelope `interface@SITE` to
+  `supervisor@SITE` stamped `interface-registration` is `VERIFIED`; any other
+  stored envelope is `UNVERIFIED`. When the old receipt also exists it is
+  checked too (it holds registration continuity), so the new store never
+  widens what verify accepts. No site, an unknown or compacted id, or an
+  unreadable store falls through to the old receipt store. An envelope-only
+  verdict is point-in-time: the method was stamped at send.
+- **`_issue_verified_supervisor_mail`** also writes that envelope (body, same
+  id as the receipt, no notice; `fleet send` delivers its own) when the home
+  has a site label and the body fits the envelope bounds (120 words, 8 KiB);
+  otherwise only the receipt is written, as before. The envelope stays unread
+  in the supervisor queue until acked.
+- **Mailman seed.** `fleet mailman init` writes the bridge command
+  `[python, bin/fleet.py, --fleet-home, HOME, msg, sync, --once]` (absolute
+  paths, so no `fleet` on `PATH` is needed) when the home has a site label;
+  a home without one keeps the empty bridge. An existing `mailman.json` is
+  not rewritten.
 
 ## 13. Doctrine and tiers
 
