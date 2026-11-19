@@ -324,6 +324,47 @@ def _ledger(store: core.Store):
                 yield record
 
 
+def _ledger_tail(store: core.Store, since: float):
+    """Ledger records whose `ts` may be at or after `since`, read from the end
+    in blocks: stops once a whole block holds only older records (plus a
+    one-hour slack for a clock that stepped back), so a long ledger is not
+    scanned per send. Oldest first within what is yielded."""
+    try:
+        st = os.lstat(store.ledger_path)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(st.st_mode):
+        raise MsgError("ledger.jsonl is not a regular file")
+    stop_at = since - rules.HOUR_S
+    block, pos, carry, chunks = 1 << 16, st.st_size, b"", []
+    with open(store.ledger_path, "rb") as handle:
+        while pos > 0:
+            start = max(0, pos - block)
+            handle.seek(start)
+            data = handle.read(pos - start) + carry
+            pos = start
+            lines = data.split(b"\n")
+            carry = lines[0] if pos > 0 else b""
+            batch = lines[1:] if pos > 0 else lines
+            chunks.append(batch)
+            stamps = []
+            for line in batch:
+                try:
+                    stamps.append(core.parse_iso_utc(json.loads(line).get("ts")))
+                except (ValueError, TypeError, AttributeError, core.EnvelopeError):
+                    continue
+            if stamps and max(stamps) < stop_at:
+                break
+    for batch in reversed(chunks):
+        for line in batch:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                yield record
+
+
 def _readers(store: core.Store) -> dict:
     return {r.get("id"): r.get("reader") for r in _ledger(store)
             if r.get("event") == "read" and r.get("reader")}
@@ -478,10 +519,15 @@ def _limits(store: core.Store) -> rules.Limits:
         raise MsgError(f"config.json: {exc}") from None
 
 
-def _ledger_sends(store: core.Store):
-    """(ts, from, to, kind, method, site-of-from) per `delivered` or `queued`
-    ledger line: the history the §11 rules and the per-peer ingest cap count."""
-    for record in _ledger(store):
+HISTORY_WINDOW_S = 24 * 3600.0   # §11 reads the last day: rate and ingest cap are hourly
+
+
+def _ledger_sends(store: core.Store, now: "float | None" = None):
+    """(ts, from, to, kind, method) per `delivered` or `queued` ledger line in
+    the last `HISTORY_WINDOW_S`: the history the §11 rules and the per-peer
+    ingest cap count. Reads the ledger tail, not the whole file."""
+    now = store.clock() if now is None else now
+    for record in _ledger_tail(store, now - HISTORY_WINDOW_S):
         if record.get("event") not in ("delivered", "queued"):
             continue
         frm, to = record.get("from"), record.get("to")
@@ -490,6 +536,8 @@ def _ledger_sends(store: core.Store):
         try:
             ts = core.parse_iso_utc(record.get("ts"))
         except (core.EnvelopeError, ValueError, TypeError):
+            continue
+        if ts < now - HISTORY_WINDOW_S:
             continue
         yield ts, frm, to, record.get("kind"), record.get("method")
 
@@ -1183,8 +1231,22 @@ def cmd_ids(prims: MsgPrims, args, out) -> int:
     return 0
 
 
+def cmd_compact(prims: MsgPrims, args, out) -> int:
+    """Pack old messages, receipts and ledger lines into `archive/<yyyymm>/`
+    (§6). Renames only; nothing is deleted. `compact_days` in config.json
+    (default 30) sets the age."""
+    store = open_store(prims)
+    days = _config(store).get("compact_days", core.COMPACT_DAYS)
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        raise MsgError("config compact_days must be a positive integer")
+    counts = core.compact(store, days=days)
+    print("COMPACTED " + " ".join(f"{k}={v}" for k, v in sorted(counts.items())), file=out)
+    return 0
+
+
 VERBS = {"init": cmd_init, "send": cmd_send, "inbox": cmd_inbox, "ack": cmd_ack,
-         "sync": cmd_sync, "serve": cmd_serve, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois}
+         "sync": cmd_sync, "serve": cmd_serve, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois,
+         "compact": cmd_compact}
 
 
 def run(args, prims: MsgPrims, out=None) -> int:

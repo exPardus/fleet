@@ -11,6 +11,7 @@ the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):*
 `## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). **Built (plan PR 2):**
 `fleet msg init/send/inbox/ack/status/queue/ids/whois` in one home in `bin/fleet_msg.py` (§8.1).
 **Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
+**Built (plan PR 10):** `fleet msg compact` and the `purge` seam in `bin/fleet_msg_core.py` (§6.1).
 Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -262,6 +263,31 @@ queued ──transfer──▶ delivered ──inbox──▶ read ──ack─�
   files into `archive/<yyyymm>/` (packed, never dropped). A `done/` file is
   archived only when its marker exists. Any purge sits
   behind one `purge` seam, off by default, and needs an explicit setting.
+
+### 6.1 Built contract (plan PR 10)
+
+- **`fleet msg compact`** renames, never copies or deletes, so every file is in
+  exactly one place at every instant and a crash is finished by the next run.
+  Age is the file's mtime; `compact_days` in `config.json` (default 30) sets it.
+  Targets under `archive/<yyyymm>/` (the month of the file's mtime):
+  `done/<name>/<id>.json` (only with its marker), `rejected/<file>`,
+  `outbox-sent/<site>/<file>`, `seen/<id[:2]>/<id>` (older than
+  `max(compact_days, dedup_days)` days plus `max_skew`, and only when the id is
+  in no spool state), and `ledger-<utc stamp>-<rand8>.jsonl`. `new/` and `cur/`
+  never move. An existing target is left in place.
+- **The ledger** is rotated whole into a segment when it holds a line older
+  than the age; the recent lines are then appended back to the live ledger,
+  skipping lines already there, and a `.seeded` sidecar marks the segment
+  done. A crash between the two leaves the segment unseeded and the next
+  `compact` finishes it. Segments hold every line, recent ones too.
+- **`purge`** is `fleet_msg_core.purge(store, config=...)`, the only function
+  that deletes. It raises unless `config.json` has `purge_enabled: true` and
+  `purge_after_days` (a positive integer); then it removes whole
+  `archive/<yyyymm>/` months that ended before that age. No verb calls it yet;
+  a `purge` verb needs its own tier (§13).
+- **History window.** The §11 history (`msg send`) and the per-peer ingest cap
+  read the ledger tail for the last 24 h, not the whole file. A task
+  alternation older than a day no longer counts toward the `loop` rule.
 
 ## 7. Transport interface
 
