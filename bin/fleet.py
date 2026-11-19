@@ -6214,6 +6214,13 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         # Project its file-only state separately from worker rows.
         "supervisor": _supervisor_tier_snapshot(now),
     }
+    try:
+        import fleet_msg_core
+        msg_counts = fleet_msg_core.view_counts(FLEET_HOME)
+    except Exception:
+        msg_counts = None
+    if msg_counts is not None:
+        snap["msg"] = msg_counts
     if not ok:
         return snap
 

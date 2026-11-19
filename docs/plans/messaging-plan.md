@@ -16,6 +16,8 @@ PR 9a (migration module: render, `import_dir`, `fold`) built: `bin/fleet_msg_mig
 `tests/test_msg_migrate.py`; the `msg import` verb needs a `bin/fleet.py` subparser and moves to PR 9b.
 PR 10 (retention) built: `msg compact`,
 the `purge` seam, and the windowed `_history`, with `tests/test_msg_compact.py`.
+PR 11 (views) built: `msg` queue counts in `status_snapshot()` and the statusline by listing
+only, with `tests/test_msg_views.py` and an extension of `tests/test_views_doctrine.py`.
 
 Every PR carries its own tests and the doc changes for what it ships: the
 spec section it implements moves from "proposed" to "built", plus

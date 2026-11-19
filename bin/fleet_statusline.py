@@ -491,7 +491,22 @@ def render_statusline(snap: dict, color: bool = True,
     #
     # Two spaces between fields: wide enough to group `label count age` as one
     # unit without a separator glyph, which would cost width and ASCII purity.
+    msg = _msg_chunk(snap, paint)
+    if msg:
+        parts.append(msg)
     return "  ".join([head] + lead + parts)
+
+
+def _msg_chunk(snap: dict, paint) -> str:
+    msg = snap.get("msg")
+    if not isinstance(msg, dict):
+        return ""
+    unread, depth = msg.get("unread"), msg.get("outbox_depth")
+    unread = unread if isinstance(unread, int) and not isinstance(unread, bool) else 0
+    depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 0
+    if not unread and not depth:
+        return ""
+    return paint(f"msg {unread} unread" + (f" {depth} out" if depth else ""), "")
 
 
 def _want_color() -> bool:

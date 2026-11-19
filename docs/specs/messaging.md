@@ -14,6 +14,7 @@ the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):*
 **Built (plan PR 10):** `fleet msg compact` and the `purge` seam in `bin/fleet_msg_core.py` (§6.1).
 **Built (plan PR 8):** named roles, `fleet msg bind` and `retire`, in `bin/fleet_msg_bind.py` (§8.3).
 **Built (plan PR 9a):** the §12 steps 2-3 module `bin/fleet_msg_migrate.py` (§12.1); the `msg import` verb and the `bin/fleet.py` hooks are PR 9b.
+**Built (plan PR 11):** the visible-queue counts in `status_snapshot()` (`msg` key) and the statusline (`msg U unread [O out]`), by directory listing only (§11, §13).
 Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
@@ -750,6 +751,12 @@ only when it holds the parent.
 - **Visible queue**: `fleet msg queue` prints per identity unread, unacked,
   needs-answer, oldest age, and per-peer outbox depth and oldest age. Views
   may show counts by directory listing only.
+  **Built (plan PR 11):** `fleet_msg_core.view_counts(home)` lists `spool/<name>/new/` per
+  identity and `outbox/<site>/q/` per peer, counting names only (no envelope parse, no lock,
+  no write); a symlink is not followed. `status_snapshot()` adds `msg`
+  (`identities`, `outbox`, `unread`, `outbox_depth`) and omits it when `state/msg/` is
+  absent. The statusline appends `msg U unread` and ` O out` when `O` is nonzero, and prints
+  nothing when both are zero.
 
 ### 11.1 Built contract (plan PR 3)
 

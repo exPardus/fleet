@@ -125,7 +125,7 @@ Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary
 
 Signature: `status_snapshot(now: datetime | None = None, include_archived: bool = False) -> dict`
 
-Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker; reads the supervisor claim file. Never opens `fleet.lock`, never calls `PLATFORM.*`, never writes. Returns:
+Reads `state/fleet.json`; counts `mailbox/<sid>.md` per worker; reads the supervisor claim file. Never opens `fleet.lock`, never calls `PLATFORM.*`, never writes. When `state/msg/` exists it also adds a `msg` key (unread per hosted identity, outbox depth per peer) counted by directory listing only (messaging spec §11); the statusline renders it as `msg U unread [O out]` and stays silent at zero. Returns:
 
 ```python
 {
