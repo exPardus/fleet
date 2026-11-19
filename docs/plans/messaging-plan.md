@@ -9,7 +9,8 @@ files, and names the tests, risks and exclusions.
 `tests/integration/test_msg_ssh_live.py` (T16). PR 6 (wiring) built: rules, fs `sync` and
 inbox pull, notice, drain block, the `msg send --kind task` gate, the PR 2
 deferrals and T10b, with `tests/test_msg_two_home.py` (T13, T14, T14b, T14c).
-`bind` and its gate arm wait for PR 8.
+`bind` and its gate arm wait for PR 8. PR 10 (retention) built: `msg compact`,
+the `purge` seam, and the windowed `_history`, with `tests/test_msg_compact.py`.
 
 Every PR carries its own tests and the doc changes for what it ships: the
 spec section it implements moves from "proposed" to "built", plus
@@ -194,6 +195,6 @@ Delta review (d60fb6b3):
 
 ## PR 6 review deferrals (PR #77)
 
-- The §11 history in `msg send` (`_history`) still scans the whole ledger once per
-  send. A tail or time-window read is deferred; the per-sync-pass ingest cap and
+- The §11 history in `msg send` (`_history`) scanned the whole ledger once per
+  send. Done in PR 10: it reads a 24 h tail (spec §6.1); the per-sync-pass ingest cap and
   retired-name reads are cached in `sync_fs_peer`.

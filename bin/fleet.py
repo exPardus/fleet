@@ -28984,6 +28984,7 @@ def build_parser() -> argparse.ArgumentParser:
     msg_sub.add_parser(
         "serve", help="ssh forced command: serve frames for one client site (needs --peer)"
     ).add_argument("--peer", default=None, metavar="SITE")
+    msg_sub.add_parser("compact", help="pack old messages and ledger into archive/<yyyymm>/")
     msg_sub.add_parser("ids", help="list the identities of this home")
     msg_sub.add_parser("whois", help="resolve one identity to its holder").add_argument(
         "name", metavar="NAME")

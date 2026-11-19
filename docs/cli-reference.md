@@ -84,6 +84,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
   - [`fleet msg queue`](#fleet-msg-queue) — unread, unacked and outbox counts
   - [`fleet msg sync`](#fleet-msg-sync) — sync fs and ssh peers: pull, push, receipts (all peers, or --peer)
   - [`fleet msg serve`](#fleet-msg-serve) — ssh forced command: serve frames for one client site (needs --peer)
+  - [`fleet msg compact`](#fleet-msg-compact) — pack old messages and ledger into archive/<yyyymm>/
   - [`fleet msg ids`](#fleet-msg-ids) — list the identities of this home
   - [`fleet msg whois`](#fleet-msg-whois) — resolve one identity to its holder
 - [`fleet relay-ack`](#fleet-relay-ack) — append an interface relay and acknowledge one mail file
@@ -1049,10 +1050,11 @@ options:
 
 ```text
 usage: fleet msg [-h]
-                 {init,send,inbox,ack,status,queue,sync,serve,ids,whois} ...
+                 {init,send,inbox,ack,status,queue,sync,serve,compact,ids,whois}
+                 ...
 
 positional arguments:
-  {init,send,inbox,ack,status,queue,sync,serve,ids,whois}
+  {init,send,inbox,ack,status,queue,sync,serve,compact,ids,whois}
     init                set this home's site label
     send                send one message; DELIVERED or QUEUED
     inbox               read NAME's queue (new -> cur)
@@ -1063,6 +1065,7 @@ positional arguments:
                         peers, or --peer)
     serve               ssh forced command: serve frames for one client site
                         (needs --peer)
+    compact             pack old messages and ledger into archive/<yyyymm>/
     ids                 list the identities of this home
     whois               resolve one identity to its holder
 
@@ -1171,6 +1174,15 @@ usage: fleet msg serve [-h] [--peer SITE]
 options:
   -h, --help   show this help message and exit
   --peer SITE
+```
+
+#### fleet msg compact
+
+```text
+usage: fleet msg compact [-h]
+
+options:
+  -h, --help  show this help message and exit
 ```
 
 #### fleet msg ids
