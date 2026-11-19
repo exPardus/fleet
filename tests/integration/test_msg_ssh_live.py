@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import child_env
+
 BIN = Path(__file__).resolve().parents[2] / "bin"
 FLEET_PY = str(BIN / "fleet.py")
 
@@ -40,7 +42,8 @@ def _free_port():
 
 def _fleet(home, *argv, env, check=True):
     run = subprocess.run([sys.executable, FLEET_PY, "--fleet-home", str(home), *argv],
-                         capture_output=True, text=True, env=env, timeout=120)
+                         capture_output=True, text=True, timeout=120,
+                         env=child_env(Path(home).parent, **env))
     if check:
         assert run.returncode == 0, run.stderr + run.stdout
     return run

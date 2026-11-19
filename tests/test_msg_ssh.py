@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import child_env
+
 import fleet
 import fleet_msg
 import fleet_msg_core as core
@@ -408,10 +410,12 @@ def test_t15c_envelope_from_a_name_the_peer_does_not_host_is_rejected_auth(two, 
     assert "rejected-by-peer" in ledger and forged["id"] in ledger
 
 
-def test_t15c_serve_refuses_without_peer_and_with_its_own_label(two):
+def test_t15c_serve_refuses_without_peer_and_with_its_own_label(two, tmp_path):
     a, b, _c, _p = two
+    env = child_env(tmp_path, SSH_CONNECTION=_env()["SSH_CONNECTION"])
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
     run = subprocess.run([sys.executable, FLEET_PY, "--fleet-home", str(b), "msg", "serve"],
-                         capture_output=True, env=_env(), timeout=60, input=b"")
+                         capture_output=True, env=env, timeout=60, input=b"")
     assert run.returncode == 2 and b"requires --peer" in run.stderr and run.stdout == b""
     own = subprocess.run(server_argv(b, "beta"), capture_output=True, env=_env(), timeout=60,
                          input=b"")
