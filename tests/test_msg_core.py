@@ -665,7 +665,9 @@ ALLOWED_DESTRUCTIVE = {
                           ("move", "replace"), ("outbox_commit", "replace"),
                           # retention (§6): compact renames into archive/; purge is the only delete
                           ("_archive_move", "replace"), ("_compact_ledger", "replace"), ("_reseed", "replace"),
-                          ("purge", "rmtree")},
+                          ("purge", "rmtree"),
+                          # `msg import` files a source into done/: link, then drop the old name
+                          ("link_move", "unlink")},
     "fleet_msg_transport.py": set(),
     # a role record is rewritten tmp -> rename under the spool lock (epoch +1)
     "fleet_msg_bind.py": {("_write_role", "replace")},
