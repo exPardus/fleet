@@ -118,3 +118,63 @@ def test_statusline_shows_counts_short():
     assert line == base + "  msg 0 unread 2 out"
     junk = sl.render_statusline(_snap({"unread": "x", "outbox_depth": True}), color=False)
     assert junk == base
+
+
+def _link_case(tmp_path, rel):
+    home = tmp_path / "home"
+    _seed(home, spool={"alice": {"new": 1}}, outbox={"s1": 1})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for i in range(3):
+        (outside / (ID.format(i) + ".json")).write_text("x")
+    target = home / "state" / "msg" / rel
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    else:
+        import shutil
+        shutil.rmtree(target)
+    os.symlink(outside, target)
+    return home
+
+
+def test_symlinked_leaf_and_parent_dirs_are_not_followed(tmp_path):
+    for rel, key in (("spool/alice/new", "unread"), ("outbox/s1/q", "outbox_depth"),
+                     ("spool", "unread"), ("outbox", "outbox_depth")):
+        home = _link_case(tmp_path / rel.replace("/", "_"), rel)
+        assert core.view_counts(home)[key] == 0, rel
+
+
+def test_stray_non_id_json_is_not_counted(tmp_path):
+    home = tmp_path / "home"
+    _seed(home, spool={"bob": {"new": 2}}, outbox={"s1": 1})
+    (home / "state/msg/spool/bob/new/notanid.json").write_text("x")
+    (home / "state/msg/outbox/s1/q/notanid.json").write_text("x")
+    got = core.view_counts(home)
+    assert got["unread"] == 2 and got["outbox_depth"] == 1
+
+
+def test_count_is_capped_and_rendered_with_plus(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "VIEW_COUNT_CAP", 3)
+    home = tmp_path / "home"
+    _seed(home, spool={"bob": {"new": 8}}, outbox={"s1": 2})
+    got = core.view_counts(home)
+    assert got["unread"] == 3 and got["outbox_depth"] == 2 and got["capped"] is True
+    line = sl.render_statusline(_snap(got), color=False)
+    assert line.endswith("  msg 3+ unread 2+ out")
+    got = core.view_counts(_seeded(tmp_path / "ok", 2))
+    assert got["capped"] is False
+
+
+def _seeded(home, n):
+    _seed(home, spool={"bob": {"new": n}})
+    return home
+
+
+def test_msg_chunk_survives_no_workers_and_fault_paths():
+    msg = {"unread": 5, "outbox_depth": 0}
+    line = sl.render_statusline({"ok": True, "workers": [], "msg": msg}, color=False)
+    assert line.endswith(": no workers  msg 5 unread")
+    line = sl.render_statusline({"ok": False, "reason": "corrupt", "msg": msg}, color=False)
+    assert line.endswith("  msg 5 unread") and "no workers" not in line
+    bare = sl.render_statusline({"ok": True, "workers": []}, color=False)
+    assert "msg" not in bare

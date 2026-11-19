@@ -753,10 +753,14 @@ only when it holds the parent.
   may show counts by directory listing only.
   **Built (plan PR 11):** `fleet_msg_core.view_counts(home)` lists `spool/<name>/new/` per
   identity and `outbox/<site>/q/` per peer, counting names only (no envelope parse, no lock,
-  no write); a symlink is not followed. `status_snapshot()` adds `msg`
-  (`identities`, `outbox`, `unread`, `outbox_depth`) and omits it when `state/msg/` is
+  no write). A name counts when `list_spool` would list it (`<32 hex>.json`). A symlink is
+  never followed: `spool`, `outbox`, `new`, `q` and every identity or site directory must be a
+  real directory. Counting stops at `VIEW_COUNT_CAP` (10,000) names per directory, so a flooded
+  queue cannot slow a render; `capped` is then true and the statusline shows `N+`. `fleet msg
+  queue` gives exact depth. `status_snapshot()` adds `msg`
+  (`identities`, `outbox`, `unread`, `outbox_depth`, `capped`) and omits it when `state/msg/` is
   absent. The statusline appends `msg U unread` and ` O out` when `O` is nonzero, and prints
-  nothing when both are zero.
+  nothing when both are zero. The same chunk follows the `no workers` and registry-fault words.
 
 ### 11.1 Built contract (plan PR 3)
 

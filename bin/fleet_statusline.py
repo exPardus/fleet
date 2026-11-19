@@ -395,7 +395,7 @@ def render_statusline(snap: dict, color: bool = True,
         # that never ran `fleet init`, on the one surface the operator reads
         # continuously. `status_snapshot` distinguishes the two now; this is a
         # render, and renders nothing new of its own.
-        return f"{head}: {registry_fault_word(snap.get('reason'))}"
+        return _with_msg(f"{head}: {registry_fault_word(snap.get('reason'))}", snap, paint)
 
     # TOTAL OVER THE ROWS IT IS HANDED, not only over the rows
     # `status_snapshot` builds. `snap["workers"]` was a `KeyError` waiting for
@@ -405,7 +405,7 @@ def render_statusline(snap: dict, color: bool = True,
     if not isinstance(workers, list):
         workers = []
     if not workers:
-        return f"{head}: no workers"
+        return _with_msg(f"{head}: no workers", snap, paint)
 
     buckets: dict = {}
     for w in workers:
@@ -497,6 +497,11 @@ def render_statusline(snap: dict, color: bool = True,
     return "  ".join([head] + lead + parts)
 
 
+def _with_msg(line: str, snap: dict, paint) -> str:
+    msg = _msg_chunk(snap, paint)
+    return f"{line}  {msg}" if msg else line
+
+
 def _msg_chunk(snap: dict, paint) -> str:
     msg = snap.get("msg")
     if not isinstance(msg, dict):
@@ -506,7 +511,8 @@ def _msg_chunk(snap: dict, paint) -> str:
     depth = depth if isinstance(depth, int) and not isinstance(depth, bool) else 0
     if not unread and not depth:
         return ""
-    return paint(f"msg {unread} unread" + (f" {depth} out" if depth else ""), "")
+    plus = "+" if msg.get("capped") is True else ""
+    return paint(f"msg {unread}{plus} unread" + (f" {depth}{plus} out" if depth else ""), "")
 
 
 def _want_color() -> bool:
