@@ -221,7 +221,9 @@ def test_bind_refusals(home, monkeypatch, capsys, name, binding, fragment):
     claim(home)
     as_body(monkeypatch, sid=SUP_SID)
     assert msg(home, "bind", name, "--binding", binding, "--nonce", NONCE) == 1
-    assert fragment in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert fragment in err
+    assert "<" not in err      # no placeholder token in a refusal (no-placeholder doctrine)
     assert not (home / "state" / "msg" / "ids").exists()
 
 

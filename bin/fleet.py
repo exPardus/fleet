@@ -28899,7 +28899,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bind", help="bind a named role to a concrete holder (epoch +1)")
     p_msg_bind.add_argument("name", metavar="NAME")
     p_msg_bind.add_argument("--binding", required=True, metavar="B",
-                            help="lane:<worker>, session:<sid>, codex-thread:<id> or pi-job:<id>")
+                            help="lane:WORKER, session:ID, codex-thread:ID or pi-job:ID")
     p_msg_bind.add_argument("--nonce", default=None, metavar="N", help=GATE_NONCE_ARG_HELP)
     p_msg_retire = msg_sub.add_parser("retire", help="retire a named role (kept, not deleted)")
     p_msg_retire.add_argument("name", metavar="NAME")

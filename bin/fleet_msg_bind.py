@@ -92,8 +92,8 @@ def check_binding(binding: str, lane_ok: Callable[[str], bool]) -> str:
             raise BindError(f"refused: {binding!r} is not a live lane in this home")
         return binding
     if not _CONCRETE_RE.fullmatch(binding):
-        raise BindError("refused: a binding is lane:<worker>, session:<sid>, "
-                        "codex-thread:<id> or pi-job:<id>")
+        raise BindError("refused: a binding is lane:WORKER, session:ID, "
+                        "codex-thread:ID or pi-job:ID")
     return binding
 
 

@@ -1208,7 +1208,7 @@ positional arguments:
 
 options:
   -h, --help   show this help message and exit
-  --binding B  lane:<worker>, session:<sid>, codex-thread:<id> or pi-job:<id>
+  --binding B  lane:WORKER, session:ID, codex-thread:ID or pi-job:ID
   --nonce N    the current supervisor generation (claim-nonce §5.3): clears
                §7's claim gate for a mutating verb while a fresh claim is
                held, and proves the lineage that owns a rotated body's workers
