@@ -1006,15 +1006,15 @@ def _quarantine_registry(path: Path):
 def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14171) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15558) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:19011) -- upgrades need complete records.
+      * `_sweep_husks` (:14175) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15562) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:19015) -- upgrades need complete records.
       * `_acting_worker_identity` (:4517) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5278) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15829) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18889) -- name the incident-specific absence.
-      * `_print_snapshot_table` (:8528) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20627) -- render the release explanation.
+      * `_doctor_check_registry` (:15833) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:18893) -- name the incident-specific absence.
+      * `_print_snapshot_table` (:8532) -- render the stale-ok explanation.
+      * `_tombstone_releasing_body` (:20631) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4499,7 +4499,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:19011`), because legacy upgrades also require a complete registry.
+    (`:19015`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1087`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -7145,7 +7145,6 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     and return nonzero rather than invite a second dispatch. The sid-keyed token
     ceiling is written only after join; native dispatch rejects USD budgets."""
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
-    # A named messaging role owns its spool; a lane of that name would take it over.
     if os.path.lexists(Path(FLEET_HOME) / "state" / "msg" / "ids" / f"{args.name}.json"):
         raise FleetCliError(
             f"{args.name}: refused -- a messaging role of that name exists "
@@ -12525,7 +12524,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12435` / `cmd_respawn:11711`, before
+    # resolution that runs from `cmd_kill:12439` / `cmd_respawn:11715`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12556,9 +12555,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12435` / `cmd_respawn:11711`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12439` / `cmd_respawn:11715`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11732-11739` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11736-11743` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -17933,9 +17932,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4327, :4362, :4392, :4431, :4468, :4524, :4603, :5672, :12538, :12701, :12966, :13190, :13226, :13468, :13469, :13557, :13567, :13578, :13676, :14197, :14472, :14473, :14508, :14596, :17880, :20780, :20792, :20939, :24712, :24713, :24813, :24877, :24939, :25968, :25970, :26007, :26535, :29491`).
+    sites that already key on the union (`:4327, :4362, :4392, :4431, :4468, :4524, :4603, :5672, :12542, :12705, :12970, :13194, :13230, :13472, :13473, :13561, :13571, :13582, :13680, :14201, :14476, :14477, :14512, :14600, :17884, :20784, :20796, :20943, :24716, :24717, :24817, :24881, :24943, :25972, :25974, :26011, :26539, :29504`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10808, :11582, :16168, :27467. This makes union identity
+    OWN prior sid alone: :10812, :11586, :16172, :27471. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18638,8 +18637,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10808, :11582, :16168,
-    # :27467) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10812, :11586, :16172,
+    # :27471) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18647,7 +18646,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1080`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17854`).
+        # names this gate as its reason (`:17858`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -19009,7 +19008,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14168`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14172`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
