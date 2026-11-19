@@ -27,6 +27,7 @@ from typing import Callable
 import fleet_msg_core as core
 import fleet_msg_fs as fsx
 import fleet_msg_rules as rules
+import fleet_msg_ssh as sshx
 import fleet_msg_transport as transport
 import fleet_msg_wake as wake
 
@@ -663,6 +664,123 @@ def sync_all_fs(prims: MsgPrims, store: core.Store, only: "str | None" = None) -
     return results
 
 
+def _make_ingest(prims: MsgPrims, store: core.Store, site: str):
+    """`ingest(raw, hosted)` for envelopes arriving from peer `site`: the §7
+    receiver path with the §11 admit and the §9 notice. One ledger and registry
+    read per session; an accepted envelope is counted in memory."""
+    recent = _recent_ingests(store, site)
+    retired = _retired_names(prims)
+    admit = rules.make_admit(_limits(store), site, lambda _s: recent, lambda: retired,
+                             prims.clock)
+    notify = _notify(prims, store)
+
+    def ingest(raw: bytes, hosted) -> str:
+        result = core.ingest(store, raw, peer_site=site, hosted=hosted, now=prims.clock(),
+                             admit=admit, notify=notify)
+        if result == "accepted":
+            try:
+                if core.parse(raw).get("kind") != "receipt":
+                    recent.append(prims.clock())
+            except core.EnvelopeError:
+                pass
+        return result
+    return ingest
+
+
+def _local_info(prims: MsgPrims, store: core.Store) -> transport.SiteInfo:
+    return transport.SiteInfo(
+        site=store.site, schemas=(core.SCHEMA,), clock=core.iso_utc(prims.clock()),
+        hosted=tuple(hosted_names(prims, prims.fleet_home)))
+
+
+def _ssh_argv(peer: dict) -> list:
+    return sshx.ssh_argv(peer)
+
+
+_ssh_spawn = sshx.subprocess.Popen       # tests replace `ssh` with a pipe here
+
+
+def sync_ssh_peer(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> dict:
+    """One ssh session with `site` (§7.2), this home the client: `push` the
+    outbox (a result settles each id), `pull`, `ingest()` each, `commit(ids)`.
+    A failure counts toward `max_failures` (exit 4); a clean pass resets it."""
+    ssh = None
+    try:
+        ssh = sshx.SshTransport(store, site, _ssh_argv(peer), spawn=_ssh_spawn)
+        remote = ssh.hello(_local_info(prims, store))
+        counts = {"pulled": 0, "accepted": 0, "duplicate": 0, "rejected": 0, "pushed": 0}
+        queued = [raw for _qseq, raw in core.outbox_entries(store, site)]
+        settled = []
+        for msg_id, value in ssh.push(queued).items():
+            settled.append(msg_id)
+            status, reason = transport.parse_push_result(value)
+            counts["pushed"] += 1
+            if status == "rejected":
+                store.ledger("rejected-by-peer", id=msg_id, site=site, reason=reason)
+        if settled:
+            core.outbox_commit(store, site, settled)
+        ingest = _make_ingest(prims, store, site)
+        ids = []
+        for qseq, raw in ssh.pull(0):
+            counts["pulled"] += 1
+            result = ingest(raw, remote.hosted)
+            counts["rejected" if result.startswith("rejected") else result] += 1
+            msg_id = ssh.entry_id(qseq)
+            if msg_id is not None:
+                ids.append(msg_id)
+        ssh.commit(ids)
+        counts["warnings"] = list(ssh.warnings)
+        counts["more"] = ssh.more
+    except (transport.TransportError, OSError, core.StoreError) as exc:
+        failed = sshx.record_failure(store, site)
+        raise MsgError(f"sync {site}: {exc} (failure {failed} of {sshx.max_failures(peer)})") from None
+    finally:
+        if ssh is not None:
+            ssh.close()
+    sshx.record_success(store, site)
+    return counts
+
+
+def sync_all(prims: MsgPrims, store: core.Store, only: "str | None" = None) -> list:
+    """Sync every fs and ssh peer in `peers.json` (or `only`). One peer's
+    failure never stops the others. Returns (site, counts | error text)."""
+    results = []
+    for site, peer in sorted(_peers(store).items()):
+        if only is not None and site != only:
+            continue
+        kind = peer.get("transport") if isinstance(peer, dict) else None
+        if kind not in ("fs", "ssh"):
+            continue
+        try:
+            sync = sync_fs_peer if kind == "fs" else sync_ssh_peer
+            results.append((site, sync(prims, store, site, peer)))
+        except (MsgError, core.StoreError, OSError) as exc:
+            results.append((site, str(exc)))
+    return results
+
+
+def cmd_serve(prims: MsgPrims, args, out) -> int:
+    """The ssh forced command (§7.2): speak frames on stdin/stdout for the
+    client the key pins as `--peer`. Refuses without `--peer`."""
+    if not args.peer:
+        raise MsgError("serve requires --peer SITE (the key's forced command sets it)", code=2)
+    if not core.valid_name(args.peer):
+        raise MsgError(f"bad --peer site label {args.peer!r}", code=2)
+    store = open_store(prims)
+    if args.peer == store.site:
+        raise MsgError("--peer is this home's own site label", code=2)
+    rfile, wfile = getattr(args, "_serve_in", None), getattr(args, "_serve_out", None)
+    rfile = rfile or sys.stdin.buffer
+    wfile = wfile or sys.stdout.buffer
+    try:
+        sshx.serve_session(store, args.peer, rfile, wfile, local=_local_info(prims, store),
+                           ingest=_make_ingest(prims, store, args.peer),
+                           after_ingest=sshx.make_receipter(store, args.peer))
+    except (transport.TransportError, core.StoreError) as exc:
+        raise MsgError(f"serve: {exc}") from None
+    return 0
+
+
 def archive_spool(prims: MsgPrims, name: str) -> "Path | None":
     """T10b: `fleet archive` of a lane moves its spool to
     `archive/<yyyymm>/spool-<name>-<epoch>/`; nothing is deleted, and a later
@@ -880,20 +998,24 @@ def cmd_sync(prims: MsgPrims, args, out) -> int:
         raise MsgError("--watch needs a finite --interval S > 0")
     if args.peer is not None and args.peer not in _peers(store):
         raise MsgError(f"unknown site {args.peer!r}: not in peers.json")
-    failed = 0
     while True:
-        results = sync_all_fs(prims, store, args.peer)
-        for site, outcome in results:
+        failed, dead = 0, False
+        for site, outcome in sync_all(prims, store, args.peer):
             if isinstance(outcome, str):
                 print(f"FAILED {site}: {outcome}", file=out)
                 failed += 1
+                peer = _peers(store).get(site) or {}
+                if peer.get("transport") == "ssh" \
+                        and sshx.failures(store, site) >= sshx.max_failures(peer):
+                    dead = True
                 continue
+            more = " more" if outcome.get("more") else ""
             print(f"SYNC {site} pulled={outcome['pulled']} accepted={outcome['accepted']} "
-                  f"duplicate={outcome['duplicate']} rejected={outcome['rejected']}", file=out)
+                  f"duplicate={outcome['duplicate']} rejected={outcome['rejected']}{more}", file=out)
             for warning in outcome["warnings"]:
                 print(f"WARN {warning}", file=out)
         if not args.watch:
-            return 1 if failed else 0
+            return 4 if dead else (1 if failed else 0)
         prims.sleep(args.interval)
 
 
@@ -1038,7 +1160,7 @@ def cmd_ids(prims: MsgPrims, args, out) -> int:
 
 
 VERBS = {"init": cmd_init, "send": cmd_send, "inbox": cmd_inbox, "ack": cmd_ack,
-         "sync": cmd_sync, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois}
+         "sync": cmd_sync, "serve": cmd_serve, "status": cmd_status, "queue": cmd_queue, "ids": cmd_ids, "whois": cmd_whois}
 
 
 def run(args, prims: MsgPrims, out=None) -> int:

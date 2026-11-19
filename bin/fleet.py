@@ -28976,11 +28976,14 @@ def build_parser() -> argparse.ArgumentParser:
     msg_sub.add_parser("queue", help="unread, unacked and outbox counts").add_argument(
         "--json", action="store_true")
     p_msg_sync = msg_sub.add_parser(
-        "sync", help="pull from fs peers and receive receipts (all peers, or --peer)")
+        "sync", help="sync fs and ssh peers: pull, push, receipts (all peers, or --peer)")
     p_msg_sync.add_argument("--peer", default=None, metavar="SITE")
     p_msg_sync.add_argument("--once", action="store_true", help="one pass (the default)")
     p_msg_sync.add_argument("--watch", action="store_true", help="repeat every --interval S")
     p_msg_sync.add_argument("--interval", type=float, default=None, metavar="S")
+    msg_sub.add_parser(
+        "serve", help="ssh forced command: serve frames for one client site (needs --peer)"
+    ).add_argument("--peer", default=None, metavar="SITE")
     msg_sub.add_parser("ids", help="list the identities of this home")
     msg_sub.add_parser("whois", help="resolve one identity to its holder").add_argument(
         "name", metavar="NAME")

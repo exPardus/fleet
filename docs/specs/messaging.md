@@ -10,7 +10,9 @@ rules as pure functions in `bin/fleet_msg_rules.py` (§11.1). **Built (plan PR 4
 the §7.1 fs transport in `bin/fleet_msg_fs.py` (§7.1.1). **Built (plan PR 5):** the §9 notice and
 `## MESSAGES` block as functions in `bin/fleet_msg_wake.py` (§9.1). **Built (plan PR 2):**
 `fleet msg init/send/inbox/ack/status/queue/ids/whois` in one home in `bin/fleet_msg.py` (§8.1).
-Every other section is proposed, not built; rules, transports and the notice are not wired yet. Where this spec and later code differ, the
+**Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
+**Built (plan PR 7):** the §7.2 ssh transport in `bin/fleet_msg_ssh.py` (§7.2.1), `msg serve`, and `sync` over ssh peers.
+Every other section is proposed, not built; where a later PR wires a section it says so below. Where this spec and later code differ, the
 code is the authority and this file is updated in the same PR.
 
 **Builds on:** `docs/specs/mailman.md` (mail format, crash-safe filing,
@@ -372,6 +374,48 @@ pass syncs and no new daemon is needed; after a reboot the first Interface
 mailman pass resumes delivery. `fleet msg queue` warns when the oldest
 outbox entry for a peer is older than `outbox_warn_s` (default 900).
 
+### 7.2.1 Built contract (plan PR 7)
+
+`bin/fleet_msg_ssh.py` holds the frame codec, `SshTransport` (the client end)
+and `serve_session` (the server end). It imports `fleet_msg_core`,
+`fleet_msg_fs` (for the shared receipt writer) and `fleet_msg_transport`; the
+receiver path (`ingest` with admit and notify) comes in as a callable.
+`bin/fleet_msg.py` adds `sync_ssh_peer`, `sync_all` (fs and ssh peers) and
+`cmd_serve`; `bin/fleet.py` adds only the `serve` subparser.
+
+- **Frames.** A header line `{"len":N,"op":OP,"sha256":HEX}` (at most 256
+  bytes, exactly those keys), then `N` bytes, at most 8 MiB. A short read,
+  unknown op, wrong op for the step, bad checksum or malformed header ends the
+  session non-zero and acts on nothing of that frame. Payloads are JSON; an
+  envelope rides base64 so its canonical bytes arrive unchanged.
+- **Pinning.** `serve` exits 2 without `--peer`, with an invalid label, or with
+  this home's own label. The `hello` of the client must name the `--peer`
+  site, else the session ends before anything is read. Hosted names for
+  ingest come from that `hello`.
+- **Push.** Up to 64 envelopes per session. Each id gets its own `result`
+  (`accepted`, `duplicate`, `rejected:<why>`); a result settles that id in the
+  client's `q/` (a `rejected` one also writes a `rejected-by-peer` ledger line).
+  An id without a result stays queued. The server writes the same
+  `delivered`/`rejected` receipt envelope `fs` writes, so the sender still
+  sees it as a message; a receipt is never receipted.
+- **Pull.** The server returns up to 64 entries of its `q/` for the client,
+  ascending, ignoring `hint_qseq`, with `more` when it held back others
+  (the next pass takes them). An entry with no readable id is not sent.
+  `commit(ids)` moves only ids this session served; a replayed or forged
+  commit moves nothing. The client writes its receipts before it commits and
+  the server answers a `commit` with a `result` frame naming the ids it moved.
+- **Peers.** `peers.json`: `{"transport": "ssh", "alias": A, "port": N, "home":
+  SERVER_HOME, "max_failures": 5}`; `fleet` (the remote command, default
+  `fleet`) is optional. The argv is `ssh -p N -o BatchMode=yes -o
+  ConnectTimeout=15 -- A fleet --fleet-home HOME msg serve`; alias, port and home
+  are validated. A session is killed after 120 s.
+- **Exit 4.** Each failed session adds one to `state/msg/ssh-fails/<peer>`; a
+  clean session sets it to 0. `sync` exits 4 when a failing ssh peer has at
+  least `max_failures` failures in a row (else 1), so the mailman bridge's
+  own `max_failures` and this one agree on "the server is gone".
+- **Not built here.** The `inbox` auto-sync stays fs-only; ssh runs from
+  `sync` and the mailman bridge command only.
+
 ## 8. CLI
 
 Every shipped argv, hook and notice names `--fleet-home` explicitly (§13).
@@ -386,7 +430,7 @@ fleet msg queue   [--json]
 fleet msg ids     | whois NAME
 fleet msg bind    NAME --binding B --nonce N  |  retire NAME --nonce N
 fleet msg sync    --peer P (--once | --watch --interval S)
-fleet msg serve   --peer SITE        (ssh forced command only)
+fleet msg serve   --peer SITE        (ssh forced command only; exits 2 without --peer)
 fleet msg compact
 fleet msg import  --dir DIR --to NAME@SITE
 ```
@@ -436,7 +480,7 @@ subparser, `cmd_msg` and `_msg_prims()`. Every verb needs an explicit
   write nothing under `state/msg/`. `queue` counts by listing and file age;
   it warns on an outbox entry older than `outbox_warn_s` (900).
 - **Still open.** A pi lane has no caller evidence and sends `unverified`.
-  `bind` and `retire`, the ssh transport and the tier machinery are later PRs.
+  `bind` and `retire` and the tier machinery are later PRs.
 
 ### 8.2 Built contract (plan PR 6, wiring)
 
@@ -472,7 +516,7 @@ and the gate call.
   non-supervisor-shaped registry rows and its `ids/` roles, read through a
   plain-directory chain and a size-capped regular-file reader (a symlinked or
   oversized peer `fleet.json` contributes nothing). `ssh` peers are
-  skipped until plan PR 7.
+  synced by `sync` too (§7.2.1); a non-peek `inbox` never dials one.
 - **Unverified namespace.** A send with method `unverified` or
   `legacy-unverified` draws its seq from `seq/<from>__<to>.unv`, is counted
   apart by the §11 history, and shows in GAP lines as `<from> (unverified)`.

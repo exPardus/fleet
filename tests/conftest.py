@@ -440,6 +440,8 @@ def pytest_collection_modifyitems(config, items):
         name = Path(str(item.fspath)).name
         if name == "test_live_smoke.py" or "integration" in Path(str(item.fspath)).parts:
             item.add_marker(pytest.mark.live)
+            if name == "test_msg_ssh_live.py":
+                continue                    # gated by FLEET_LIVE_SSH=1 in the module, and skips loudly
             if not live_enabled:
                 item.add_marker(live_skip)
         elif name == "test_hooks.py":

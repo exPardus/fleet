@@ -4,7 +4,9 @@ Spec: `docs/specs/messaging.md` (revision 2). This plan orders the build into
 small PRs, splits them across at most three parallel lanes with disjoint
 files, and names the tests, risks and exclusions.
 
-**Status:** PRs 0 to 5 merged. PR 6 (wiring) built: rules, fs `sync` and
+**Status:** PRs 0 to 6 merged. PR 7 (ssh transport) built: `bin/fleet_msg_ssh.py`, `msg serve`,
+`sync` over ssh peers, `tests/test_msg_ssh.py` (T15, T15b-e) and the gated
+`tests/integration/test_msg_ssh_live.py` (T16). PR 6 (wiring) built: rules, fs `sync` and
 inbox pull, notice, drain block, the `msg send --kind task` gate, the PR 2
 deferrals and T10b, with `tests/test_msg_two_home.py` (T13, T14, T14b, T14c).
 `bind` and its gate arm wait for PR 8.
