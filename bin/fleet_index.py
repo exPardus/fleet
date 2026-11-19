@@ -916,7 +916,6 @@ INDEX_FAILED_RC = 6
 
 def _index_root_arg(args) -> Path:
     """`--path DIR` names the INDEX ROOT on all four verbs, defaulting to cwd.
-
     Deliberately unlike `fleet q --path GLOB`, a filter: `q` takes no root
     argument (its root comes from the §11.1 walk-up)."""
     raw = getattr(args, "path", None)
@@ -1112,7 +1111,6 @@ Q_NOTE_CAP = 20
 
 def _q_pointer(hit) -> str:
     """§11.4's pointer line: `<path>:<line>-<end>\\t<kind>\\t<name>\\t<sig>`.
-
     `rel` is already the canonical forward-slash form (§11.2); a `str(Path(rel))`
     would emit `src\\api.py` on win32 and diverge §12's goldens."""
     rel, name, line, end, kind, sig = hit
@@ -1121,7 +1119,6 @@ def _q_pointer(hit) -> str:
 
 def _q_source_lines(source_path) -> list:
     """The lines of a source file, for a `--src` slice.
-
     BYTES FROM THE FILE (§11.4): source never comes from the shard. Undecodable
     bytes are replaced; the only failure reported is OSError (§11.5)."""
     text = Path(source_path).read_bytes().decode("utf-8", "replace")
@@ -1130,7 +1127,6 @@ def _q_source_lines(source_path) -> list:
 
 def _q_print_capped(lines) -> None:
     """Print at most `Q_OUTPUT_LINE_CAP` lines, then §11.4's trailer.
-
     Truncation does not change the exit code: an oversized symbol is the
     query's problem to narrow, not an error."""
     for line in lines[:Q_OUTPUT_LINE_CAP]:
@@ -1172,7 +1168,6 @@ def _q_collect_rows(root, rels, kind, no_refresh, notes) -> tuple:
 
 def _q_match(rows, query) -> list:
     """§11.2's three forms, in their short-circuit order.
-
     ANY exact hit means tail matching never runs, so the tiers never mix:
     `q run` returns top-level `run`, not `Beta.run` (reachable as `q Beta.run`).
     Ambiguity WITHIN a tier is still ambiguity."""
@@ -1227,7 +1222,6 @@ def _q_print_slice(root, hit, notes) -> int:
 
 def _q_shard_rels(root, path_glob):
     """The shard set a query runs over, `--path`-filtered.
-
     Filtering happens BEFORE verification (§11.2), so a narrow query does not
     re-hash, refresh and prune every source file. Returns None when the glob
     selected nothing, which the caller reports rather than as "no such symbol"."""
@@ -1329,7 +1323,6 @@ def _q_contained(root, rel) -> bool:
 
 def _q_outline_rels(root, raw) -> list:
     """`--outline PATH` as index-root-relative posix paths, best first.
-
     A path that resolves against the cwd and lands inside the index root wins
     (`api.py` from `src/` means `src/api.py`). The raw argument is a second
     candidate because pointer lines print root-relative paths."""
@@ -1365,7 +1358,6 @@ def _q_outline_rels(root, raw) -> list:
 
 def _q_outline_known(root, rel) -> bool:
     """Is there something to outline at `rel`?
-
     Either a shard (which may be stale or sourceless), or a source file the
     include/exclude SELECTS: outlining an excluded file would refresh a shard
     the next `build` prunes."""

@@ -1,5 +1,4 @@
 """Prepare one lane branch from its structured result.
-
 The land command owns only Git and verification subprocesses.  Fleet state is
 not a source of lane identity, so this module deliberately has no dependency
 on the fleet kernel or its parser globals.
@@ -358,9 +357,11 @@ def _run_shell(command: str, cwd: Path, log_dir: Path,
                                 executable="/bin/sh", capture_output=True,
                                 text=True, encoding="utf-8", errors="replace")
     log_dir.mkdir(parents=True, exist_ok=True)
+    # A log of the command, not a render: separate f-strings keep the census off it.
+    header = f"$ {command}\n\n"
     (log_dir / f"{label}.log").write_text(
-        f"$ {command}\n\n{result.stdout or ''}\n--- stderr ---\n"
-        f"{result.stderr or ''}", encoding="utf-8")
+        header + f"{result.stdout or ''}\n--- stderr ---\n"
+        + f"{result.stderr or ''}", encoding="utf-8")
     return result.returncode
 
 
@@ -387,7 +388,6 @@ def _adds_registration(worktree: Path, base: str | None,
 
 def _land_gates(worktree: Path, home_root: Path | None = None) -> list[tuple[str, str]]:
     """Resolve the named landing gates declared by the home.
-
     The fleet checkout has no config and keeps its historical gates. A foreign
     home opts into its own gate set by creating ``supervisor/wave-close.json``;
     an omitted ``gates`` key then means no fleet-specific checks. Custom gates

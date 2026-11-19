@@ -232,6 +232,14 @@ ALLOWED = {
     "cmd_attach", "cmd_release", "cmd_abandon", "cmd_clean", "cmd_archive",
     "cmd_resume_limited", "_resume_one_limited", "_resume_one_limited_native",
     "_sweep_husks", "_expire_tombstones",
+    # w510: the liveness/idle-reconcile helpers. Each `load_registry` call sits
+    # LEXICALLY inside `with fleet_lock():` and is paired with a save + event or
+    # a compare-and-swap on the row. `_reconcile_working_row` is reached only
+    # from `cmd_abandon`, `cmd_lane_done` and `sweep_lane_done` (mutating verbs,
+    # never a view); the two stream-retry helpers are reached only from
+    # `recover_lane`, which `cmd_sup_guard` drives.
+    "_reconcile_working_row", "_record_stream_retry",
+    "_mark_stream_retry_exhausted",
     # --- supervisor lifecycle: all inside `fleet_lock()` ---
     "cmd_sup_handoff_begin", "cmd_sup_handoff_complete", "_dispatch_supervisor_body",
     "_cmd_respawn_supervisor",
