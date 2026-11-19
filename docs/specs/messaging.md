@@ -503,7 +503,7 @@ subparser, `cmd_msg` and `_msg_prims()`. Every verb needs an explicit
   another home in the homes list already uses.
 - **Identities.** `supervisor` and `interface` always exist. A lane is a
   registry row that is not supervisor-shaped; an archived row is
-  `rejected: retired`. A named role exists only as `ids/<name>.json`
+  `rejected: retired`, as is a retired role (local `send` and every ingest). A named role exists only as `ids/<name>.json`
   (written by plan PR 8). Any other local name is refused. A remote
   `name@site` needs the site in `peers.json` and is `QUEUED`.
 - **Caller proofs** (§10), best first: `supervisor-nonce` (a `--nonce` that
@@ -559,7 +559,7 @@ and the gate call.
 - **`sync [--peer SITE] [--once | --watch --interval S]`.** For each fs peer
   in `peers.json` (`{"transport": "fs", "home": PATH}`; without `home` the
   homes-list member whose `site.json` names the peer): `hello`, `pull`,
-  `core.ingest()` per entry with `make_admit` (retired lanes and the per-peer
+  `core.ingest()` per entry with `make_admit` (retired lanes and roles, and the per-peer
   ingest cap, counted from the ledger), then `commit(ids)` for every pulled id,
   which sends receipts and drains the peer's outbox. One failing peer prints
   `FAILED <site>: ...`, exits 1, and never stops the others. A non-peek
@@ -636,7 +636,10 @@ fleet msg retire NAME [--nonce N]
 - **`retire`** marks the record (`retired_at`, no binding) and keeps it and its
   queue: nothing is deleted. A send to a retired role is `rejected: retired`;
   retiring twice is a no-op; a later `bind` revives the name at the next
-  epoch. `whois` and `ids` print `RETIRED`.
+  epoch. `whois` and `ids` print `RETIRED`. `bind` refuses a role record it
+  cannot read (oversized, not UTF-8 JSON, bad schema) with a one-line error
+  naming the file, so the epoch never restarts at 1. `fleet spawn NAME` is
+  refused while `ids/NAME.json` exists: a role and a lane share one spool.
 - **Still open.** Tiers for the two verbs stay with PR 12 (unclassified,
   fail-safe). A pi lane has no caller evidence, so a pi-job role is read only
   through `--peek` until pi gains evidence.

@@ -7145,6 +7145,11 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     and return nonzero rather than invite a second dispatch. The sid-keyed token
     ceiling is written only after join; native dispatch rejects USD budgets."""
     _supervisor_gate("spawn", nonce=getattr(args, "nonce", None))
+    # A named messaging role owns its spool; a lane of that name would take it over.
+    if os.path.lexists(Path(FLEET_HOME) / "state" / "msg" / "ids" / f"{args.name}.json"):
+        raise FleetCliError(
+            f"{args.name}: refused -- a messaging role of that name exists "
+            f"(state/msg/ids/{args.name}.json); pick another name or retire the role")
     _ceiling_refusal = _ceiling_refuses_dispatch(
         "spawn",
         force_band=getattr(args, "force_band", False))

@@ -1,5 +1,6 @@
 """Named roles: `fleet msg bind` / `retire` (spec docs/specs/messaging.md §3,
 §8, §10; plan PR 8, T17)."""
+import argparse
 import ast
 import json
 from datetime import datetime, timezone
@@ -289,3 +290,36 @@ def test_module_deletes_nothing():
     attrs = {(n.attr) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     assert not attrs & {"unlink", "remove", "rmdir", "rmtree", "rename", "truncate"}
     assert bind.role_names  # the module under test imported
+
+
+# --- w508 review fixes ---------------------------------------------------------
+
+def test_local_send_to_a_retired_role_is_refused_kind_neutrally(home, monkeypatch, capsys):
+    bound(home, monkeypatch, "session:sid-x")
+    assert msg(home, "retire", "ops", "--nonce", NONCE) == 0
+    capsys.readouterr()
+    assert msg(home, "send", "ops", "late", "--from", "lane-a") == 1
+    err = capsys.readouterr().err
+    assert "rejected: retired" in err and "archived lane" not in err
+
+
+def test_spawn_refuses_a_name_a_role_holds(home, monkeypatch, capsys, tmp_path):
+    bound(home, monkeypatch, "session:sid-x")
+    before = (home / "state" / "fleet.json").read_bytes()
+    capsys.readouterr()
+    with pytest.raises(fleet.FleetCliError, match="messaging role"):
+        fleet.cmd_spawn(argparse.Namespace(name="ops", dir=str(tmp_path), task="t", nonce=NONCE))
+    assert (home / "state" / "fleet.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", [b"\xff\xfe not utf8", b"x" * 5000, b'{"name": "ops"}'])
+def test_bind_refuses_an_unreadable_role_record(home, monkeypatch, capsys, damage):
+    bound(home, monkeypatch, "session:sid-x")
+    path = home / "state" / "msg" / "ids" / "ops.json"
+    path.write_bytes(damage)
+    capsys.readouterr()
+    assert msg(home, "bind", "ops", "--binding", "session:sid-y", "--nonce", NONCE) == 1
+    err = capsys.readouterr().err
+    assert "ops.json" in err and "unreadable" in err and err.count("\n") == 1
+    assert path.read_bytes() == damage
+    assert [r["event"] for r in ledger(home) if r["event"] == "bound"] == ["bound"]

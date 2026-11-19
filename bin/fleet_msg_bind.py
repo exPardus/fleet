@@ -131,6 +131,10 @@ def bind(store: core.Store, name: str, binding: str, bound_by: str, *,
     check_binding(binding, lane_ok)
     with store.locked("spool", name):
         previous = read_role(store, name)
+        if previous is None and os.path.lexists(role_path(store, name)):
+            raise BindError(f"refused: role record {role_path(store, name)} is unreadable "
+                            "(oversized, not UTF-8 JSON or bad schema); repair or move it "
+                            "so the epoch is not reset")
         epoch = (previous["epoch"] if previous else 0) + 1
         record = {"schema": SCHEMA, "name": name, "role": name, "binding": binding,
                   "epoch": epoch, "bound_at": core.iso_utc(store.clock()),

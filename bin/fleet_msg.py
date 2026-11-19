@@ -661,11 +661,23 @@ def hosted_names(prims: MsgPrims, home: Path) -> list:
     return sorted(names)
 
 
-def _retired_names(prims: MsgPrims) -> list:
+def _retired_names(prims: MsgPrims, store: "core.Store | None" = None) -> list:
+    """Archived lanes plus retired roles: the names an ingest rejects as retired."""
     workers = prims.workers() or {}
-    return sorted(n for n, rec in workers.items() if isinstance(rec, dict)
-                  and rec.get("archived_at") is not None and core.valid_name(n)
-                  and not prims.is_supervisor_shaped(n))
+    names = {n for n, rec in workers.items() if isinstance(rec, dict)
+             and rec.get("archived_at") is not None and core.valid_name(n)
+             and not prims.is_supervisor_shaped(n)}
+    if store is None:      # a caller without a store (the ssh ingest) still sees roles
+        try:
+            store = open_store(prims)
+        except (OSError, MsgError, core.StoreError):
+            store = None
+    if store is not None:
+        for name in bind.role_names(store):
+            role = bind.read_role(store, name)
+            if role is not None and bind.is_retired(role):
+                names.add(name)
+    return sorted(names)
 
 
 def _peer_home(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> Path:
@@ -699,7 +711,7 @@ def sync_fs_peer(prims: MsgPrims, store: core.Store, site: str, peer: dict) -> d
         # One ledger and registry read per pass; accepted receive times are
         # appended in memory so the §11 cap still counts this pass's envelopes.
         recent = _recent_ingests(store, site)
-        retired = _retired_names(prims)
+        retired = _retired_names(prims, store)
         admit = rules.make_admit(limits, site, lambda _s: recent, lambda: retired,
                                  prims.clock)
         notify = _notify(prims, store)
@@ -1001,7 +1013,7 @@ def cmd_send(prims: MsgPrims, args, out) -> int:
         if ident is None:
             raise MsgError(f"unknown identity {to_name!r} on site {store.site!r}")
         if ident["retired"]:
-            raise MsgError(f"rejected: retired ({to_name!r} is an archived lane)")
+            raise MsgError(f"rejected: retired ({to_name!r} is retired)")
     elif to_site not in _peers(store):
         raise MsgError(f"unknown site {to_site!r}: not in peers.json")
     parent = None
