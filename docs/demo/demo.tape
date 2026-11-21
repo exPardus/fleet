@@ -26,7 +26,7 @@ Sleep 1500ms
 Hide
 Type "demo-seed && clear"
 Enter
-Sleep 500ms
+Sleep 2500ms
 Show
 
 Type "fleet status --stale-ok"

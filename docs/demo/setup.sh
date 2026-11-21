@@ -13,8 +13,13 @@ APP=$DEMO/acme-app
 
 case "${1:-}" in
 prepare)
+    if [ -e "$DEMO" ] && [ ! -f "$DEMO/.fleet-demo" ]; then
+        echo "setup.sh: $DEMO exists and was not made by this script; remove it yourself" >&2
+        exit 1
+    fi
     rm -rf "$DEMO"
     mkdir -p "$DEMO/bin" "$APP"
+    : > "$DEMO/.fleet-demo"
     git -C "$APP" init -q
     # `fleet msg` needs an explicit home; the shim supplies it after `init`.
     cat > "$DEMO/bin/fleet" <<SHIM

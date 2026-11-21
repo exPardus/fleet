@@ -28,7 +28,7 @@ before it reaches `main`.
 | **Mid-turn steering** | `fleet send` steers a running worker without attaching to it. |
 | **Usage limits** | A worker that hits a usage limit is parked and resumed when the limit resets. |
 | **Messaging** | `fleet msg send/inbox/ack` is one store-and-forward layer for every harness. Messages go to stable identities (lanes, supervisor, interface, named roles), not to sessions. Peers in other homes or on other machines sync over fs and ssh transports. Size, hop, loop and rate limits keep agents from gridlocking each other. |
-| **Liveness** | A turn that ends on an API stream error is retried in the same session with backoff. When retries run out, or a lane dies without an outcome, its supervisor receives a `LANE-DEAD` message and wakes. |
+| **Liveness** | A turn that ends on an API stream error is retried in the same session with backoff. When retries run out, or a Claude lane dies without an outcome, its supervisor receives a `LANE-DEAD` message and wakes. |
 | **Resource GC** | Idle lane sessions that fleet spawned stop after a TTL. Optional memory budget and available-memory floor make `spawn` refuse instead of overloading the host. |
 | **Honest status** | A worker fleet cannot confirm is alive becomes `dead-suspected`. Fleet never respawns it on its own, because a respawn repeats its side effects. |
 | **Work journals** | A stuck worker can be respawned and continue from its journal instead of starting over. |
