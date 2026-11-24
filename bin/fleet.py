@@ -19843,6 +19843,23 @@ def _wave_sync_merges(repo, base, run=subprocess.run) -> set:
     return sync
 
 
+def _wave_github_merge_lane(repo, subject, run=subprocess.run, workers=None, aliases=None):
+    match = re.match(r"^Merge pull request #\d+ from [^/\s]+/(\S+)", subject)
+    if not match:
+        return None
+    branch = match.group(1)
+    candidates = [branch]
+    for prefix in ("fleet/", "lane/"):
+        if branch.startswith(prefix) and len(branch) > len(prefix):
+            candidates.append(branch[len(prefix):])
+    for token in candidates:
+        worktree, _name, record = _wave_lane_join(
+            repo, token, run=run, workers=workers, aliases=aliases)
+        if record is not None:
+            return token, _wave_record_substrate(repo, worktree, record=record)
+    return None
+
+
 def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
     """Return ``(lanes, unparsed)`` for merge commits in ``base..HEAD``.
     ``lanes`` holds every worker merge whose subject matches `merge(<lane>):`,
@@ -19863,6 +19880,11 @@ def _wave_merge_audit(repo, base, run=subprocess.run, aliases=None):
         commit, _, subject = line.partition("\t")
         match = re.search(r"^merge\(([^)]+)\):", subject, re.IGNORECASE)
         if not match:
+            gh_lane = _wave_github_merge_lane(repo, subject, run=run, workers=workers,
+                                              aliases=aliases)
+            if gh_lane is not None:
+                lanes.append((gh_lane[0], gh_lane[1], commit[:7]))
+                continue
             if sync is None:
                 sync = _wave_sync_merges(repo, base, run=run)
             if commit.strip() not in sync:
