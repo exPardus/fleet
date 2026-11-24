@@ -12,7 +12,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 HARNESS = REPO / "tools" / "codex_native_acceptance.py"
 NO_INFERENCE_FIXTURE = (
-    REPO / "tests" / "fixtures" / "codex_app_server" / "0.155.1"
+    REPO / "tests" / "fixtures" / "codex_app_server" / "0.171.0"
     / "no-inference-acceptance.json")
 NO_INFERENCE_RECEIPT = (
     REPO / "docs" / "lanes" / "codex-native-public-no-inference.json")
@@ -123,7 +123,7 @@ def test_live_turn_request_has_fixed_schema_and_no_unbounded_input():
 def test_public_no_inference_fixture_has_no_turn_or_duplicate_start():
     fixture = json.loads(NO_INFERENCE_FIXTURE.read_text(encoding="utf-8"))
 
-    assert fixture["codex_version"] == "0.155.1"
+    assert fixture["codex_version"] == "0.171.0"
     assert fixture["rpc_sequence"].count("thread/start") == 1
     assert fixture["rpc_sequence"].count("thread/resume") == 1
     assert fixture["rpc_sequence"].count("thread/inject_items") == 1
@@ -261,7 +261,7 @@ def test_real_public_protocol_without_inference():
         pytest.skip(f"BLOCKED: {report['reason']}")
     assert completed.returncode == 0
     assert report["overall"] == "PASS"
-    assert report["codex_version"] == "0.155.1"
+    assert report["codex_version"] == "0.171.0"
     assert report["thread"]["count"] == 1
     assert report["thread"]["turn_count"] == 0
     assert report["host"]["generation_changed"] is True

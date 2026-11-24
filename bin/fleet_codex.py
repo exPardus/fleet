@@ -46,7 +46,7 @@ SCHEMA_FIXTURES = (
 )
 REVIEWED_SCHEMA_MANIFESTS = {
     version: SCHEMA_FIXTURES / version / "manifest.json"
-    for version in ("0.155.1", "0.160.0", "0.161.0", "0.162.0")
+    for version in ("0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0")
 }
 
 

@@ -3,7 +3,7 @@
 **Status:** Option A approved and native is the default for new Codex workers
 and Codex supervisor bodies. The explicit mcx compatibility selector remains.
 **Evidence baseline:** fleet `6fa06c9`; reviewed `codex-cli` 0.155.1,
-0.160.0, 0.161.0 and 0.162.0 v2 JSON Schemas generated with
+0.160.0, 0.161.0, 0.162.0 and 0.171.0 v2 JSON Schemas generated with
 `codex app-server generate-json-schema`.
 **Implementation plan:** `docs/plans/2026-09-20-codex-native-integration.md`.
 
@@ -141,8 +141,9 @@ That compatibility adapter cannot provide the target lifecycle:
 ### 3.2 Reviewed Codex v2 schemas
 
 For a new host, the adapter selects an explicit reviewed manifest from exact
-`codex --version` output. Versions 0.155.1, 0.160.0, 0.161.0 and 0.162.0 are reviewed; any other
-version refuses before host startup, and an installed schema whose digest
+`codex --version` output. Versions 0.155.1, 0.160.0, 0.161.0, 0.162.0 and
+0.171.0 are reviewed; any other version refuses before host startup, and an
+installed schema whose digest
 differs from its selected manifest never publishes ready. An already-live host
 is instead authenticated against the reviewed version and digest recorded in
 its metadata, so upgrading the installed CLI does not strand native work owned
@@ -236,6 +237,32 @@ No consumed field was removed or made required. The no-inference acceptance
 fixture changes only its version; it is an expected RPC contract, not evidence
 of a new live acceptance run. The only required adapter behavior change is the
 speed capability normalization above. Schema extraction needs no change.
+
+Review of 0.171.0 against 0.162.0 regenerated both complete public v2 schemas.
+The regenerated 0.162.0 SHA-256 matched its reviewed manifest. The 0.171.0
+SHA-256 is `d5d9aaf55c71f99f9822b33f62dfab506d76b3f3c8751e6e6a056bf9a9d396d9`.
+The compact contract changes only by adding `bioPolicy`,
+`inferenceHookDenied`, `modelNotFound`, and `policyCapacityUnavailable` to
+`CodexErrorInfo`. Fleet stores these as ordinary failed-turn error codes;
+none is a quota reset signal. The complete-schema review found:
+
+| Surface | 0.171.0 delta and Fleet handling |
+| --- | --- |
+| `initialize` and `initialized` | Existing handshake fields are unchanged. `InitializeCapabilities.requiredHumanApproval` is optional; Fleet does not request it. Its new `humanCommand` command-approval kind therefore cannot be emitted to Fleet. |
+| `thread/start`, `thread/resume`, `thread/read`, `thread/turns/list` | Request and response definitions, effective model, cwd, approval policy, reviewer, sandbox, thread and turn identity/status fields are unchanged. `thread/list` adds optional account and ID filters; its existing parameters and response remain compatible. |
+| `turn/start`, `turn/steer`, `turn/interrupt` | Requests and responses, including the expected turn and interrupt IDs, are unchanged. |
+| `thread/items/list`, `item/completed`, `turn/completed` | Item paging adds optional `deferOutput`, which Fleet omits. Completed-item events add optional `contentTokenCount`; the terminal event is unchanged. Thread items add optional lifecycle timestamps, agent-message moderation and MCP environment IDs. Image-generation items can carry a file ID in place of inline `result`; Fleet reads only agent-message text for results and tolerates other item kinds. |
+| `thread/tokenUsage/updated`, account usage and rate limits | The consumed token-usage event and rate-limit shapes are unchanged. `ThreadUsage` adds optional native USD micros, which Fleet does not use for token accounting. |
+| Approval and input server requests | Command approval adds the capability-gated `humanCommand` kind; MCP elicitation adds optional `environmentId`. Existing command, file, permission, MCP, and input request/response fields remain compatible. |
+| `configRequirements/read` | The response envelope and approval/sandbox allowlists are unchanged. Nested requirements add optional telemetry, app storage, and network review-domain settings; Fleet's preflight checks the same approval and sandbox restrictions. |
+
+New provider-management, feedback and account-security methods, and three
+new thread notifications are outside Fleet's sent and
+consumed method set. The response-item and realtime/audio extensions are
+outside Fleet's text-result path. No consumed field was removed or made
+required, so the adapter needs only the exact-version manifest entry. The
+no-inference fixture retains the same RPC sequence and forbids all turn
+methods; it records an expected contract, not proof of a live run.
 
 ## 4. Alternatives
 
@@ -1135,7 +1162,7 @@ Grade actions and side effects, not wording.
 
 | ID | Layer | Test | Required result |
 | --- | --- | --- | --- |
-| P1 | Schema | Generate 0.155.1, 0.160.0, 0.161.0 and 0.162.0 v2 schemas; validate each fixture digest | Each reviewed exact version/digest accepted; unknown version or drift disables native only |
+| P1 | Schema | Generate 0.155.1, 0.160.0, 0.161.0, 0.162.0 and 0.171.0 v2 schemas; validate each fixture digest | Each reviewed exact version/digest accepted; unknown version or drift disables native only |
 | P2 | Protocol | Initialize; start/read/list/resume disposable thread at exact cwd | Real ID/cwd agree |
 | P3 | Protocol | Start, active, steer with expected turn, page history, complete | One real turn lineage; final result persisted |
 | P4 | Protocol | Interrupt active disposable turn | Supported request with real IDs; same turn observed terminal |

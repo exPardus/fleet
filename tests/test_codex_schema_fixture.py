@@ -292,7 +292,7 @@ def test_generate_contract_rejects_oversized_public_schema(tmp_path):
         _generator()(str(codex), tmp_path / "fixture")
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0"])
 def test_checked_fixture_pins_reviewed_public_contract(version):
     fixture = FIXTURES / version
     manifest = json.loads((fixture / "manifest.json").read_text())
@@ -334,7 +334,7 @@ def test_0160_no_inference_contract_changes_only_the_version():
     assert new == old
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0"])
 def test_checked_fixture_contains_no_private_codex_path(version):
     for path in (FIXTURES / version).glob("*.json"):
         text = path.read_text(encoding="utf-8")
@@ -385,7 +385,33 @@ def test_0162_no_inference_contract_changes_only_the_version():
     assert new == old
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0"])
+def test_0171_reviewed_contract_adds_only_error_codes():
+    old = json.loads((FIXTURES / "0.162.0" / "v2-contract.json").read_text())
+    new = json.loads((FIXTURES / "0.171.0" / "v2-contract.json").read_text())
+    old_errors = set(old["enums"]["codex_error_codes"])
+    new_errors = set(new["enums"]["codex_error_codes"])
+    old["enums"]["codex_error_codes"] = []
+    new["enums"]["codex_error_codes"] = []
+
+    assert new == old
+    assert new_errors - old_errors == {
+        "bioPolicy", "inferenceHookDenied", "modelNotFound",
+        "policyCapacityUnavailable",
+    }
+    assert old_errors - new_errors == set()
+
+
+def test_0171_no_inference_contract_changes_only_the_version():
+    old = json.loads(
+        (FIXTURES / "0.162.0" / "no-inference-acceptance.json").read_text())
+    new = json.loads(
+        (FIXTURES / "0.171.0" / "no-inference-acceptance.json").read_text())
+    assert old.pop("codex_version") == "0.162.0"
+    assert new.pop("codex_version") == "0.171.0"
+    assert new == old
+
+
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0"])
 def test_reviewed_fixture_selected_from_exact_installed_version(
         tmp_path, monkeypatch, version):
     from types import SimpleNamespace
