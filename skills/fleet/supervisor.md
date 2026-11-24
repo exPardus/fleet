@@ -15,7 +15,8 @@ Dispatch precise, disjoint briefs; review results; land only verified work; run
 the required floor and regression gates; then close the wave. Preserve current
 home, claim, model, budget, and operator rulings in checkpoints and handoff.
 Wait for a lane with `fleet wait NAME --timeout SECONDS`; never hand-roll an
-`until fleet status | grep ...` loop. A `dead-suspected` result ends the wait
+`until fleet status | grep ...` loop. Park with `fleet wait [NAME...] --mail`:
+it also returns on new verified Interface mail and never exceeds 10 minutes. A `dead-suspected` result ends the wait
 promptly and needs inspection, not more polling.
 A lane with no commits to land: run
 `fleet abandon NAME --reason TEXT --nonce NONCE` before wave-close. It records

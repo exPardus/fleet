@@ -9336,7 +9336,7 @@ def cmd_result(args, run=subprocess.run, which=shutil.which) -> int:
 
 
 def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: float = 3.0,
-                      sleep=time.sleep, clock=time.monotonic):
+                      sleep=time.sleep, clock=time.monotonic, stop=None):
     """Poll fresh worker snapshots until the requested completion condition or timeout.
     Return (finished statuses, pending names). Re-read each pass to see concurrent
     respawns/interrupts. Archived records resolve using frozen committed state:
@@ -9375,14 +9375,32 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
             if status in NATIVE_TERMINAL_STATUSES:
                 finished[n] = status
                 pending.discard(n)
-        if not pending:
+        if not pending and names:
             break
         if mode == "any" and finished:
+            break
+        if stop is not None and stop():
             break
         if deadline is not None and clock() >= deadline:
             break
         sleep(poll_interval)
     return finished, pending
+
+
+MAIL_WAIT_CAP_SECONDS = 600
+
+
+def _verified_interface_mail_ids() -> set:
+    try:
+        candidates = {path.stem for path in mail_receipts_dir().glob("*.json")}
+    except OSError:
+        return set()
+    verified = set()
+    for mail_id in candidates:
+        with redirect_stdout(io.StringIO()):
+            if cmd_mail_verify(SimpleNamespace(mail_id=mail_id)) == 0:
+                verified.add(mail_id)
+    return verified
 
 
 def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
@@ -9394,11 +9412,29 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
         for n in args.names:
             if n not in data["workers"]:
                 raise FleetCliError(f"unknown worker: {n!r}")
+    watch_mail = bool(getattr(args, "mail", False))
+    if not args.names and not watch_mail:
+        raise FleetCliError("wait: name at least one worker, or pass --mail")
+    timeout = args.timeout
+    mail_seen, new_mail = set(), []
+    if watch_mail:
+        timeout = MAIL_WAIT_CAP_SECONDS if timeout is None else min(
+            timeout, MAIL_WAIT_CAP_SECONDS)
+        mail_seen = {path.stem for path in mail_receipts_dir().glob("*.json")
+                     } if mail_receipts_dir().is_dir() else set()
+
+    def mail_arrived():
+        new_mail[:] = sorted(_verified_interface_mail_ids() - mail_seen)
+        return bool(new_mail)
 
     mode = "any" if args.any else "all"
     finished, pending = wait_for_workers(
-        args.names, mode=mode, timeout=args.timeout, sleep=sleep, clock=clock,
+        args.names, mode=mode, timeout=timeout, sleep=sleep, clock=clock,
+        stop=mail_arrived if watch_mail else None,
     )
+    for mail_id in new_mail:
+        print(f"MAIL {mail_id}: new verified Interface mail -- run "
+              f"`fleet mail verify {mail_id}` and act on its BODY")
 
     # The persist pass fetches its own roster; display its committed verdict when
     # available, since it may differ from the earlier poll. Otherwise retain the
@@ -9513,13 +9549,16 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
               "pre-freeze poll verdict; nothing persisted (G9)")
 
     if pending:
-        if mode == "any" and finished:
+        if (mode == "any" and finished) or new_mail:
             # --any succeeds when one worker finishes even while others remain pending.
             for n in pending:
                 print(f"{n}: still working")
             return 0
         for n in pending:
             print(f"{n}: timed out (still working)")
+        return 1
+    if watch_mail and not args.names and not new_mail:
+        print(f"wait: no new verified Interface mail within {timeout:g} s")
         return 1
     return 0
 
@@ -28830,7 +28869,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_address.add_argument("--json", action="store_true")
 
     p_wait = sub.add_parser("wait", help="block until turn(s) end")
-    p_wait.add_argument("names", nargs="+")
+    p_wait.add_argument("names", nargs="*")
+    p_wait.add_argument(
+        "--mail", action="store_true",
+        help="also return when new verified Interface mail arrives (a supervisor "
+             "park); names become optional and the wait is capped at "
+             f"{MAIL_WAIT_CAP_SECONDS // 60} minutes")
     wait_mode = p_wait.add_mutually_exclusive_group()
     wait_mode.add_argument("--any", action="store_true")
     wait_mode.add_argument("--all", action="store_true")

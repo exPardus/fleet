@@ -294,13 +294,17 @@ options:
 Constraint: At most one of `--any` or `--all` may be used.
 
 ```text
-usage: fleet wait [-h] [--any] [--all] [--timeout TIMEOUT] names [names ...]
+usage: fleet wait [-h] [--mail] [--any] [--all] [--timeout TIMEOUT]
+                  [names ...]
 
 positional arguments:
   names
 
 options:
   -h, --help         show this help message and exit
+  --mail             also return when new verified Interface mail arrives (a
+                     supervisor park); names become optional and the wait is
+                     capped at 10 minutes
   --any
   --all
   --timeout TIMEOUT
