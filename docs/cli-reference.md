@@ -172,8 +172,8 @@ usage: fleet spawn [-h] --dir DIR --task TASK
                    [--max-budget-usd MAX_BUDGET_USD]
                    [--setting-sources SETTING_SOURCES] [--nonce NONCE]
                    [--force-band] [--token-ceiling TOKEN_CEILING]
-                   [--category CATEGORY] [--spec CAMPAIGN] [--slice NAME]
-                   [--context CONTEXT]
+                   [--category CATEGORY] [--disk-heavy] [--spec CAMPAIGN]
+                   [--slice NAME] [--context CONTEXT]
                    name
 
 positional arguments:
@@ -201,6 +201,10 @@ options:
                         never the hard ceiling
   --token-ceiling TOKEN_CEILING
   --category CATEGORY
+  --disk-heavy          the lane builds or runs containers: apply
+                        gc.min_free_disk_gb_heavy (default 8 GB) instead of
+                        gc.min_free_disk_gb (default 6 GB); --category docker
+                        implies it
   --spec CAMPAIGN       bind to an accepted SDD campaign spec (requires
                         sdd.enabled)
   --slice NAME          the spec slice that narrows this worker's scope
