@@ -442,10 +442,21 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
     return root
 
 
+def live_tier_enabled(value=None):
+    """Only `FLEET_LIVE=1` or `true` enables the spending live tier.
+
+    Any other value, including `0`, `false` and the empty string, keeps it
+    skipped: an opt-out spelling must never start real Claude sessions.
+    """
+    if value is None:
+        value = os.environ.get("FLEET_LIVE", "")
+    return value.strip().lower() in {"1", "true"}
+
+
 def pytest_collection_modifyitems(config, items):
     """Tag every collected test with its tier (SPEC §12) and skip the live
     tier unless FLEET_LIVE=1 is set in the environment."""
-    live_enabled = bool(os.environ.get("FLEET_LIVE"))
+    live_enabled = live_tier_enabled()
     live_skip = pytest.mark.skip(
         reason="live tier gated: set FLEET_LIVE=1 to run the tier-3 haiku harness"
     )
