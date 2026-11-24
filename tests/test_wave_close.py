@@ -1613,3 +1613,67 @@ def test_push_argv_ignores_upstream_with_different_branch_name(tmp_path):
     assert ok
     assert git("rev-parse", "--abbrev-ref", "@{upstream}", cwd=work) == "origin/fleet/wave-96"
     assert fleet._wave_push_argv(work) == ["push"]
+
+
+def _gh_audit_run(subjects):
+    def run(argv, **kwargs):
+        if argv[1] == "log":
+            return subprocess.CompletedProcess(argv, 0, subjects, "")
+        if argv[1] == "worktree":
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
+def test_merge_audit_maps_github_pr_subject_to_lane(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch, {
+        "w522-readme-demo": {"branch": "fleet/w522-readme-demo", "status": "idle", "substrate": "claude"}})
+    run = _gh_audit_run(
+        "abcdef1234567\tMerge pull request #86 from exPardus/fleet/w522-readme-demo\n")
+    lanes, unparsed = fleet._wave_merge_audit(home, "base", run=run)
+    assert [(lane, sha) for lane, _sub, sha in lanes] == [
+        ("fleet/w522-readme-demo", "abcdef1")]
+    assert unparsed == []
+    assert [sub for _lane, sub, _sha in lanes] == ["claude"]
+
+
+def test_merge_audit_github_subject_strips_prefix_to_find_worker(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch, {"w9-thing": {"status": "idle", "substrate": "claude"}})
+    run = _gh_audit_run("abcdef1234567\tMerge pull request #7 from o/lane/w9-thing\n")
+    lanes, unparsed = fleet._wave_merge_audit(home, "base", run=run)
+    assert [lane for lane, _sub, _sha in lanes] == ["w9-thing"]
+    assert unparsed == []
+
+
+def test_merge_audit_mixes_convention_and_github_subjects(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch, {
+        "w1": {"branch": "fleet/w1", "status": "idle", "substrate": "claude"},
+        "w2": {"branch": "fleet/w2", "status": "idle", "substrate": "claude"}})
+    run = _gh_audit_run(
+        "aaaaaaa1111111\tmerge(fleet/w1): landed\n"
+        "bbbbbbb2222222\tMerge pull request #3 from o/fleet/w2\n")
+    lanes, unparsed = fleet._wave_merge_audit(home, "base", run=run)
+    assert [(lane, sha) for lane, _sub, sha in lanes] == [
+        ("fleet/w1", "aaaaaaa"), ("fleet/w2", "bbbbbbb")]
+    assert unparsed == []
+    assert len(lanes) + len(unparsed) == 2
+
+
+@pytest.mark.parametrize("origin_branch", ["lane/w1", "w1"])
+def test_merge_audit_github_merge_of_a_different_branch_is_not_credited(
+        tmp_path, monkeypatch, origin_branch):
+    home = _home(tmp_path, monkeypatch, {
+        "w1": {"branch": "fleet/w1", "status": "idle", "substrate": "claude"}})
+    run = _gh_audit_run(
+        f"abcdef1234567\tMerge pull request #5 from someone/{origin_branch}\n")
+    lanes, unparsed = fleet._wave_merge_audit(home, "base", run=run)
+    assert lanes == []
+    assert unparsed == ["abcdef1"]
+
+
+def test_merge_audit_github_subject_for_unknown_branch_stays_unparsed(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch, {"w1": {"branch": "fleet/w1", "status": "idle", "substrate": "claude"}})
+    run = _gh_audit_run("abcdef1234567\tMerge pull request #4 from o/fleet/nobody\n")
+    lanes, unparsed = fleet._wave_merge_audit(home, "base", run=run)
+    assert lanes == []
+    assert unparsed == ["abcdef1"]
