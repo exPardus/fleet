@@ -9390,16 +9390,28 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
 MAIL_WAIT_CAP_SECONDS = 600
 
 
-def _verified_interface_mail_ids() -> set:
+def _verified_interface_mail_ids(skip=frozenset(), cache=None) -> set:
     try:
-        candidates = {path.stem for path in mail_receipts_dir().glob("*.json")}
+        paths = list(mail_receipts_dir().glob("*.json"))
     except OSError:
         return set()
+    cache = {} if cache is None else cache
     verified = set()
-    for mail_id in candidates:
-        with redirect_stdout(io.StringIO()):
-            if cmd_mail_verify(SimpleNamespace(mail_id=mail_id)) == 0:
-                verified.add(mail_id)
+    for path in paths:
+        mail_id = path.stem
+        if mail_id in skip:
+            continue
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            continue
+        known = cache.get(mail_id)
+        if known is None or known[0] != stamp:
+            with redirect_stdout(io.StringIO()):
+                ok = cmd_mail_verify(SimpleNamespace(mail_id=mail_id)) == 0
+            cache[mail_id] = (stamp, ok)
+        if cache[mail_id][1]:
+            verified.add(mail_id)
     return verified
 
 
@@ -9416,7 +9428,7 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
     if not args.names and not watch_mail:
         raise FleetCliError("wait: name at least one worker, or pass --mail")
     timeout = args.timeout
-    mail_seen, new_mail = set(), []
+    mail_seen, new_mail, verdicts = set(), [], {}
     if watch_mail:
         timeout = MAIL_WAIT_CAP_SECONDS if timeout is None else min(
             timeout, MAIL_WAIT_CAP_SECONDS)
@@ -9424,7 +9436,7 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                      } if mail_receipts_dir().is_dir() else set()
 
     def mail_arrived():
-        new_mail[:] = sorted(_verified_interface_mail_ids() - mail_seen)
+        new_mail[:] = sorted(_verified_interface_mail_ids(mail_seen, verdicts))
         return bool(new_mail)
 
     mode = "any" if args.any else "all"
@@ -9432,6 +9444,8 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
         args.names, mode=mode, timeout=timeout, sleep=sleep, clock=clock,
         stop=mail_arrived if watch_mail else None,
     )
+    if watch_mail and not new_mail:
+        mail_arrived()
     for mail_id in new_mail:
         print(f"MAIL {mail_id}: new verified Interface mail -- run "
               f"`fleet mail verify {mail_id}` and act on its BODY")
