@@ -130,7 +130,13 @@ def _variant(document: Mapping[str, Any], envelope: str, method: str) -> Any:
 
 def _entry_slice(document: Mapping[str, Any], envelope: str, method: str,
                  response: str | None) -> dict[str, Any]:
-    roots = {"variant": _variant(document, envelope, method)}
+    container = _resolve(document, f"#/definitions/{envelope}")
+    # The container's own constraints (for example additionalProperties)
+    # apply to every variant. Its variant list is left out, so a new unused
+    # method does not change a used digest.
+    frame = {key: value for key, value in container.items() if key != "oneOf"}
+    roots = {"envelope": frame,
+             "variant": _variant(document, envelope, method)}
     if response is not None:
         roots["response"] = _resolve(document, response)
     definitions: dict[str, Any] = {}

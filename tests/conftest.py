@@ -406,6 +406,10 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
             HERMETIC_CODEX_VERSION].read_text("utf-8"))
     reviewed.update(
         schema_sha256=hashlib.sha256(HERMETIC_CODEX_SCHEMA).hexdigest())
+    # The private schema has no combined file to compare used shapes with;
+    # this manifest pins only the raw digest.
+    for key in ("used_schema_sha256", "used_schema_entries"):
+        reviewed.pop(key, None)
     manifest = root / "manifest.json"
     manifest.write_text(json.dumps(reviewed), encoding="utf-8")
     monkeypatch.setitem(

@@ -147,6 +147,8 @@ class Host:
         self.reviewed_schema_digest = manifest["schema_sha256"]
         self.schema_digest = self.reviewed_schema_digest
         self.reviewed_version = manifest["codex_version"]
+        self.reviewed_used_digest = manifest.get("used_schema_sha256")
+        self.reviewed_used_entries = manifest.get("used_schema_entries")
         self.expected_version = codex_version or self.reviewed_version
         self.reviewed_manifests = list(reviewed_manifests or ())
         # Set only when the installed schema matched by used shapes.
@@ -488,17 +490,36 @@ class Host:
                 actual = hashlib.sha256(schema.read_bytes()).hexdigest()
             except OSError as exc:
                 raise RuntimeError("installed Codex schema bundle is missing") from exc
-            if (hmac.compare_digest(actual, self.reviewed_schema_digest)
-                    and self.expected_version == self.reviewed_version):
+            exact = (hmac.compare_digest(actual, self.reviewed_schema_digest)
+                     and self.expected_version == self.reviewed_version)
+            if exact and self.reviewed_used_digest is None:
+                # A manifest without a used-schema contract (test fixtures).
                 return
-            # Not a reviewed bundle: launch only if every call Fleet uses has
-            # the schema of a reviewed release. Version is a diagnostic.
+            # The v2 digest does not cover the used v1 shapes in the combined
+            # schema, so even an exact release compares used shapes. Another
+            # release launches only if every call Fleet uses has the schema
+            # of a reviewed release; its version is a diagnostic.
             from fleet_codex_schema import (
-                SchemaDrift, match_reviewed, read_combined_schema)
+                SchemaDrift, drifted_calls, match_reviewed,
+                read_combined_schema, used_schema_digests)
             try:
-                used_digest, _ = match_reviewed(
-                    read_combined_schema(Path(directory)),
-                    {str(path): Path(path) for path in self.reviewed_manifests})
+                document = read_combined_schema(Path(directory))
+                if exact:
+                    used_digest, entries = used_schema_digests(document)
+                    if not hmac.compare_digest(
+                            used_digest, self.reviewed_used_digest):
+                        changed = drifted_calls(
+                            entries, {"used_schema_entries":
+                                      self.reviewed_used_entries})
+                        raise SchemaDrift(
+                            "installed Codex used shapes differ from the "
+                            f"reviewed {self.reviewed_version} contract: "
+                            + ", ".join(changed[:8]))
+                else:
+                    used_digest, _ = match_reviewed(
+                        document,
+                        {str(path): Path(path)
+                         for path in self.reviewed_manifests})
             except SchemaDrift as exc:
                 raise RuntimeError(
                     "installed Codex schema does not match the reviewed digest "

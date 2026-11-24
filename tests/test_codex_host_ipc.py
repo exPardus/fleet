@@ -862,6 +862,8 @@ def test_live_old_host_remains_reachable_after_installed_version_change(
     for version, schema_bytes in schemas.items():
         value = json.loads(manifests[version].read_text(encoding="utf-8"))
         value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
+        for key in ("used_schema_sha256", "used_schema_entries"):
+            value.pop(key, None)  # the fake emits no combined schema
         manifest = tmp_path / f"manifest-{version}.json"
         manifest.write_text(json.dumps(value), encoding="utf-8")
         manifests[version] = manifest
@@ -1094,6 +1096,8 @@ def test_each_reviewed_codex_version_can_publish_a_matching_host(
     value = json.loads(
         module.REVIEWED_SCHEMA_MANIFESTS[version].read_text(encoding="utf-8"))
     value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
+    for key in ("used_schema_sha256", "used_schema_entries"):
+        value.pop(key, None)  # the fake emits no combined schema
     manifest.write_text(json.dumps(value), encoding="utf-8")
     manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
     manifests[version] = manifest

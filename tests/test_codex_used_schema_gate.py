@@ -77,46 +77,78 @@ def _constants(node):
             if isinstance(item, ast.Constant) and isinstance(item.value, str)}
 
 
-def _bin_method_names(public):
-    """Codex method names in adapter source.
+def _adapter_names(root=ROOT / "bin"):
+    """Return (method-position names, slash-shaped literals) in adapter source.
 
-    A slash name is specific enough to count anywhere. A bare word such as
-    `error` counts only in a method position: a `"method"` dict value, the
-    first argument of `.request(...)`, or a comparison with a method value.
+    A method position is a `"method"` dict value, the first argument of
+    `.request(...)`, or a comparison with a method value. Every name found
+    there counts, whether or not a reviewed Codex release defines it, so a
+    call to a method from a later release cannot escape the inventory.
     """
-    found = set()
-    for path in sorted((ROOT / "bin").glob("*.py")):
+    positions, slashes = set(), set()
+    for path in sorted(Path(root).glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if "/" in node.value:
-                    found.add(node.value)
+                    slashes.add(node.value)
             elif isinstance(node, ast.Dict):
                 for key, value in zip(node.keys, node.values):
                     if isinstance(key, ast.Constant) and key.value == "method":
-                        found |= _constants(value)
+                        positions |= _constants(value)
             elif (isinstance(node, ast.Call)
                   and isinstance(node.func, ast.Attribute)
                   and node.func.attr in {"request", "_recovery_request"}
                   and node.args):
-                found |= _constants(node.args[0])
+                positions |= _constants(node.args[0])
             elif isinstance(node, ast.Compare):
                 operands = [node.left, *node.comparators]
                 if any(_mentions_method(item) for item in operands):
                     for item in operands:
-                        found |= _constants(item)
-    return found & public
+                        positions |= _constants(item)
+    return positions, slashes
 
 
-def test_inventory_equals_codex_methods_named_in_adapter_source():
+# Names in a method position that are not Codex methods: Fleet's own host IPC
+# verbs and labels compared with method-like fields. A new name in a method
+# position must be added to the inventory or here, by review.
+NOT_CODEX_METHODS = frozenset({
+    "approval/list", "approval/respond", "approval/supervisor-reservation-v1",
+    "expect_method", "from_auth", "host/shutdown", "host/shutdown-restored",
+    "interface-registration", "legacy-unverified", "method", "ping",
+    "public-evidence/read", "public_method", "rpc", "supervisor-nonce",
+    "unverified",
+})
+
+
+def _reviewed_public_methods():
     public = set()
     for version in REVIEWED:
         manifest = json.loads((FIXTURES / version / "manifest.json").read_text())
         public.update(manifest["public_methods"])
-    named = _bin_method_names(public)
+    return public
+
+
+def test_inventory_equals_codex_methods_named_in_adapter_source():
+    positions, slashes = _adapter_names()
+    unknown = positions - used.USED_METHODS - NOT_CODEX_METHODS
+    assert unknown == set(), ("unlisted method-position names:", sorted(unknown))
+    named = (slashes | positions) & _reviewed_public_methods()
     assert named == set(used.USED_METHODS), (
         "unlisted:", sorted(named - used.USED_METHODS),
         "stale:", sorted(used.USED_METHODS - named))
+    assert not (NOT_CODEX_METHODS & _reviewed_public_methods())
+
+
+def test_a_call_to_a_method_no_reviewed_release_defines_is_caught(tmp_path):
+    (tmp_path / "adapter.py").write_text(
+        'def go(client):\n'
+        '    client.request("future/newMethod", {}, timeout=1)\n'
+        '    return {"method": "future/otherMethod"}\n')
+    positions, _ = _adapter_names(tmp_path)
+    assert {"future/newMethod", "future/otherMethod"} <= positions
+    assert not ({"future/newMethod", "future/otherMethod"}
+                & (used.USED_METHODS | NOT_CODEX_METHODS))
 
 
 def test_inventory_covers_the_adapters_own_method_sets():
@@ -315,5 +347,56 @@ def test_attach_refuses_metadata_without_a_reviewed_contract(
         _published(home, **changes)
         with pytest.raises(fleet_codex.UnsafeHostState):
             fleet_codex.CodexHostClient._existing(home)
+    finally:
+        _shutdown(client)
+
+
+@pytest.mark.parametrize("envelope", ["ClientRequest", "ClientNotification",
+                                      "ServerRequest", "ServerNotification"])
+def test_an_envelope_constraint_changes_the_used_digest(envelope):
+    """A container constraint applies to every used variant inside it."""
+    base = fake_combined_schema()
+    changed = copy.deepcopy(base)
+    changed["definitions"][envelope]["additionalProperties"] = False
+    assert used.used_schema_digests(changed)[0] != used.used_schema_digests(base)[0]
+
+
+def test_a_new_unused_variant_in_an_envelope_keeps_the_used_digest():
+    base = fake_combined_schema()
+    changed = copy.deepcopy(base)
+    changed["definitions"]["ServerNotification"]["oneOf"].append({
+        "properties": {"method": {"enum": ["brand/new"]}}, "type": "object"})
+    assert used.used_schema_digests(changed) == used.used_schema_digests(base)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native host transport is POSIX-only")
+@pytest.mark.parametrize("combined_ok", [True, False])
+def test_exact_version_and_v2_digest_still_compare_used_shapes(
+        tmp_path, monkeypatch, combined_ok):
+    """The combined schema carries used v1 shapes the v2 digest never sees."""
+    schema = fake_combined_schema()
+    installed = schema if combined_ok else {"definitions": {}}
+    codex, v2_digest = _fake_codex(tmp_path, "0.171.0", installed)
+    manifest, value = _reviewed_manifest(tmp_path, schema)
+    value["schema_sha256"] = v2_digest
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setitem(fleet_codex.REVIEWED_SCHEMA_MANIFESTS, "0.171.0", manifest)
+    home = _home(tmp_path)
+    log = tmp_path / "app-server.jsonl"
+    kwargs = dict(app_server_command=[str(_fake_app_server(tmp_path, "0.171.0"))],
+                  schema_command=[str(codex)],
+                  env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+                  idle_timeout=30)
+    if not combined_ok:
+        with pytest.raises(fleet_codex.HostUnavailable):
+            fleet_codex.CodexHostClient.ensure(home, ready_timeout=3, **kwargs)
+        assert not log.exists()
+        assert not (home / "state" / "codex" / "host.json").exists()
+        return
+    client = fleet_codex.CodexHostClient.ensure(home, ready_timeout=5, **kwargs)
+    try:
+        metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
+        assert metadata["schema_digest"] == v2_digest
+        assert metadata["used_schema_digest"] == value["used_schema_sha256"]
     finally:
         _shutdown(client)

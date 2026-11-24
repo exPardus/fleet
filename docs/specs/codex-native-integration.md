@@ -144,8 +144,10 @@ Versions 0.155.1, 0.160.0, 0.161.0, 0.162.0 and 0.171.0 are reviewed. The
 launch gate compares the schema of the calls Fleet uses, not the release
 version. A new host starts when either check passes:
 
-- **Exact:** the installed version is reviewed and the generated v2 bundle
-  has that manifest's raw `schema_sha256`.
+- **Exact:** the installed version is reviewed, the generated v2 bundle has
+  that manifest's raw `schema_sha256`, and the combined schema gives that
+  manifest's `used_schema_sha256`. The v2 digest alone does not cover used v1
+  shapes such as `initialize` and the answered server requests.
 - **Used shapes:** the generated combined schema
   (`codex_app_server_protocol.schemas.json`) gives a used-schema digest equal
   to the `used_schema_sha256` of a reviewed manifest.
@@ -153,12 +155,15 @@ version. A new host starts when either check passes:
 `fleet_codex_schema.USED_SCHEMA_INVENTORY` lists every request Fleet sends,
 every server request it answers, and every notification it sends or consumes,
 with each response definition. For each entry, the digest covers the method
-variant, its response, and every definition reachable through `$ref`.
+variant, its response, the enclosing envelope's own constraints (everything
+except its variant list), and every definition reachable through `$ref`.
 Description and title strings do not count. A missing used method, a reference
 that does not resolve, or any changed used shape refuses launch. The refusal
 names the drifted calls against the newest reviewed manifest. A test derives
 the Codex method names in `bin/` source and requires them to equal the
-inventory, so an unlisted call fails the gate instead of escaping it. The
+inventory. Every name in a method position must be in the inventory or in a
+reviewed list of Fleet's own IPC names, so a call to a method that no reviewed
+release defines also fails the test instead of escaping it. The
 version and the raw digest stay in host metadata as diagnostics. Verbs pinned
 to an exact raw digest (approval cancellation, terminal-quota recovery) still
 require that digest.
