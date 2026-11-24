@@ -18042,9 +18042,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20921, :20933, :21080, :24665, :24860, :24861, :24961, :25025, :25087, :26116, :26118, :26155, :26683, :29656`).
+    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20921, :20933, :21080, :24665, :24860, :24861, :24961, :25025, :25087, :26120, :26122, :26159, :26687, :29661`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10896, :11670, :16282, :27615. This makes union identity
+    OWN prior sid alone: :10896, :11670, :16282, :27619. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18748,7 +18748,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10896, :11670, :16282,
-    # :27615) -- so union identity cannot make one body answer for another.
+    # :27619) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -25623,13 +25623,15 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
     """Notify the interface; dry-run skips claim work."""
     kind, target = _resolve_notify_target(
         getattr(args, "tmux_session", None), args.window, run)
+    if kind != "tmux":
+        raise FleetCliError(
+            f"sup-notify: registered {kind} interface {target} has no live "
+            "tmux pane; its mailbox is not drained by the interface -- "
+            "the interface has NOT been told. Register a live tmux interface "
+            "pane or relay the line through an interface inbox that is being read.")
     line = interface_line(args.text, SUPERVISOR_LINE_PREFIX)
     if args.dry_run:
-        if kind == "tmux":
-            print(f"[dry-run] would type into {target}: {line}")
-        else:
-            print(f"[dry-run] would queue to the registered {kind} "
-                  f"interface {target}: {line}")
+        print(f"[dry-run] would type into {target}: {line}")
         return 0
     with fleet_lock():
         claim, _, notices = _require_claim_holder(
@@ -25639,23 +25641,14 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
-    if kind == "tmux":
-        if not type_interface_line(run, target, args.text,
-                                   prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
-            raise FleetCliError(
-                f"sup-notify: tmux would not deliver the line to {target} -- "
-                f"the interface has NOT been told. Check that the tmux server "
-                f"and the window exist (`tmux list-windows`); the claim is "
-                f"untouched apart from this call's own restamp, so re-running "
-                f"this verb is safe.")
-    else:
-        try:
-            append_mailbox(target, line)
-        except OSError as exc:
-            raise FleetCliError(
-                f"sup-notify: could not queue the line for the registered "
-                f"{kind} interface {target} ({exc}) -- the interface has NOT "
-                f"been told; re-running this verb is safe.") from exc
+    if not type_interface_line(run, target, args.text,
+                               prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
+        raise FleetCliError(
+            f"sup-notify: tmux would not deliver the line to {target} -- "
+            f"the interface has NOT been told. Check that the tmux server "
+            f"and the window exist (`tmux list-windows`); the claim is "
+            f"untouched apart from this call's own restamp, so re-running "
+            f"this verb is safe.")
     append_interface_log("RELAY", args.text)
     print(f"notified {target} as {inc}: {line}")
     return 0
@@ -29225,23 +29218,23 @@ def build_parser() -> argparse.ArgumentParser:
     # Match the keeper's tmux defaults and dry-run interface for this shared channel.
     p_supnotify = sub.add_parser(
         "sup-notify",
-        help="deliver one `SUPERVISOR: <text>` line to the registered "
-             "interface, else its tmux window (claim holder only): the "
+        help="deliver one `SUPERVISOR: <text>` line to a live registered "
+             "Claude tmux pane, else its tmux window (claim holder only): the "
              "graceful-end announcement the interface acts on")
     p_supnotify.add_argument("text",
                              help="the line's text -- prefixed with `SUPERVISOR: ` "
                                   "and sanitised to one printable line before it is typed")
     p_supnotify.add_argument("--tmux-session", dest="tmux_session", default=None,
                              help="tmux session holding the interface window; overrides "
-                                  "registration (default: the registered interface, else "
+                                  "registration (default: a live registered Claude pane, else "
                                   "`work` if it has the window, else the one session "
-                                  "that has it; none or several fails closed)")
+                                  "that has it; non-tmux registration and stale panes fail closed)")
     p_supnotify.add_argument("--window", default="fleet",
                              help="tmux window name (default: fleet)")
     p_supnotify.add_argument("--dry-run", dest="dry_run", action="store_true",
                              help="print the exact bytes and stop: no lock, no claim "
                                   "read, no write, no tmux send (an omitted --tmux-session "
-                                  "is still resolved via read-only `tmux list-windows`)")
+                                  "still checks the registered pane or lists tmux windows)")
     p_supnotify.add_argument("--sid", help="override caller session id")
     p_supnotify.add_argument("--nonce", help=NONCE_ARG_HELP)
 
@@ -30580,7 +30573,42 @@ def _resolve_notify_session(session, window, run=subprocess.run) -> str:
 _NOTIFY_MAILBOX_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
-def _registered_notify_target() -> tuple[str, str] | None:
+def _live_notify_pane(pane: str, run=subprocess.run) -> None:
+    try:
+        proc = run(["tmux", "list-panes", "-a", "-F",
+                    "#{pane_id} #{pane_current_command} #{pane_dead}"],
+                   capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise FleetCliError(
+            f"sup-notify: cannot check registered pane {pane} ({exc}); "
+            "the interface has NOT been told") from exc
+    if proc.returncode != 0:
+        raise FleetCliError(
+            f"sup-notify: tmux pane scan failed for registered pane {pane}; "
+            "the interface has NOT been told")
+    for row in (proc.stdout or "").splitlines():
+        parts = row.split()
+        if not parts or parts[0] != pane:
+            continue
+        if len(parts) != 3 or parts[2] not in ("0", "1"):
+            raise FleetCliError(
+                f"sup-notify: registered pane {pane} liveness unreadable; "
+                "the interface has NOT been told")
+        if parts[1] != "claude":
+            raise FleetCliError(
+                f"sup-notify: registered pane {pane} runs {parts[1]}, not "
+                "claude; the interface has NOT been told")
+        if parts[2] == "1":
+            raise FleetCliError(
+                f"sup-notify: registered pane {pane} is dead; "
+                "the interface has NOT been told")
+        return
+    raise FleetCliError(
+        f"sup-notify: registered pane {pane} is absent from tmux; "
+        "the interface has NOT been told")
+
+
+def _registered_notify_target(run=subprocess.run) -> tuple[str, str] | None:
     state = state_dir()
     if _registration_path_present(state / "interface-codex.json"):
         try:
@@ -30594,6 +30622,7 @@ def _registered_notify_target() -> tuple[str, str] | None:
         return None
     pane = _registration_token(state / "interface-pane")
     if pane and pane.startswith("%") and pane[1:].isascii() and pane[1:].isdecimal():
+        _live_notify_pane(pane, run)
         return "tmux", pane
     sid = _registration_token(state / "interface-session")
     if sid and ".." not in sid and _NOTIFY_MAILBOX_ID_RE.fullmatch(sid):
@@ -30604,7 +30633,7 @@ def _registered_notify_target() -> tuple[str, str] | None:
 def _resolve_notify_target(session, window, run=subprocess.run) -> tuple[str, str]:
     if session is not None:
         return "tmux", f"{session}:{window}"
-    registered = _registered_notify_target()
+    registered = _registered_notify_target(run)
     if registered is not None:
         return registered
     return "tmux", f"{_resolve_notify_session(None, window, run)}:{window}"

@@ -100,7 +100,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet sup-reconcile`](#fleet-sup-reconcile) — explicitly reconcile a native Codex supervisor after host restart; never creates a thread or turn
 - [`fleet sup-context`](#fleet-sup-context) — read this session's own context occupancy vs its tier's context band -- supervisor 350-400k, worker 250-300k (§11.2)
 - [`fleet sup-decision`](#fleet-sup-decision) — operator-gate routing (§8): --raise (supervisor parks a decision), --answer (interface answers), --clear, or show
-- [`fleet sup-notify`](#fleet-sup-notify) — deliver one `SUPERVISOR: <text>` line to the registered interface, else its tmux window (claim holder only): the graceful-end announcement the interface acts on
+- [`fleet sup-notify`](#fleet-sup-notify) — deliver one `SUPERVISOR: <text>` line to a live registered Claude tmux pane, else its tmux window (claim holder only): the graceful-end announcement the interface acts on
 - [`fleet sup-handoff-begin`](#fleet-sup-handoff-begin) — dispatch a handoff successor (claim holder only)
 - [`fleet sup-handoff-complete`](#fleet-sup-handoff-complete) — verify HANDSHAKE and transfer the claim
 - [`fleet sup-handoff-abort`](#fleet-sup-handoff-abort) — abort a handoff: stop the limbo successor, resume duty
@@ -1505,14 +1505,15 @@ options:
   -h, --help            show this help message and exit
   --tmux-session TMUX_SESSION
                         tmux session holding the interface window; overrides
-                        registration (default: the registered interface, else
-                        `work` if it has the window, else the one session that
-                        has it; none or several fails closed)
+                        registration (default: a live registered Claude pane,
+                        else `work` if it has the window, else the one session
+                        that has it; non-tmux registration and stale panes
+                        fail closed)
   --window WINDOW       tmux window name (default: fleet)
   --dry-run             print the exact bytes and stop: no lock, no claim
                         read, no write, no tmux send (an omitted --tmux-
-                        session is still resolved via read-only `tmux list-
-                        windows`)
+                        session still checks the registered pane or lists tmux
+                        windows)
   --sid SID             override caller session id
   --nonce NONCE         the generation this body was last given (claim-nonce
                         §5.3); the ONLY presentation channel -- there is no

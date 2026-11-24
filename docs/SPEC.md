@@ -826,12 +826,18 @@ plain-character burst window. Failed buffer creation or paste never sends
 Enter; failed paste deletes its temporary buffer. Failed submission remains
 undelivered, so callers do not record the page as delivered.
 
-`sup-notify` target: an explicit `--tmux-session` is used as given. When it is
-omitted, `_resolve_notify_session` lists `tmux list-windows -a` and uses the
-`work` session if it has the window; otherwise the single session that has the
-window. No match or several matches fail closed with the existing error,
-naming the candidates. `wave-close` relays its accounting line the same way.
-`--dry-run` resolves through tmux but takes no lock.
+`sup-notify` target: an explicit `--tmux-session` is used as given. Otherwise a
+registered tmux pane is used only if an all-pane scan still finds that exact
+pane running a live `claude` process. A shell, dead or absent pane, or an
+unreadable scan fails closed before typing or recording `RELAY`. A registered
+Claude session or Codex thread also fails closed: the `mailbox/<id>.md` file
+is not drained by the Interface, so writing it cannot count as notification.
+The refusal says the Interface has NOT been told. With no registration,
+`_resolve_notify_session` lists `tmux list-windows -a` and uses the `work`
+session if it has the window; otherwise the single session that has the window.
+No match or several matches fail closed, naming the candidates. `wave-close`
+relays its accounting line the same way. `--dry-run` resolves the target and
+validates a registered pane but takes no lock or writes.
 
 Heartbeat primitive: in-session `ScheduleWakeup` self-rearm, confirmed real (G7); `claude stop` permanently kills a scheduled wake — a stopped supervisor never self-resumes.
 

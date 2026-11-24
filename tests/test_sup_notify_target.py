@@ -5,15 +5,26 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
+import fleet_codex
+
+
+@pytest.fixture(autouse=True)
+def no_interface_settle(monkeypatch):
+    monkeypatch.setattr(fleet.time, "sleep", lambda _seconds: None)
 
 
 class Tmux:
-    def __init__(self, listing="", rc=0):
-        self.listing, self.rc, self.calls = listing, rc, []
+    def __init__(self, listing="", rc=0, panes=""):
+        self.listing, self.rc, self.panes, self.calls = listing, rc, panes, []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
-        out = self.listing if argv[:2] == ["tmux", "list-windows"] else ""
+        if argv[:2] == ["tmux", "list-windows"]:
+            out = self.listing
+        elif argv[:2] == ["tmux", "list-panes"]:
+            out = self.panes
+        else:
+            out = ""
         return subprocess.CompletedProcess(argv, self.rc, out, "")
 
 
@@ -87,24 +98,63 @@ def _nargs(**over):
     return SimpleNamespace(**ns)
 
 
-def test_registered_claude_session_delivered_without_tmux(reg_home):
+def test_registered_claude_session_without_drain_fails_closed(reg_home):
     (reg_home / "state" / "interface-session").write_text("sid-int\n")
     run = Tmux("")
-    assert fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run) == 0
+    with pytest.raises(fleet.FleetCliError, match="interface has NOT been told") as exc:
+        fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
+    assert "mailbox" in str(exc.value) and "not drained" in str(exc.value)
     assert run.calls == []
-    mail = (reg_home / "mailbox" / "sid-int.md").read_text()
-    assert mail.startswith("SUPERVISOR: handoff")
-    assert " RELAY handoff" in fleet.interface_log_path().read_text()
+    assert not (reg_home / "mailbox" / "sid-int.md").exists()
+    assert not fleet.interface_log_path().exists()
+
+
+def test_registered_codex_thread_without_drain_fails_closed(reg_home, monkeypatch):
+    (reg_home / "state" / "interface-codex.json").write_text("{}")
+    monkeypatch.setattr(fleet_codex, "read_interface_claim",
+                        lambda _home: {"thread_id": "thread-int"})
+    run = Tmux("")
+    with pytest.raises(fleet.FleetCliError, match="mailbox is not drained"):
+        fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
+    assert run.calls == []
+    assert not (reg_home / "mailbox" / "thread-int.md").exists()
+    assert not fleet.interface_log_path().exists()
 
 
 def test_registered_pane_targets_that_pane(reg_home):
     (reg_home / "state" / "interface-pane").write_text("%7\n")
     (reg_home / "state" / "interface-session").write_text("sid-int\n")
-    run = Tmux("")
+    run = Tmux("", panes="%7 claude 0\n")
     assert fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run) == 0
     paste = [c for c in run.calls if "paste-buffer" in c][0]
     assert paste[paste.index("-t") + 1] == "%7"
     assert not (reg_home / "mailbox").exists()
+
+
+@pytest.mark.parametrize("panes, reason", [
+    ("%7 bash 0\n", "runs bash"),
+    ("%7 claude 1\n", "dead"),
+    ("%8 claude 0\n", "absent"),
+])
+def test_registered_pane_is_not_typed_when_not_live_claude(reg_home, panes, reason):
+    (reg_home / "state" / "interface-pane").write_text("%7\n")
+    run = Tmux("work:fleet\n", panes=panes)
+    with pytest.raises(fleet.FleetCliError, match="interface has NOT been told") as exc:
+        fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
+    assert reason in str(exc.value)
+    assert not any("paste-buffer" in call or "send-keys" in call
+                   for call in run.calls)
+    assert not fleet.interface_log_path().exists()
+
+
+def test_registered_pane_scan_failure_does_not_type(reg_home):
+    (reg_home / "state" / "interface-pane").write_text("%7\n")
+    run = Tmux("work:fleet\n", rc=1, panes="%7 claude 0\n")
+    with pytest.raises(fleet.FleetCliError, match="pane scan failed"):
+        fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
+    assert not any("paste-buffer" in call or "send-keys" in call
+                   for call in run.calls)
+    assert not fleet.interface_log_path().exists()
 
 
 def test_tmux_path_unchanged_when_nothing_registered(reg_home):
@@ -132,10 +182,9 @@ def test_nothing_registered_fails_closed_and_logs_nothing(reg_home):
     assert not log.exists() or " RELAY " not in log.read_text()
 
 
-def test_dry_run_names_registered_target_without_sending(reg_home, capsys):
+def test_dry_run_rejects_undrained_registered_target(reg_home):
     (reg_home / "state" / "interface-session").write_text("sid-int\n")
     run = Tmux("")
-    assert fleet.cmd_sup_notify(_nargs(dry_run=True), run=run) == 0
-    out = capsys.readouterr().out
-    assert "claude-session" in out and "sid-int" in out
+    with pytest.raises(fleet.FleetCliError, match="mailbox is not drained"):
+        fleet.cmd_sup_notify(_nargs(dry_run=True), run=run)
     assert run.calls == [] and not (reg_home / "mailbox").exists()
