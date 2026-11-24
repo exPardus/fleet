@@ -1029,7 +1029,7 @@ def _quarantine_artifacts() -> list:
       * `_doctor_check_registry` (:15943) -- a renamed-away path is not readable.
       * `_identity_abstention_note` (:19003) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8616) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20741) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20770) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -18042,9 +18042,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20894, :20906, :21053, :24638, :24833, :24834, :24934, :24998, :25060, :26089, :26091, :26128, :26656, :29629`).
+    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20923, :20935, :21082, :24667, :24862, :24863, :24963, :25027, :25089, :26118, :26120, :26157, :26685, :29658`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10896, :11670, :16282, :27588. This makes union identity
+    OWN prior sid alone: :10896, :11670, :16282, :27617. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18748,7 +18748,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10896, :11670, :16282,
-    # :27588) -- so union identity cannot make one body answer for another.
+    # :27617) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
