@@ -71,6 +71,7 @@ global: --fleet-home <PATH> selects which fleet home to act on (accepted in any 
 - [`fleet journal-roll`](#fleet-journal-roll) — roll older supervisor journal entries into history
 - [`fleet interface-register`](#fleet-interface-register) — register this tmux pane or Claude session as the interface
 - [`fleet watch`](#fleet-watch) — wait for mail, lane, mcx, memory, or disk events
+- [`fleet exclusive`](#fleet-exclusive) — run one command under the box-wide exclusive lock (full test suites, buf, docker database runs); waits, then fails, naming the holder
 - [`fleet mailman`](#fleet-mailman) — sort the home inbox; wake only for mail needing the interface
   - [`fleet mailman init`](#fleet-mailman-init) — seed mailman.json in the home
   - [`fleet mailman run`](#fleet-mailman-run) — block until a mail needs the interface (exit 0) or timeout (3)
@@ -1013,6 +1014,28 @@ options:
                         turns it off
   --interval INTERVAL
   --timeout TIMEOUT
+```
+
+### fleet exclusive
+
+```text
+usage: fleet exclusive [-h] [--status] [--label LABEL] [--holder HOLDER]
+                       [--wait-max WAIT_MAX] [--ttl TTL]
+                       ...
+
+positional arguments:
+  -- COMMAND
+
+options:
+  -h, --help           show this help message and exit
+  --status             print the holder; exit 1 when it is stale
+  --label LABEL        what this run is, shown to waiters
+  --holder HOLDER      holder name (default: $FLEET_WORKER)
+  --wait-max WAIT_MAX  seconds to wait for the holder (default 1800, capped at
+                       14400); then exit 75
+  --ttl TTL            seconds after which waiters may take this run's lock
+                       over (default 14400); a dead holder is taken over at
+                       once
 ```
 
 ### fleet mailman
