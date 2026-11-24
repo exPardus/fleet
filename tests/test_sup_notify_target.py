@@ -229,3 +229,59 @@ def test_registration_switch_during_pane_scan_refuses_old_target(
     assert not any("paste-buffer" in call or "send-keys" in call
                    for call in run.calls)
     assert not fleet.interface_log_path().exists()
+
+
+@pytest.mark.parametrize("stage", ["set-buffer", "paste-buffer", "send-keys"])
+def test_registration_cannot_switch_while_the_line_is_delivered(reg_home, stage):
+    """A concurrent interface-register needs fleet.lock to switch panes.
+    sup-notify holds that lock from its final scan through submit, so the
+    pane it reports as notified is still the registered pane."""
+    registration = reg_home / "state" / "interface-pane"
+    registration.write_text("%7\n")
+    nonce = _hold()
+    attempts = []
+
+    class RegisteringTmux(Tmux):
+        def __call__(self, argv, **kwargs):
+            if argv[:2] == ["tmux", stage]:
+                try:
+                    with fleet.fleet_lock(timeout=0):
+                        registration.write_text("%8\n")
+                    attempts.append("switched")
+                except fleet.FleetLockTimeout:
+                    attempts.append("blocked")
+            return super().__call__(argv, **kwargs)
+
+    run = RegisteringTmux("work:fleet\n", panes="%7 claude 0\n%8 claude 0\n")
+    assert fleet.cmd_sup_notify(_nargs(nonce=nonce), run=run) == 0
+    assert attempts == ["blocked"]
+    assert registration.read_text() == "%7\n"
+    paste = [c for c in run.calls if "paste-buffer" in c][0]
+    assert paste[paste.index("-t") + 1] == "%7"
+    assert " RELAY " in fleet.interface_log_path().read_text()
+
+
+def test_lock_is_released_after_delivery(reg_home):
+    (reg_home / "state" / "interface-pane").write_text("%7\n")
+    run = Tmux("", panes="%7 claude 0\n")
+    assert fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run) == 0
+    with fleet.fleet_lock(timeout=0):
+        pass
+
+
+def test_lock_is_released_when_delivery_fails(reg_home):
+    (reg_home / "state" / "interface-pane").write_text("%7\n")
+
+    class FailingPaste(Tmux):
+        def __call__(self, argv, **kwargs):
+            cp = super().__call__(argv, **kwargs)
+            if argv[:2] == ["tmux", "paste-buffer"]:
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            return cp
+
+    run = FailingPaste("", panes="%7 claude 0\n")
+    with pytest.raises(fleet.FleetCliError, match="would not deliver"):
+        fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
+    with fleet.fleet_lock(timeout=0):
+        pass
+    assert not fleet.interface_log_path().exists()

@@ -25641,14 +25641,20 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
-    current_kind, current_target = _resolve_notify_target(
-        getattr(args, "tmux_session", None), args.window, run)
-    if (current_kind, current_target) != (kind, target):
-        raise FleetCliError(
-            "sup-notify: interface registration changed before delivery; "
-            "the interface has NOT been told")
-    if not type_interface_line(run, target, args.text,
-                               prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
+    # interface-register switches panes only under fleet.lock. Hold it from
+    # the final scan through submit, so the pane reported below is still the
+    # registered pane when the line lands.
+    with fleet_lock():
+        current_kind, current_target = _resolve_notify_target(
+            getattr(args, "tmux_session", None), args.window, run)
+        if (current_kind, current_target) != (kind, target):
+            raise FleetCliError(
+                "sup-notify: interface registration changed before delivery; "
+                "the interface has NOT been told")
+        delivered = type_interface_line(run, target, args.text,
+                                        prefix=SUPERVISOR_LINE_PREFIX,
+                                        label="fleet")
+    if not delivered:
         raise FleetCliError(
             f"sup-notify: tmux would not deliver the line to {target} -- "
             f"the interface has NOT been told. Check that the tmux server "
