@@ -18016,9 +18016,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12626, :12789, :13054, :13278, :13314, :13556, :13557, :13645, :13655, :13666, :13764, :14285, :14560, :14561, :14596, :14684, :17968, :20868, :20880, :21027, :24800, :24801, :24901, :24965, :25027, :26056, :26058, :26095, :26623, :29593`).
+    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12626, :12789, :13054, :13278, :13314, :13556, :13557, :13645, :13655, :13666, :13764, :14285, :14560, :14561, :14596, :14684, :17968, :20868, :20880, :21027, :24612, :24807, :24808, :24908, :24972, :25034, :26063, :26065, :26102, :26630, :29600`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10896, :11670, :16256, :27555. This makes union identity
+    OWN prior sid alone: :10896, :11670, :16256, :27562. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18722,7 +18722,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10896, :11670, :16256,
-    # :27555) -- so union identity cannot make one body answer for another.
+    # :27562) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -24599,12 +24599,17 @@ INTERFACE_DIVERGENCE_WINDOW_SECONDS = SUPERVISOR_CLAIM_STALE_SECONDS
 def _interface_divergence(now=None, window_seconds=None):
     """Warn when recent supervisor mail names multiple interface caller sids.
     Read a bounded transcript tail and return a warning dict or None.
-    The interface has no claim, so this detects divergence without refusing
-    sends. Read-only and tolerant of malformed evidence."""
+    Detects divergence without refusing sends. Registered-worker caller sids
+    (lane reports) never count as steers. Read-only and tolerant of malformed evidence."""
     if now is None:
         now = datetime.now(timezone.utc)
     if window_seconds is None:
         window_seconds = INTERFACE_DIVERGENCE_WINDOW_SECONDS
+    worker_sids = set()
+    registry = _registry_records_or_none()
+    if isinstance(registry, dict) and isinstance(registry.get("workers"), dict):
+        for record in registry["workers"].values():
+            worker_sids |= _record_sids(record)
     callers = {}     # caller_sid -> latest ts string seen (for reporting)
     for line in _read_tail_lines(events_path()):
         line = line.strip()
@@ -24622,6 +24627,8 @@ def _interface_divergence(now=None, window_seconds=None):
         cs = ev.get("caller_sid")
         if not isinstance(cs, str) or not cs:
             continue      # no provenance (human shell / pre-§5.3 event): ignore
+        if cs in worker_sids:
+            continue
         try:
             ts = _parse_iso(ev["ts"])
         except (KeyError, TypeError, ValueError):
