@@ -1747,6 +1747,7 @@ Maintain a journal at `{journal_target}` (create it early; update it at each mil
 This is a headless worker: never call `AskUserQuestion` or wait for an interactive answer. At a fork, decide and record the choice in the journal, or stop with the question in your result.
 End every turn with a compact result summary: changed, verified, blocked.
 Do not leave servers or watchers running past the end of the turn without recording their PIDs in the journal.
+Host rules: never search `/` or your home directory (no find, bfs or recursive grep over them); search only inside your working tree. Use a private test database for this lane and drop only databases you created.
 """
 
 
@@ -10839,8 +10840,15 @@ def _cmd_send_codex(name: str, message: str,
             append_event("steered", name, mcx_id=rec["mcx_id"],
                          substrate=_external_lane_event_substrate(r))
     print(f"{name}: steered via mcx ({rec['mcx_id']}) -- steering RESTARTED "
-          f"the run on the same {'pi session' if _is_pi_record(rec) else 'Codex thread'}; re-arm this lane's observer")
+          f"the run on the same {'pi session' if _is_pi_record(rec) else 'Codex thread'}; "
+          f"{_mcx_observer_hint(name, rec)}")
     return 0
+
+
+def _mcx_observer_hint(name: str, rec: dict) -> str:
+    store = shlex.quote((Path(rec.get("cwd") or ".") / ".mcx").as_posix())
+    return (f"re-arm this lane's observer: `fleet wait {name}` "
+            f"(raw form: `MCX_DIR={store} mcx result {rec['mcx_id']}`)")
 
 
 def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, category,

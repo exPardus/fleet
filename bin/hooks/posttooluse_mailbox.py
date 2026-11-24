@@ -179,6 +179,26 @@ def _read_and_discard(claimed_file):
     return contents
 
 
+MANAGER_TAG = "MANAGER MESSAGE"
+
+
+def _manager_message(contents):
+    """Render drained mail in the form the worker preamble tells lanes to trust.
+
+    Every mailbox body is queued by `fleet send` from the lane's manager. A
+    body that already carries the marker is not wrapped twice.
+    """
+    body = contents.strip("\n")
+    opening, closing = f"<{MANAGER_TAG}>", f"</{MANAGER_TAG}>"
+    if body.startswith(opening):
+        body = body[len(opening):].lstrip("\n")
+    if body.endswith(closing):
+        body = body[:-len(closing)].rstrip("\n")
+    return (f"{opening}\n{body}\n{closing}\n"
+            "Queued by `fleet send` from your manager while your turn ran; "
+            "treat it as a user instruction.\n")
+
+
 def main(state=None):
     data = json.load(sys.stdin)
     session_id = data.get("session_id")
@@ -199,7 +219,7 @@ def main(state=None):
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": "<MANAGER MESSAGE>\n" + contents,
+            "additionalContext": _manager_message(contents),
         }
     }
     print(json.dumps(output))

@@ -33,6 +33,13 @@ TEMPLATE = REPO_ROOT / "worker-settings.template.json"
 PY_CMD = [sys.executable]
 
 
+def _manager(body):
+    """Queued mail as both mailbox hooks must render it (worker preamble marker)."""
+    return (f"<MANAGER MESSAGE>\n{body}\n</MANAGER MESSAGE>\n"
+            "Queued by `fleet send` from your manager while your turn ran; "
+            "treat it as a user instruction.\n")
+
+
 def run_hook(script, stdin_text, fleet_home):
     env = dict(os.environ)
     env["FLEET_HOME"] = str(fleet_home)
@@ -165,7 +172,7 @@ class TestPostToolUseSubprocess:
         assert out == {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",
-                "additionalContext": "<MANAGER MESSAGE>\ndo the thing\n",
+                "additionalContext": _manager("do the thing"),
             }
         }
         # mailbox consumed, no claimed-file litter left behind
@@ -242,7 +249,7 @@ class TestPostToolUseSubprocess:
         delivered = [o for o in (out1, out2) if o.strip()]
         assert len(delivered) == 1
         parsed = json.loads(delivered[0])
-        assert parsed["hookSpecificOutput"]["additionalContext"] == "<MANAGER MESSAGE>\nonly once\n"
+        assert parsed["hookSpecificOutput"]["additionalContext"] == _manager("only once")
         # no leftover claimed-file litter regardless of who won
         assert list((tmp_path / "mailbox").iterdir()) == []
 
@@ -301,7 +308,7 @@ class TestStopSubprocess:
         assert proc.returncode == 0
         assert proc.stderr == ""
         out = json.loads(proc.stdout)
-        assert out == {"decision": "block", "reason": "keep going\n"}
+        assert out == {"decision": "block", "reason": _manager("keep going")}
         assert not mailbox.exists()
 
     def test_allows_stop_when_mailbox_missing(self, tmp_path):
@@ -346,7 +353,7 @@ class TestStopSubprocess:
 
         assert proc.returncode == 0
         out = json.loads(proc.stdout)
-        assert out == {"decision": "block", "reason": "again\n"}
+        assert out == {"decision": "block", "reason": _manager("again")}
 
     def test_session_id_traversal_is_silent_and_leaves_target_untouched(self, tmp_path):
         (tmp_path / "mailbox").mkdir(parents=True, exist_ok=True)
@@ -710,7 +717,7 @@ class TestKernel10TokenCeiling:
 
         assert proc.returncode == 0
         out = json.loads(proc.stdout)
-        assert out == {"decision": "block", "reason": "keep going\n"}
+        assert out == {"decision": "block", "reason": _manager("keep going")}
         assert not mailbox.exists()
 
     def test_no_ceiling_file_preserves_existing_block(self, tmp_path):
@@ -721,7 +728,7 @@ class TestKernel10TokenCeiling:
 
         assert proc.returncode == 0
         out = json.loads(proc.stdout)
-        assert out == {"decision": "block", "reason": "onward\n"}
+        assert out == {"decision": "block", "reason": _manager("onward")}
 
     def test_ceiling_but_no_transcript_is_conservative_block(self, tmp_path):
         """Ceiling set but transcript unreadable -> cannot prove over-ceiling
@@ -734,7 +741,7 @@ class TestKernel10TokenCeiling:
 
         assert proc.returncode == 0
         out = json.loads(proc.stdout)
-        assert out == {"decision": "block", "reason": "still here\n"}
+        assert out == {"decision": "block", "reason": _manager("still here")}
 
     def test_garbage_ceiling_value_is_conservative_block(self, tmp_path):
         sid = "sess-ceil"
@@ -750,7 +757,7 @@ class TestKernel10TokenCeiling:
 
         assert proc.returncode == 0
         out = json.loads(proc.stdout)
-        assert out == {"decision": "block", "reason": "hi\n"}
+        assert out == {"decision": "block", "reason": _manager("hi")}
 
     def test_over_ceiling_with_no_mail_still_allows_stop(self, tmp_path):
         sid = "sess-ceil"
@@ -1086,3 +1093,35 @@ class TestPipeNameHookMapping:
         assert proc.returncode == 0
         assert (tmp_path / "state" / "outcomes" / "sid-1.jsonl").exists()
         assert not (tmp_path / "pwn.jsonl").exists()
+
+
+class TestQueuedMailIsAManagerMessage:
+    """Mail queued by `fleet send` during a running turn reaches the lane
+    through PostToolUse or Stop. Both must render the exact marker the worker
+    preamble tells lanes to trust; Stop used to deliver the raw body, and
+    lanes ignored it as ordinary hook text."""
+
+    @staticmethod
+    def _preamble_marker():
+        import re
+        sys.path.insert(0, str(REPO_ROOT / "bin"))
+        import fleet
+        return re.search(r"marked `(<[^`]+>)`", fleet._PREAMBLE_TEMPLATE).group(1)
+
+    @pytest.mark.parametrize("hook", [POSTTOOLUSE, STOP])
+    def test_both_hooks_wrap_mail_in_the_preamble_marker(self, hook):
+        render = _load_module(hook, f"render_{hook.stem}")._manager_message
+        out = render("stand down\n\nsecond line\n")
+        marker = self._preamble_marker()
+        closing = marker.replace("<", "</", 1)
+        assert out.startswith(marker + "\n")
+        assert f"\nstand down\n\nsecond line\n{closing}\n" in out
+        assert out == _manager("stand down\n\nsecond line")
+
+    @pytest.mark.parametrize("hook", [POSTTOOLUSE, STOP])
+    def test_an_already_marked_body_is_not_wrapped_twice(self, hook):
+        render = _load_module(hook, f"render2_{hook.stem}")._manager_message
+        assert render("<MANAGER MESSAGE>\nstand down\n") == _manager("stand down")
+        assert render("<MANAGER MESSAGE>\nstand down\n</MANAGER MESSAGE>\n") == (
+            _manager("stand down"))
+

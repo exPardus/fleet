@@ -277,7 +277,28 @@ def main(state=None):
         _notify_lane_done(session_id)
         return
 
-    print(json.dumps({"decision": "block", "reason": contents}))
+    print(json.dumps({"decision": "block",
+                      "reason": _manager_message(contents)}))
+
+
+MANAGER_TAG = "MANAGER MESSAGE"
+
+
+def _manager_message(contents):
+    """Render drained mail in the form the worker preamble tells lanes to trust.
+
+    Every mailbox body is queued by `fleet send` from the lane's manager. A
+    body that already carries the marker is not wrapped twice.
+    """
+    body = contents.strip("\n")
+    opening, closing = f"<{MANAGER_TAG}>", f"</{MANAGER_TAG}>"
+    if body.startswith(opening):
+        body = body[len(opening):].lstrip("\n")
+    if body.endswith(closing):
+        body = body[:-len(closing)].rstrip("\n")
+    return (f"{opening}\n{body}\n{closing}\n"
+            "Queued by `fleet send` from your manager while your turn ran; "
+            "treat it as a user instruction.\n")
 
 
 def _notify_lane_done(session_id):

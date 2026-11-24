@@ -861,6 +861,14 @@ class TestComposePrompt:
         assert "AskUserQuestion" in prompt
         assert "never" in prompt.lower()
 
+    def test_preamble_carries_the_host_rules_every_lane_needs(self, isolated_home):
+        """The supervisor should not have to repeat these in each brief."""
+        prompt, _claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "t", "sid-1")
+        assert "never search `/` or your home directory" in prompt
+        assert "search only inside your working tree" in prompt
+        assert "private test database for this lane" in prompt
+        assert "drop only databases you created" in prompt
+
     def test_empty_mailbox_is_noop(self, isolated_home):
         prompt, claim, _mail = fleet.compose_prompt("probe-1", "C:/x", "task text", "sid-1")
         # The preamble explains the <MANAGER MESSAGE> convention (in backticks);
