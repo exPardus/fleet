@@ -9,8 +9,8 @@ import os
 import pytest
 
 from native_subagent_evidence import (
-    child_runs, read_until, session_id, sidechain_usage, stop_parent,
-    stream_events, subagent_files)
+    child_runs, child_write, group_alive, read_until, session_id,
+    sidechain_usage, stop_parent, stream_events, subagent_files)
 
 SID = "11111111-2222-4333-8444-555555555555"
 AGENT = "a0123456789abcdef"
@@ -151,4 +151,72 @@ def test_stop_parent_escalates_when_sigterm_is_ignored():
     parent.wait = short_wait
     stop_parent(parent)
     assert parent.poll() is not None and len(calls) == 2
+
+
+DISPATCH = "toolu_dispatch"
+
+
+def _child_use(path, use_id="toolu_w"):
+    return {"type": "assistant", "parent_tool_use_id": DISPATCH,
+            "message": {"content": [{"type": "tool_use", "id": use_id,
+                                     "name": "Write",
+                                     "input": {"file_path": path}}]}}
+
+
+def _child_result(use_id="toolu_w", is_error=False):
+    block = {"type": "tool_result", "tool_use_id": use_id,
+             "content": "File created successfully"}
+    if is_error:
+        block["is_error"] = True
+    return {"type": "user", "parent_tool_use_id": DISPATCH,
+            "message": {"content": [block]}}
+
+
+def test_a_write_request_without_its_result_is_not_a_successful_write():
+    """The reviewed false positive: a request plus a file made by someone else."""
+    events = [_child_use("/p/pin-x.txt")]
+    assert child_write(events, DISPATCH, "pin-x.txt") == ("/p/pin-x.txt", None)
+
+
+def test_a_denied_write_and_a_successful_write_are_told_apart():
+    denied = [_child_use("/p/pin-x.txt"), _child_result(is_error=True)]
+    ok = [_child_use("/p/pin-x.txt"), _child_result()]
+    assert child_write(denied, DISPATCH, "pin-x.txt") == ("/p/pin-x.txt", "denied")
+    assert child_write(ok, DISPATCH, "pin-x.txt") == ("/p/pin-x.txt", "ok")
+
+
+def test_a_result_for_another_call_or_another_dispatch_does_not_count():
+    other_call = [_child_use("/p/pin-x.txt"), _child_result(use_id="toolu_other")]
+    assert child_write(other_call, DISPATCH, "pin-x.txt")[1] is None
+    foreign = dict(_child_result(), parent_tool_use_id="toolu_elsewhere")
+    assert child_write([_child_use("/p/pin-x.txt"), foreign],
+                       DISPATCH, "pin-x.txt")[1] is None
+    assert child_write([_child_use("/p/other.txt"), _child_result()],
+                       DISPATCH, "pin-x.txt") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+def test_stop_parent_reaps_a_group_member_that_outlives_the_parent(tmp_path):
+    """The reviewed leak: the parent exits on SIGTERM, a child ignores it."""
+    pid_file = tmp_path / "child.pid"
+    script = (
+        "import os, signal, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "time.sleep(120)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(120)\n")
+    parent = _silent_parent(script)
+    parent.stdout.readline()
+    child_pid = int(pid_file.read_text())
+    stop_parent(parent, grace=5)
+    assert parent.poll() is not None
+    assert not group_alive(parent.pid)
+    try:
+        os.kill(child_pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    assert not alive
 

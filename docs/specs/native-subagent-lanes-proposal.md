@@ -63,7 +63,7 @@ Observed on Claude Code 2.1.331 with haiku, a headless parent (`claude -p --outp
 - Identity: the Agent tool returns an `agentId` (the stream's task_id), tied to the dispatching tool_use_id. Each run of that child has its own run_id. A `SendMessage` to a finished child revives the same `agentId` with a new run_id, so a Fleet binding is (`agentId`, run_id), not the session ID. A child is backgrounded unless the parent asks for the foreground.
 - Terminal evidence: the parent stream emits a task_notification with status `completed` and the child's final text, per run. Progress events are never terminal.
 - Per-child usage: that notification carries total_tokens, tool uses and duration. The child's own transcript carries per-message input and output tokens. The parent's final result aggregates parent and children by model, with one cost figure. There is no per-child dollar source, so a per-child dollar ceiling stays unsupported.
-- Durable record: the child transcript and `agent-<agentId>.meta.json` live under the parent session's `subagents/` directory in the Claude config directory, beside the parent transcript. The meta file names the dispatching tool use and gains `finished: true` only when the child finished. These files survive parent exit and `/compact` byte for byte. The stream's output file under the system temp directory is only a symlink to that transcript.
+- Durable record: the child transcript and `agent-<agentId>.meta.json` live under the parent session's `subagents/` directory in the Claude config directory, beside the parent transcript. The meta file names the dispatching tool use and gains `finished: true` when the run ends, but a graceful parent shutdown can set it for a child that never completed, so it is not completion evidence. These files survive parent exit and `/compact` byte for byte. The stream's output file under the system temp directory is only a symlink to that transcript.
 
 **Question 2: worktree, permission mode, model, cleanup.**
 
@@ -74,7 +74,7 @@ Observed on Claude Code 2.1.331 with haiku, a headless parent (`claude -p --outp
 
 **Parent death and compaction.**
 
-- Killing the parent (SIGTERM to its process group) kills the child with it; no child process survives, and its pending work never completes. The meta file has no `finished` flag, and an isolated child's worktree is left behind, locked.
+- Terminating the parent process alone (SIGTERM) ends the child with it; no child process survives, and its pending work never completes. The meta file may or may not gain `finished: true`, and an isolated child's worktree is left behind, locked.
 - Resuming the parent session with `--resume` keeps the session ID and emits a task_notification with status `stopped` ("didn't finish before the previous session ended"). It does not restart the child.
 - `/compact` writes a compact_boundary and leaves the child's files untouched.
 
@@ -82,7 +82,7 @@ Observed on Claude Code 2.1.331 with haiku, a headless parent (`claude -p --outp
 
 **Consequences for the migration.**
 
-- Bind a native lane to (`agentId`, run_id) and its parent session, and read terminal evidence from the parent's stream or the child's meta file. A missing `finished` flag after the parent ended is a dead child, not a running one.
+- Bind a native lane to (`agentId`, run_id) and its parent session, and read completion only from a `completed` task_notification in the parent's stream. After the parent ended, a child without one is dead, whatever its meta file says.
 - Parent death ends the child, so a native child's lifetime cannot exceed its parent session (question 4). Work that must outlive the supervisor stays an independent lane.
 - Fleet must remove a dead child's locked worktree and integrate a finished child's kept worktree; Claude Code cleans only unchanged worktrees.
 - Per-child ceilings can use tokens, not dollars.

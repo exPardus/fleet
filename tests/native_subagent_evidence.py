@@ -154,14 +154,70 @@ def read_until(process, seen, predicate, timeout):
             return True
 
 
-def stop_parent(process):
-    """SIGTERM the parent's process group; escalate if it does not exit."""
+def group_alive(pgid) -> bool:
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(pgid, 0)
     except ProcessLookupError:
-        return
-    try:
-        process.wait(30)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait(10)
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def stop_parent(process, grace=30):
+    """Clean up the parent's whole process group, never only the parent.
+
+    SIGTERM the group, wait for the parent, then SIGKILL any member still
+    alive (a child that ignores SIGTERM outlives a parent that exits), and
+    wait until the group is empty or the bound passes.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(grace if sig == signal.SIGTERM else 10)
+        except subprocess.TimeoutExpired:
+            pass
+    deadline = time.monotonic() + 10
+    while group_alive(process.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def child_tool_calls(events, dispatch_tool_use_id):
+    """Map the child's tool_use ids to {"use": block, "result": block|None}."""
+    calls = {}
+    for event in events:
+        message = event.get("message")
+        if (event.get("parent_tool_use_id") != dispatch_tool_use_id
+                or not isinstance(message, dict)):
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if event.get("type") == "assistant" and block.get("type") == "tool_use":
+                calls.setdefault(block.get("id"), {"use": None, "result": None})[
+                    "use"] = block
+            elif event.get("type") == "user" and block.get("type") == "tool_result":
+                calls.setdefault(block.get("tool_use_id"),
+                                 {"use": None, "result": None})["result"] = block
+    return calls
+
+
+def child_write(events, dispatch_tool_use_id, name):
+    """The child's Write of `name`: (path, "ok"|"denied"|None) or None.
+
+    "ok" needs the Write's own successful tool result, not a file on disk:
+    anything else could have created the file.
+    """
+    for call in child_tool_calls(events, dispatch_tool_use_id).values():
+        use = call["use"] or {}
+        path = str((use.get("input") or {}).get("file_path", ""))
+        if use.get("name") != "Write" or not path.endswith(name):
+            continue
+        result = call["result"]
+        if result is None:
+            return path, None
+        return path, "denied" if result.get("is_error") else "ok"
+    return None

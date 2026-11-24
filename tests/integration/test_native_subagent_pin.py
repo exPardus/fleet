@@ -12,8 +12,9 @@ installed Claude Code exposes about that child:
      `worktreeCleanlyRemoved`), a changed one is kept on its own branch;
   4. permissions: the child inherits the parent's mode and --allowedTools;
      a project agent's `permissionMode` does not narrow an acceptEdits parent;
-  5. parent death: the child dies with the parent, leaves no `finished` flag,
-     and a resumed parent reports the run as `stopped`;
+  5. parent death: the child dies with the parent and never completes, and
+     a resumed parent reports the run as `stopped` (the meta `finished` flag
+     may still be set, so it is not completion evidence);
   6. compaction: /compact leaves the child's transcript and meta intact.
 
 A failure here means the substrate changed under the proposal: re-read the
@@ -47,7 +48,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from native_subagent_evidence import (  # noqa: E402
-    child_runs, read_until, session_id, sidechain_usage, stop_parent,
+    child_runs, child_write, read_until, session_id, sidechain_usage,
+    stop_parent,
     stream_events,
     subagent_files)
 
@@ -231,31 +233,19 @@ def test_3_changed_worktree_is_kept_and_the_child_inherits_accept_edits(project)
     sid = session_id(events)
     assert runs[0]["terminal"]["status"] == "completed"
     meta = json.loads(subagent_files(sid, agent)[0].read_text())
+    path, outcome = child_write(events, runs[0]["tool_use_id"], name)
+    assert outcome == "ok", (path, outcome)
     assert meta["worktreePath"] in _worktrees(project)
     assert meta["worktreeBranch"] == f"worktree-agent-{agent}"
-    assert (Path(meta["worktreePath"]) / name).is_file()
+    assert Path(path) == Path(meta["worktreePath"]) / name
+    assert Path(path).is_file()
     assert not (project / name).exists()
 
 
-def _child_tool_uses(events, tool_use_id):
-    """Tool calls the child made, read from the parent's stream."""
-    uses = []
-    for event in events:
-        message = event.get("message")
-        if (event.get("type") == "assistant"
-                and event.get("parent_tool_use_id") == tool_use_id
-                and isinstance(message, dict)):
-            uses.extend(block for block in message.get("content") or []
-                        if isinstance(block, dict)
-                        and block.get("type") == "tool_use")
-    return uses
-
-
 def _attempted_write(events, tool_use_id, name):
-    """Haiku sometimes skips the step; only an attempted Write pins anything."""
-    return any(use.get("name") == "Write"
-               and str((use.get("input") or {}).get("file_path", "")).endswith(name)
-               for use in _child_tool_uses(events, tool_use_id))
+    """Haiku sometimes skips the step; only a Write with a result pins anything."""
+    found = child_write(events, tool_use_id, name)
+    return found is not None and found[1] is not None
 
 
 def _denials(events, agent):
@@ -280,7 +270,9 @@ def test_4_child_inherits_the_parent_permission_mode(project, flags, allowed):
     else:
         pytest.fail("the child never attempted the Write; nothing was pinned")
     assert runs[0]["terminal"]["status"] == "completed"
-    assert (project / name).is_file() is allowed
+    path, outcome = child_write(events, runs[0]["tool_use_id"], name)
+    assert outcome == ("ok" if allowed else "denied"), (path, outcome)
+    assert Path(path).is_file() is allowed
     assert bool(_denials(events, agent)) is not allowed
 
 
@@ -306,9 +298,11 @@ def test_4b_project_agent_permission_mode_does_not_narrow_accept_edits(project):
     sid = session_id(events)
     assert json.loads(subagent_files(sid, agent)[0].read_text())[
         "agentType"] == "pin-narrow"
-    # The child's own Write, tied to its dispatching tool use, created the
-    # file: the narrower declared mode is not applied (2.1.331).
-    assert (project / name).is_file()
+    # The child's own Write, tied to its dispatching tool use, succeeded:
+    # the narrower declared mode is not applied (2.1.331).
+    path, outcome = child_write(events, runs[0]["tool_use_id"], name)
+    assert outcome == "ok", (path, outcome)
+    assert Path(path) == project / name and Path(path).is_file()
     assert not _denials(events, agent)
 
 
@@ -330,18 +324,25 @@ def test_5_parent_death_kills_the_child_and_resume_reports_stopped(project):
             and event.get("last_tool_name") == "Bash"), timeout=120)
         assert reached, "child never ran Bash within 120 s"
         time.sleep(3)
+        # The probe: signal the parent process alone. Group cleanup below
+        # must not be what stops the child.
+        parent.send_signal(signal.SIGTERM)
+        parent.wait(30)
+        time.sleep(45)  # past the child's sleep: nothing may complete it later
+        assert not list(project.rglob(f"{token}.txt"))
+        residue = subprocess.run(["pgrep", "-f", token], capture_output=True,
+                                 text=True).stdout.split()
+        assert residue == []
     finally:
         stop_parent(parent)
     sid = session_id(seen)
     agent, runs = _only_child(seen)
     assert runs[0]["terminal"] is None
     meta = json.loads(subagent_files(sid, agent)[0].read_text())
-    assert "finished" not in meta
-    time.sleep(45)  # past the child's sleep: nothing may complete it later
-    assert not list(project.rglob(f"{token}.txt"))
-    residue = subprocess.run(["pgrep", "-f", token], capture_output=True,
-                             text=True).stdout.split()
-    assert residue == []
+    # A graceful parent shutdown may still write `finished: true` for a child
+    # that never completed (seen on 2.1.331), so the flag is not completion
+    # evidence; the missing completed notification and output are.
+    assert meta.get("finished") in (None, True), json.dumps(meta)
     # The worktree outlives its dead child; its owner must remove it.
     assert meta["worktreePath"] in _worktrees(project)
     resumed = _parent(project, "Do not start any agent. Reply with one word: OK.",
