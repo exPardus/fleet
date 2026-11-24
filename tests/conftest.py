@@ -152,6 +152,15 @@ def child_env(sandbox, **over):
 
 
 @pytest.fixture(autouse=True)
+def _host_disk_never_decides_a_test(monkeypatch):
+    """The spawn disk floor reads the host's free space; no ordinary test may
+    pass or fail on that. Tests of the floor restore the defaults explicitly."""
+    import fleet
+    monkeypatch.setattr(fleet, "DISK_FLOOR_GB_DEFAULT", None)
+    monkeypatch.setattr(fleet, "DISK_FLOOR_HEAVY_GB_DEFAULT", None)
+
+
+@pytest.fixture(autouse=True)
 def _never_touch_the_real_install(tmp_path_factory, monkeypatch):
     """The code-plane twin of `_never_touch_the_real_home`, and it exists
     because the multi-fleet slice-0 split BROKE THE SANDBOX AND THE SUITE PROVED

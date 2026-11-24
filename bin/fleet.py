@@ -7343,6 +7343,11 @@ def cmd_spawn(args, run=subprocess.run, which=shutil.which, sleep=time.sleep,
     _memory_refusal = _memory_budget_refusal(run=run, which=which)
     if _memory_refusal is not None:
         raise FleetCliError(_memory_refusal)
+    _disk_refusal = _disk_floor_refusal(
+        args.dir, heavy=bool(getattr(args, "disk_heavy", False))
+        or getattr(args, "category", None) in DISK_HEAVY_CATEGORIES)
+    if _disk_refusal is not None:
+        raise FleetCliError(_disk_refusal)
     _require_instance_settings()
 
     cwd = Path(args.dir)
@@ -14607,7 +14612,7 @@ GC_IDLE_TTL_MINUTES_DEFAULT = 30
 
 def gc_config() -> dict:
     """`state/config.json` "gc": idle_ttl_minutes (0/null off), memory_budget_mb,
-    min_available_mb. Unset or non-numeric values keep the defaults."""
+    min_available_mb, min_free_disk_gb[_heavy]; bad values keep the defaults."""
     try:
         data = json.loads(config_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -14624,7 +14629,33 @@ def gc_config() -> dict:
         return value if value > 0 else None
     return {"idle_ttl_minutes": number("idle_ttl_minutes", GC_IDLE_TTL_MINUTES_DEFAULT),
             "memory_budget_mb": number("memory_budget_mb", None),
-            "min_available_mb": number("min_available_mb", None)}
+            "min_available_mb": number("min_available_mb", None),
+            "min_free_disk_gb": number("min_free_disk_gb", DISK_FLOOR_GB_DEFAULT),
+            "min_free_disk_gb_heavy": number("min_free_disk_gb_heavy",
+                                             DISK_FLOOR_HEAVY_GB_DEFAULT)}
+
+
+DISK_FLOOR_GB_DEFAULT = 6
+DISK_FLOOR_HEAVY_GB_DEFAULT = 8
+DISK_HEAVY_CATEGORIES = frozenset({"docker"})
+
+
+def _disk_floor_refusal(directory, heavy=False, verb="spawn"):
+    config = gc_config()
+    key = "min_free_disk_gb_heavy" if heavy else "min_free_disk_gb"
+    floor = config[key]
+    if not floor:
+        return None
+    probe = Path(directory)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = _watch_free_disk_gb(probe)
+    if free is None or free >= floor:
+        return None
+    kind = "docker-heavy lane " if heavy else ""
+    return (f"{verb}: {free:.1f} GB free on the filesystem of {directory} is below "
+            f"gc.{key} {floor} for a {kind}spawn -- free disk (images, logs, "
+            "worktrees) or lower the floor in state/config.json")
 
 
 def _roster_idle_live(entries: list, sid) -> bool:
@@ -28749,6 +28780,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_spawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
     # Use the default fleet category when dispatch receives no explicit category.
     p_spawn.add_argument("--category", default=None)
+    p_spawn.add_argument(
+        "--disk-heavy", action="store_true", dest="disk_heavy",
+        help="the lane builds or runs containers: apply gc.min_free_disk_gb_heavy "
+             "(default 8 GB) instead of gc.min_free_disk_gb (default 6 GB); "
+             "--category docker implies it")
     p_spawn.add_argument("--spec", default=None, metavar="CAMPAIGN",
                          help="bind to an accepted SDD campaign spec (requires sdd.enabled)")
     p_spawn.add_argument("--slice", default=None, metavar="NAME",

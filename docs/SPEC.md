@@ -716,6 +716,11 @@ and the budget when one is set. `spawn` refuses when that RSS is at or above
 both are unset by default, and an unreadable measurement never refuses. The floor
 also refuses `respawn` and defers a stream retry to the next sweep; a fork-steer
 `send` is never refused, but appends `send_under_memory_floor`.
+`spawn` also refuses when free space on the lane directory's filesystem is below
+`gc.min_free_disk_gb` (default 6 GB), or below `gc.min_free_disk_gb_heavy`
+(default 8 GB) for a docker-heavy lane (`--disk-heavy` or `--category docker`).
+A full disk stalls every lane on the host at once; 0 or null turns a floor off,
+and an unreadable measurement never refuses.
 
 Autoclean tier 1 reuses the archive writer with an age-independent criterion:
 explicit registry `lane_state: landed|abandoned` or matching latest outcome kind
