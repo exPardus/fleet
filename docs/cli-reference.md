@@ -581,7 +581,7 @@ options:
 usage: fleet respawn [-h] [--task TASK] [--force] [--force-band] [--yes]
                      [--nonce NONCE] [--max-budget-usd MAX_BUDGET_USD]
                      [--setting-sources SETTING_SOURCES]
-                     [--token-ceiling TOKEN_CEILING]
+                     [--token-ceiling TOKEN_CEILING] [--model MODEL]
                      name
 
 positional arguments:
@@ -601,6 +601,9 @@ options:
   --max-budget-usd MAX_BUDGET_USD
   --setting-sources SETTING_SOURCES
   --token-ceiling TOKEN_CEILING
+  --model MODEL         respawn onto a different model within the same
+                        substrate (spawn's rules); omitted keeps the stored
+                        model
 ```
 
 ### fleet resume-limited

@@ -168,7 +168,7 @@ Each line below is derived from `build_parser()` in `bin/fleet.py`.
 - `fleet interrupt NAME`: stop the worker's current turn.
 - `fleet release NAME`: release an attached worker to idle.
 - `fleet abandon NAME --reason TEXT [--force] [--nonce VALUE]`: record lane_state=abandoned for an idle lane with no commits to land; refuses a busy lane or a branch ahead of HEAD (unless `--force`); removes no worktree or branch.
-- `fleet respawn NAME [--task TEXT] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief.
+- `fleet respawn NAME [--task TEXT] [--model M] [--force] [--yes] [--force-band]`: start a fresh session while retaining the worker identity and recorded brief. `--model` swaps the stored model for the new body under spawn's validation and records it; it never crosses substrate (Claude/OpenRouter ↔ `codex:`) and is refused for supervisors and pi lanes.
 - `fleet resume-limited [NAME] [--force-now]`: resume workers whose usage horizon permits it.
 - `fleet kill NAME [--yes]`: interrupt a worker and mark it dead.
 - `fleet clean [--dead-only|--tombstones] [--yes]`: remove eligible dead records;

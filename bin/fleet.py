@@ -1021,15 +1021,15 @@ def _quarantine_registry(path: Path):
 def _quarantine_artifacts() -> list:
     """Return sorted quarantine artifacts; delegate the glob to _quarantine_artifacts_at.
     An artifact marks an unresolved incident, not a fresh install. Readers:
-      * `_sweep_husks` (:14259) -- refuse on presence alone.
-      * `_doctor_check_autoclean` (:15646) -- report a sweep blocked by it.
-      * `_require_claim_holder`'s §9 arm (:19099) -- upgrades need complete records.
+      * `_sweep_husks` (:14285) -- refuse on presence alone.
+      * `_doctor_check_autoclean` (:15672) -- report a sweep blocked by it.
+      * `_require_claim_holder`'s §9 arm (:19125) -- upgrades need complete records.
       * `_acting_worker_identity` (:4577) -- only fresh absence proves no records.
       * `_read_registry_readonly` (:5338) -- expose that distinction to views.
-      * `_doctor_check_registry` (:15917) -- a renamed-away path is not readable.
-      * `_identity_abstention_note` (:18977) -- name the incident-specific absence.
+      * `_doctor_check_registry` (:15943) -- a renamed-away path is not readable.
+      * `_identity_abstention_note` (:19003) -- name the incident-specific absence.
       * `_print_snapshot_table` (:8616) -- render the stale-ok explanation.
-      * `_tombstone_releasing_body` (:20715) -- render the release explanation.
+      * `_tombstone_releasing_body` (:20741) -- render the release explanation.
     Restore the artifact's contents before removing it to re-arm the readers.    """
     return _quarantine_artifacts_at(state_dir())
 
@@ -4559,7 +4559,7 @@ def _acting_worker_identity(sid=None, registry=None) -> dict:
     counts as read; absence with a quarantine artifact does not. A healthy registry
     still answers identity so the §6.5 gate can recognize workers.
     The presence-only refusal that closes it lives in `_require_claim_holder`
-    (`:19099`), because legacy upgrades also require a complete registry.
+    (`:19125`), because legacy upgrades also require a complete registry.
     `load_registry`
     QUARANTINES a corrupt registry -- it RENAMES the file aside (`:1102`) -- and
     must not be used for this read. Corrupt/unreadable state yields unresolved.
@@ -11562,7 +11562,7 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
 
     cwd = before["cwd"]
     mode = before["mode"]
-    model = before.get("model")
+    model = getattr(args, "model", None) or before.get("model")
     category = before.get("category")
     setting_sources = (args.setting_sources if getattr(args, "setting_sources", None) is not None
                        else before.get("setting_sources"))
@@ -11778,6 +11778,23 @@ def _cmd_respawn_native(args, before: dict, run=subprocess.run, which=shutil.whi
     return 0
 
 
+def _respawn_model_override(args, name: str, before: dict):
+    model = _normalise_model(getattr(args, "model", None))
+    args.model = model
+    if model is None:
+        return None
+    _enforce_tier_policy("worker", model)
+    if _pi_model_slug(model) is not None or _is_pi_record(before):
+        raise FleetCliError(
+            f"{name}: --model is not supported for pi lanes -- spawn a replacement")
+    if _is_codex_record(before) != (_codex_model_slug(model) is not None):
+        raise FleetCliError(
+            f"{name}: --model {model!r} changes substrate "
+            f"({'codex' if _is_codex_record(before) else 'claude'} row) -- "
+            "respawn keeps the substrate; spawn a replacement to switch")
+    return model
+
+
 def cmd_respawn(args, run=subprocess.run, which=shutil.which,
                 sleep=time.sleep, clock=time.monotonic) -> int:
     """Reset a worker's context with task, journal and old-sid mailbox carry.
@@ -11800,6 +11817,9 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
     if _sup_target is not None:
         _sup_name, _sup_rec, _sup_claim = _sup_target
         _supervisor_lifecycle_interaction_refusals("respawn", _sup_name, _sup_rec, _sup_claim)
+        if _normalise_model(getattr(args, "model", None)) is not None:
+            raise FleetCliError(
+                f"{_sup_name}: --model is not supported for supervisors")
         args.name = _sup_name
         refuse_if_archived(_sup_name, _sup_rec, "respawn")
         _confirm_destructive("respawn (retire the session of)", [_sup_name],
@@ -11830,11 +11850,15 @@ def cmd_respawn(args, run=subprocess.run, which=shutil.which,
 
     refuse_if_archived(args.name, before, "respawn")
     if _is_supervisor_shaped(args.name):
+        if _normalise_model(getattr(args, "model", None)) is not None:
+            raise FleetCliError(
+                f"{args.name}: --model is not supported for supervisors")
         # Route non-holder supervisor-shaped husks through the boot ritual too.
         # The new body asks sup-boot to claim/refuse; a respawn flag cannot establish
         # holdership or bypass a live claim.
         return _cmd_respawn_supervisor(args, args.name, before, None,
                                        run=run, which=which, sleep=sleep, clock=clock)
+    _respawn_model_override(args, args.name, before)
     if _is_codex_record(before):
         return _cmd_respawn_codex(args, before, run=run, which=which,
                                   sleep=sleep)
@@ -11853,7 +11877,7 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
     if _codex_record_route(before) == "native":
         return _cmd_respawn_codex_native(args, before)
     _require_mcx_codex_record(name, before, "respawn")
-    model = before.get("model")
+    model = getattr(args, "model", None) or before.get("model")
     if _codex_model_slug(model) is None and _pi_model_slug(model) is None:
         raise FleetCliError(
             f"{name}: codex record without a codex:<model> model "
@@ -11894,6 +11918,7 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
         rec = data["workers"].get(name)
         if rec is not None:
             rec["mcx_id"] = new_id
+            rec["model"] = model
             rec["mcx_approval"] = mcx_settings["approval"]
             rec["mcx_effort"] = mcx_settings["effort"]
             # Write-only, via update(): the brief-preservation census flags any
@@ -11948,7 +11973,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
             "refusing a second thread")
 
     cwd = binding.cwd
-    model = before.get("model")
+    model = getattr(args, "model", None) or before.get("model")
     requested_model = _codex_model_slug(model)
     if requested_model is None:
         raise FleetCliError(f"{name}: native Codex row has no codex:<model>")
@@ -12049,6 +12074,7 @@ def _cmd_respawn_codex_native(args, before: dict) -> int:
                 retired_entry["terminal_proof"] = system_error_proof
             retired.append(retired_entry)
             record.update({
+                "model": model,
                 "codex_thread_id": thread_id, "codex_turn_id": None,
                 "codex_host_generation": reply.generation,
                 "adapter_state": "bound", "status": "working",
@@ -12608,7 +12634,7 @@ def _resolve_supervisor_lifecycle_target(verb):
             f"the body cannot be identified. Never decide blind: run `fleet doctor` "
             f"and inspect supervisor/INCARNATION.", rc=3)
     # Use a read without repair for the pre-flight
-    # resolution that runs from `cmd_kill:12523` / `cmd_respawn:11799`, before
+    # resolution that runs from `cmd_kill:12549` / `cmd_respawn:11816`, before
     # fleet.lock. Quarantining here would be an unlocked write destroying evidence.
     # Distinguish unreadable registry from a readable registry without a holder.
     # The refusal supplies its own --repair hint, so suppress the loader's copy.
@@ -12639,9 +12665,9 @@ def _supervisor_lifecycle_target(verb, name):
     if name == SUPERVISOR_BODY_NAME:
         return _resolve_supervisor_lifecycle_target(verb)
     # Read without repair from
-    # `cmd_kill:12523` / `cmd_respawn:11799`, ahead of either verb's `fleet_lock`,
+    # `cmd_kill:12549` / `cmd_respawn:11816`, ahead of either verb's `fleet_lock`,
     # so corruption remains for the ordinary path's lock-held loader.
-    # `cmd_respawn:11820-11827` spells out that design -- resolve under the lock.
+    # `cmd_respawn:11840-11847` spells out that design -- resolve under the lock.
     # On corruption return None to route there; its loader refuses with the actual
     # registry error rather than an unknown-worker result from an empty substitute.
     try:
@@ -18016,9 +18042,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12626, :12789, :13054, :13278, :13314, :13556, :13557, :13645, :13655, :13666, :13764, :14285, :14560, :14561, :14596, :14684, :17968, :20868, :20880, :21027, :24612, :24807, :24808, :24908, :24972, :25034, :26063, :26065, :26102, :26630, :29600`).
+    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20894, :20906, :21053, :24638, :24833, :24834, :24934, :24998, :25060, :26089, :26091, :26128, :26656, :29629`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10896, :11670, :16256, :27562. This makes union identity
+    OWN prior sid alone: :10896, :11670, :16282, :27588. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18721,8 +18747,8 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # Resolve the physical record first, then compare identity against this claim;
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
-    # writer appends that record's OWN prior sid alone (:10896, :11670, :16256,
-    # :27562) -- so union identity cannot make one body answer for another.
+    # writer appends that record's OWN prior sid alone (:10896, :11670, :16282,
+    # :27588) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -18730,7 +18756,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
         # file aside (`:1095`), which is a write. Routing the identity read
         # through the read-only helper preserves evidence.
         # The helper declines unreadable data and
-        # names this gate as its reason (`:17942`).
+        # names this gate as its reason (`:17968`).
         _records = _registry_records_or_none()
         _workers = _records.get("workers") if isinstance(_records, dict) else None
         resolved_rec = (_workers.get(send_target)
@@ -19092,7 +19118,7 @@ def _require_claim_holder(sid_override=None, nonce=None, verb="sup", mint=True, 
         # Require completeness as well as readable identity: a recreated registry may
         # omit live records now held in quarantine. Presence alone blocks upgrade.
         # PRESENCE-ONLY, REGISTRY PRESENT OR NOT, verbatim as _sweep_husks
-        # spells it at `:14256`. Rename preserves mtime, so age ordering cannot prove
+        # spells it at `:14282`. Rename preserves mtime, so age ordering cannot prove
         # that a newer registry restored all quarantined records. Scope this check to
         # legacy upgrade: making the shared identity reader abstain would let a known
         # worker through the earlier worker-turn gate.
@@ -28732,6 +28758,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_respawn.add_argument("--setting-sources", dest="setting_sources", default=None)
     # Carry the token ceiling forward unless overridden.
     p_respawn.add_argument("--token-ceiling", type=int, default=None, dest="token_ceiling")
+    p_respawn.add_argument("--model", default=None,
+                           help="respawn onto a different model within the same substrate "
+                                "(spawn's rules); omitted keeps the stored model")
 
     # Explicit usage-limit resume sweep.
     p_resume = sub.add_parser("resume-limited",
