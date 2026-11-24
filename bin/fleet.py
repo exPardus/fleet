@@ -803,8 +803,30 @@ def refuse_if_archived(name: str, record: dict, action: str) -> None:
     """
     if isinstance(record, dict) and record.get("archived_at") is not None:
         raise FleetCliError(
-            f"{name}: archived -- history only (fleet clean to delete)"
+            f"{name}: archived -- history only, so `{action}` refuses it. "
+            f"Start a new lane from its record: {_archived_respawn_command(name, record)}"
+            " (`fleet clean --tombstones` deletes every archived row)"
         )
+
+
+def _archived_respawn_command(name: str, record: dict) -> str:
+    workers = (_registry_records_or_none() or {}).get("workers") or {}
+    base = re.sub(r"-\d+$", "", name)
+    index = 2
+    while f"{base}-{index}" in workers:
+        index += 1
+    brief = next((path for path in (brief_file_path(name), task_file_path(name))
+                  if path.exists()), None)
+    parts = ["fleet", "spawn", f"{base}-{index}", "--dir",
+             shlex.quote(str(record.get("cwd") or "<dir>")),
+             "--mode", shlex.quote(str(record.get("mode") or "dontask"))]
+    if record.get("model"):
+        parts += ["--model", shlex.quote(str(record["model"]))]
+    if record.get("category"):
+        parts += ["--category", shlex.quote(str(record["category"]))]
+    parts += ["--task", shlex.quote(f"@{brief.as_posix()}") if brief else "<task>",
+              "--nonce", "<NONCE>"]
+    return "`" + " ".join(parts) + "`"
 
 
 def _write_ceiling_file(sid: str, ceiling) -> None:
