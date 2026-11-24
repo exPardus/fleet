@@ -104,12 +104,32 @@ def test_inbound_mail_still_wins_over_a_stale_outbox(tmp_path, capsys):
     assert capsys.readouterr().out.startswith("MAIL ")
 
 
-def test_doctor_fails_outbound_mail_only_when_stale(tmp_path, monkeypatch):
+def test_doctor_notes_stale_outbound_mail_without_failing(tmp_path, monkeypatch):
+    """A receiver outside fleet being offline is not broken fleet
+    infrastructure: the row is a NOTE, so `fleet doctor` still exits 0."""
     home = _home(tmp_path)
     monkeypatch.setattr(fleet, "FLEET_HOME", home)
     _put(home, "to-hub/fresh.md", 5)
-    assert fleet._doctor_check_outbound_mail()[1] is True
+    name, ok, message = fleet._doctor_check_outbound_mail()
+    assert ok is True and not message.startswith("NOTE")
     _put(home, "to-hub/old.md", 95)
     name, ok, message = fleet._doctor_check_outbound_mail()
-    assert (name, ok) == ("outbound-mail", False)
-    assert "to-hub/old.md" in message and "95m" in message
+    assert (name, ok) == ("outbound-mail", True)
+    assert message.startswith("NOTE") and "to-hub/old.md" in message
+    assert "95m" in message
+
+
+def test_a_stale_file_is_not_lost_behind_another_event(tmp_path, capsys):
+    """Review w598 of 06ecd2e0: a STALEOUT that loses to MAIL in the same pass
+    must still be reported by a later watch, not recorded as reported."""
+    home = _home(tmp_path)
+    assert _watch(home) == 3  # seed the cursor
+    _put(home, "to-hub/x.md", 40)
+    (home / "mailbox" / "to-fleet" / "new.mail").write_text("hi")
+    assert _watch(home) == 0
+    assert capsys.readouterr().out.startswith("MAIL ")
+    cursor = json.loads((home / "state" / "interface" / "watch-cursor.json").read_text())
+    assert cursor["stale_out"] == []
+    assert _watch(home) == 0
+    assert capsys.readouterr().out.startswith("STALEOUT")
+    assert _watch(home) == 3

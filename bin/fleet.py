@@ -477,9 +477,10 @@ def _outbound_mail_stale(home, max_age_seconds, now=None) -> list:
                     or entry.is_symlink() or not entry.is_file()):
                 continue
             try:
-                age = now - entry.stat().st_mtime
+                info = entry.stat()
             except OSError:
                 continue
+            age = now - info.st_mtime
             if age > max_age_seconds:
                 stale.append((f"{outbox.name}/{entry.name}", age))
     return stale
@@ -622,10 +623,9 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
                     dirty[home] = True
                 for name, age in stale:
                     if name not in reported:
-                        cursor["stale_out"].append(name)
-                        dirty[home] = True
                         events.append((5, f"STALEOUT {home_tag(home)} {name} "
-                                          f"{int(age // 60)}m not picked up"))
+                                          f"{int(age // 60)}m not picked up",
+                                       home, name))
                         break
             current, valid = _watch_lane_observation(home)
             if not valid:
@@ -675,7 +675,11 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
             if free is not None and free < disk_floor:
                 events.append((4, f"LOWDISK {_watch_format_gb(free)}"))
         if events:
-            print(min(events, key=lambda item: item[0])[1])
+            chosen = min(events, key=lambda item: item[0])
+            if len(chosen) == 4:
+                cursors[chosen[2]]["stale_out"].append(chosen[3])
+                _watch_write_cursor(chosen[2], cursors[chosen[2]])
+            print(chosen[1])
             return 0
         if timeout is not None and clock() - started >= timeout:
             return 3
@@ -15285,8 +15289,8 @@ def _doctor_check_outbound_mail():
         return ("outbound-mail", True,
                 f"no outbox file older than {OUTBOUND_STALE_MINUTES_DEFAULT} minutes")
     oldest = max(stale, key=lambda item: item[1])
-    return ("outbound-mail", False,
-            f"{len(stale)} outbox file(s) not picked up for over "
+    return ("outbound-mail", True,
+            f"NOTE {len(stale)} outbox file(s) not picked up for over "
             f"{OUTBOUND_STALE_MINUTES_DEFAULT} minutes (oldest {oldest[0]}, "
             f"{int(oldest[1] // 60)}m) -- the receiving side is not polling; "
             "check it before sending more")
