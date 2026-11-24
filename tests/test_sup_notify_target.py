@@ -188,3 +188,44 @@ def test_dry_run_rejects_undrained_registered_target(reg_home):
     with pytest.raises(fleet.FleetCliError, match="mailbox is not drained"):
         fleet.cmd_sup_notify(_nargs(dry_run=True), run=run)
     assert run.calls == [] and not (reg_home / "mailbox").exists()
+
+
+@pytest.mark.parametrize("name, contents", [
+    ("interface-codex.json", b"{"),
+    ("interface-pane", b"work:fleet\n"),
+    ("interface-session", b"sid with spaces\n"),
+    ("interface-pane", b"\xff"),
+])
+def test_invalid_present_registration_never_falls_back_to_window(
+        reg_home, name, contents):
+    (reg_home / "state" / name).write_bytes(contents)
+    run = Tmux("work:fleet\n")
+    with pytest.raises(fleet.FleetCliError, match="registration"):
+        fleet.cmd_sup_notify(_nargs(dry_run=True), run=run)
+    assert run.calls == []
+    assert not fleet.interface_log_path().exists()
+
+
+@pytest.mark.parametrize("scan_number", [1, 2])
+def test_registration_switch_during_pane_scan_refuses_old_target(
+        reg_home, scan_number):
+    registration = reg_home / "state" / "interface-pane"
+    registration.write_text("%7\n")
+    nonce = _hold()
+
+    class SwitchingTmux(Tmux):
+        scans = 0
+
+        def __call__(self, argv, **kwargs):
+            if argv[:2] == ["tmux", "list-panes"]:
+                self.scans += 1
+                if self.scans == scan_number:
+                    registration.write_text("%8\n")
+            return super().__call__(argv, **kwargs)
+
+    run = SwitchingTmux("work:fleet\n", panes="%7 claude 0\n%8 claude 0\n")
+    with pytest.raises(fleet.FleetCliError, match="registration changed"):
+        fleet.cmd_sup_notify(_nargs(nonce=nonce), run=run)
+    assert not any("paste-buffer" in call or "send-keys" in call
+                   for call in run.calls)
+    assert not fleet.interface_log_path().exists()

@@ -18042,9 +18042,9 @@ def _releaser_is_roster_live(claim, live_sids: set, registry=None) -> bool:
     Both boot and lifecycle gates use this pure predicate, with IO supplied by
     callers. _releaser_live_sids owns the tombstone and fork-steer age boundaries.
     The sid union handles forks whose claim still names their earlier session;
-    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20921, :20933, :21080, :24665, :24860, :24861, :24961, :25025, :25087, :26120, :26122, :26159, :26687, :29661`).
+    sites that already key on the union (`:4387, :4422, :4452, :4491, :4528, :4584, :4663, :5732, :12652, :12815, :13080, :13304, :13340, :13582, :13583, :13671, :13681, :13692, :13790, :14311, :14586, :14587, :14622, :14710, :17994, :20921, :20933, :21080, :24665, :24860, :24861, :24961, :25025, :25087, :26126, :26128, :26165, :26693, :29667`).
     No foreign sid enters a record's retired_sids: every writer appends the record's
-    OWN prior sid alone: :10896, :11670, :16282, :27619. This makes union identity
+    OWN prior sid alone: :10896, :11670, :16282, :27625. This makes union identity
     safe; the age boundary distinguishes respawn.
     Missing registry data falls back to the bare sid comparison.
     """
@@ -18748,7 +18748,7 @@ def _supervisor_gate(verb, nonce=None, now=None, send_target=None):
     # a moved claim or supervisor-shaped husk does not qualify. Other verbs stay gated.
     # SAFETY INVARIANT: no foreign sid enters retired_sids; each
     # writer appends that record's OWN prior sid alone (:10896, :11670, :16282,
-    # :27619) -- so union identity cannot make one body answer for another.
+    # :27625) -- so union identity cannot make one body answer for another.
     # Read registry identity without quarantine; unreadable data declines the carve-out.
     if verb == "send" and send_target is not None:
         # `_registry_records_or_none`, NEVER `load_registry`: this gate is read-only.
@@ -25641,6 +25641,12 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
+    current_kind, current_target = _resolve_notify_target(
+        getattr(args, "tmux_session", None), args.window, run)
+    if (current_kind, current_target) != (kind, target):
+        raise FleetCliError(
+            "sup-notify: interface registration changed before delivery; "
+            "the interface has NOT been told")
     if not type_interface_line(run, target, args.text,
                                prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
         raise FleetCliError(
@@ -30614,18 +30620,40 @@ def _registered_notify_target(run=subprocess.run) -> tuple[str, str] | None:
         try:
             from fleet_codex import read_interface_claim
             claim = read_interface_claim(FLEET_HOME)
-        except Exception:
-            return None
+        except Exception as exc:
+            raise FleetCliError(
+                "sup-notify: Codex interface registration is unreadable or "
+                "invalid; the interface has NOT been told") from exc
         thread = claim.get("thread_id") if isinstance(claim, dict) else None
         if isinstance(thread, str) and _NOTIFY_MAILBOX_ID_RE.fullmatch(thread):
             return "codex", thread
-        return None
-    pane = _registration_token(state / "interface-pane")
-    if pane and pane.startswith("%") and pane[1:].isascii() and pane[1:].isdecimal():
+        raise FleetCliError(
+            "sup-notify: Codex interface registration is invalid; "
+            "the interface has NOT been told")
+    pane_path = state / "interface-pane"
+    session_path = state / "interface-session"
+    pane_present = _registration_path_present(pane_path)
+    session_present = _registration_path_present(session_path)
+    pane = _registration_token(pane_path) if pane_present else None
+    sid = _registration_token(session_path) if session_present else None
+    if pane_present and not (pane and pane.startswith("%")
+                             and pane[1:].isascii() and pane[1:].isdecimal()):
+        raise FleetCliError(
+            "sup-notify: tmux interface registration is unreadable or invalid; "
+            "the interface has NOT been told")
+    if session_present and not (sid and ".." not in sid
+                                and _NOTIFY_MAILBOX_ID_RE.fullmatch(sid)):
+        raise FleetCliError(
+            "sup-notify: Claude interface registration is unreadable or invalid; "
+            "the interface has NOT been told")
+    if pane is not None:
         _live_notify_pane(pane, run)
+        if _registration_token(pane_path) != pane:
+            raise FleetCliError(
+                "sup-notify: interface registration changed during pane scan; "
+                "the interface has NOT been told")
         return "tmux", pane
-    sid = _registration_token(state / "interface-session")
-    if sid and ".." not in sid and _NOTIFY_MAILBOX_ID_RE.fullmatch(sid):
+    if sid is not None:
         return "claude-session", sid
     return None
 

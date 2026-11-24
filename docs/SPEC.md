@@ -832,6 +832,10 @@ pane running a live `claude` process. A shell, dead or absent pane, or an
 unreadable scan fails closed before typing or recording `RELAY`. A registered
 Claude session or Codex thread also fails closed: the `mailbox/<id>.md` file
 is not drained by the Interface, so writing it cannot count as notification.
+An unreadable or invalid registration refuses without falling back to a tmux
+window. A live send rechecks its target after the claim gate and checks that
+the pane registration did not change during either liveness scan; a changed
+target refuses before typing or recording `RELAY`.
 The refusal says the Interface has NOT been told. With no registration,
 `_resolve_notify_session` lists `tmux list-windows -a` and uses the `work`
 session if it has the window; otherwise the single session that has the window.
