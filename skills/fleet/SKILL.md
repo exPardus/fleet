@@ -128,8 +128,8 @@ permission modes to mcx approval modes as
 reused by respawn/steer; a caller's `MCX_APPROVAL` cannot weaken Fleet's mode.
 `status` and `peek` show the approval mode.
 
-- For an explicit mcx lane, run one observer per lane; break its loop when `mcx result` returns anything other than 2 (`2` live, `0` done, `1` stopped or unknown).
-- For an explicit mcx lane, re-arm the observer after every `mcx steer`; steering RESTARTS the run.
+- For an explicit mcx lane, run one observer per lane: `fleet wait NAME`. Each lane's jobs live in `<lane cwd>/.mcx`; a bare `mcx result <id>` reads the caller's store and reports an unknown worker. The raw form is `MCX_DIR=<lane cwd>/.mcx mcx result <id>`; break its loop on any exit other than 2 (`2` live, `0` done, `1` stopped or unknown).
+- For an explicit mcx lane, re-arm the observer after every steer; steering RESTARTS the run. `fleet send` prints both observer forms.
 - Use `gpt-5.6-luna` by default; use Astra only by exception and run at most one Astra lane at a time.
 - An explicit mcx worker cannot commit: mcx runs `codex exec` under the default `workspace-write` sandbox, and a worktree's gitdir lives outside the worker's cwd, so `fleet land` commits the dirty worktree on the worker's behalf.
 - Do not use mcx to commit, steer unrelated workers, or create a second worker for a lane without an explicit split.

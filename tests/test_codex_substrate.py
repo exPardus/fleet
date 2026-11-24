@@ -408,6 +408,37 @@ class TestSend:
         assert after["status"] == "working"
         assert after["turns"] == rec["turns"] + 1
 
+    def test_send_hint_names_an_observer_that_reaches_the_lane_store(
+            self, codex_home, capsys, tmp_path_factory):
+        """A bare `mcx result <id>` reads the caller's own store and says
+        unknown worker: each lane's jobs live in <lane cwd>/.mcx. The hint
+        must name `fleet wait`, which routes through the recorded adapter,
+        and a raw command pinned to the lane store."""
+        import re
+        import shlex
+        worktree, rec = _spawn(codex_home)
+        _set_state(worktree, rec["mcx_id"], "done")
+        rec["status"] = "idle"
+        _write_rec("cx1", rec)
+        capsys.readouterr()
+        assert fleet.cmd_send(SimpleNamespace(
+            name="cx1", message="again", nonce=None, force_band=False)) == 0
+        out = capsys.readouterr().out
+        assert "`fleet wait cx1`" in out
+        raw = re.search(r"`MCX_DIR=(.+?) mcx result (\S+)`", out)
+        assert raw, out
+        store = Path(shlex.split(raw.group(1))[0])
+        assert store == worktree / ".mcx"
+        assert raw.group(2) == rec["mcx_id"]
+        _set_state(worktree, rec["mcx_id"], "done")
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        env = dict(os.environ, MCX_DIR=str(store))
+        done = subprocess.run(["mcx", "result", raw.group(2)], cwd=elsewhere,
+                              env=env, capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+        assert fleet.cmd_wait(SimpleNamespace(
+            names=["cx1"], any=False, all=False, timeout=30)) == 0
+
     def test_steer_reuses_persisted_mcx_settings(self, codex_home, monkeypatch):
         worktree, rec = _spawn(codex_home, mode="accept", effort="xhigh")
         _set_state(worktree, rec["mcx_id"], "done")

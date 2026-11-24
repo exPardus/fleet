@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec"); fleet_manager_mail = importlib.import_module("fleet_manager_mail")
 from fleet_errors import FleetCliError
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
@@ -1603,6 +1603,75 @@ def _registered_lane_mail_sender() -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def _manager_claim(nonce) -> dict | None:
+    if current_caller_session() is None or nonce is None:
+        return None
+    try:
+        claim = read_incarnation()
+        age = (datetime.now(timezone.utc)
+               - _parse_iso(claim["heartbeat_at"])).total_seconds()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if (claim.get("state") == "released" or _claim_is_legacy(claim)
+            or age > SUPERVISOR_CLAIM_STALE_SECONDS
+            or _nonce_presentation(claim, nonce) is None):
+        return None
+    return claim
+
+
+def _send_mail_entry(sid: str, message: str, manager_nonce, *,
+                     locked=False) -> str:
+    if manager_nonce is None:
+        return message
+
+    def record():
+        claim = _manager_claim(manager_nonce)
+        if claim is None:
+            return message
+        body, mail_id = message.rstrip("\n"), str(uuid.uuid4())
+        kept = [item for item in claim.get(fleet_manager_mail.CLAIM_KEY) or []
+                if isinstance(item, dict)]
+        claim[fleet_manager_mail.CLAIM_KEY] = kept[
+            -(fleet_manager_mail.CLAIM_RECORD_LIMIT - 1):] + [{
+                "id": mail_id, "sids": [sid],
+                "body_sha256": fleet_manager_mail.digest(body)}]
+        write_incarnation(claim)
+        return fleet_manager_mail.entry(mail_id, body)
+
+    if locked:
+        return record()
+    with fleet_lock():
+        return record()
+
+
+def _rebind_manager_mail(contents: str, new_sid: str, *, locked=False) -> None:
+    ids = set(fleet_manager_mail.entry_ids(contents))
+    if not ids:
+        return
+
+    def rebind():
+        claim = read_incarnation()
+        records = claim.get(fleet_manager_mail.CLAIM_KEY) if isinstance(
+            claim, dict) else None
+        if not isinstance(records, list):
+            return
+        for item in records:
+            if (isinstance(item, dict) and item.get("id") in ids
+                    and isinstance(item.get("sids"), list)
+                    and new_sid not in item["sids"]):
+                item["sids"].append(new_sid)
+        write_incarnation(claim)
+
+    try:
+        if locked:
+            rebind()
+        else:
+            with fleet_lock():
+                rebind()
+    except (FleetLockTimeout, OSError):
+        return
+
+
 def _issue_verified_supervisor_mail(target: str, body: str) -> tuple[str, str | None]:
     """Return raw worker mail or a verified/unverified supervisor notice."""
     if not _is_supervisor_shaped(target):
@@ -1747,6 +1816,7 @@ Maintain a journal at `{journal_target}` (create it early; update it at each mil
 This is a headless worker: never call `AskUserQuestion` or wait for an interactive answer. At a fork, decide and record the choice in the journal, or stop with the question in your result.
 End every turn with a compact result summary: changed, verified, blocked.
 Do not leave servers or watchers running past the end of the turn without recording their PIDs in the journal.
+Host rules: never search `/` or your home directory (no find, bfs or recursive grep over them); search only inside your working tree. Use a private test database for this lane and drop only databases you created.
 """
 
 
@@ -1774,7 +1844,8 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
     if sid is not None:
         mail, claim = claim_mailbox(sid)
         if mail:
-            parts.append(f"<MANAGER MESSAGE>\n{mail}\n")
+            parts.append(fleet_manager_mail.render(
+                mail, sid, fleet_manager_mail.claim_records(FLEET_HOME)))
             # Record drain at composition. The claim is recoverable on launch failure;
             # this event is an audit entry, not a retry queue.
             append_event("mail_drained", name, sid=sid)
@@ -9425,7 +9496,7 @@ class TransientSendRefusal(FleetCliError):
 
 def _cmd_send_native(name: str, message: str,
                      run=subprocess.run, which=shutil.which, sleep=time.sleep,
-                     *, stream_retry=False) -> int:
+                     *, stream_retry=False, manager_source=None) -> int:
     """Queue mail for a working worker or fork-steer an idle one.
     Fetch the roster outside the lock, then re-read/recompute under a fresh lock.
     Refuse dead, interrupted, suspected-dead, limited and other unsupported states.
@@ -9480,7 +9551,8 @@ def _cmd_send_native(name: str, message: str,
                 and not _launch_claim_expired(claim_anchor)
             )
             if in_flight:
-                append_mailbox(raw_sid, message)
+                append_mailbox(raw_sid, _send_mail_entry(
+                    raw_sid, message, manager_source, locked=True))
                 append_event("mail_sent", name, sid=raw_sid, status="working",
                              caller_sid=caller_sid)
                 print(f"{name}: turn running -- message queued to mailbox")
@@ -9523,7 +9595,8 @@ def _cmd_send_native(name: str, message: str,
                 raise FleetCliError(
                     f"{name}: dispatch in flight -- retry in a few seconds"
                 )
-            append_mailbox(sid, message)
+            append_mailbox(sid, _send_mail_entry(
+                sid, message, manager_source, locked=True))
             append_event("mail_sent", name, sid=sid, status=status,
                          caller_sid=caller_sid)
             print(f"{name}: turn running -- message queued to mailbox")
@@ -9571,7 +9644,8 @@ def _cmd_send_native(name: str, message: str,
         save_registry(data)
 
     # Append before draining so this message joins any earlier mail exactly once.
-    append_mailbox(old_sid, message)
+    entry = _send_mail_entry(old_sid, message, manager_source)
+    append_mailbox(old_sid, entry)
     append_event("mail_sent", name, sid=old_sid, status="idle",
                  caller_sid=caller_sid)
     if _memory_floor_refusal("send"):
@@ -9591,7 +9665,7 @@ def _cmd_send_native(name: str, message: str,
     # A resumed session must receive the message inline. Use all drained mail when
     # it fits; over the head-first cap use this message itself (the drain's tail,
     # never truncated from a reported success). An empty drain falls back to it too.
-    inline = mail if (mail and len(mail) <= NATIVE_INLINE_STEER_MAX) else message
+    inline = mail if (mail and len(mail) <= NATIVE_INLINE_STEER_MAX) else entry
     try:
         result = dispatch_bg(
             name, cwd, prompt, mode, model=model, category=category,
@@ -9858,16 +9932,21 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
         before = dict(data["workers"][args.name])
 
     refuse_if_archived(args.name, before, "send")
+    manager_source = None
     if getattr(args, "_fleet_structured_notice", False):
         mail_receipt_id = None
     else:
         message, mail_receipt_id = _issue_verified_supervisor_mail(args.name, message)
+        nonce = getattr(args, "nonce", None)
+        if not _is_supervisor_shaped(args.name) and _manager_claim(nonce):
+            manager_source = nonce
     if _is_codex_record(before):
         result = _cmd_send_codex(args.name, message, run=run, which=which)
     else:
         result = _cmd_send_native(
             args.name, message, run=run, which=which, sleep=sleep,
-            stream_retry=bool(getattr(args, "_fleet_stream_retry", False)))
+            stream_retry=bool(getattr(args, "_fleet_stream_retry", False)),
+            manager_source=manager_source)
     if result == 0 and mail_receipt_id is not None:
         print(f"{args.name}: Interface mail receipt {mail_receipt_id} -- "
               f"supervisor must verify before acting")
@@ -10839,8 +10918,15 @@ def _cmd_send_codex(name: str, message: str,
             append_event("steered", name, mcx_id=rec["mcx_id"],
                          substrate=_external_lane_event_substrate(r))
     print(f"{name}: steered via mcx ({rec['mcx_id']}) -- steering RESTARTED "
-          f"the run on the same {'pi session' if _is_pi_record(rec) else 'Codex thread'}; re-arm this lane's observer")
+          f"the run on the same {'pi session' if _is_pi_record(rec) else 'Codex thread'}; "
+          f"{_mcx_observer_hint(name, rec)}")
     return 0
+
+
+def _mcx_observer_hint(name: str, rec: dict) -> str:
+    store = shlex.quote((Path(rec.get("cwd") or ".") / ".mcx").as_posix())
+    return (f"re-arm this lane's observer: `fleet wait {name}` "
+            f"(raw form: `MCX_DIR={store} mcx result {rec['mcx_id']}`)")
 
 
 def _resume_one_limited_native(name: str, old_sid: str, cwd, mode, model, category,
@@ -16288,7 +16374,7 @@ def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
 
 def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
     """Carry mail arriving after prompt composition from old_sid to new_sid.
-    Run after the steer commit. Use append_mailbox's atomic append because
+    Run after the steer commit, under its fleet.lock. Use atomic appends because
     senders can race this migration; errors must not undo a successful steer.
     """
     old_path = mailbox_dir() / f"{old_sid}.md"
@@ -16297,6 +16383,7 @@ def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
             return
         content = old_path.read_text(encoding="utf-8", errors="replace")
         if content.strip():
+            _rebind_manager_mail(content, new_sid, locked=True)
             append_mailbox(new_sid, content)
         old_path.unlink()
     except OSError:
@@ -16433,7 +16520,9 @@ def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid,
             body = (body[:NATIVE_INLINE_STEER_MAX].rstrip()
                     + "\n[truncated here -- the full text is in the file "
                       "named below]")
-        block = f"<MANAGER MESSAGE>\n{body}\n</MANAGER MESSAGE>\n\n" if body else ""
+        block = (fleet_manager_mail.render(
+            body, resume_sid, fleet_manager_mail.claim_records(FLEET_HOME))
+            + "\n" if body else "")
         return (
             f"{block}{lead} {pointer} That file has been REWRITTEN since "
             f"you last read it -- read it again rather than reusing an "
