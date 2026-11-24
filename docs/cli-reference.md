@@ -997,8 +997,9 @@ options:
 ```text
 usage: fleet watch [-h] [--fleet-home PATH] [--mcx-dir DIR]
                    [--mem-floor-mb MEM_FLOOR_MB]
-                   [--disk-floor-gb DISK_FLOOR_GB] [--interval INTERVAL]
-                   [--timeout TIMEOUT]
+                   [--disk-floor-gb DISK_FLOOR_GB]
+                   [--outbound-stale-min OUTBOUND_STALE_MIN]
+                   [--interval INTERVAL] [--timeout TIMEOUT]
 
 options:
   -h, --help            show this help message and exit
@@ -1006,6 +1007,10 @@ options:
   --mcx-dir DIR         mcx state directory; repeatable
   --mem-floor-mb MEM_FLOOR_MB
   --disk-floor-gb DISK_FLOOR_GB
+  --outbound-stale-min OUTBOUND_STALE_MIN
+                        report STALEOUT once per file left in a mailbox/to-*
+                        outbox (other than to-fleet) for longer than this; 0
+                        turns it off
   --interval INTERVAL
   --timeout TIMEOUT
 ```
