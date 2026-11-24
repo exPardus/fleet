@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from test_codex_used_schema_gate import fake_combined_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "codex_app_server"
@@ -209,6 +211,7 @@ def _fake_schema_bundle():
         "ClientNotification.json": notifications,
         "ServerRequest.json": {"oneOf": []},
         "ServerNotification.json": server_notifications,
+        "codex_app_server_protocol.schemas.json": fake_combined_schema(),
     }
 
 

@@ -194,6 +194,10 @@ def test_connect_existing_never_ensures_or_launches_a_host(tmp_path, monkeypatch
         lambda *args, **kwargs: pytest.fail(
             "attaching to a reviewed live host must not inspect installed Codex"))
     monkeypatch.setattr(
+        module, "_reviewed_schema_selection",
+        lambda *args, **kwargs: pytest.fail(
+            "attaching to a reviewed live host must not inspect installed Codex"))
+    monkeypatch.setattr(
         module.CodexHostClient, "ensure",
         classmethod(lambda cls, *args, **kwargs: pytest.fail(
             "connect_existing must not ensure or launch a host")))
@@ -1110,15 +1114,18 @@ def test_each_reviewed_codex_version_can_publish_a_matching_host(
         _shutdown(client)
 
 
-def test_unreviewed_installed_codex_version_is_refused(tmp_path, monkeypatch):
+def test_unreviewed_installed_codex_version_defers_to_used_schema_gate(
+        tmp_path, monkeypatch):
+    """A new version is not refused by name; the host compares used shapes."""
     module = _modules()
     monkeypatch.setattr(
         module.subprocess, "run",
         lambda *args, **kwargs: SimpleNamespace(
             returncode=0, stdout="codex-cli 9.9.9\n"))
 
-    with pytest.raises(module.HostUnavailable, match="no reviewed schema"):
-        module._reviewed_schema_manifest(["codex"], env={}, cwd=tmp_path)
+    assert module._reviewed_schema_manifest(
+        ["codex"], env={}, cwd=tmp_path) == module.REVIEWED_SCHEMA_MANIFESTS[
+            max(module.REVIEWED_SCHEMA_MANIFESTS, key=module._version_key)]
 
 
 def test_idle_host_shuts_down_without_killing_or_signaling_provider_pid(tmp_path):

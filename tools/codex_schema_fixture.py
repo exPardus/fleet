@@ -9,10 +9,15 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bin"))
+from fleet_codex_schema import (  # noqa: E402
+    read_combined_schema, used_schema_digests)
 
 
 MAX_SCHEMA_BYTES = 8 * 1024 * 1024
@@ -48,14 +53,20 @@ class ContractManifest:
     protocol_version: int
     schema_sha256: str
     contract_sha256: str
+    used_schema_sha256: str
+    used_schema_entries: dict[str, str]
+    public_methods: tuple[str, ...]
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "codex_version": self.codex_version,
             "contract_sha256": self.contract_sha256,
             "protocol_version": self.protocol_version,
+            "public_methods": list(self.public_methods),
             "schema_file": SCHEMA_FILE,
             "schema_sha256": self.schema_sha256,
+            "used_schema_entries": dict(sorted(self.used_schema_entries.items())),
+            "used_schema_sha256": self.used_schema_sha256,
         }
 
 
@@ -215,6 +226,21 @@ def _extract_contract(bundle: Path) -> tuple[bytes, dict[str, Any]]:
     return raw_schema, contract
 
 
+def _public_methods(combined: dict[str, Any]) -> tuple[str, ...]:
+    """Every method name Codex defines; a test checks adapter source against it."""
+    definitions = combined.get("definitions")
+    if not isinstance(definitions, dict):
+        raise ValueError("combined Codex schema has no definitions object")
+    names: set[str] = set()
+    for envelope in ("ClientRequest", "ClientNotification",
+                     "ServerRequest", "ServerNotification"):
+        document = definitions.get(envelope)
+        if not isinstance(document, dict):
+            raise ValueError(f"combined Codex schema lacks {envelope}")
+        names.update(_method_variants(document))
+    return tuple(sorted(names))
+
+
 def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
 
@@ -240,6 +266,9 @@ def generate_contract(codex: str, destination: Path) -> ContractManifest:
             detail = proc.stderr.decode("utf-8", errors="replace")[:500]
             raise RuntimeError(f"Codex schema generation failed ({proc.returncode}): {detail}")
         raw_schema, contract = _extract_contract(bundle)
+        combined = read_combined_schema(bundle)
+        used_total, used_entries = used_schema_digests(combined)
+        public_methods = _public_methods(combined)
 
     contract_bytes = _json_bytes(contract)
     manifest = ContractManifest(
@@ -247,6 +276,9 @@ def generate_contract(codex: str, destination: Path) -> ContractManifest:
         protocol_version=2,
         schema_sha256=hashlib.sha256(raw_schema).hexdigest(),
         contract_sha256=hashlib.sha256(contract_bytes).hexdigest(),
+        used_schema_sha256=used_total,
+        used_schema_entries=used_entries,
+        public_methods=public_methods,
     )
     destination.mkdir(parents=True, exist_ok=True)
     for name, data in (("v2-contract.json", contract_bytes),
