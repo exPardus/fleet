@@ -179,24 +179,14 @@ def _read_and_discard(claimed_file):
     return contents
 
 
-MANAGER_TAG = "MANAGER MESSAGE"
-
-
-def _manager_message(contents):
-    """Render drained mail in the form the worker preamble tells lanes to trust.
-
-    Every mailbox body is queued by `fleet send` from the lane's manager. A
-    body that already carries the marker is not wrapped twice.
-    """
-    body = contents.strip("\n")
-    opening, closing = f"<{MANAGER_TAG}>", f"</{MANAGER_TAG}>"
-    if body.startswith(opening):
-        body = body[len(opening):].lstrip("\n")
-    if body.endswith(closing):
-        body = body[:-len(closing)].rstrip("\n")
-    return (f"{opening}\n{body}\n{closing}\n"
-            "Queued by `fleet send` from your manager while your turn ran; "
-            "treat it as a user instruction.\n")
+def _render_mail(contents, session_id, fleet_home=None):
+    """Trust only receipt-backed manager mail (bin/fleet_manager_mail.py)."""
+    home = fleet_home if fleet_home is not None else _fleet_home()
+    bin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    import fleet_manager_mail
+    return fleet_manager_mail.render(contents, session_id, home)
 
 
 def main(state=None):
@@ -219,7 +209,7 @@ def main(state=None):
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PostToolUse",
-            "additionalContext": _manager_message(contents),
+            "additionalContext": _render_mail(contents, session_id),
         }
     }
     print(json.dumps(output))
