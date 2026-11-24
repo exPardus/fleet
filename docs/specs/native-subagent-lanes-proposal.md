@@ -53,3 +53,36 @@ Nothing in the `--bg` lifecycle is deleted: independent Claude lanes still use `
 2. Can a child work in an isolated worktree with a specified effective permission mode and model, and who owns cleanup if its supervisor disappears?
 3. Which native message API yields an acknowledgement that can be tied to Fleet's durable message ID? If none does, should native messaging be notice-only?
 4. Should a native child's maximum lifetime be one supervisor incarnation, one claim lineage, or one supervisor turn?
+
+## Substrate findings (migration step 1)
+
+Observed on Claude Code 2.1.331 with haiku, a headless parent (`claude -p --output-format stream-json`) and one child at a time. `tests/integration/test_native_subagent_pin.py` pins each finding (live tier, `FLEET_LIVE=1`); `tests/native_subagent_evidence.py` holds the shared stream and transcript readers, and `tests/test_native_subagent_evidence.py` proves them without spending.
+
+**Question 1: identity, usage, terminal evidence, durable record.**
+
+- Identity: the Agent tool returns an `agentId` (the stream's task_id), tied to the dispatching tool_use_id. Each run of that child has its own run_id. A `SendMessage` to a finished child revives the same `agentId` with a new run_id, so a Fleet binding is (`agentId`, run_id), not the session ID. A child is backgrounded unless the parent asks for the foreground.
+- Terminal evidence: the parent stream emits a task_notification with status `completed` and the child's final text, per run. Progress events are never terminal.
+- Per-child usage: that notification carries total_tokens, tool uses and duration. The child's own transcript carries per-message input and output tokens. The parent's final result aggregates parent and children by model, with one cost figure. There is no per-child dollar source, so a per-child dollar ceiling stays unsupported.
+- Durable record: the child transcript and `agent-<agentId>.meta.json` live under the parent session's `subagents/` directory in the Claude config directory, beside the parent transcript. The meta file names the dispatching tool use and gains `finished: true` only when the child finished. These files survive parent exit and `/compact` byte for byte. The stream's output file under the system temp directory is only a symlink to that transcript.
+
+**Question 2: worktree, permission mode, model, cleanup.**
+
+- Worktree: `isolation: "worktree"` runs the child in `.claude/worktrees/agent-<agentId>` on branch `worktree-agent-<agentId>`. An unchanged worktree is removed at the end, and the meta file then records `worktreeCleanlyRemoved` instead of a path. A changed worktree is kept, and the meta file records its path and branch. Fleet owns integrating or removing it.
+- Permission mode: the child inherits the parent's mode and `--allowedTools`, in the background and the foreground, with or without a worktree. A default-mode parent's child cannot write; an `acceptEdits` or `--allowedTools Write` parent's child can. A project agent that declares `permissionMode: default` does not narrow an `acceptEdits` parent. Fleet must therefore treat the parent's mode as the child's effective mode, and cannot give one child a narrower mode than its parent today.
+- Model: the meta file records the resolved model. The Agent tool and agent definitions can name one.
+- Probe caveat: a project under the Claude config directory makes every write a sensitive-file denial. Pins must run outside it.
+
+**Parent death and compaction.**
+
+- Killing the parent (SIGTERM to its process group) kills the child with it; no child process survives, and its pending work never completes. The meta file has no `finished` flag, and an isolated child's worktree is left behind, locked.
+- Resuming the parent session with `--resume` keeps the session ID and emits a task_notification with status `stopped` ("didn't finish before the previous session ended"). It does not restart the child.
+- `/compact` writes a compact_boundary and leaves the child's files untouched.
+
+**Question 3: acknowledgement.** `SendMessage` to a child returns success to the calling session and starts a new run, whose terminal notification follows. Both appear only in the parent's own stream and transcript. Nothing gives Fleet an acknowledgement it can verify outside that session, so native messaging stays notice-only, as proposed.
+
+**Consequences for the migration.**
+
+- Bind a native lane to (`agentId`, run_id) and its parent session, and read terminal evidence from the parent's stream or the child's meta file. A missing `finished` flag after the parent ended is a dead child, not a running one.
+- Parent death ends the child, so a native child's lifetime cannot exceed its parent session (question 4). Work that must outlive the supervisor stays an independent lane.
+- Fleet must remove a dead child's locked worktree and integrate a finished child's kept worktree; Claude Code cleans only unchanged worktrees.
+- Per-child ceilings can use tokens, not dollars.
