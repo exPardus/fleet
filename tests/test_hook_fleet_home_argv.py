@@ -69,6 +69,13 @@ REPO = Path(__file__).resolve().parent.parent
 HOOKS = REPO / "bin" / "hooks"
 HOOK_SCRIPTS = ("postcompact_journal.py", "posttooluse_mailbox.py",
                 "stop_mailbox.py", "stop_outcome.py", "stopfailure_recover.py")
+# Hooks that read no Fleet home: the search guard judges only the tool call.
+HOME_FREE_HOOKS = ("pretooluse_search_guard.py",)
+
+
+def _home_hook_commands(text):
+    return [c for c in _hook_commands(text)
+            if not any(hook in c for hook in HOME_FREE_HOOKS)]
 
 sys.path.insert(0, str(REPO / "bin"))
 import fleet  # noqa: E402
@@ -147,9 +154,8 @@ class TestTheTemplateBakesTheHome:
         """Slice 0's split is not undone by slice (c): the SCRIPT comes from
         the install (code plane), the HOME argument from the home (data
         plane). Both placeholders in one command is the whole point."""
-        cmds = _hook_commands(_template_text())
-        assert len(cmds) == len(HOOK_SCRIPTS)
-        for cmd in cmds:
+        assert len(_home_hook_commands(_template_text())) == len(HOOK_SCRIPTS)
+        for cmd in _hook_commands(_template_text()):
             assert "{{FLEET_INSTALL}}/bin/hooks/" in cmd, cmd
 
     def test_the_rendered_home_is_forward_slashed_and_quoted(self, tmp_path):
@@ -160,7 +166,7 @@ class TestTheTemplateBakesTheHome:
         home.mkdir()
         rendered = fleet.render_worker_settings_template(
             _template_text(), sys.executable, home, fleet_install=REPO)
-        for cmd in _hook_commands(rendered):
+        for cmd in _home_hook_commands(rendered):
             baked = re.search(r'--fleet-home "([^"]+)"', cmd)
             assert baked, cmd
             assert "\\" not in baked.group(1), cmd

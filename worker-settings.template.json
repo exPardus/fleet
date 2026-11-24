@@ -2,6 +2,8 @@
   "permissions": { "allow": ["Bash(fleet q:*)"] },
   "crossSessionInbound": "accept",
   "hooks": {
+    "PreToolUse": [{ "matcher": "Bash|Grep|Glob", "hooks": [{ "type": "command",
+      "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/pretooluse_search_guard.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],
     "PostToolUse": [{ "hooks": [{ "type": "command",
       "command": "\"{{PYTHON}}\" \"{{FLEET_INSTALL}}/bin/hooks/posttooluse_mailbox.py\" --fleet-home \"{{FLEET_HOME}}\"" }] }],
     "Stop": [{ "hooks": [{ "type": "command",

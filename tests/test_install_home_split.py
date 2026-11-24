@@ -81,8 +81,9 @@ def _hook_commands(text):
 
 class TestTheFourDeadHooksAreExactlyFour:
     def test_the_template_declares_exactly_four_hook_commands(self):
-        # w489 added the StopFailure bridge: four Stop-era hooks plus one.
-        assert len(_hook_commands(_template_text())) == 5
+        # w489 added the StopFailure bridge: four Stop-era hooks plus one,
+        # and the PreToolUse search guard makes six.
+        assert len(_hook_commands(_template_text())) == 6
 
     def test_and_they_are_these_four(self):
         """Named, not counted. If a fifth lands, this says which four it joined
@@ -90,8 +91,8 @@ class TestTheFourDeadHooksAreExactlyFour:
         scripts = sorted(re.search(r"/bin/hooks/(\S+?)\"", c).group(1)
                          for c in _hook_commands(_template_text()))
         assert scripts == ["postcompact_journal.py", "posttooluse_mailbox.py",
-                           "stop_mailbox.py", "stop_outcome.py",
-                           "stopfailure_recover.py"]
+                           "pretooluse_search_guard.py", "stop_mailbox.py",
+                           "stop_outcome.py", "stopfailure_recover.py"]
 
     def test_every_hook_command_is_rooted_at_the_install_placeholder(self):
         """THE FIX. Each of the four used to render under `{{FLEET_HOME}}`; all
@@ -113,7 +114,7 @@ class TestTheFourDeadHooksAreExactlyFour:
             _template_text(), sys.executable, home, fleet_install=REPO)
 
         commands = _hook_commands(rendered)
-        assert len(commands) == 5
+        assert len(commands) == 6
         # The SCRIPT path, addressed by what makes it the script (it is the
         # `bin/hooks/*.py` token), not by its position in the command. The
         # older `...([^"]+)"\s*$` spelling read the LAST quoted token, which
@@ -392,7 +393,9 @@ class TestTheFourHookHomeResolversDoNotDrift:
     def test_the_pinned_set_is_the_set_the_template_dispatches(self):
         dispatched = sorted(re.search(r"/bin/hooks/(\S+?)\"", c).group(1)
                             for c in _hook_commands(_template_text()))
-        assert dispatched == sorted(self.HOOK_SCRIPTS)
+        # The search guard reads no Fleet home, so it has no resolver to drift.
+        home_free = {"pretooluse_search_guard.py"}
+        assert sorted(set(dispatched) - home_free) == sorted(self.HOOK_SCRIPTS)
 
     def _resolve(self, script, env):
         code = (

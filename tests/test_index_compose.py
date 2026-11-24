@@ -1696,7 +1696,8 @@ class TestTemplateGrant:
 
     def test_the_hooks_block_is_untouched(self):
         hooks = _template()["hooks"]
-        assert set(hooks) == {"PostToolUse", "Stop", "StopFailure", "PostCompact"}
+        assert set(hooks) == {"PreToolUse", "PostToolUse", "Stop", "StopFailure",
+                              "PostCompact"}
 
 
 class TestTemplateRenderAndFreshnessHandleTheNewKey:
