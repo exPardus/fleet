@@ -25619,6 +25619,29 @@ def cmd_sup_context(args) -> int:
     return 0
 
 
+# A registration switch and a sup-notify delivery exclude each other with this
+# interface-only lock, never with fleet.lock: delivery runs tmux subprocesses,
+# and F4 forbids holding fleet.lock across a subprocess. A registrar waits for
+# at most one bounded delivery (pane scan, three tmux writes, settle), so a
+# registration during delivery completes after it instead of failing.
+INTERFACE_LOCK_TIMEOUT_SECONDS = (
+    10 + 3 * TMUX_TIMEOUT_SECONDS + INTERFACE_PASTE_SETTLE_SECONDS + 5)
+
+
+@contextmanager
+def interface_lock(timeout: float = INTERFACE_LOCK_TIMEOUT_SECONDS, *,
+                   home=None):
+    """Fence interface registration against sup-notify delivery."""
+    path = ((state_dir() if home is None else Path(home) / "state")
+            / "interface.lock")
+    with registry_lock(
+            path, timeout=timeout, stale_seconds=LOCK_STALE_SECONDS,
+            retry_interval=LOCK_RETRY_INTERVAL_SECONDS,
+            live_owner=_fleet_lock_live_owner, same_file=_fleet_lock_same_file,
+            kernel_lock=fcntl):
+        yield
+
+
 def cmd_sup_notify(args, run=subprocess.run) -> int:
     """Notify the interface; dry-run skips claim work."""
     kind, target = _resolve_notify_target(
@@ -25641,10 +25664,10 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
-    # interface-register switches panes only under fleet.lock. Hold it from
-    # the final scan through submit, so the pane reported below is still the
-    # registered pane when the line lands.
-    with fleet_lock():
+    # Every interface-register holds interface.lock while it writes. Hold it
+    # from the final scan through submit, so the pane reported below is still
+    # the registered pane when the line lands.
+    with interface_lock():
         current_kind, current_target = _resolve_notify_target(
             getattr(args, "tmux_session", None), args.window, run)
         if (current_kind, current_target) != (kind, target):
@@ -25682,6 +25705,11 @@ def _clear_competing_interface_registration(path: Path) -> bool:
 def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
     """Register the current validated Interface pane or hosted session."""
     root = FLEET_HOME if home is None else Path(home)
+    with interface_lock(home=root):
+        return _cmd_interface_register_fenced(args, run, root)
+
+
+def _cmd_interface_register_fenced(args, run, root: Path) -> int:
     codex_thread = getattr(args, "codex_thread", None)
     if codex_thread is not None:
         return _cmd_interface_register_codex(args, root)
@@ -25756,7 +25784,11 @@ def cmd_interface_register(args, run=subprocess.run, home=None) -> int:
             existing = None
         cleared_codex = _clear_competing_interface_registration(
             root / "state" / "interface-codex.json")
-        changed = existing != sid or cleared_codex
+        # A headless session supersedes an earlier tmux pane registration;
+        # sup-notify would otherwise still type into that old pane.
+        cleared_pane = _clear_competing_interface_registration(
+            root / "state" / "interface-pane")
+        changed = existing != sid or cleared_codex or cleared_pane
         if changed:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(sid + "\n", encoding="utf-8")

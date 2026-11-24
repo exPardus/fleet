@@ -233,7 +233,14 @@ def test_competing_provider_registrations_share_one_atomic_lock(
                 raise AssertionError("test did not release Claude registration")
         return cleared
 
+    @contextmanager
+    def passthrough_interface_lock(timeout=None, *, home=None):
+        # interface.lock also serializes these registrars. Bypass it here so
+        # this test still proves the fleet.lock section alone is atomic.
+        yield
+
     monkeypatch.setattr(fleet, "fleet_lock", coordinated_lock)
+    monkeypatch.setattr(fleet, "interface_lock", passthrough_interface_lock)
     monkeypatch.setattr(
         fleet, "_clear_competing_interface_registration", pause_after_claude_clear)
 

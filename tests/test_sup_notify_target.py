@@ -233,7 +233,7 @@ def test_registration_switch_during_pane_scan_refuses_old_target(
 
 @pytest.mark.parametrize("stage", ["set-buffer", "paste-buffer", "send-keys"])
 def test_registration_cannot_switch_while_the_line_is_delivered(reg_home, stage):
-    """A concurrent interface-register needs fleet.lock to switch panes.
+    """A concurrent interface-register needs interface.lock to switch panes.
     sup-notify holds that lock from its final scan through submit, so the
     pane it reports as notified is still the registered pane."""
     registration = reg_home / "state" / "interface-pane"
@@ -245,7 +245,7 @@ def test_registration_cannot_switch_while_the_line_is_delivered(reg_home, stage)
         def __call__(self, argv, **kwargs):
             if argv[:2] == ["tmux", stage]:
                 try:
-                    with fleet.fleet_lock(timeout=0):
+                    with fleet.interface_lock(timeout=0):
                         registration.write_text("%8\n")
                     attempts.append("switched")
                 except fleet.FleetLockTimeout:
@@ -265,7 +265,7 @@ def test_lock_is_released_after_delivery(reg_home):
     (reg_home / "state" / "interface-pane").write_text("%7\n")
     run = Tmux("", panes="%7 claude 0\n")
     assert fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run) == 0
-    with fleet.fleet_lock(timeout=0):
+    with fleet.interface_lock(timeout=0):
         pass
 
 
@@ -282,6 +282,50 @@ def test_lock_is_released_when_delivery_fails(reg_home):
     run = FailingPaste("", panes="%7 claude 0\n")
     with pytest.raises(fleet.FleetCliError, match="would not deliver"):
         fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
-    with fleet.fleet_lock(timeout=0):
+    with fleet.interface_lock(timeout=0):
         pass
     assert not fleet.interface_log_path().exists()
+
+
+@pytest.mark.parametrize("stage", ["list-panes", "set-buffer", "paste-buffer",
+                                   "send-keys"])
+def test_delivery_never_holds_fleet_lock_across_tmux(reg_home, stage):
+    """F4: no fleet.lock across a subprocess; unrelated registry work proceeds."""
+    (reg_home / "state" / "interface-pane").write_text("%7\n")
+    free = []
+
+    class ProbingTmux(Tmux):
+        def __call__(self, argv, **kwargs):
+            if argv[:2] == ["tmux", stage]:
+                with fleet.fleet_lock(timeout=0):
+                    free.append(stage)
+            return super().__call__(argv, **kwargs)
+
+    run = ProbingTmux("", panes="%7 claude 0\n")
+    assert fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run) == 0
+    assert free and set(free) == {stage}
+
+
+def test_registrar_waits_out_one_bounded_delivery():
+    worst_delivery = (10 + 3 * fleet.TMUX_TIMEOUT_SECONDS
+                      + fleet.INTERFACE_PASTE_SETTLE_SECONDS)
+    assert fleet.INTERFACE_LOCK_TIMEOUT_SECONDS > worst_delivery
+
+
+def test_headless_registration_supersedes_an_earlier_pane(reg_home, monkeypatch):
+    """A later headless Claude registration must not leave the old pane live."""
+    (reg_home / "state" / "interface-pane").write_text("%7\n")
+    (reg_home / "state" / "interface-session").write_text("sid-old\n")
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    fleet.cmd_interface_register(
+        SimpleNamespace(codex_thread=None, session_id="sid-new"),
+        home=reg_home)
+    assert not (reg_home / "state" / "interface-pane").exists()
+    assert (reg_home / "state" / "interface-session").read_text() == "sid-new\n"
+    run = Tmux("", panes="%7 claude 0\n%8 claude 0\n")
+    with pytest.raises(fleet.FleetCliError, match="not drained"):
+        fleet.cmd_sup_notify(_nargs(nonce=_hold()), run=run)
+    assert not any("paste-buffer" in call for call in run.calls)
+    log = fleet.interface_log_path().read_text()
+    assert " RELAY " not in log
