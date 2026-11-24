@@ -5,8 +5,6 @@ Windows and POSIX adapters isolate platform operations. See docs/SPEC.md.
 """
 from __future__ import annotations
 
-import argparse
-import ast
 import base64
 import fnmatch
 import functools
@@ -34,6 +32,16 @@ from types import SimpleNamespace
 
 import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec")
 from fleet_errors import FleetCliError
+
+
+class _LazyArgparse:
+    def __getattr__(self, name):
+        import argparse as module
+        globals()["argparse"] = module
+        return getattr(module, name)
+
+
+argparse = _LazyArgparse()
 # Preserve the public facade for callers and direct probes. Internal index
 # calls resolve in fleet_index; tests patch that owner through patch_fleet.
 from fleet_index import (
@@ -2402,13 +2410,35 @@ def _codex_existing_client(home):
     return connect_existing(Path(home).resolve())
 
 
-def _codex_wait_summaries(record: dict) -> list[dict]:
+def _codex_wait_store_empty() -> bool:
+    if os.path.realpath(FLEET_HOME) != os.path.abspath(FLEET_HOME):
+        return False
+    approvals = FLEET_HOME / "state" / "codex" / "approvals"
+    try:
+        info = approvals.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    if not PLATFORM.is_windows and (
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        return False
+    return not any(approvals.glob("*.json"))
+
+
+def _codex_wait_summaries(record: dict, store=None) -> list[dict]:
     """Read durable wait metadata without starting or probing a host."""
     if _codex_record_route(record) != "native":
         return []
     thread_id = record.get("codex_thread_id")
     turn_id = record.get("codex_turn_id")
     if not isinstance(thread_id, str) or not isinstance(turn_id, str):
+        return []
+    if store is not None and "empty" not in store:
+        store["empty"] = _codex_wait_store_empty()
+    if store is not None and store["empty"]:
         return []
     try:
         from fleet_codex import read_pending_requests
@@ -6285,6 +6315,7 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
         return snap
 
     rows = []
+    codex_wait_store = {}
     by_status: dict = {}
     total_mail = 0
     total_cost = 0.0
@@ -6347,7 +6378,7 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
                 not isinstance(claim_inc, str) or not claim_inc
                 or _supervisor_row_incarnation(name, rec) == claim_inc)
         if _codex_record_route(rec) == "native":
-            row["codex_waits"] = _codex_wait_summaries(rec)
+            row["codex_waits"] = _codex_wait_summaries(rec, codex_wait_store)
         if _codex_record_route(rec) == "mcx":
             row["mcx_approval"] = rec.get("mcx_approval") or _mcx_approval(
                 rec.get("mode") or "dontask")

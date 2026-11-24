@@ -1,6 +1,5 @@
 """Shared platform adapter for Fleet core and the standalone Codex host."""
 
-import ctypes
 import json
 import os
 import subprocess
@@ -126,8 +125,10 @@ class _WindowsPlatform:
         across concurrent handles. The kernel append handle avoids that race;
         a short write raises because a torn JSONL record would otherwise be skipped.
         """
-        kernel32 = ctypes.windll.kernel32
+        import ctypes
         from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
 
         create_file_w = kernel32.CreateFileW
         create_file_w.argtypes = [
