@@ -130,3 +130,56 @@ def test_the_worker_settings_template_wires_the_guard():
     assert any("pretooluse_search_guard.py" in command for command in commands)
     matchers = {entry.get("matcher") for entry in entries}
     assert any(m and {"Bash", "Grep", "Glob"} <= set(m.split("|")) for m in matchers)
+
+
+# Review w598 of 66a43d77: multi-line commands, cd, wrappers with values,
+# nested shells, grep -d recurse, and Glob patterns.
+@pytest.mark.parametrize("command", [
+    "echo hi\nfind / -name x",
+    "cd src\nrg TODO ~",
+    "cd /\nfind . -name x",
+    "cd / && find . -name x",
+    "(cd /; find .)",
+    "cd ~ && rg foo",
+    "cd && rg foo",
+    "pushd / && rg x",
+    "cd /home && fd x",
+    "nice -n 10 find /",
+    "timeout -s KILL 60 find /",
+    "sudo -u root find /",
+    "bash -c 'find / -name x'",
+    "sh -c \"rg foo /\"",
+    "grep -d recurse foo /",
+    "grep --directories=recurse foo ~",
+    "cat <<EOF\ndata\nEOF\nfind / -name x",
+])
+def test_review_bypasses_are_refused(guard, command):
+    assert guard.refusal(_bash(command)) is not None, command
+
+
+@pytest.mark.parametrize("command", [
+    "cat <<EOF\nfind / -name x\nEOF",
+    "cat <<-'EOF'\n\trg foo ~\n\tEOF\necho done",
+    "cd src && find . -name x",
+    "cd /tmp/../home/lane-user/work/lane-tree && rg foo",
+    "cd - && find .",
+    "grep -r --include '*.md' '/' docs",
+    "rg --hyperlink-format default '/' src",
+    "bash -c 'find . -name x'",
+    "nice -n 10 find .",
+    "cd / && ls",
+    "cd / && sudo",
+])
+def test_review_false_positives_are_allowed(guard, command):
+    assert guard.refusal(_bash(command)) is None, command
+
+
+@pytest.mark.parametrize("pattern, refused", [
+    ("/**/*.py", True), ("~/**/*.md", True), ("/home/*/x", True),
+    ("/home/lane-user/work/lane-tree/**/*.py", False), ("**/*.py", False),
+    ("src/*.py", False),
+])
+def test_an_absolute_glob_pattern_without_a_path(guard, pattern, refused):
+    payload = {"tool_name": "Glob", "tool_input": {"pattern": pattern}, "cwd": CWD}
+    assert (guard.refusal(payload) is not None) is refused
+

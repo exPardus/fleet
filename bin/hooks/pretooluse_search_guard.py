@@ -18,12 +18,23 @@ legitimate command because of a parsing gap. Exit 0 on every path.
 """
 import json
 import os
+import re
 import shlex
 import sys
 
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "|&", "\n"}
 WRAPPERS = {"sudo", "time", "nice", "nohup", "command", "exec", "env",
-            "ionice", "stdbuf", "builtin"}
+            "ionice", "stdbuf", "builtin", "timeout"}
+# Wrapper options that take a separate value, so the value is not mistaken
+# for the wrapped command.
+WRAPPER_VALUE = {
+    "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"},
+    "nice": {"-n"}, "ionice": {"-c", "-n", "-p"},
+    "stdbuf": {"-i", "-o", "-e"}, "env": {"-u", "-C", "-S"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 FD_VALUE = {"-e", "--extension", "-t", "--type", "-E", "--exclude", "-d",
             "--max-depth", "--min-depth", "--exact-depth", "-j", "--threads",
             "-c", "--color", "-o", "--owner", "-S", "--size", "--changed-within",
@@ -38,11 +49,12 @@ RG_VALUE = {"-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not",
             "--pre-glob", "--sort", "--sortr", "-E", "--encoding",
             "--path-separator", "--context-separator", "--field-match-separator",
             "--field-context-separator", "--dfa-size-limit", "--regex-size-limit",
-            "--engine", "--ignore-file"}
+            "--engine", "--ignore-file", "--hyperlink-format"}
 RG_PATTERN_VALUE = {"-e", "--regexp", "-f", "--file"}
 GREP_VALUE = {"-m", "--max-count", "-A", "--after-context", "-B",
               "--before-context", "-C", "--context", "-d", "--directories",
-              "-D", "--devices", "--label", "--color", "--colour"}
+              "-D", "--devices", "--label", "--color", "--colour", "--include",
+              "--exclude", "--exclude-dir", "--exclude-from", "--binary-files"}
 GREP_PATTERN_VALUE = {"-e", "--regexp", "-f", "--file"}
 
 
@@ -69,9 +81,26 @@ def too_broad(path, cwd=None, home=None):
             or home.startswith(resolved.rstrip(os.sep) + os.sep))
 
 
+def _strip_heredocs(command):
+    """Drop heredoc bodies: they are data, not commands."""
+    kept, closing = [], []
+    for line in command.split("\n"):
+        if closing:
+            delimiter, strip_tabs = closing[0]
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                closing.pop(0)
+            continue
+        kept.append(line)
+        closing.extend((m.group(3), m.group(1) == "-")
+                       for m in HEREDOC.finditer(line))
+    return "\n".join(kept)
+
+
 def _segments(command):
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()\n")
+    lexer = shlex.shlex(_strip_heredocs(command), posix=True,
+                        punctuation_chars=";&|()\n")
     lexer.whitespace_split = True
+    lexer.whitespace = " \t\r"  # a newline separates commands
     lexer.commenters = ""
     segment = []
     for token in lexer:
@@ -89,17 +118,16 @@ def _strip_wrappers(words):
     index = 0
     while index < len(words):
         word = words[index]
+        name = os.path.basename(word)
         if "=" in word and not word.startswith("-") and word.split("=")[0].isidentifier():
             index += 1
-        elif os.path.basename(word) in WRAPPERS:
+        elif name in WRAPPERS:
             index += 1
+            values = WRAPPER_VALUE.get(name, set())
             while index < len(words) and words[index].startswith("-"):
-                index += 1
-        elif os.path.basename(word) == "timeout":
-            index += 1
-            while index < len(words) and words[index].startswith("-"):
-                index += 1
-            index += 1  # the duration
+                index += 2 if words[index] in values else 1
+            if name == "timeout":
+                index += 1  # the duration
         else:
             break
     return words[index:]
@@ -155,10 +183,18 @@ def _positional_roots(args, value_options, path_options, pattern_options,
 
 
 def search_roots(words):
-    """The search roots of one simple command, or [] when it is not a search."""
+    """The search roots of one simple command, or [] when it is not a search.
+
+    A search with no explicit root searches its working directory: `.`.
+    """
+    roots = _explicit_roots(words)
+    return roots if roots is None or roots else ["."]
+
+
+def _explicit_roots(words):
     words = _strip_wrappers(words)
     if not words:
-        return []
+        return None
     name, args = os.path.basename(words[0]), words[1:]
     if name in ("find", "bfs"):
         return _find_roots(args)
@@ -169,14 +205,58 @@ def search_roots(words):
         return _positional_roots(args, RG_VALUE, set(), RG_PATTERN_VALUE,
                                  pattern_needed=not listing)
     if name in ("grep", "egrep", "fgrep"):
-        recursive = any(arg in ("--recursive", "--dereference-recursive")
-                        or (arg.startswith("-") and not arg.startswith("--")
-                            and ("r" in arg[1:] or "R" in arg[1:]))
-                        for arg in args)
+        recursive = any(
+            arg in ("--recursive", "--dereference-recursive",
+                    "--directories=recurse", "-drecurse")
+            or (arg in ("-d", "--directories") and index + 1 < len(args)
+                and args[index + 1] == "recurse")
+            or (arg.startswith("-") and not arg.startswith("--")
+                and not arg.startswith("-d")
+                and ("r" in arg[1:] or "R" in arg[1:]))
+            for index, arg in enumerate(args))
         if not recursive:
-            return []
+            return None
         return _positional_roots(args, GREP_VALUE, set(), GREP_PATTERN_VALUE)
-    return []
+    return None
+
+
+def command_roots(command, cwd, home, depth=0):
+    """(root, cwd) pairs for every search in a Bash command.
+
+    `cd` and `pushd` move the cwd for the segments after them, so
+    `cd / && find .` is judged at `/`. `sh -c '...'` and its siblings are
+    parsed recursively. Raises ValueError on unbalanced quotes.
+    """
+    roots = []
+    for words in _segments(command):
+        words = _strip_wrappers(words)
+        if not words:
+            continue
+        name, args = os.path.basename(words[0]), words[1:]
+        if name in ("cd", "pushd"):
+            targets = [a for a in args if a == "-" or not a.startswith("-")]
+            if not targets:
+                cwd = home if name == "cd" else cwd
+            elif targets[0] != "-":
+                cwd = _expand(targets[0], cwd, home)
+            continue
+        if name in SHELLS and "-c" in args and depth < 3:
+            index = args.index("-c")
+            if index + 1 < len(args):
+                roots.extend(command_roots(args[index + 1], cwd, home, depth + 1))
+            continue
+        roots.extend((root, cwd) for root in search_roots(words) or [])
+    return roots
+
+
+def _glob_root(pattern):
+    """The literal directory an absolute Glob pattern starts from."""
+    if not isinstance(pattern, str) or not pattern.startswith(("/", "~")):
+        return None
+    prefix = re.split(r"[*?\[{]", pattern, maxsplit=1)[0]
+    if prefix in ("~", "~/"):
+        return "~"
+    return prefix if prefix.endswith("/") else os.path.dirname(prefix) or "/"
 
 
 def refusal(payload):
@@ -191,15 +271,18 @@ def refusal(payload):
         if not isinstance(command, str):
             return None
         try:
-            for words in _segments(command):
-                roots.extend(search_roots(words))
+            roots = command_roots(command, cwd, home)
         except ValueError:  # unbalanced quotes: allow rather than guess
             return None
     elif tool in ("Grep", "Glob"):
         path = tool_input.get("path")
         if isinstance(path, str) and path:
-            roots.append(path)
-    broad = [root for root in roots if too_broad(root, cwd, home)]
+            roots.append((path, cwd))
+        elif tool == "Glob":
+            root = _glob_root(tool_input.get("pattern"))
+            if root:
+                roots.append((root, cwd))
+    broad = [root for root, at in roots if too_broad(root, at, home)]
     if not broad:
         return None
     return (f"fleet host rule: refusing a search rooted at {broad[0]!r} -- "
