@@ -169,3 +169,106 @@ def test_the_sweep_wrapper_never_breaks_the_guard(monkeypatch, capsys):
     monkeypatch.setattr(fleet, "sweep_codex_host_gone", boom)
     assert fleet._sup_guard_codex_host_sweep() == []
     assert "codex-host sweep failed" in capsys.readouterr().err
+
+
+# Review w598 of 1be2de40: a staged failed-client recovery replaces the host
+# on purpose and rebinds rows one by one; the sweep must not mark them.
+def _barrier(home, state):
+    path = home / "state" / "codex" / "failed-client-recovery.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": 1, "home": str(home.resolve()),
+                                "state": state}))
+    path.parent.chmod(0o700)
+    path.chmod(0o600)
+
+
+@pytest.mark.parametrize("state", ["prepared", "authorized", "shutdown_sent",
+                                   "shutdown_ack", "exited", "boot_requested",
+                                   "rebind"])
+def test_a_recovery_in_progress_marks_nothing(home, monkeypatch, state):
+    _save({"a": _native("working")})
+    _barrier(home, state)
+    monkeypatch.setattr(fleet, "_codex_host_presence",
+                        lambda: ("live", GEN_NEW, None))
+    assert fleet.sweep_codex_host_gone() == []
+    row = fleet.load_registry()["workers"]["a"]
+    assert row["status"] == "working" and "codex_host_gone" not in row
+    name, ok, message = fleet._doctor_check_codex_host(fleet.load_registry()["workers"])
+    assert ok is True and f"state {state}" in message and "paused" in message
+
+
+def test_an_unreadable_recovery_fence_marks_nothing(home, monkeypatch):
+    _save({"a": _native("working")})
+    path = home / "state" / "codex" / "failed-client-recovery.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    monkeypatch.setattr(fleet, "_codex_host_presence", lambda: GONE)
+    assert fleet.sweep_codex_host_gone() == []
+    assert "codex_host_gone" not in fleet.load_registry()["workers"]["a"]
+
+
+def test_after_a_complete_recovery_held_rows_stay_unmarked(home, monkeypatch):
+    _save({"held": _native("dead"), "interrupted": _native("interrupted"),
+           "live": _native("working")})
+    _barrier(home, "complete")
+    monkeypatch.setattr(fleet, "_codex_host_presence",
+                        lambda: ("live", GEN_NEW, None))
+    monkeypatch.setattr(fleet, "read_incarnation", lambda: None)
+    assert fleet.sweep_codex_host_gone() == ["live"]
+    workers = fleet.load_registry()["workers"]
+    assert "codex_host_gone" not in workers["held"]
+    assert "codex_host_gone" not in workers["interrupted"]
+
+
+def test_a_failed_notice_is_sent_again_next_sweep(home, monkeypatch):
+    _save({"a": _native("working"), "b": _native("working")})
+    monkeypatch.setattr(fleet, "_codex_host_presence", lambda: GONE)
+    monkeypatch.setattr(fleet, "read_incarnation", lambda: {"state": "held"})
+    monkeypatch.setattr(fleet, "_claim_holder_row_name", lambda c, d: "sup-body")
+    attempts = []
+
+    def deliver(claim, parent, message, **k):
+        attempts.append(message)
+        if len(attempts) == 1:
+            raise fleet.FleetCliError("supervisor busy")
+
+    monkeypatch.setattr(fleet, "_deliver_lane_mail", deliver)
+    assert fleet.sweep_codex_host_gone() == ["a", "b"]
+    assert fleet.load_registry()["workers"]["a"]["codex_host_gone"]["notified"] is False
+    assert fleet.sweep_codex_host_gone() == ["a", "b"]
+    assert len(attempts) == 2 and attempts[1].startswith("CODEX-HOST-GONE 2 lane(s)")
+    assert fleet.load_registry()["workers"]["a"]["codex_host_gone"]["notified"] is True
+    assert fleet.sweep_codex_host_gone() == []
+    assert len(attempts) == 2
+    events = [json.loads(line) for line in
+              fleet.events_path().read_text().splitlines()]
+    assert [e["kind"] for e in events].count("codex_host_gone") == 1
+
+
+class _Client:
+    def __init__(self, generation, live):
+        self.generation, self.host_pid, self._live = generation, 4242, live
+
+    def _owner_live(self):
+        return self._live
+
+
+def test_presence_maps_the_existing_client_facade(monkeypatch):
+    from fleet_codex import HostUnavailable
+
+    def gone(_home):
+        raise HostUnavailable("no ready Codex host exists for this Fleet home")
+    monkeypatch.setattr(fleet, "_codex_existing_client", gone)
+    assert fleet._codex_host_presence()[0] == "gone"
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: _Client(GEN_OLD, False))
+    assert fleet._codex_host_presence()[:2] == ("gone", GEN_OLD)
+    monkeypatch.setattr(fleet, "_codex_existing_client",
+                        lambda _home: _Client(GEN_OLD, True))
+    assert fleet._codex_host_presence() == ("live", GEN_OLD, None)
+
+    def unsafe(_home):
+        raise fleet.FleetCliError("Codex host metadata has wrong home")
+    monkeypatch.setattr(fleet, "_codex_existing_client", unsafe)
+    assert fleet._codex_host_presence()[0] == "unknown"
+

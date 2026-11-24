@@ -15319,6 +15319,9 @@ def _doctor_check_codex_host(workers):
               and r.get("status") in CODEX_HOST_GONE_STATUSES]
     if not native:
         return ("codex-host", True, "no in-flight native Codex lanes")
+    recovery = _codex_recovery_in_progress()
+    if recovery is not None:
+        return ("codex-host", True, f"{recovery}; host-gone marking paused")
     presence = _codex_host_presence()
     if presence[0] == "unknown":
         return ("codex-host", False, presence[2])
@@ -30711,40 +30714,71 @@ def _codex_host_gone_marked(rec) -> bool:
             and marker.get("generation") == rec.get("codex_host_generation"))
 
 
+def _codex_recovery_in_progress():
+    try:
+        from fleet_codex import failed_client_recovery_barrier
+        barrier = failed_client_recovery_barrier(FLEET_HOME)
+    except ImportError:
+        return None
+    except Exception as exc:
+        return f"failed-client recovery fence unreadable ({exc})"
+    if isinstance(barrier, dict) and barrier.get("state") != "complete":
+        return f"failed-client recovery in progress (state {barrier.get('state')})"
+    return None
+
+
 def sweep_codex_host_gone(*, sleep=time.sleep) -> list:
+    if _codex_recovery_in_progress() is not None:
+        return []
     presence = _codex_host_presence()
     if presence[0] == "unknown":
         return []
     with fleet_lock():
         data = read_registry_no_repair()
         targets = _codex_host_gone_rows(data["workers"], presence)
-        if not targets:
-            return []
         stamp = now_iso()
         for name, (generation, reason) in targets.items():
             rec = data["workers"][name]
             rec["codex_host_gone"] = {"generation": generation,
-                                      "detected_at": stamp, "reason": reason}
+                                      "detected_at": stamp, "reason": reason,
+                                      "notified": False}
             rec["status"] = "dead-suspected"
             rec["adapter_state"] = "host-gone"
-        save_registry(data)
+        unsent = sorted(
+            name for name, rec in data["workers"].items()
+            if _codex_host_gone_marked(rec) and not rec.get("archived_at")
+            and rec["codex_host_gone"].get("notified") is False)
+        if targets:
+            save_registry(data)
+        if not unsent:
+            return []
+        reason = data["workers"][unsent[0]]["codex_host_gone"].get("reason")
         claim = read_incarnation()
         parent_name = (_claim_holder_row_name(claim, data)
                        if isinstance(claim, dict)
                        and claim.get("state") in (None, "held") else None)
-    names = sorted(targets)
-    reason = targets[names[0]][1]
-    _append_event_quiet("codex_host_gone", "codex-host", lanes=names,
-                        reason=reason)
-    if parent_name is not None:
-        message = (f"CODEX-HOST-GONE {len(names)} lane(s): {' '.join(names)} -- "
-                   f"{reason}; one notice replaces their LANE-DEAD mail")
-        try:
-            _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
-                               what="CODEX-HOST-GONE mail")
-        except Exception as exc:
-            print(f"fleet: CODEX-HOST-GONE mail failed: {exc}", file=sys.stderr)
-    return names
+    if targets:
+        _append_event_quiet("codex_host_gone", "codex-host",
+                            lanes=sorted(targets), reason=reason)
+    if parent_name is None:
+        return unsent
+    message = (f"CODEX-HOST-GONE {len(unsent)} lane(s): {' '.join(unsent)} -- "
+               f"{reason}; one notice replaces their LANE-DEAD mail")
+    try:
+        _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
+                           what="CODEX-HOST-GONE mail")
+    except Exception as exc:
+        print(f"fleet: CODEX-HOST-GONE mail failed (retried next sweep): {exc}",
+              file=sys.stderr)
+        return unsent
+    with fleet_lock():
+        data = read_registry_no_repair()
+        for name in unsent:
+            rec = data["workers"].get(name)
+            if _codex_host_gone_marked(rec):
+                rec["codex_host_gone"]["notified"] = True
+        save_registry(data)
+    return unsent
 
 
 def _settle_lane_dead(name, key, *, delivered) -> None:
