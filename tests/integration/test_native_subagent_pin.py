@@ -47,7 +47,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from native_subagent_evidence import (  # noqa: E402
-    child_runs, session_id, sidechain_usage, stream_events,
+    child_runs, read_until, session_id, sidechain_usage, stop_parent,
+    stream_events,
     subagent_files)
 
 pytestmark = pytest.mark.live
@@ -290,18 +291,25 @@ def test_4b_project_agent_permission_mode_does_not_narrow_accept_edits(project):
         "---\nname: pin-narrow\ndescription: Pin probe with a narrower "
         "permission mode.\npermissionMode: default\n---\nFollow the task "
         "exactly.\n")
-    name = f"pin-{uuid.uuid4().hex[:6]}.txt"
-    events = _parent(project, _dispatch(
-        "pin narrow", f"Use the Write tool to create {name} containing PIN in "
-        "your current directory, then reply WROTE or DENIED.").replace(
-            "general-purpose", "pin-narrow"),
-        "--permission-mode", "acceptEdits")
+    for _attempt in range(2):
+        name = f"pin-{uuid.uuid4().hex[:6]}.txt"
+        events = _parent(project, _dispatch(
+            "pin narrow", f"Use the Write tool to create {name} containing "
+            "PIN in your current directory, then reply WROTE or DENIED.").replace(
+                "general-purpose", "pin-narrow"),
+            "--permission-mode", "acceptEdits")
+        agent, runs = _only_child(events)
+        if _attempted_write(events, runs[0]["tool_use_id"], name):
+            break
+    else:
+        pytest.fail("the child never attempted the Write; nothing was pinned")
     sid = session_id(events)
-    agent, _ = _only_child(events)
     assert json.loads(subagent_files(sid, agent)[0].read_text())[
         "agentType"] == "pin-narrow"
-    # Observed on 2.1.331: the narrower declared mode is not applied.
+    # The child's own Write, tied to its dispatching tool use, created the
+    # file: the narrower declared mode is not applied (2.1.331).
     assert (project / name).is_file()
+    assert not _denials(events, agent)
 
 
 def test_5_parent_death_kills_the_child_and_resume_reports_stopped(project):
@@ -316,18 +324,14 @@ def test_5_parent_death_kills_the_child_and_resume_reports_stopped(project):
                               stderr=subprocess.DEVNULL, text=True,
                               start_new_session=True)
     seen = []
-    deadline = time.monotonic() + 120
     try:
-        for line in parent.stdout:
-            seen.extend(stream_events(line))
-            if (seen[-1:] and seen[-1].get("subtype") == "task_progress"
-                    and seen[-1].get("last_tool_name") == "Bash"):
-                break
-            assert time.monotonic() < deadline, "child never ran Bash"
+        reached = read_until(parent, seen, lambda event: (
+            event.get("subtype") == "task_progress"
+            and event.get("last_tool_name") == "Bash"), timeout=120)
+        assert reached, "child never ran Bash within 120 s"
         time.sleep(3)
     finally:
-        os.killpg(parent.pid, signal.SIGTERM)
-        parent.wait(30)
+        stop_parent(parent)
     sid = session_id(seen)
     agent, runs = _only_child(seen)
     assert runs[0]["terminal"] is None

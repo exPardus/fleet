@@ -4,9 +4,13 @@ The event shapes are the ones claude 2.1.331 emitted in the pin probes,
 reduced to the fields the readers use.
 """
 import json
+import os
+
+import pytest
 
 from native_subagent_evidence import (
-    child_runs, session_id, sidechain_usage, stream_events, subagent_files)
+    child_runs, read_until, session_id, sidechain_usage, stop_parent,
+    stream_events, subagent_files)
 
 SID = "11111111-2222-4333-8444-555555555555"
 AGENT = "a0123456789abcdef"
@@ -90,3 +94,61 @@ def test_subagent_files_are_found_beside_the_parent_session(tmp_path):
     found_meta, transcript = subagent_files(SID, AGENT, root=tmp_path)
     assert found_meta == meta and transcript.name == f"agent-{AGENT}.jsonl"
     assert subagent_files(SID, "aother", root=tmp_path) == (None, None)
+
+
+def _silent_parent(script):
+    import subprocess
+    import sys
+    return subprocess.Popen([sys.executable, "-c", script],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, start_new_session=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+def test_a_parent_that_holds_stdout_open_silently_cannot_hang_the_pin():
+    import time
+    parent = _silent_parent("import time; time.sleep(60)")
+    started = time.monotonic()
+    try:
+        assert read_until(parent, [], lambda event: True, timeout=1.5) is False
+        assert time.monotonic() - started < 10
+    finally:
+        stop_parent(parent)
+    assert parent.poll() is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+def test_read_until_stops_at_the_first_matching_event():
+    script = ("import json, sys, time\n"
+              "print(json.dumps({'subtype': 'task_progress', "
+              "'last_tool_name': 'Bash'}), flush=True)\n"
+              "time.sleep(60)\n")
+    parent = _silent_parent(script)
+    seen = []
+    try:
+        assert read_until(parent, seen, lambda event: (
+            event.get("last_tool_name") == "Bash"), timeout=30) is True
+    finally:
+        stop_parent(parent)
+    assert seen == [{"subtype": "task_progress", "last_tool_name": "Bash"}]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups are POSIX")
+def test_stop_parent_escalates_when_sigterm_is_ignored():
+    script = ("import signal, time\n"
+              "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+              "print('ready', flush=True)\n"
+              "time.sleep(120)\n")
+    parent = _silent_parent(script)
+    parent.stdout.readline()
+    real_wait = parent.wait
+    calls = []
+
+    def short_wait(timeout=None):
+        calls.append(timeout)
+        return real_wait(min(timeout or 1, 1))
+
+    parent.wait = short_wait
+    stop_parent(parent)
+    assert parent.poll() is not None and len(calls) == 2
+

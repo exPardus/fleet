@@ -19,6 +19,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import signal
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped", "killed"})
@@ -116,3 +121,47 @@ def sidechain_usage(transcript_text: str, agent: str) -> dict[str, int]:
             if isinstance(usage.get(key), int):
                 total[key] += usage[key]
     return total
+
+
+def read_until(process, seen, predicate, timeout):
+    """Collect stream events until one matches; never block past `timeout`.
+
+    A reader thread owns the pipe, so a parent that keeps stdout open but
+    writes no line cannot hold the pin beyond its deadline.
+    """
+    lines = queue.Queue()
+
+    def pump():
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            line = lines.get(timeout=remaining)
+        except queue.Empty:
+            return False
+        if line is None:
+            return False
+        events = stream_events(line)
+        seen.extend(events)
+        if any(predicate(event) for event in events):
+            return True
+
+
+def stop_parent(process):
+    """SIGTERM the parent's process group; escalate if it does not exit."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(30)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(10)
