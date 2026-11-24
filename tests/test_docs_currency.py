@@ -39,6 +39,9 @@ HISTORICAL_METADATA_EXEMPTIONS = {
     # plan PR 0).
     "1942a432200aa4d9866b9d01807de05eeca65f4a",
     "6085e308b345d6204e3db41d2a68f24777b07cd8",
+    # Divergence-detector internals (PR #90): the lane recorded Docs: n/a in its
+    # result but not as a commit trailer; merged, so every lane inherits it.
+    "71b26ab38a869b5bab31f98aef17054348f9b070",
 }
 
 
