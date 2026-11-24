@@ -1065,7 +1065,7 @@ def test_darwin_identity_source_change_does_not_replace_live_host(monkeypatch):
     assert kill_calls == [(4321, 0)]
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0"])
 def test_installed_reviewed_codex_versions_select_their_manifest(
         tmp_path, monkeypatch, version):
     module = _modules()
@@ -1080,7 +1080,7 @@ def test_installed_reviewed_codex_versions_select_their_manifest(
     assert json.loads(selected.read_text(encoding="utf-8"))["codex_version"] == version
 
 
-@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0"])
+@pytest.mark.parametrize("version", ["0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0"])
 def test_each_reviewed_codex_version_can_publish_a_matching_host(
         tmp_path, monkeypatch, version):
     module = _modules()

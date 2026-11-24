@@ -13,6 +13,9 @@ which routes Codex sessions into the interface, supervisor and worker roles.
 - The **Codex CLI**, installed and signed in on the machine that runs fleet.
 - Nothing else for the default **native** adapter. Fleet starts one host process
   per fleet home, and the host talks to Codex over its own protocol.
+- The native adapter accepts exact CLI versions with reviewed public schemas:
+  0.155.1, 0.160.0, 0.161.0, 0.162.0 and 0.171.0. A newer version requires a
+  schema review before new native dispatch can start.
 - **mcx** only for the legacy `--codex-adapter mcx` route. See
   [the mcx route](#the-legacy-mcx-route) below.
 

@@ -22,10 +22,10 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parents[1]
 BIN = REPO / "bin"
 SCHEMA_MANIFEST = (
-    REPO / "tests" / "fixtures" / "codex_app_server" / "0.155.1"
+    REPO / "tests" / "fixtures" / "codex_app_server" / "0.171.0"
     / "manifest.json")
 NO_INFERENCE_FIXTURE = (
-    REPO / "tests" / "fixtures" / "codex_app_server" / "0.155.1"
+    REPO / "tests" / "fixtures" / "codex_app_server" / "0.171.0"
     / "no-inference-acceptance.json")
 
 FAKE_CASES = {
@@ -689,7 +689,7 @@ def run_public_no_inference(*, cleanup_ledger: dict | None = None,
             }
             if list_blocked:
                 report["reason"] = (
-                    "Codex 0.155.1 thread/list omits the genuine zero-turn thread; "
+                    f"Codex {fixture['codex_version']} thread/list omits the genuine zero-turn thread; "
                     "read and resume recover the same ID after Fleet-host restart")
             client.call({
                 "operation_id": f"accept-shutdown-two-{uuid.uuid4()}",
