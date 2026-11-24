@@ -25619,11 +25619,6 @@ def cmd_sup_context(args) -> int:
     return 0
 
 
-# A registration switch and a sup-notify delivery exclude each other with this
-# interface-only lock, never with fleet.lock: delivery runs tmux subprocesses,
-# and F4 forbids holding fleet.lock across a subprocess. A registrar waits for
-# at most one bounded delivery (pane scan, three tmux writes, settle), so a
-# registration during delivery completes after it instead of failing.
 INTERFACE_LOCK_TIMEOUT_SECONDS = (
     10 + 3 * TMUX_TIMEOUT_SECONDS + INTERFACE_PASTE_SETTLE_SECONDS + 5)
 
@@ -25631,7 +25626,6 @@ INTERFACE_LOCK_TIMEOUT_SECONDS = (
 @contextmanager
 def interface_lock(timeout: float = INTERFACE_LOCK_TIMEOUT_SECONDS, *,
                    home=None):
-    """Fence interface registration against sup-notify delivery."""
     path = ((state_dir() if home is None else Path(home) / "state")
             / "interface.lock")
     with registry_lock(
@@ -25664,9 +25658,6 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
-    # Every interface-register holds interface.lock while it writes. Hold it
-    # from the final scan through submit, so the pane reported below is still
-    # the registered pane when the line lands.
     with interface_lock():
         current_kind, current_target = _resolve_notify_target(
             getattr(args, "tmux_session", None), args.window, run)
@@ -25784,8 +25775,6 @@ def _cmd_interface_register_fenced(args, run, root: Path) -> int:
             existing = None
         cleared_codex = _clear_competing_interface_registration(
             root / "state" / "interface-codex.json")
-        # A headless session supersedes an earlier tmux pane registration;
-        # sup-notify would otherwise still type into that old pane.
         cleared_pane = _clear_competing_interface_registration(
             root / "state" / "interface-pane")
         changed = existing != sid or cleared_codex or cleared_pane

@@ -307,6 +307,11 @@ def test_delivery_never_holds_fleet_lock_across_tmux(reg_home, stage):
 
 
 def test_registrar_waits_out_one_bounded_delivery():
+    """interface.lock, not fleet.lock, fences registration against delivery:
+    delivery runs tmux subprocesses, and F4 forbids holding fleet.lock across
+    a subprocess. A registrar waits for at most one bounded delivery (pane
+    scan, three tmux writes, settle), so it completes after the delivery
+    instead of failing on a short lock deadline."""
     worst_delivery = (10 + 3 * fleet.TMUX_TIMEOUT_SECONDS
                       + fleet.INTERFACE_PASTE_SETTLE_SECONDS)
     assert fleet.INTERFACE_LOCK_TIMEOUT_SECONDS > worst_delivery
