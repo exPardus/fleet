@@ -11,50 +11,12 @@ import pytest
 
 import fleet_codex
 import fleet_codex_schema as used
+from codex_test_support import fake_combined_schema
 from test_codex_host_ipc import _fake_app_server, _home, _shutdown
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "codex_app_server"
 REVIEWED = ("0.155.1", "0.160.0", "0.161.0", "0.162.0", "0.171.0")
-
-
-def fake_combined_schema():
-    """A minimal combined schema with every used call and one unused call."""
-    definitions = {"v2": {}, "RequestId": {"type": ["string", "integer"]}}
-    envelopes = {name: {"oneOf": []} for name in (
-        "ClientRequest", "ClientNotification", "ServerRequest",
-        "ServerNotification")}
-    for (envelope, method), response in used.USED_SCHEMA_INVENTORY.items():
-        stem = "".join(part[:1].upper() + part[1:]
-                       for part in method.replace("/", " ").split())
-        definitions["v2"][f"{stem}Params"] = {
-            "description": f"Params for {method}.",
-            "properties": {"threadId": {"type": "string"},
-                           "description": {"type": "string"}},
-            "type": "object"}
-        envelopes[envelope]["oneOf"].append({
-            "properties": {
-                "id": {"$ref": "#/definitions/RequestId"},
-                "method": {"enum": [method]},
-                "params": {"$ref": f"#/definitions/v2/{stem}Params"}},
-            "required": ["id", "method", "params"], "type": "object"})
-        if response is not None:
-            parts = response.split("/")[2:]
-            node = definitions
-            for part in parts[:-1]:
-                node = node.setdefault(part, {})
-            node[parts[-1]] = {
-                "properties": {"status": {"$ref": "#/definitions/v2/Status"}},
-                "type": "object"}
-    definitions["v2"]["Status"] = {"enum": ["completed", "failed"]}
-    definitions["v2"]["UnusedParams"] = {"type": "object"}
-    envelopes["ClientRequest"]["oneOf"].append({
-        "properties": {"method": {"enum": ["unused/method"]},
-                       "params": {"$ref": "#/definitions/v2/UnusedParams"}},
-        "type": "object"})
-    definitions.update(envelopes)
-    return {"$schema": "http://json-schema.org/draft-07/schema#",
-            "definitions": definitions, "title": "CodexAppServerProtocol"}
 
 
 # --- the used-method inventory is derived from adapter call sites ---------
@@ -397,6 +359,61 @@ def test_exact_version_and_v2_digest_still_compare_used_shapes(
     try:
         metadata = json.loads(client.metadata_path.read_text(encoding="utf-8"))
         assert metadata["schema_digest"] == v2_digest
-        assert metadata["used_schema_digest"] == value["used_schema_sha256"]
+        # An exact host compared used shapes but stays bound to its reviewed
+        # version and raw digest, so it publishes no used-schema digest.
+        assert metadata["used_schema_digest"] is None
     finally:
         _shutdown(client)
+
+
+@pytest.mark.parametrize("branch", [
+    {"properties": {"method": {"enum": ["turn/start", "brand/new"]}},
+     "type": "object"},
+    {"properties": {"method": {"const": "turn/start"}}, "type": "object"},
+    {"properties": {"method": {"type": "string"}}, "type": "object"},
+    {"properties": {"method": {"$ref": "#/definitions/v2/AnyMethod"}},
+     "type": "object"},
+    {"$ref": "#/definitions/v2/UnusedParams"},
+])
+def test_a_branch_that_may_also_match_a_used_method_changes_its_digest(branch):
+    """`oneOf` rejects a request two branches accept: overlap is a shape change."""
+    base = fake_combined_schema()
+    base["definitions"]["v2"]["AnyMethod"] = {"type": "string"}
+    changed = copy.deepcopy(base)
+    changed["definitions"]["ClientRequest"]["oneOf"].append(branch)
+    _, before = used.used_schema_digests(base)
+    try:
+        _, after = used.used_schema_digests(changed)
+    except used.SchemaDrift:
+        return  # a second exact branch is ambiguous and refuses outright
+    assert before["ClientRequest turn/start"] != after["ClientRequest turn/start"]
+
+
+def test_a_branch_that_provably_rejects_used_methods_keeps_their_digests():
+    base = fake_combined_schema()
+    changed = copy.deepcopy(base)
+    changed["definitions"]["ClientRequest"]["oneOf"].append({
+        "properties": {"method": {"enum": ["brand/new", "other/new"]}},
+        "type": "object"})
+    assert used.used_schema_digests(changed) == used.used_schema_digests(base)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native host transport is POSIX-only")
+def test_exact_release_without_a_used_contract_is_refused(tmp_path, monkeypatch):
+    """A reviewed manifest must carry a used contract; no exact-path bypass."""
+    codex, v2_digest = _fake_codex(tmp_path, "0.171.0", {"definitions": {}})
+    manifest, value = _reviewed_manifest(tmp_path, fake_combined_schema())
+    value["schema_sha256"] = v2_digest
+    del value["used_schema_sha256"], value["used_schema_entries"]
+    manifest.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setitem(fleet_codex.REVIEWED_SCHEMA_MANIFESTS, "0.171.0", manifest)
+    home = _home(tmp_path)
+    log = tmp_path / "app-server.jsonl"
+    with pytest.raises(fleet_codex.HostUnavailable):
+        fleet_codex.CodexHostClient.ensure(
+            home, app_server_command=[str(_fake_app_server(tmp_path, "0.171.0"))],
+            schema_command=[str(codex)],
+            env=dict(os.environ, FAKE_APP_SERVER_LOG=str(log)),
+            ready_timeout=3, idle_timeout=30)
+    assert not log.exists()
+    assert not (home / "state" / "codex" / "host.json").exists()

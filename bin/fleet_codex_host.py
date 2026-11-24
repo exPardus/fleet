@@ -492,9 +492,6 @@ class Host:
                 raise RuntimeError("installed Codex schema bundle is missing") from exc
             exact = (hmac.compare_digest(actual, self.reviewed_schema_digest)
                      and self.expected_version == self.reviewed_version)
-            if exact and self.reviewed_used_digest is None:
-                # A manifest without a used-schema contract (test fixtures).
-                return
             # The v2 digest does not cover the used v1 shapes in the combined
             # schema, so even an exact release compares used shapes. Another
             # release launches only if every call Fleet uses has the schema
@@ -504,6 +501,10 @@ class Host:
                 read_combined_schema, used_schema_digests)
             try:
                 document = read_combined_schema(Path(directory))
+                if exact and not isinstance(self.reviewed_used_digest, str):
+                    raise SchemaDrift(
+                        f"reviewed {self.reviewed_version} manifest has no "
+                        "used-schema contract")
                 if exact:
                     used_digest, entries = used_schema_digests(document)
                     if not hmac.compare_digest(
@@ -525,7 +526,9 @@ class Host:
                     "installed Codex schema does not match the reviewed digest "
                     f"or a reviewed used-schema contract: {exc}") from exc
             self.schema_digest = actual
-            self.used_schema_digest = used_digest
+            # Published only for a host admitted by used shapes; an exact
+            # host stays bound to its reviewed version and raw digest.
+            self.used_schema_digest = None if exact else used_digest
 
     def _heartbeat(self) -> None:
         while not self.stop.wait(0.5):

@@ -115,17 +115,51 @@ def _refs(node: Any):
             yield from _refs(item)
 
 
-def _variant(document: Mapping[str, Any], envelope: str, method: str) -> Any:
+def _method_values(document: Mapping[str, Any], branch: Any) -> set | None:
+    """The method names a branch accepts, or None when that is not provable.
+
+    Only a plain object branch whose `method` property is a string `enum` or
+    `const` (directly or through `$ref`) is provable.
+    """
+    if not isinstance(branch, dict) or set(branch) & {
+            "$ref", "allOf", "anyOf", "oneOf", "not", "if"}:
+        return None
+    method = branch.get("properties", {}).get("method")
+    seen = set()
+    while isinstance(method, dict) and isinstance(method.get("$ref"), str):
+        if method["$ref"] in seen:
+            return None
+        seen.add(method["$ref"])
+        method = _resolve(document, method["$ref"])
+    if not isinstance(method, dict):
+        return None
+    if isinstance(method.get("const"), str):
+        return {method["const"]}
+    enum = method.get("enum")
+    if isinstance(enum, list) and all(isinstance(item, str) for item in enum):
+        return set(enum)
+    return None
+
+
+def _variant(document: Mapping[str, Any], envelope: str,
+             method: str) -> tuple[Any, list]:
+    """Return the branch for `method` and every other branch that may match it.
+
+    A `oneOf` rejects a value that two branches accept, so an added branch
+    that also accepts a used method changes that method's wire contract.
+    A branch counts as unrelated only when it provably rejects the method.
+    """
     container = _resolve(document, f"#/definitions/{envelope}")
-    found = []
+    found, overlap = [], []
     for entry in container.get("oneOf", []) if isinstance(container, dict) else []:
-        enum = (entry.get("properties", {}).get("method", {}).get("enum")
-                if isinstance(entry, dict) else None)
-        if enum == [method]:
+        values = _method_values(document, entry)
+        if values == {method}:
             found.append(entry)
+        elif values is None or method in values:
+            overlap.append(entry)
     if len(found) != 1:
         raise SchemaDrift(f"{envelope} {method} is missing or ambiguous")
-    return found[0]
+    return found[0], sorted(overlap, key=_canonical)
 
 
 def _entry_slice(document: Mapping[str, Any], envelope: str, method: str,
@@ -135,8 +169,10 @@ def _entry_slice(document: Mapping[str, Any], envelope: str, method: str,
     # apply to every variant. Its variant list is left out, so a new unused
     # method does not change a used digest.
     frame = {key: value for key, value in container.items() if key != "oneOf"}
-    roots = {"envelope": frame,
-             "variant": _variant(document, envelope, method)}
+    variant, overlap = _variant(document, envelope, method)
+    roots = {"envelope": frame, "variant": variant}
+    if overlap:
+        roots["overlap"] = overlap
     if response is not None:
         roots["response"] = _resolve(document, response)
     definitions: dict[str, Any] = {}

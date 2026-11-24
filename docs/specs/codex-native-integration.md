@@ -147,7 +147,8 @@ version. A new host starts when either check passes:
 - **Exact:** the installed version is reviewed, the generated v2 bundle has
   that manifest's raw `schema_sha256`, and the combined schema gives that
   manifest's `used_schema_sha256`. The v2 digest alone does not cover used v1
-  shapes such as `initialize` and the answered server requests.
+  shapes such as `initialize` and the answered server requests. A reviewed
+  manifest without a used-schema contract refuses launch.
 - **Used shapes:** the generated combined schema
   (`codex_app_server_protocol.schemas.json`) gives a used-schema digest equal
   to the `used_schema_sha256` of a reviewed manifest.
@@ -156,7 +157,11 @@ version. A new host starts when either check passes:
 every server request it answers, and every notification it sends or consumes,
 with each response definition. For each entry, the digest covers the method
 variant, its response, the enclosing envelope's own constraints (everything
-except its variant list), and every definition reachable through `$ref`.
+except its variant list), every other variant that may also accept the method,
+and every definition reachable through `$ref`. A `oneOf` rejects a message two
+variants accept, so a variant counts as unrelated only when its `method` enum
+or const provably excludes the used method. A second variant for exactly that
+method refuses as ambiguous.
 Description and title strings do not count. A missing used method, a reference
 that does not resolve, or any changed used shape refuses launch. The refusal
 names the drifted calls against the newest reviewed manifest. A test derives
@@ -176,6 +181,8 @@ shape unchanged; it does not admit a release because it is newer.
 
 An already-live host is authenticated against its metadata: a reviewed
 version with that manifest's raw digest, or a reviewed `used_schema_digest`.
+A host publishes `used_schema_digest` only when it was admitted by used shapes;
+an exact host publishes none and stays bound to its version and raw digest.
 Upgrading the installed CLI therefore does not strand native work owned by the
 prior reviewed host. The adapter begins with `initialize` and `initialized`.
 All reviewed generated schemas expose:

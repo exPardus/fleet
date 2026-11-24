@@ -130,6 +130,17 @@ def _fake_app_server(tmp_path, version="0.155.1"):
     return script
 
 
+def _fake_combined_bytes():
+    from codex_test_support import fake_combined_schema
+    return (json.dumps(fake_combined_schema(), sort_keys=True) + "\n").encode()
+
+
+def _fake_used_digests():
+    import fleet_codex_schema
+    from codex_test_support import fake_combined_schema
+    return fleet_codex_schema.used_schema_digests(fake_combined_schema())
+
+
 def _fake_schema_command(tmp_path, version, schema_bytes):
     script = tmp_path / f"codex-schema-{version}"
     script.write_text(
@@ -137,12 +148,14 @@ def _fake_schema_command(tmp_path, version, schema_bytes):
         "import pathlib, sys\n"
         f"VERSION = {version!r}\n"
         f"SCHEMA = {schema_bytes!r}\n"
+        f"COMBINED = {_fake_combined_bytes()!r}\n"
         "if sys.argv[1:] == ['--version']:\n"
         "    print('codex-cli ' + VERSION)\n"
         "elif sys.argv[1:3] == ['app-server', 'generate-json-schema']:\n"
         "    out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
         "    out.mkdir(parents=True, exist_ok=True)\n"
         "    (out / 'codex_app_server_protocol.v2.schemas.json').write_bytes(SCHEMA)\n"
+        "    (out / 'codex_app_server_protocol.schemas.json').write_bytes(COMBINED)\n"
         "else:\n"
         "    raise SystemExit(2)\n",
         encoding="utf-8")
@@ -862,8 +875,8 @@ def test_live_old_host_remains_reachable_after_installed_version_change(
     for version, schema_bytes in schemas.items():
         value = json.loads(manifests[version].read_text(encoding="utf-8"))
         value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
-        for key in ("used_schema_sha256", "used_schema_entries"):
-            value.pop(key, None)  # the fake emits no combined schema
+        value["used_schema_sha256"], value["used_schema_entries"] = (
+            _fake_used_digests())
         manifest = tmp_path / f"manifest-{version}.json"
         manifest.write_text(json.dumps(value), encoding="utf-8")
         manifests[version] = manifest
@@ -1096,8 +1109,8 @@ def test_each_reviewed_codex_version_can_publish_a_matching_host(
     value = json.loads(
         module.REVIEWED_SCHEMA_MANIFESTS[version].read_text(encoding="utf-8"))
     value["schema_sha256"] = hashlib.sha256(schema_bytes).hexdigest()
-    for key in ("used_schema_sha256", "used_schema_entries"):
-        value.pop(key, None)  # the fake emits no combined schema
+    value["used_schema_sha256"], value["used_schema_entries"] = (
+        _fake_used_digests())
     manifest.write_text(json.dumps(value), encoding="utf-8")
     manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
     manifests[version] = manifest
@@ -1230,12 +1243,14 @@ def test_public_initialize_wrong_codex_home_never_publishes_ready(tmp_path):
 
 def test_installed_schema_digest_mismatch_never_publishes_ready(
         tmp_path, monkeypatch):
+    """Neither the raw digest nor the used shapes match a reviewed release."""
     module = _modules()
     home = _home(tmp_path)
     manifest = tmp_path / "manifest.json"
     value = json.loads(
         module.REVIEWED_SCHEMA_MANIFESTS["0.155.1"].read_text())
     value["schema_sha256"] = "0" * 64
+    value["used_schema_sha256"] = "1" * 64
     manifest.write_text(json.dumps(value), encoding="utf-8")
     manifests = dict(module.REVIEWED_SCHEMA_MANIFESTS)
     manifests["0.155.1"] = manifest
