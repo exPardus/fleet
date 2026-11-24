@@ -87,6 +87,34 @@ class TestDetector:
         assert fleet._interface_divergence(now=NOW) is None
 
 
+class TestWorkerMailNotSteer:
+    def _register(self, name, sid, retired=()):
+        rec = fleet.new_worker_record(sid, str(fleet.FLEET_HOME), "t", "bypass",
+                                      dispatch_kind="bg")
+        rec["retired_sids"] = list(retired)
+        data = fleet.load_registry()
+        data["workers"][name] = rec
+        fleet.save_registry(data)
+
+    def test_live_lane_mail_is_not_divergence(self, home):
+        self._register("lane-a", "sid-LA", retired=["sid-LA-old"])
+        self._register("lane-b", "sid-LB")
+        _event(home, caller_sid="sid-IF")
+        _event(home, caller_sid="sid-LA")
+        _event(home, caller_sid="sid-LA-old")
+        _event(home, caller_sid="sid-LB")
+        assert fleet._interface_divergence(now=NOW) is None
+
+    def test_genuine_interface_steers_still_diverge(self, home):
+        self._register("lane-a", "sid-LA")
+        _event(home, caller_sid="sid-LA")
+        _event(home, caller_sid="sid-IF1")
+        _event(home, caller_sid="sid-IF2")
+        div = fleet._interface_divergence(now=NOW)
+        assert div is not None
+        assert div["caller_sids"] == ["sid-IF1", "sid-IF2"]
+
+
 # --------------------------------------------------------------------------
 # sup-status surfaces the warning.
 # --------------------------------------------------------------------------
