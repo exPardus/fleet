@@ -25620,13 +25620,16 @@ def cmd_sup_context(args) -> int:
 
 
 def cmd_sup_notify(args, run=subprocess.run) -> int:
-    """Notify the interface; dry-run skips claim work, else heartbeat before tmux."""
-    tmux_session = _resolve_notify_session(
+    """Notify the interface; dry-run skips claim work."""
+    kind, target = _resolve_notify_target(
         getattr(args, "tmux_session", None), args.window, run)
-    target = f"{tmux_session}:{args.window}"
+    line = interface_line(args.text, SUPERVISOR_LINE_PREFIX)
     if args.dry_run:
-        print(f"[dry-run] would type into {target}: "
-              f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
+        if kind == "tmux":
+            print(f"[dry-run] would type into {target}: {line}")
+        else:
+            print(f"[dry-run] would queue to the registered {kind} "
+                  f"interface {target}: {line}")
         return 0
     with fleet_lock():
         claim, _, notices = _require_claim_holder(
@@ -25636,17 +25639,25 @@ def cmd_sup_notify(args, run=subprocess.run) -> int:
         write_incarnation(claim)
     inc = claim.get("incarnation_id", "?")
     _deliver_notices(notices)
-    if not type_interface_line(run, target, args.text,
-                               prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
-        raise FleetCliError(
-            f"sup-notify: tmux would not deliver the line to {target} -- the "
-            f"interface has NOT been told. Check that the tmux server and the "
-            f"window exist (`tmux list-windows -t {tmux_session}`); the "
-            f"claim is untouched apart from this call's own restamp, so "
-            f"re-running this verb is safe.")
+    if kind == "tmux":
+        if not type_interface_line(run, target, args.text,
+                                   prefix=SUPERVISOR_LINE_PREFIX, label="fleet"):
+            raise FleetCliError(
+                f"sup-notify: tmux would not deliver the line to {target} -- "
+                f"the interface has NOT been told. Check that the tmux server "
+                f"and the window exist (`tmux list-windows`); the claim is "
+                f"untouched apart from this call's own restamp, so re-running "
+                f"this verb is safe.")
+    else:
+        try:
+            append_mailbox(target, line)
+        except OSError as exc:
+            raise FleetCliError(
+                f"sup-notify: could not queue the line for the registered "
+                f"{kind} interface {target} ({exc}) -- the interface has NOT "
+                f"been told; re-running this verb is safe.") from exc
     append_interface_log("RELAY", args.text)
-    print(f"notified {target} as {inc}: "
-          f"{interface_line(args.text, SUPERVISOR_LINE_PREFIX)}")
+    print(f"notified {target} as {inc}: {line}")
     return 0
 
 
@@ -29214,14 +29225,15 @@ def build_parser() -> argparse.ArgumentParser:
     # Match the keeper's tmux defaults and dry-run interface for this shared channel.
     p_supnotify = sub.add_parser(
         "sup-notify",
-        help="type one `SUPERVISOR: <text>` line into the interface tmux "
-             "window (claim holder only): the graceful-end announcement the "
-             "interface acts on")
+        help="deliver one `SUPERVISOR: <text>` line to the registered "
+             "interface, else its tmux window (claim holder only): the "
+             "graceful-end announcement the interface acts on")
     p_supnotify.add_argument("text",
                              help="the line's text -- prefixed with `SUPERVISOR: ` "
                                   "and sanitised to one printable line before it is typed")
     p_supnotify.add_argument("--tmux-session", dest="tmux_session", default=None,
-                             help="tmux session holding the interface window (default: "
+                             help="tmux session holding the interface window; overrides "
+                                  "registration (default: the registered interface, else "
                                   "`work` if it has the window, else the one session "
                                   "that has it; none or several fails closed)")
     p_supnotify.add_argument("--window", default="fleet",
@@ -30563,6 +30575,39 @@ def _resolve_notify_session(session, window, run=subprocess.run) -> str:
         f"sup-notify: tmux would not deliver the line -- cannot choose the "
         f"interface window `{window}` (candidates: {found}); pass "
         f"--tmux-session explicitly; the interface has NOT been told.")
+
+
+_NOTIFY_MAILBOX_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _registered_notify_target() -> tuple[str, str] | None:
+    state = state_dir()
+    if _registration_path_present(state / "interface-codex.json"):
+        try:
+            from fleet_codex import read_interface_claim
+            claim = read_interface_claim(FLEET_HOME)
+        except Exception:
+            return None
+        thread = claim.get("thread_id") if isinstance(claim, dict) else None
+        if isinstance(thread, str) and _NOTIFY_MAILBOX_ID_RE.fullmatch(thread):
+            return "codex", thread
+        return None
+    pane = _registration_token(state / "interface-pane")
+    if pane and pane.startswith("%") and pane[1:].isascii() and pane[1:].isdecimal():
+        return "tmux", pane
+    sid = _registration_token(state / "interface-session")
+    if sid and ".." not in sid and _NOTIFY_MAILBOX_ID_RE.fullmatch(sid):
+        return "claude-session", sid
+    return None
+
+
+def _resolve_notify_target(session, window, run=subprocess.run) -> tuple[str, str]:
+    if session is not None:
+        return "tmux", f"{session}:{window}"
+    registered = _registered_notify_target()
+    if registered is not None:
+        return registered
+    return "tmux", f"{_resolve_notify_session(None, window, run)}:{window}"
 
 
 _TERMINAL_QUOTA_SCHEMAS = frozenset({
