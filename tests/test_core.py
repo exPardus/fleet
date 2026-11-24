@@ -1202,3 +1202,57 @@ class TestManagerMailProvenance:
         fleet._rebind_manager_mail(entry, "sid-next")
         assert self._render(entry, sid="sid-next").startswith("<MANAGER MESSAGE>")
 
+
+
+class TestManagerMailSurvivesForkSteer:
+    """Residual mail migrates to the successor session inside the steer
+    commit, which already holds fleet.lock. Re-acquiring it waited out the
+    lock timeout and left the successor unrecorded, so a late manager
+    message arrived as unverified mail."""
+
+    def test_migration_under_the_held_lock_keeps_manager_mail_verified(
+            self, isolated_home, monkeypatch):
+        import time
+        fleet.write_incarnation(_holder_claim())
+        monkeypatch.setattr(fleet, "current_caller_session", lambda: "sid-sup")
+        entry = fleet._send_mail_entry("old", "late steer", NONCE)
+        mbox = fleet.mailbox_dir()
+        mbox.mkdir(parents=True, exist_ok=True)
+        (mbox / "old.md").write_text(entry + "\n\n", encoding="utf-8")
+        started = time.monotonic()
+        with fleet.fleet_lock():
+            fleet._migrate_residual_mailbox("old", "new")
+        assert time.monotonic() - started < fleet.LOCK_TIMEOUT_SECONDS / 2
+        records = fleet.read_incarnation()["manager_mail"]
+        assert "new" in records[-1]["sids"]
+        rendered = fleet.fleet_manager_mail.render(
+            (mbox / "new.md").read_text(encoding="utf-8"), "new",
+            fleet.fleet_manager_mail.claim_records(fleet.FLEET_HOME))
+        assert rendered.startswith("<MANAGER MESSAGE>\nlate steer\n")
+
+    def test_every_migration_caller_holds_fleet_lock(self):
+        """The migration passes locked=True; pin that its callers hold it."""
+        import ast
+        tree = ast.parse(Path(fleet.__file__).read_text(encoding="utf-8"))
+        unlocked = []
+
+        def visit(node, locked):
+            for child in ast.iter_child_nodes(node):
+                held = locked
+                if isinstance(child, ast.With) and any(
+                        isinstance(item.context_expr, ast.Call)
+                        and getattr(item.context_expr.func, "id", None) == "fleet_lock"
+                        for item in child.items):
+                    held = True
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    held = False
+                if (isinstance(child, ast.Call)
+                        and getattr(child.func, "id", None)
+                        == "_migrate_residual_mailbox" and not locked):
+                    unlocked.append(child.lineno)
+                visit(child, held)
+
+        visit(tree, False)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and getattr(node.func, "id", None) == "_migrate_residual_mailbox"]
+        assert calls and unlocked == []

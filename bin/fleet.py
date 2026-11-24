@@ -1644,23 +1644,30 @@ def _send_mail_entry(sid: str, message: str, manager_nonce, *,
         return record()
 
 
-def _rebind_manager_mail(contents: str, new_sid: str) -> None:
+def _rebind_manager_mail(contents: str, new_sid: str, *, locked=False) -> None:
     ids = set(fleet_manager_mail.entry_ids(contents))
     if not ids:
         return
+
+    def rebind():
+        claim = read_incarnation()
+        records = claim.get(fleet_manager_mail.CLAIM_KEY) if isinstance(
+            claim, dict) else None
+        if not isinstance(records, list):
+            return
+        for item in records:
+            if (isinstance(item, dict) and item.get("id") in ids
+                    and isinstance(item.get("sids"), list)
+                    and new_sid not in item["sids"]):
+                item["sids"].append(new_sid)
+        write_incarnation(claim)
+
     try:
-        with fleet_lock():
-            claim = read_incarnation()
-            records = claim.get(fleet_manager_mail.CLAIM_KEY) if isinstance(
-                claim, dict) else None
-            if not isinstance(records, list):
-                return
-            for item in records:
-                if (isinstance(item, dict) and item.get("id") in ids
-                        and isinstance(item.get("sids"), list)
-                        and new_sid not in item["sids"]):
-                    item["sids"].append(new_sid)
-            write_incarnation(claim)
+        if locked:
+            rebind()
+        else:
+            with fleet_lock():
+                rebind()
     except (FleetLockTimeout, OSError):
         return
 
@@ -16367,7 +16374,7 @@ def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
 
 def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
     """Carry mail arriving after prompt composition from old_sid to new_sid.
-    Run after the steer commit. Use append_mailbox's atomic append because
+    Run after the steer commit, under its fleet.lock. Use atomic appends because
     senders can race this migration; errors must not undo a successful steer.
     """
     old_path = mailbox_dir() / f"{old_sid}.md"
@@ -16376,7 +16383,7 @@ def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
             return
         content = old_path.read_text(encoding="utf-8", errors="replace")
         if content.strip():
-            _rebind_manager_mail(content, new_sid)
+            _rebind_manager_mail(content, new_sid, locked=True)
             append_mailbox(new_sid, content)
         old_path.unlink()
     except OSError:
