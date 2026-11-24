@@ -133,6 +133,9 @@ UNENFORCED = {
     # Proposed native Codex architecture; implementation and receipt-bearing
     # behavior are gated by its companion plan and have not started.
     "codex-native-integration.md",
+    # Proposed native Claude subagent lanes are unbuilt; their future behavior
+    # and substrate guarantees have no repository receipt to reproduce yet.
+    "native-subagent-lanes-proposal.md",
     # Spike of the vendor cross-session messaging surface: live-session
     # evidence outside the repo that a later run cannot reproduce.
     "peer-messaging.md",
