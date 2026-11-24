@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from fleet_errors import FleetCliError
 

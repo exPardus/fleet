@@ -36,6 +36,7 @@ row belonged to. The tag costs a single-home machine nothing: no homes list
 means `HOME_SINGLE` means no tag means the row this file rendered before the
 field existed, byte for byte. See `nameplate` and `rendered_home_tag`.
 """
+import copy
 import json
 import os
 import subprocess
@@ -1128,8 +1129,56 @@ def _stdout_can_encode(text: str) -> bool:
     return True
 
 
+def memoize_registry_reads() -> None:
+    """Parse each home's registry at most once per statusline process.
+
+    One refresh resolves the home with a sid lookup over every listed home,
+    checks the default home is initialized, and asks again whether the
+    session is registered: the same registries were parsed two or three
+    times, which dominated the statusline's CPU on a host with large
+    registries. The registry memo lives only in this process and is keyed by
+    the file's identity, size and mtime, so a registry rewritten mid-refresh
+    is read again; the sid lookup over the same population is computed once
+    and handed out as a copy. It takes no lock and writes nothing (D1); it is safe only
+    because a view never mutates what it reads.
+    """
+    original = getattr(fleet.read_registry_at, "__wrapped__", fleet.read_registry_at)
+    memo = {}
+
+    def read_registry_at(home):
+        try:
+            path = fleet.registry_path_at(home)
+            info = os.stat(path)
+            key = (str(path), info.st_ino, info.st_size, info.st_mtime_ns)
+        except (OSError, ValueError, TypeError):
+            return original(home)
+        if key not in memo:
+            memo[key] = original(home)
+        return memo[key]
+
+    read_registry_at.__wrapped__ = original
+    fleet.read_registry_at = read_registry_at
+
+    original_lookup = getattr(fleet.lookup_home_for_sid, "__wrapped__",
+                              fleet.lookup_home_for_sid)
+    lookups = {}
+
+    def lookup_home_for_sid(sid, population=None, install=None):
+        homes = (None if population is None
+                 else tuple(str(home) for home in population.get("homes", ())))
+        key = (sid, homes, str(install))
+        if key not in lookups:
+            lookups[key] = original_lookup(sid, population=population,
+                                           install=install)
+        return copy.deepcopy(lookups[key])
+
+    lookup_home_for_sid.__wrapped__ = original_lookup
+    fleet.lookup_home_for_sid = lookup_home_for_sid
+
+
 def main() -> int:
     try:
+        memoize_registry_reads()
         # Claude Code passes a session JSON blob on stdin. Fleet needs none of
         # it, but a chained delegate might, so it is captured and forwarded
         # verbatim. Read it in full so the writer never blocks on a full pipe.
