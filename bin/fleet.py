@@ -1603,10 +1603,7 @@ def _registered_lane_mail_sender() -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _manager_mail_source(nonce) -> dict | None:
-    source = _registered_interface_mail_source()
-    if source is not None:
-        return {"kind": "interface", "interface": source}
+def _manager_claim(nonce) -> dict | None:
     if current_caller_session() is None or nonce is None:
         return None
     try:
@@ -1619,13 +1616,53 @@ def _manager_mail_source(nonce) -> dict | None:
             or age > SUPERVISOR_CLAIM_STALE_SECONDS
             or _nonce_presentation(claim, nonce) is None):
         return None
-    return {"kind": "supervisor", "incarnation_id": claim.get("incarnation_id")}
+    return claim
 
 
-def _send_mail_entry(sid: str, message: str, manager_source) -> str:
-    if manager_source is None:
+def _send_mail_entry(sid: str, message: str, manager_nonce, *,
+                     locked=False) -> str:
+    if manager_nonce is None:
         return message
-    return fleet_manager_mail.issue(FLEET_HOME, sid, message, manager_source)
+
+    def record():
+        claim = _manager_claim(manager_nonce)
+        if claim is None:
+            return message
+        body, mail_id = message.rstrip("\n"), str(uuid.uuid4())
+        kept = [item for item in claim.get(fleet_manager_mail.CLAIM_KEY) or []
+                if isinstance(item, dict)]
+        claim[fleet_manager_mail.CLAIM_KEY] = kept[
+            -(fleet_manager_mail.CLAIM_RECORD_LIMIT - 1):] + [{
+                "id": mail_id, "sids": [sid],
+                "body_sha256": fleet_manager_mail.digest(body)}]
+        write_incarnation(claim)
+        return fleet_manager_mail.entry(mail_id, body)
+
+    if locked:
+        return record()
+    with fleet_lock():
+        return record()
+
+
+def _rebind_manager_mail(contents: str, new_sid: str) -> None:
+    ids = set(fleet_manager_mail.entry_ids(contents))
+    if not ids:
+        return
+    try:
+        with fleet_lock():
+            claim = read_incarnation()
+            records = claim.get(fleet_manager_mail.CLAIM_KEY) if isinstance(
+                claim, dict) else None
+            if not isinstance(records, list):
+                return
+            for item in records:
+                if (isinstance(item, dict) and item.get("id") in ids
+                        and isinstance(item.get("sids"), list)
+                        and new_sid not in item["sids"]):
+                    item["sids"].append(new_sid)
+            write_incarnation(claim)
+    except (FleetLockTimeout, OSError):
+        return
 
 
 def _issue_verified_supervisor_mail(target: str, body: str) -> tuple[str, str | None]:
@@ -1800,7 +1837,8 @@ def compose_prompt(name: str, cwd, task: str, sid: str | None, journal_path=None
     if sid is not None:
         mail, claim = claim_mailbox(sid)
         if mail:
-            parts.append(fleet_manager_mail.render(mail, sid, FLEET_HOME))
+            parts.append(fleet_manager_mail.render(
+                mail, sid, fleet_manager_mail.claim_records(FLEET_HOME)))
             # Record drain at composition. The claim is recoverable on launch failure;
             # this event is an audit entry, not a retry queue.
             append_event("mail_drained", name, sid=sid)
@@ -9507,7 +9545,7 @@ def _cmd_send_native(name: str, message: str,
             )
             if in_flight:
                 append_mailbox(raw_sid, _send_mail_entry(
-                    raw_sid, message, manager_source))
+                    raw_sid, message, manager_source, locked=True))
                 append_event("mail_sent", name, sid=raw_sid, status="working",
                              caller_sid=caller_sid)
                 print(f"{name}: turn running -- message queued to mailbox")
@@ -9550,7 +9588,8 @@ def _cmd_send_native(name: str, message: str,
                 raise FleetCliError(
                     f"{name}: dispatch in flight -- retry in a few seconds"
                 )
-            append_mailbox(sid, _send_mail_entry(sid, message, manager_source))
+            append_mailbox(sid, _send_mail_entry(
+                sid, message, manager_source, locked=True))
             append_event("mail_sent", name, sid=sid, status=status,
                          caller_sid=caller_sid)
             print(f"{name}: turn running -- message queued to mailbox")
@@ -9891,8 +9930,9 @@ def cmd_send(args, which=shutil.which, sleep=time.sleep, run=subprocess.run) -> 
         mail_receipt_id = None
     else:
         message, mail_receipt_id = _issue_verified_supervisor_mail(args.name, message)
-        if not _is_supervisor_shaped(args.name):
-            manager_source = _manager_mail_source(getattr(args, "nonce", None))
+        nonce = getattr(args, "nonce", None)
+        if not _is_supervisor_shaped(args.name) and _manager_claim(nonce):
+            manager_source = nonce
     if _is_codex_record(before):
         result = _cmd_send_codex(args.name, message, run=run, which=which)
     else:
@@ -16336,7 +16376,7 @@ def _migrate_residual_mailbox(old_sid: str, new_sid: str) -> None:
             return
         content = old_path.read_text(encoding="utf-8", errors="replace")
         if content.strip():
-            fleet_manager_mail.rebind(FLEET_HOME, content, new_sid)
+            _rebind_manager_mail(content, new_sid)
             append_mailbox(new_sid, content)
         old_path.unlink()
     except OSError:
@@ -16473,8 +16513,9 @@ def _dispatch_argv_prompt(task_path, prompt_body: str, resume_sid,
             body = (body[:NATIVE_INLINE_STEER_MAX].rstrip()
                     + "\n[truncated here -- the full text is in the file "
                       "named below]")
-        block = (fleet_manager_mail.render(body, resume_sid, FLEET_HOME) + "\n"
-                 if body else "")
+        block = (fleet_manager_mail.render(
+            body, resume_sid, fleet_manager_mail.claim_records(FLEET_HOME))
+            + "\n" if body else "")
         return (
             f"{block}{lead} {pointer} That file has been REWRITTEN since "
             f"you last read it -- read it again rather than reusing an "

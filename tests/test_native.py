@@ -402,8 +402,12 @@ class TestDispatchBg:
     def test_dispatch_bg_resume_argv_carries_manager_message(self, native_home):
         """Exercise the real dispatch builder, not only its prompt helper."""
         calls = []
-        entry = fleet.fleet_manager_mail.issue(
-            fleet.FLEET_HOME, "old-sid", "STEER-TOKEN-42", {"kind": "supervisor"})
+        claim = {"state": "active", "manager_mail": [{
+            "id": "11111111-2222-4333-8444-555555555555", "sids": ["old-sid"],
+            "body_sha256": fleet.fleet_manager_mail.digest("STEER-TOKEN-42")}]}
+        fleet.write_incarnation(claim)
+        entry = fleet.fleet_manager_mail.entry(
+            "11111111-2222-4333-8444-555555555555", "STEER-TOKEN-42")
         fleet.dispatch_bg(
             "w1", "C:/proj", "rewritten task body", "accept",
             resume_sid="old-sid", inline_kind="steer", inline_body=entry,

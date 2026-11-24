@@ -180,13 +180,14 @@ def _read_and_discard(claimed_file):
 
 
 def _render_mail(contents, session_id, fleet_home=None):
-    """Trust only receipt-backed manager mail (bin/fleet_manager_mail.py)."""
+    """Trust only claim-recorded manager mail (bin/fleet_manager_mail.py)."""
     home = fleet_home if fleet_home is not None else _fleet_home()
     bin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if bin_dir not in sys.path:
         sys.path.insert(0, bin_dir)
     import fleet_manager_mail
-    return fleet_manager_mail.render(contents, session_id, home)
+    return fleet_manager_mail.render(
+        contents, session_id, fleet_manager_mail.claim_records(home))
 
 
 def main(state=None):
