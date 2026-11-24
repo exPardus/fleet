@@ -1615,7 +1615,7 @@ def test_push_argv_ignores_upstream_with_different_branch_name(tmp_path):
     assert fleet._wave_push_argv(work) == ["push"]
 
 
-def _gh_audit_run(subjects, lane_worktree=None):
+def _gh_audit_run(subjects):
     def run(argv, **kwargs):
         if argv[1] == "log":
             return subprocess.CompletedProcess(argv, 0, subjects, "")
@@ -1657,6 +1657,18 @@ def test_merge_audit_mixes_convention_and_github_subjects(tmp_path, monkeypatch)
         ("fleet/w1", "aaaaaaa"), ("fleet/w2", "bbbbbbb")]
     assert unparsed == []
     assert len(lanes) + len(unparsed) == 2
+
+
+@pytest.mark.parametrize("origin_branch", ["lane/w1", "w1"])
+def test_merge_audit_github_merge_of_a_different_branch_is_not_credited(
+        tmp_path, monkeypatch, origin_branch):
+    home = _home(tmp_path, monkeypatch, {
+        "w1": {"branch": "fleet/w1", "status": "idle", "substrate": "claude"}})
+    run = _gh_audit_run(
+        f"abcdef1234567\tMerge pull request #5 from someone/{origin_branch}\n")
+    lanes, unparsed = fleet._wave_merge_audit(home, "base", run=run)
+    assert lanes == []
+    assert unparsed == ["abcdef1"]
 
 
 def test_merge_audit_github_subject_for_unknown_branch_stays_unparsed(tmp_path, monkeypatch):

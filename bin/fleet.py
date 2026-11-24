@@ -19855,8 +19855,15 @@ def _wave_github_merge_lane(repo, subject, run=subprocess.run, workers=None, ali
     for token in candidates:
         worktree, _name, record = _wave_lane_join(
             repo, token, run=run, workers=workers, aliases=aliases)
-        if record is not None:
-            return token, _wave_record_substrate(repo, worktree, record=record)
+        if record is None:
+            continue
+        # A stripped token names a worker only when that row records no branch
+        # or the very branch GitHub merged; otherwise it is a different branch.
+        recorded = record.get("branch")
+        if (not (aliases or {}).get(token)
+                and isinstance(recorded, str) and recorded and recorded != branch):
+            continue
+        return token, _wave_record_substrate(repo, worktree, record=record)
     return None
 
 
