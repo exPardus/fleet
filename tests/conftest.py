@@ -360,7 +360,12 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
     import json
 
     import fleet_codex
-    from codex_test_support import hermetic_codex_argv
+    import fleet_codex_schema
+    from codex_test_support import fake_combined_schema, hermetic_codex_argv
+
+    HERMETIC_COMBINED_SCHEMA = fake_combined_schema()
+    hermetic_combined = (json.dumps(HERMETIC_COMBINED_SCHEMA, sort_keys=True)
+                         + "\n").encode()
 
     root = tmp_path_factory.mktemp("hermetic-codex")
     # POSIX can execute the extensionless shebang directly.  Windows does not
@@ -382,6 +387,8 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
         "    out.mkdir(parents=True, exist_ok=True)\n"
         "    (out / 'codex_app_server_protocol.v2.schemas.json')"
         f".write_bytes({HERMETIC_CODEX_SCHEMA!r})\n"
+        "    (out / 'codex_app_server_protocol.schemas.json')"
+        f".write_bytes({hermetic_combined!r})\n"
         "elif sys.argv[1:] == ['app-server', '--listen', 'stdio://']:\n"
         "    first = json.loads(sys.stdin.readline())\n"
         "    result = {'serverInfo': {'name': 'hermetic-codex', "
@@ -406,6 +413,12 @@ def _hermetic_codex(tmp_path_factory, monkeypatch):
             HERMETIC_CODEX_VERSION].read_text("utf-8"))
     reviewed.update(
         schema_sha256=hashlib.sha256(HERMETIC_CODEX_SCHEMA).hexdigest())
+    # The host also compares used shapes, so the fake emits a complete
+    # combined schema and the manifest pins its used-schema digest.
+    used_total, used_entries = fleet_codex_schema.used_schema_digests(
+        HERMETIC_COMBINED_SCHEMA)
+    reviewed.update(used_schema_sha256=used_total,
+                    used_schema_entries=used_entries)
     manifest = root / "manifest.json"
     manifest.write_text(json.dumps(reviewed), encoding="utf-8")
     monkeypatch.setitem(

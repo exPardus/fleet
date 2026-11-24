@@ -140,15 +140,52 @@ That compatibility adapter cannot provide the target lifecycle:
 
 ### 3.2 Reviewed Codex v2 schemas
 
-For a new host, the adapter selects an explicit reviewed manifest from exact
-`codex --version` output. Versions 0.155.1, 0.160.0, 0.161.0, 0.162.0 and
-0.171.0 are reviewed; any other version refuses before host startup, and an
-installed schema whose digest
-differs from its selected manifest never publishes ready. An already-live host
-is instead authenticated against the reviewed version and digest recorded in
-its metadata, so upgrading the installed CLI does not strand native work owned
-by the prior reviewed host. The adapter begins with `initialize` and
-`initialized`. All reviewed generated schemas expose:
+Versions 0.155.1, 0.160.0, 0.161.0, 0.162.0 and 0.171.0 are reviewed. The
+launch gate compares the schema of the calls Fleet uses, not the release
+version. A new host starts when either check passes:
+
+- **Exact:** the installed version is reviewed, the generated v2 bundle has
+  that manifest's raw `schema_sha256`, and the combined schema gives that
+  manifest's `used_schema_sha256`. The v2 digest alone does not cover used v1
+  shapes such as `initialize` and the answered server requests. A reviewed
+  manifest without a used-schema contract refuses launch.
+- **Used shapes:** the generated combined schema
+  (`codex_app_server_protocol.schemas.json`) gives a used-schema digest equal
+  to the `used_schema_sha256` of a reviewed manifest.
+
+`fleet_codex_schema.USED_SCHEMA_INVENTORY` lists every request Fleet sends,
+every server request it answers, and every notification it sends or consumes,
+with each response definition. For each entry, the digest covers the method
+variant, its response, the enclosing envelope's own constraints (everything
+except its variant list), every other variant that may also accept the method,
+and every definition reachable through `$ref`. A `oneOf` rejects a message two
+variants accept, so a variant counts as unrelated only when its `method` enum
+or const provably excludes the used method. A second variant for exactly that
+method refuses as ambiguous.
+Description and title strings do not count. A missing used method, a reference
+that does not resolve, or any changed used shape refuses launch. The refusal
+names the drifted calls against the newest reviewed manifest. A test derives
+the Codex method names in `bin/` source and requires them to equal the
+inventory. Every name in a method position must be in the inventory or in a
+reviewed list of Fleet's own IPC names, so a call to a method that no reviewed
+release defines also fails the test instead of escaping it. The
+version and the raw digest stay in host metadata as diagnostics. Verbs pinned
+to an exact raw digest (approval cancellation, terminal-quota recovery) still
+require that digest.
+
+The checked 0.155.1-0.172.0 history shows each release changing at least one
+used closure, mostly through `Turn`, `ThreadItem` or `CodexErrorInfo`.
+0.172.0 differs from 0.171.0 only in `CodexErrorInfo`, which Fleet reads, so
+0.172.0 still needs review. The gate admits a release that leaves every used
+shape unchanged; it does not admit a release because it is newer.
+
+An already-live host is authenticated against its metadata: a reviewed
+version with that manifest's raw digest, or a reviewed `used_schema_digest`.
+A host publishes `used_schema_digest` only when it was admitted by used shapes;
+an exact host publishes none and stays bound to its version and raw digest.
+Upgrading the installed CLI therefore does not strand native work owned by the
+prior reviewed host. The adapter begins with `initialize` and `initialized`.
+All reviewed generated schemas expose:
 
 | Concern | Exact public surface |
 | --- | --- |
@@ -260,7 +297,7 @@ New provider-management, feedback and account-security methods, and three
 new thread notifications are outside Fleet's sent and
 consumed method set. The response-item and realtime/audio extensions are
 outside Fleet's text-result path. No consumed field was removed or made
-required, so the adapter needs only the exact-version manifest entry. The
+required, so the adapter needs only the reviewed manifest entry. The
 no-inference fixture retains the same RPC sequence and forbids all turn
 methods; it records an expected contract, not proof of a live run.
 
@@ -1162,7 +1199,7 @@ Grade actions and side effects, not wording.
 
 | ID | Layer | Test | Required result |
 | --- | --- | --- | --- |
-| P1 | Schema | Generate 0.155.1, 0.160.0, 0.161.0, 0.162.0 and 0.171.0 v2 schemas; validate each fixture digest | Each reviewed exact version/digest accepted; unknown version or drift disables native only |
+| P1 | Schema | Generate 0.155.1, 0.160.0, 0.161.0, 0.162.0 and 0.171.0 v2 schemas; validate each fixture digest | Each reviewed exact version/digest accepted; an unknown version launches only with reviewed used shapes; used-shape drift disables native only |
 | P2 | Protocol | Initialize; start/read/list/resume disposable thread at exact cwd | Real ID/cwd agree |
 | P3 | Protocol | Start, active, steer with expected turn, page history, complete | One real turn lineage; final result persisted |
 | P4 | Protocol | Interrupt active disposable turn | Supported request with real IDs; same turn observed terminal |

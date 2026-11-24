@@ -129,7 +129,8 @@ class Host:
     def __init__(self, *, home: Path, generation: str, endpoint: str,
                  transport: str, app_server_command: list[str],
                  schema_manifest: Path, schema_command: list[str],
-                 idle_timeout: float) -> None:
+                 idle_timeout: float, codex_version: str | None = None,
+                 reviewed_manifests: list[Path] | None = None) -> None:
         self.home = _canonical_home(home)
         self.generation = generation
         self.endpoint = endpoint
@@ -143,8 +144,15 @@ class Host:
         self.last_activity = time.monotonic()
         self.stop = threading.Event()
         manifest = json.loads(schema_manifest.read_text(encoding="utf-8"))
-        self.schema_digest = manifest["schema_sha256"]
-        self.expected_version = manifest["codex_version"]
+        self.reviewed_schema_digest = manifest["schema_sha256"]
+        self.schema_digest = self.reviewed_schema_digest
+        self.reviewed_version = manifest["codex_version"]
+        self.reviewed_used_digest = manifest.get("used_schema_sha256")
+        self.reviewed_used_entries = manifest.get("used_schema_entries")
+        self.expected_version = codex_version or self.reviewed_version
+        self.reviewed_manifests = list(reviewed_manifests or ())
+        # Set only when the installed schema matched by used shapes.
+        self.used_schema_digest: str | None = None
         self.client: AppServerClient | None = None
         self.listener: socket.socket | None = None
         self.journal = OperationJournal(self.home, self.generation)
@@ -368,6 +376,7 @@ class Host:
             "ipc_protocol_version": IPC_PROTOCOL_VERSION,
             "codex_protocol_version": 2,
             "schema_digest": self.schema_digest,
+            "used_schema_digest": self.used_schema_digest,
             "ready": True,
         }
 
@@ -481,9 +490,45 @@ class Host:
                 actual = hashlib.sha256(schema.read_bytes()).hexdigest()
             except OSError as exc:
                 raise RuntimeError("installed Codex schema bundle is missing") from exc
-            if not hmac.compare_digest(actual, self.schema_digest):
+            exact = (hmac.compare_digest(actual, self.reviewed_schema_digest)
+                     and self.expected_version == self.reviewed_version)
+            # The v2 digest does not cover the used v1 shapes in the combined
+            # schema, so even an exact release compares used shapes. Another
+            # release launches only if every call Fleet uses has the schema
+            # of a reviewed release; its version is a diagnostic.
+            from fleet_codex_schema import (
+                SchemaDrift, drifted_calls, match_reviewed,
+                read_combined_schema, used_schema_digests)
+            try:
+                document = read_combined_schema(Path(directory))
+                if exact and not isinstance(self.reviewed_used_digest, str):
+                    raise SchemaDrift(
+                        f"reviewed {self.reviewed_version} manifest has no "
+                        "used-schema contract")
+                if exact:
+                    used_digest, entries = used_schema_digests(document)
+                    if not hmac.compare_digest(
+                            used_digest, self.reviewed_used_digest):
+                        changed = drifted_calls(
+                            entries, {"used_schema_entries":
+                                      self.reviewed_used_entries})
+                        raise SchemaDrift(
+                            "installed Codex used shapes differ from the "
+                            f"reviewed {self.reviewed_version} contract: "
+                            + ", ".join(changed[:8]))
+                else:
+                    used_digest, _ = match_reviewed(
+                        document,
+                        {str(path): Path(path)
+                         for path in self.reviewed_manifests})
+            except SchemaDrift as exc:
                 raise RuntimeError(
-                    "installed Codex schema does not match the reviewed digest")
+                    "installed Codex schema does not match the reviewed digest "
+                    f"or a reviewed used-schema contract: {exc}") from exc
+            self.schema_digest = actual
+            # Published only for a host admitted by used shapes; an exact
+            # host stays bound to its reviewed version and raw digest.
+            self.used_schema_digest = None if exact else used_digest
 
     def _heartbeat(self) -> None:
         while not self.stop.wait(0.5):
@@ -1112,6 +1157,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--schema-manifest", type=Path, required=True)
     parser.add_argument("--schema-command-json", required=True)
     parser.add_argument("--idle-timeout", type=float, default=0.0)
+    parser.add_argument("--codex-version")
+    parser.add_argument("--reviewed-manifests-json", default="[]")
     args = parser.parse_args(argv)
     command = json.loads(args.app_server_command_json)
     if not isinstance(command, list) or not all(isinstance(item, str) and item for item in command):
@@ -1120,6 +1167,10 @@ def main(argv: list[str] | None = None) -> int:
     if (not isinstance(schema_command, list)
             or not all(isinstance(item, str) and item for item in schema_command)):
         raise SystemExit("invalid schema command")
+    reviewed_manifests = json.loads(args.reviewed_manifests_json)
+    if (not isinstance(reviewed_manifests, list)
+            or not all(isinstance(item, str) and item for item in reviewed_manifests)):
+        raise SystemExit("invalid reviewed manifests")
     host = Host(
         home=args.home,
         generation=args.generation,
@@ -1129,6 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
         schema_manifest=args.schema_manifest,
         schema_command=schema_command,
         idle_timeout=args.idle_timeout,
+        codex_version=args.codex_version,
+        reviewed_manifests=[Path(item) for item in reviewed_manifests],
     )
     signal.signal(
         signal.SIGTERM,

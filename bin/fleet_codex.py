@@ -109,13 +109,23 @@ def authorize_failed_client_recovery_operation(
     raise HostRejected("failed-client recovery barrier blocks provider mutation")
 
 
-def _reviewed_schema_manifest(
+def _version_key(version: str) -> tuple:
+    return tuple(int(part) if part.isdigit() else -1
+                 for part in version.split("."))
+
+
+def _reviewed_schema_selection(
     command: Sequence[str],
     *,
     env: Mapping[str, str] | None = None,
     cwd: Path | None = None,
-) -> Path:
-    """Select an explicit reviewed schema from the installed Codex version."""
+) -> tuple[Path, str]:
+    """Return a reviewed manifest and the installed Codex version.
+
+    A reviewed version selects its own manifest. Another version selects the
+    newest reviewed manifest; the host then launches only if the schema of
+    every call Fleet uses matches a reviewed release (fleet_codex_schema).
+    """
     if not command or not all(isinstance(item, str) and item for item in command):
         raise ValueError("Codex schema command must be a non-empty argv")
     try:
@@ -132,9 +142,21 @@ def _reviewed_schema_manifest(
     version = words[1]
     manifest = REVIEWED_SCHEMA_MANIFESTS.get(version)
     if manifest is None:
-        raise HostUnavailable(
-            f"installed Codex version {version!r} has no reviewed schema")
-    return manifest
+        if not REVIEWED_SCHEMA_MANIFESTS:
+            raise HostUnavailable("no reviewed Codex schema is available")
+        manifest = REVIEWED_SCHEMA_MANIFESTS[
+            max(REVIEWED_SCHEMA_MANIFESTS, key=_version_key)]
+    return manifest, version
+
+
+def _reviewed_schema_manifest(
+    command: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> Path:
+    """Select the reviewed manifest for the installed Codex version."""
+    return _reviewed_schema_selection(command, env=env, cwd=cwd)[0]
 
 
 @dataclass(frozen=True)
@@ -2256,7 +2278,7 @@ class CodexHostClient:
             if (existing is not None
                     and (not existing._metadata_stale() or existing._owner_live())):
                 raise HostUnavailable("Codex host is busy or unresponsive; refusing replacement")
-            schema_manifest = _reviewed_schema_manifest(
+            schema_manifest, codex_version = _reviewed_schema_selection(
                 schema_command_argv, env=child_env, cwd=home)
             key_path = state_dir / "host.key"
             if key_path.exists():
@@ -2284,6 +2306,9 @@ class CodexHostClient:
                 "--app-server-command-json", json.dumps(command),
                 "--schema-manifest", str(schema_manifest),
                 "--schema-command-json", json.dumps(schema_command_argv),
+                "--codex-version", codex_version,
+                "--reviewed-manifests-json", json.dumps(
+                    [str(path) for path in REVIEWED_SCHEMA_MANIFESTS.values()]),
                 "--idle-timeout", str(idle_timeout),
             ]
             popen_args: dict[str, Any] = {
@@ -2336,14 +2361,33 @@ class CodexHostClient:
         version = metadata.get("codex_version")
         schema_manifest = (REVIEWED_SCHEMA_MANIFESTS.get(version)
                            if isinstance(version, str) else None)
-        if schema_manifest is None:
-            raise UnsafeHostState(
-                "Codex host metadata names an unreviewed Codex version")
-        try:
-            manifest = json.loads(schema_manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise UnsafeHostState(
-                "reviewed Codex schema manifest is unreadable") from exc
+        manifest = None
+        if schema_manifest is not None:
+            try:
+                manifest = json.loads(schema_manifest.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise UnsafeHostState(
+                    "reviewed Codex schema manifest is unreadable") from exc
+        exact = (isinstance(manifest, dict)
+                 and metadata.get("schema_digest") == manifest.get("schema_sha256"))
+        if not exact:
+            # A host that matched a reviewed contract by used shapes publishes
+            # that digest. Its version and full schema digest are diagnostics.
+            from fleet_codex_schema import reviewed_used_schemas
+            used_digest = metadata.get("used_schema_digest")
+            reviewed = reviewed_used_schemas(REVIEWED_SCHEMA_MANIFESTS)
+            schema_digest = metadata.get("schema_digest")
+            if (not isinstance(version, str) or not version
+                    or not isinstance(used_digest, str)
+                    or used_digest not in reviewed
+                    or not isinstance(schema_digest, str)
+                    or len(schema_digest) != 64
+                    or any(ch not in "0123456789abcdef" for ch in schema_digest)):
+                raise UnsafeHostState(
+                    "Codex host metadata names neither a reviewed schema nor "
+                    "a reviewed used-schema contract")
+            manifest = {**reviewed[used_digest], "codex_version": version,
+                        "schema_sha256": schema_digest}
         try:
             generation = uuid.UUID(metadata["generation"])
         except (ValueError, TypeError, AttributeError) as exc:
