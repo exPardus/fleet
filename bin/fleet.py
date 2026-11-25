@@ -9957,8 +9957,12 @@ def _cmd_send_native(name: str, message: str,
         ceiling_file_path(old_sid).unlink()
     except OSError:
         pass
+    # Stop the parent process this fork retired (it stays resident otherwise),
+    # under the same rules as supervisor forks: the fork must be roster-live,
+    # the parent idle, its mailbox empty, and its sid owned by this row alone.
     _reap_current_supervisor_forks(name, expected_sid=new_sid, run=run,
-                                   which=which, sleep=sleep, attempts=3)
+                                   which=which, sleep=sleep, attempts=3,
+                                   any_worker=True)
     print(f"{name}: fork-steered (new session {short_id}) -- fork carries full transcript (G2b)")
     return 0
 
@@ -13869,23 +13873,37 @@ def _reap_mail_pending(sid: str) -> bool:
 def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
                                    run=subprocess.run, which=shutil.which,
                                    sleep=time.sleep, roster_fn=None, attempts=1,
-                                   caller_sid=None):
+                                   caller_sid=None, any_worker=False):
     """Stop idle pre-steer processes only after the current fork is roster-live.
     Keep the current row and sid history. Send takes three fresh observations;
     lifecycle passes retry deferred cleanup. Bound each pass to four stops with
-    five-second CLI-attempt timeouts; outcomes alone cannot prove a live fork."""
+    five-second CLI-attempt timeouts; outcomes alone cannot prove a live fork.
+    `any_worker` extends this to the named ordinary (non-supervisor) worker:
+    a fork-steer otherwise leaves every parent session resident until kill."""
     caller = caller_sid or current_caller_session()
     fetch = roster_fn or (lambda: _fetch_agents_roster(which=which, run=run))
     stopped = []
+    ordinary = (any_worker and isinstance(name, str)
+                and not _is_supervisor_shaped(name))
+    label = "fork" if ordinary else "supervisor_fork"
 
     def current():
         ok, _reason, data = _read_registry_readonly()
-        claim = read_incarnation()
-        if not ok or not isinstance(claim, dict) or claim.get("state") == "released":
+        if not ok:
             return None
         workers = data.get("workers", {})
-        holders = [(n, r) for n, r in workers.items()
-                   if _record_is_supervisor_claim_holder(r, claim=claim) is True]
+        if ordinary:
+            # An ordinary worker is resolved by name; the same ownership,
+            # current-sid and sid-history checks below still apply.
+            claim = {}
+            holders = [(name, workers[name])] if isinstance(
+                workers.get(name), dict) else []
+        else:
+            claim = read_incarnation()
+            if not isinstance(claim, dict) or claim.get("state") == "released":
+                return None
+            holders = [(n, r) for n, r in workers.items()
+                       if _record_is_supervisor_claim_holder(r, claim=claim) is True]
         if len(holders) != 1:
             return None
         n, record = holders[0]
@@ -13922,7 +13940,10 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
             return stopped
         # Retire newest parents first. No daemon subprocess runs under the
         # fleet lock; re-read the authority and mail immediately before stop.
-        live = _fork_took_over_rows(entries)
+        # An ordinary worker's idle parent may report `state: done` while its
+        # process stays resident; pid + idle status is the stop evidence there
+        # (the same rows the pre-stop recheck below reads).
+        live = (_sup_guard_live_rows if ordinary else _fork_took_over_rows)(entries)
         candidates = [sid for sid in reversed(initial[2])
                       if len(live.get(sid, [])) == 1
                       and live[sid][0].get("status") == "idle"
@@ -13947,7 +13968,7 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
                 retired, run=run, which=which,
                 timeout=_RETIRED_SID_SWEEP_TIMEOUT_SECONDS,
                 ref=old_rows[0].get("id"))
-            _append_event_quiet("supervisor_fork_retired", initial[0],
+            _append_event_quiet(f"{label}_retired", initial[0],
                                 session_id=retired, live_fork=initial[1],
                                 stopped=ok, outcome=outcome)
             print(f"fleet: {initial[0]}: retiring pre-steer session "
@@ -13955,7 +13976,7 @@ def _reap_current_supervisor_forks(name=None, expected_sid=None, *,
             if ok:
                 stopped.append(retired)
     except Exception as exc:
-        print(f"fleet: supervisor fork retirement deferred -- "
+        print(f"fleet: {label.replace('_', ' ')} retirement deferred -- "
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
     return stopped
 

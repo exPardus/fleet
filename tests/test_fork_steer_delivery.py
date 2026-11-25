@@ -192,6 +192,10 @@ def _paths_named_in(turn: str):
 
 def _recorder(sid, log):
     def _run(argv, **_kw):
+        # `claude stop` retires the fork's parent after a fork-steer; it is
+        # not a launch, so it is not a dispatch under test here.
+        if len(argv) > 1 and argv[1] == "stop":
+            return types.SimpleNamespace(returncode=0, stdout="Stopped", stderr="")
         log.append(Dispatch(argv))
         return types.SimpleNamespace(
             returncode=0,
