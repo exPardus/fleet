@@ -809,24 +809,48 @@ def refuse_if_archived(name: str, record: dict, action: str) -> None:
         )
 
 
+def _archived_brief(name: str):
+    stem = name_fs_stem(name)
+    numbered = []
+    for path in archive_root().glob(f"{stem}.*"):
+        suffix = path.name[len(stem) + 1:]
+        if path.is_dir() and suffix.isdigit():
+            numbered.append((int(suffix), path))
+    dirs = [path for _n, path in sorted(numbered, reverse=True)]
+    dirs.append(archive_root() / stem)
+    for directory in dirs:
+        for filename in ("brief.md", "task.md"):
+            if (directory / filename).is_file():
+                return directory / filename
+    return next((path for path in (brief_file_path(name), task_file_path(name))
+                 if path.is_file()), None)
+
+
 def _archived_respawn_command(name: str, record: dict) -> str:
     workers = (_registry_records_or_none() or {}).get("workers") or {}
     base = re.sub(r"-\d+$", "", name)
     index = 2
     while f"{base}-{index}" in workers:
         index += 1
-    brief = next((path for path in (brief_file_path(name), task_file_path(name))
-                  if path.exists()), None)
-    parts = ["fleet", "spawn", f"{base}-{index}", "--dir",
-             shlex.quote(str(record.get("cwd") or "<dir>")),
-             "--mode", shlex.quote(str(record.get("mode") or "dontask"))]
-    if record.get("model"):
-        parts += ["--model", shlex.quote(str(record["model"]))]
-    if record.get("category"):
-        parts += ["--category", shlex.quote(str(record["category"]))]
-    parts += ["--task", shlex.quote(f"@{brief.as_posix()}") if brief else "<task>",
-              "--nonce", "<NONCE>"]
-    return "`" + " ".join(parts) + "`"
+    brief = _archived_brief(name)
+    argv = ["fleet", "spawn", f"{base}-{index}", "--dir",
+            str(record.get("cwd") or "<dir>"),
+            "--mode", str(record.get("mode") or "dontask")]
+    for flag, key in (("--model", "model"), ("--category", "category"),
+                      ("--setting-sources", "setting_sources"),
+                      ("--token-ceiling", "token_ceiling")):
+        if record.get(key) is not None and record.get(key) != "":
+            argv += [flag, str(record[key])]
+    if _codex_record_route(record) == "mcx":
+        argv += ["--codex-adapter", "mcx"]
+    argv += ["--task", f"@{brief.as_posix()}" if brief else "<task>",
+             "--nonce", "<NONCE>"]
+    if PLATFORM.is_windows:
+        rendered = subprocess.list2cmdline(argv)
+    else:
+        rendered = " ".join(arg if arg in ("<task>", "<NONCE>", "<dir>")
+                            else shlex.quote(arg) for arg in argv)
+    return "`" + rendered + "`"
 
 
 def _write_ceiling_file(sid: str, ceiling) -> None:
