@@ -184,20 +184,20 @@ The verb, both scheduler backends, and the adapter seam all exist — which is w
 no longer reads `ready-for-build`:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def cmd_autoclean" bin/fleet.py
 7634:def cmd_autoclean(args, run=subprocess.run, which=shutil.which) -> int:
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "class _WindowsPlatform\|class _PosixPlatform" bin/fleet.py
 391:class _WindowsPlatform:
 522:class _PosixPlatform:
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -c "raise UnsupportedPlatformError" bin/fleet.py
 0
 ```
@@ -205,7 +205,7 @@ $ grep -c "raise UnsupportedPlatformError" bin/fleet.py
 The §7.2 supervisor exemption below shipped too:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def _record_is_supervisor_claim_holder\|supervisor claim-holder -- protected" bin/fleet.py
 2087:def _record_is_supervisor_claim_holder(record, claim=None):
 6799:        return (False, "supervisor claim-holder -- protected while live (§7.2)")
@@ -215,13 +215,13 @@ The two tags this document keeps — the `scheduled_task_*` rename and the combi
 wiring — are both still absent, and the adapter methods still carry their autoclean-shaped names:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -cE "scheduled_task_|\"--supervisor-beat\"" bin/fleet.py
 0
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def autoclean_task_install" bin/fleet.py
 446:    def autoclean_task_install(self, task_name: str, command: str,
 604:    def autoclean_task_install(self, task_name: str, command: str,

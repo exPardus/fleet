@@ -51,7 +51,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 # THE FOUNDING ARTIFACT of the parser-evasion class (H1, break-lens FINAL GATE r3,
 # `docs/reviews/THREE-TIER-REDRAFT-REVIEW-2026-07-23-break.md` §2.4-§2.5).
 #
-# `4e540f8` is "three-tier fix-wave 2"; its parent is the tree in which four
+# `e199be1` is "three-tier fix-wave 2"; its parent is the tree in which four
 # receipt blocks sat behind `> ` blockquote and 2-space list gutters. The old
 # parser matched `$ `/`# at ` on RAW lines, so those blocks were never parsed:
 # it printed `34/34 receipts reproduce exactly (37 fenced blocks ...)` and exited
@@ -59,7 +59,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 #
 # The fixture IS the artifact -- it is read out of git history at test time, never
 # hand-transcribed, so it cannot be tuned to the detector.
-FOUNDING_ARTIFACT = "4e540f8~1:docs/specs/three-tier-command.md"
+FOUNDING_ARTIFACT = "e199be1~1:docs/specs/three-tier-command.md"
 
 # The eight gutter-hidden fence markers in that artifact, by line number, as
 # reconstructed independently by the r3 census (blockquote §7.2 B1; 2-space list
@@ -93,7 +93,7 @@ RECEIPT_FLOOR = {
 
 # A commit whose bin/fleet.py predates the me/ul + me/daemon merges, used by the
 # drift tests below. Any commit reachable from this branch works.
-PIN = "091d5fa"
+PIN = "af50585"
 PINNED_LINE = "6849:def incarnation_path() -> Path:"
 HARNESS = REPO / "tools" / "verify_receipts.py"
 SPEC_DIR = REPO / "docs" / "specs"
@@ -517,7 +517,7 @@ def test_clean_prose_is_not_flagged(vr):
         "  - and a nested one, indented, about `git log` at HEAD\n"
         "\n"
         "```\n"
-        "# at 235421e56bfd328a7e913e519a1459ccf55918dc\n"
+        "# at 78781a8b9efe1dc976f64b5a72328045240824cc\n"
         "$ echo clean\n"
         "clean\n"
         "```\n"

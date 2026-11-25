@@ -7,7 +7,7 @@ constraint. This test keeps the constraint tied to the shipped call graph:
     quarantine a corrupt registry -- they read
     `fleet.status_snapshot()` and exit 0.
 
-Measured 2026-07-27 at `02bf276`, that is true of `bin/fleet_statusline.py` and
+Measured 2026-07-27 at `ccb896c`, that is true of `bin/fleet_statusline.py` and
 false of every read-only `/fleet:*` command: `cmd_status` (bare path), `cmd_peek`,
 `cmd_result` and `fleet doctor` each take `fleet_lock()` and then
 `load_registry()`, which RENAMES a corrupt `state/fleet.json` aside. The receipts
@@ -311,7 +311,7 @@ def test_doctrine_is_not_restated_unqualified_while_it_is_false(
     assert not unqualified, (
         f"{doc.name}: paragraph(s) at line(s) {unqualified} restate the D4 "
         f"doctrine as fact while shipped code violates it. Measured at "
-        f"02bf276: `fleet status`/`peek`/`result`/`doctor` take `fleet.lock` "
+        f"ccb896c: `fleet status`/`peek`/`result`/`doctor` take `fleet.lock` "
         f"and quarantine-rename a corrupt `state/fleet.json`; only the "
         f"statusline honours D4. Either mark the claim as the REQUIREMENT and "
         f"state the CURRENT STATE beside it (see terminal-surface.md D4), or "
@@ -320,7 +320,7 @@ def test_doctrine_is_not_restated_unqualified_while_it_is_false(
 
 # The six restatements as they read BEFORE the views-doctrine slice corrected
 # them -- i.e. the exact prose the measurement showed false. Verbatim from
-# `02bf276`. `_CLAIM_RE` must recognise every one of them: these are precisely
+# `ccb896c`. `_CLAIM_RE` must recognise every one of them: these are precisely
 # the sentences a future author would restore, and a regex that stops seeing them
 # is a disarmed pin regardless of what the documents currently say.
 #
@@ -669,7 +669,7 @@ def test_the_receipt_section_is_present_and_cited():
     assert "## Receipts — D4 measured against shipped code" in spec, (
         "the D4 receipts section is gone from terminal-surface.md -- the "
         "CURRENT STATE paragraphs now cite nothing.")
-    assert "# at 02bf276" in spec, (
+    assert "# at ccb896c" in spec, (
         "the D4 receipts lost their commit pin. A receipt is a claim about a "
         "commit; an unpinned one is checked against the working tree and rots.")
     assert "tests/test_views_doctrine.py" in spec and \

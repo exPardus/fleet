@@ -2436,7 +2436,7 @@ class TestContinuityExitCode:
 
 class TestMintedValueCliPresentation:
     """Root cause of the test_a_valid_proof_still_exits_0 flake (pre-existing
-    on 31a21f8, failed ~once per full run, passed isolated and on re-run).
+    on fd5a71b, failed ~once per full run, passed isolated and on re-run).
 
     `mint_nonce()` is `secrets.token_urlsafe(32)` -- base64url, so ~1/64 of
     minted values begin with "-". argparse's SPACE form reads such a value as

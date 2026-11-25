@@ -5,7 +5,7 @@
 at `c73ab84` after 5 waves, 3 dual-lens gate rounds + 2 confirmation passes, final break-lens merge
 verdict "fit for operator ratification"; the three claim-nonce build-slice prerequisites disclosed
 at ratification gate the build, not this status). This document re-drafts the withdrawn PROPOSAL (its full prior text is
-recoverable from git history at `235421e`^) on top of two things that did not exist when the PROPOSAL
+recoverable from git history at `78781a8`) on top of two things that did not exist when the PROPOSAL
 was frozen: `docs/specs/claim-nonce.md` (**spec-of-record, ratified by the operator 2026-07-23**, gate
 question decided **option (b)**) and the re-pinned `docs/specs/native-substrate.md` (2.1.212 transient
 daemon, 2.1.216 daemon-wedge). It answers the 2026-07-17 dual-lens adjudication's binding items **4–10**
@@ -29,10 +29,10 @@ with a 3.10 floor, `bin/fleet.py` stdlib-only single file, forward slashes in ho
 ## Vantage and receipt pin
 
 Every `$ ` receipt below was executed by the author in worktree `C:\projects\fleet-mf-threetier`
-(branch `mf/three-tier`), and is pinned **`# at 235421e56bfd328a7e913e519a1459ccf55918dc`** — this
+(branch `mf/three-tier`), and is pinned **`# at 78781a8b9efe1dc976f64b5a72328045240824cc`** — this
 worktree's HEAD at authoring time. `tools/verify_receipts.py` materialises that commit's tree and
 re-runs each block against it, so an unrelated later change to `bin/fleet.py` cannot rot these lines.
-Line numbers below are this commit's; they differ from `claim-nonce.md`'s (pinned `091d5fa`) because
+Line numbers below are this commit's; they differ from `claim-nonce.md`'s (pinned `af50585`) because
 `bin/fleet.py` has moved since. Where a claim describes behaviour **not yet in shipped code**, it
 carries `[UNBUILT — owned by the three-tier build slice]` and a no-match receipt proving its absence
 at this commit (§Appendix A collects them).
@@ -40,13 +40,13 @@ at this commit (§Appendix A collects them).
 **Tag currency, 2026-07-27 (the `unbuilt-sweep` pass).** The three-tier build slice shipped
 (`c6fde34`), plus the `sup-spawn` choreography (`31e139e`) and two fix waves — so most of the
 `[UNBUILT]` tags below described a future that has since arrived, and the document was under-claiming
-what exists. Appendix A's no-match receipts remain **true at their pin** (`235421e5`) and are left
-untouched; **§Appendix A2 re-runs the same questions at `0e8d7ca`** and is the receipt for every tag
-this pass cleared. A tag still reading `[UNBUILT]` below has been re-checked against `0e8d7ca` and is
+what exists. Appendix A's no-match receipts remain **true at their pin** (`78781a8b`) and are left
+untouched; **§Appendix A2 re-runs the same questions at `8f55461`** and is the receipt for every tag
+this pass cleared. A tag still reading `[UNBUILT]` below has been re-checked against `8f55461` and is
 still accurate. Where only part of a claim shipped the tag was **narrowed, not cleared** — those read
 `[PARTLY BUILT …]`.
 
-^ `git show 235421e~0:docs/specs/three-tier-command.md` is the withdrawn PROPOSAL; not re-pasted here
+^ `git show 78781a8:docs/specs/three-tier-command.md` is the withdrawn PROPOSAL; not re-pasted here
 because verify would re-run it, and it is prose, not a receipt.
 
 ---
@@ -135,7 +135,7 @@ ceiling-refused.)*
 There is no hardcoded model id anywhere in `bin/fleet.py`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "claude-opus\|claude-sonnet\|claude-haiku\|claude-fable" bin/fleet.py
 0
 ```
@@ -145,7 +145,7 @@ slice added a tier resolver, band/ceiling/archive/provenance surfaces, and the s
 family — none of it a model id. Re-verified after that work:
 
 ```
-# at 99bb0d6e101f91f30ce9f3b58e8206952fe3591f
+# at 62def4b42e0288db44e7c445e842a740feacd543
 $ grep -c "claude-opus\|claude-sonnet\|claude-haiku\|claude-fable" bin/fleet.py
 0
 ```
@@ -154,7 +154,7 @@ The model reaches a session exactly one way — `--model <value>` on the dispatc
 absent (the CLI/daemon's own default):
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -n '"--model"\|argv += \["--model"' bin/fleet.py
 7733:        argv += ["--model", model]
 8529:        argv += ["--model", args.model]
@@ -168,7 +168,7 @@ concrete model using the daemon's environment (`ANTHROPIC_DEFAULT_OPUS_MODEL`,
 below fleet, in the daemon env** — `bin/fleet.py` has no provider or model-mapping surface of its own:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "CLAUDE_CONFIG_DIR\|ANTHROPIC_\|--provider\|provider" bin/fleet.py
 0
 ```
@@ -262,7 +262,7 @@ Two shipped facts decide the mechanism, and they point the same way:
    important, is *not* a context reset.** Its native path dispatches with `resume_sid=old_sid`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '3909,3912p' bin/fleet.py
         result = dispatch_bg(
             name, cwd, body, mode, model=model, category=category,
@@ -278,7 +278,7 @@ right recovery for *"the same tier is available again"*; it is **not** a tier-ch
 respawn/handoff path, which mints a fresh record and so a fresh context:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '4367,4368p' bin/fleet.py
         new_record = new_worker_record(
             None, cwd, task_for_record, mode, model=model,
@@ -289,7 +289,7 @@ $ sed -n '4367,4368p' bin/fleet.py
 out of the *prior* record a few lines above, unconditionally:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '4309p' bin/fleet.py
     model = before.get("model")
 ```
@@ -298,7 +298,7 @@ and `respawn`'s parser offers no `--model` to override it — note the contrast 
 which *do* get carry-forward-or-override treatment:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8878,8891p' bin/fleet.py | grep -c -- "--model"
 0
 ```
@@ -318,7 +318,7 @@ rather than trimmed). Limit detection is the G11 transcript-tail scan (limit wal
 hook, no roster change, §4.1), and the park records a **reset horizon**:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '1920,1924p' bin/fleet.py
         is_limit, reset_at, kind = scan(sid, transcript_path=path)
         if is_limit:
@@ -330,7 +330,7 @@ $ sed -n '1920,1924p' bin/fleet.py
 and the horizon gate that decides when a parked body may return:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '1635,1640p' bin/fleet.py
     """True iff a `limited` record's limit_reset_at is set AND now >= it. A null
     horizon returns False (never auto-eligible -- needs an operator-set reset or
@@ -376,7 +376,7 @@ chain needs already exists"* — that **overstates the receipts**. `limit_reset_
 code consults it only for records whose status *is* `limited`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '2162p' bin/fleet.py
             "resume_eligible": status == "limited" and _limit_reset_passed(rec),
 ```
@@ -402,7 +402,7 @@ That ritual must be run **by the claim-holding body** — `cmd_sup_handoff_begin
 `_require_claim_holder` callers:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8492p' bin/fleet.py
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
 ```
@@ -411,7 +411,7 @@ But the chain's only trigger is the usage limit, and hitting it parks the body `
 fleet refuses to give it a turn at all:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '3681,3687p' bin/fleet.py
         if status == "limited":
             data["workers"][name] = after
@@ -460,7 +460,7 @@ while a handoff is already in flight, the predecessor is parked holding an **ope
 *also* a `_require_claim_holder` caller:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8654p' bin/fleet.py
         claim, caller = _require_claim_holder(getattr(args, "sid", None))
 ```
@@ -499,7 +499,7 @@ stale-`HANDSHAKE` *seeding* cleanup remains the interface-driven fallback's job,
 Pinned to the build slice's base commit, where the merged branch is present:
 
 ```
-# at 31a21f871e643e20f784048b7e80460986eaefce
+# at fd5a71beb2c0180be0d8d3c23493f123a97d4f65
 $ sed -n '8506p;8563p' bin/fleet.py
       1b. holder parked `limited` with a horizon, and not resumable
     if holder_limited and not resume_ok:
@@ -520,7 +520,7 @@ ruling no record is ever named `supervisor`; every `sup-spawn` launch mints a fr
 it never fires on a freshly minted launch id.)*
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '2815p' bin/fleet.py
         validate_name(args.name, existing=data["workers"].keys())
 ```
@@ -638,7 +638,7 @@ dead-daemon string:
 `supervisor_epoch_check` tests fetch-success and non-emptiness only; there is **no staleness test**:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8117,8126p' bin/fleet.py
 def supervisor_epoch_check(roster_ok: bool, payload):
     """Roster-epoch sanity check, run BEFORE any claim decision (spec §4).
@@ -663,7 +663,7 @@ three-tier spec inherits that disposition and does not reopen it** — the resid
 `_cmd_send_native` refuses up front when the roster snapshot is epoch-suspicious:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '3595,3599p' bin/fleet.py
         if native_epoch_suspicious(roster_ok, roster_entries, {name: rec}):
             raise FleetCliError(
@@ -716,7 +716,7 @@ under a suspicious roster and the scheduler eats the exit code. `fleet beat` is 
 that fixes this. It does not exist today:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c 'add_parser("beat"' bin/fleet.py
 0
 ```
@@ -742,7 +742,7 @@ $ grep -c 'add_parser("beat"' bin/fleet.py
   interacts with `send has no --model` / `model is spawn-immutable`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8865,8866p' bin/fleet.py
     p_send.add_argument("name")
     p_send.add_argument("message")
@@ -772,7 +772,7 @@ supervisor running unattended while the human is away, so no human notices the s
 `send` today records the *target's* sid in its event, **not** any caller/interface provenance:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -n 'append_event("mail_sent"' bin/fleet.py
 3654:                append_event("mail_sent", name, sid=raw_sid, status="working")
 3710:            append_event("mail_sent", name, sid=sid, status=status)
@@ -822,7 +822,7 @@ nonce, is what bounds the damage such a body can do.
 > - `fleet init --autoclean`, `--autoclean-interval-hours`, `--autoclean-remove` — **gone**
 >   (`fleet: error: unrecognized arguments: --autoclean`).
 >
-> The receipts in §6.1/§6.2/§6.3 are pinned at `235421e5` and still verify — **correctly, as history.**
+> The receipts in §6.1/§6.2/§6.3 are pinned at `78781a8b` and still verify — **correctly, as history.**
 > A green receipt here is evidence about that commit and says nothing about HEAD. That is precisely
 > what made this drift hard to see, and it is why this banner exists rather than a re-pin.
 >
@@ -843,14 +843,14 @@ nonce, is what bounds the damage such a body can do.
 seam, a doctor check for the new task, multi-flag refusal semantics, and reconciliation with the
 `ScheduleWakeup` primitive the draft never mentioned.
 
-### 6.1 ~~The generic installer already exists~~ — IT DID AT `235421e5`; IT IS DELETED AT HEAD
+### 6.1 ~~The generic installer already exists~~ — IT DID AT `78781a8b`; IT IS DELETED AT HEAD
 
-**[SUPERSEDED — see §6's banner. Present tense below is as-of `235421e5`, not as-of HEAD.]**
+**[SUPERSEDED — see §6's banner. Present tense below is as-of `78781a8b`, not as-of HEAD.]**
 
 The platform adapter method is already generic over `task_name`, `command`, `interval_hours`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -n "def autoclean_task_install" bin/fleet.py
 409:    def autoclean_task_install(self, task_name: str, command: str,
 567:    def autoclean_task_install(self, task_name: str, command: str,
@@ -867,21 +867,21 @@ scheduler seam — a **rename to `scheduled_task_*` is `[UNBUILT]` cosmetic clea
 
 **[SUPERSEDED — see §6's banner. `_fleet_task_is_ours` no longer exists; the *reasoning* below is the
 part that survives, as a requirement any future scheduled task inherits. Present tense is as-of
-`235421e5`.]**
+`78781a8b`.]**
 
 Item 6's `_autoclean_task_is_ours` path-only defect — which would let `fleet init --autoclean`
 `/Create /F` over a second fleet task — was fixed in M-E. Ownership is now full-identity (resolved
 fleet.py path **and** subcommand **and** fleet-home), on whole quote-stripped tokens, not a substring:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -n "def _fleet_task_is_ours\|def _autoclean_task_is_ours" bin/fleet.py
 5946:def _fleet_task_is_ours(command: str, subcommand: str) -> bool:
 6022:def _autoclean_task_is_ours(command: str) -> bool:
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '6022,6026p' bin/fleet.py
 def _autoclean_task_is_ours(command: str) -> bool:
     """F4 for the autoclean task specifically -- see `_fleet_task_is_ours`.
@@ -939,7 +939,7 @@ task appeared.]**
   referenced in `bin/fleet.py`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "ScheduleWakeup" bin/fleet.py
 0
 ```
@@ -957,7 +957,7 @@ clamp means `autoclean` can rm the supervisor. Both must be resolved by construc
 The seizure threshold is a standalone constant, already independent of any beat period:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '7918p' bin/fleet.py
 SUPERVISOR_CLAIM_STALE_SECONDS = 3600.0   # S: seizure/nag threshold, > beat period + margin (spec §4)
 ```
@@ -981,13 +981,13 @@ margin` as an install-time check in `--supervisor-beat` is `[UNBUILT]`.
 The two constants that collide:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '4914p' bin/fleet.py
 ARCHIVE_TTL_HOURS_DEFAULT = 24.0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '6033,6034p' bin/fleet.py
     if not 1 <= interval_hours <= 23:
         raise FleetCliError("--autoclean-interval-hours must be 1..23 (schtasks /SC HOURLY /MO)")
@@ -1010,7 +1010,7 @@ respawns and hands it off "constantly" (§1), and the shipped handoff dispatches
 independent:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8522p' bin/fleet.py
     name = f"sup|{successor_inc}|successor"
 ```
@@ -1044,7 +1044,7 @@ Today's archive is registry-worker-only with **no** exemption of either kind, an
 would key on does not exist:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '4917,4920p' bin/fleet.py
 def _archive_eligible(name: str, record: dict, roster_entries: list, now,
                       ttl_hours: float = ARCHIVE_TTL_HOURS_DEFAULT) -> tuple:
@@ -1082,7 +1082,7 @@ edits, spec promotion — everything in `the local operator decision record`) to
 never self-approve. No such routing surface exists today:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "NEEDS-OPERATOR\|needs_operator\|pending-decision\|pending_decision" bin/fleet.py
 0
 ```
@@ -1173,7 +1173,7 @@ registry record/`_worker_env` implications stated); rule on `respawn supervisor`
 ### 10.1 `dispatch_bg` is the sanctioned choke point, and it takes a model
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '7670,7673p' bin/fleet.py
 def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
                 hint="", resume_sid=None, settings_path=None,
@@ -1185,7 +1185,7 @@ def dispatch_bg(name, cwd, prompt_body, mode, model=None, category=None,
 `--add-dir` for the tasks/journals dirs (historical; now per-worker `--allowedTools`, SPEC §5), and launches under `env=_worker_env(name)`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '7708,7708p;7721,7722p' bin/fleet.py
     argv += ["-n", rendered, "--settings", settings.as_posix()]
     argv += ["--add-dir", tasks_dir().as_posix(),
@@ -1198,10 +1198,10 @@ argv — so the supervisor body gets: fleet's hooks (`--settings`), the tasks/jo
 stripped, `FLEET_WORKER` stamped), and a registry record. The one thing it adds over `cmd_spawn` is the
 first-turn sup-boot ritual (the successor bootstrap already models this; §10.4). `sup-spawn` did not
 exist at this document's pin — it does now (§A2.1, §A2.7); the no-match below is retained as the
-absence proof it was, true at `235421e5`:
+absence proof it was, true at `78781a8b`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "sup-spawn\|cmd_sup_spawn" bin/fleet.py
 0
 ```
@@ -1211,7 +1211,7 @@ adjudication flagged as hand-rolling argv and giving successors *no hooks at all
 `--settings` + `_worker_env`, the same defense `dispatch_bg` applies:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '8526,8531p' bin/fleet.py
     argv = [exe, "--bg", "-n", name,
             "--settings", instance_settings_path().as_posix()]
@@ -1267,13 +1267,13 @@ applies the same `--settings`/`_worker_env` guarantees. `sup-spawn`, having no s
 There is no RESERVED list today, and `validate_name` is the single creation choke point:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "RESERVED" bin/fleet.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '721,722p' bin/fleet.py
 def validate_name(name: str, existing=()) -> None:
     """Raise ValueError unless name matches [a-z0-9-]+ and isn't in `existing`.
@@ -1327,7 +1327,7 @@ does not. The rule:
   exactly why B5 stands and the kill arm must steer rather than release:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "sup-release\|cmd_sup_release" bin/fleet.py
 0
 ```
@@ -1348,7 +1348,7 @@ record to read `released`"* therefore lets `kill supervisor` hang instead of fal
 its shape — "how long a supervisor-protocol turn may take before the caller gives up":
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '7919p' bin/fleet.py
 SUPERVISOR_HANDSHAKE_TIMEOUT_SECONDS = 300.0   # T: handoff wait before abort (spec §4)
 ```
@@ -1468,7 +1468,7 @@ The drafted band was 300–500k; the operator's is **150–200k**. This spec ado
 **doc-sync collisions** (§12), not changes this write-set makes:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "500k" skills/fleet/SKILL.md docs/SPEC.md
 skills/fleet/SKILL.md:1
 docs/SPEC.md:1
@@ -1482,7 +1482,7 @@ all.** The Stop-hook outcome record captures `input_tokens` and `output_tokens` 
 turn's `message.usage`:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '220,223p' bin/hooks/stop_outcome.py
         record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                   "session_id": sid, "kind": "result", "result_text": text,
@@ -1503,7 +1503,7 @@ creation turn that omission understates occupancy enough to skip the band-entry 
 records none of the three cache fields:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "cache_read\|cache_creation" bin/hooks/stop_outcome.py
 0
 ```
@@ -1511,7 +1511,7 @@ $ grep -c "cache_read\|cache_creation" bin/hooks/stop_outcome.py
 The statusline surfaces only aggregate `cost_usd`, not any per-session context size:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "cache_read\|context_tokens\|context_window" bin/fleet_statusline.py
 0
 ```
@@ -1532,7 +1532,7 @@ mechanism — built to be rotation-safe:
   (native-substrate G4), and `current_caller_session()` is exactly that read:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '826,827p' bin/fleet.py
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     return sid or None
@@ -1677,11 +1677,11 @@ every next task "the current urgent task" and never cross into hand-off. The fix
   `sup-spawn` at the three-tier build slice and task-bearing `respawn` at merge `d969de3`, which is what
   the enumeration above now names.)
   Neither existed at this document's pin, and the no-match below is retained as the absence proof it
-  was, true at `235421e5` (note it lumps `SUPERVISOR_BODY_NAME` and `sup-context` — both now present
+  was, true at `78781a8b` (note it lumps `SUPERVISOR_BODY_NAME` and `sup-context` — both now present
   — with the beat symbols, which are still absent; §A2.8 separates them):
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "sup-context\|supervisor-beat.jsonl\|_doctor_check_supervisor_beat\|SUPERVISOR_BODY_NAME" bin/fleet.py
 0
 ```
@@ -1721,7 +1721,7 @@ prevent, failing unsafe. Three bindings close it:
   therefore immune to (a)'s window:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '1284p' bin/fleet.py
     env["FLEET_WORKER"] = name
 ```
@@ -1835,7 +1835,7 @@ What the doctrine *does* retire is the **`--token-ceiling` spend denomination** 
 fleet-enforced cap — a real, shipped registry field today:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ sed -n '858p' bin/fleet.py
         "token_ceiling": token_ceiling,
 ```
@@ -1950,48 +1950,48 @@ operator attention). Design consequences v1 should not foreclose:
 
 ---
 
-## Appendix A — `[UNBUILT]` proofs (no-match receipts at `235421e5`)
+## Appendix A — `[UNBUILT]` proofs (no-match receipts at `78781a8b`)
 
 Every prescriptive `[UNBUILT]` claim above is grep-verifiable as absent at this commit. Collected:
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "sup-spawn\|cmd_sup_spawn" bin/fleet.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c 'add_parser("beat"' bin/fleet.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "RESERVED" bin/fleet.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "NEEDS-OPERATOR\|needs_operator\|pending-decision\|pending_decision" bin/fleet.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "_doctor_check_supervisor_beat\|supervisor-beat.jsonl\|sup-context\|sup-decision" bin/fleet.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "cache_read" bin/hooks/stop_outcome.py
 0
 ```
 
 ```
-# at 235421e56bfd328a7e913e519a1459ccf55918dc
+# at 78781a8b9efe1dc976f64b5a72328045240824cc
 $ grep -c "CLAUDE_CONFIG_DIR\|ANTHROPIC_" bin/fleet.py
 0
 ```
@@ -2000,21 +2000,21 @@ Each `0` proves the named behaviour is not in shipped code at the pin — the `[
 about the future, receipted as absent in the present.
 
 **Read Appendix A2 before treating any `0` above as a statement about today.** Five of these seven
-questions now answer differently; the blocks above stay because they are true *at `235421e5`*, which is
+questions now answer differently; the blocks above stay because they are true *at `78781a8b`*, which is
 all a pinned receipt ever claims.
 
 ---
 
-## Appendix A2 — what has since been BUILT (receipts at `0e8d7ca`, 2026-07-27)
+## Appendix A2 — what has since been BUILT (receipts at `8f55461`, 2026-07-27)
 
 Added by the `unbuilt-sweep` pass. Every tag this document cleared or narrowed cites a block here.
-Same discipline as Appendix A, one pin later: these are claims about `0e8d7ca`, not about `HEAD`.
+Same discipline as Appendix A, one pin later: these are claims about `8f55461`, not about `HEAD`.
 
 **§A2.1 — the three `sup-*` verbs the body tagged `[UNBUILT]` all exist.** Clears §5.2's
 `sup-context`/`sup-decision` references, §8's verb, §10.1's `sup-spawn`, §11.2's helper, §11.4's read:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def cmd_sup_spawn\|def cmd_sup_context\|def cmd_sup_decision" bin/fleet.py
 13024:def cmd_sup_context(args) -> int:
 13062:def cmd_sup_decision(args) -> int:
@@ -2024,7 +2024,7 @@ $ grep -n "def cmd_sup_spawn\|def cmd_sup_context\|def cmd_sup_decision" bin/fle
 **§A2.2 — the reserved-name set exists and is checked at `validate_name`.** Clears §10.3:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "^SUPERVISOR_BODY_NAME\|^RESERVED_NAMES\|if name in RESERVED_NAMES" bin/fleet.py
 767:SUPERVISOR_BODY_NAME = "supervisor"
 768:RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
@@ -2035,7 +2035,7 @@ $ grep -n "^SUPERVISOR_BODY_NAME\|^RESERVED_NAMES\|if name in RESERVED_NAMES" bi
 Clears all three §8 bullets:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def pending_decision_path\|def _doctor_check_pending_decision\|\"pending_decision\":" bin/fleet.py
 10342:def pending_decision_path() -> Path:
 12924:        "pending_decision": read_pending_decision(),   # §8: routing surface
@@ -2046,7 +2046,7 @@ $ grep -n "def pending_decision_path\|def _doctor_check_pending_decision\|\"pend
 predicate (and `autoclean.md`'s copy of it):
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def _record_is_supervisor_claim_holder\|supervisor claim-holder -- protected" bin/fleet.py
 2087:def _record_is_supervisor_claim_holder(record, claim=None):
 6799:        return (False, "supervisor claim-holder -- protected while live (§7.2)")
@@ -2056,14 +2056,14 @@ $ grep -n "def _record_is_supervisor_claim_holder\|supervisor claim-holder -- pr
 arms (`caller_sid` stamped onto the `mail_sent` events, and the detector projected by `sup-status`):
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def _interface_divergence\|\"interface_divergence\":" bin/fleet.py
 12850:def _interface_divergence(now=None, window_seconds=None):
 12925:        "interface_divergence": _interface_divergence(),  # §5.3: B7 detection
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -c "caller_sid=caller_sid" bin/fleet.py
 4
 ```
@@ -2071,14 +2071,14 @@ $ grep -c "caller_sid=caller_sid" bin/fleet.py
 **§A2.6 — the band constants and the hard-ceiling refusal exist.** Clears §11.3:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "^BAND_SOFT_TOKENS\|^BAND_HARD_TOKENS" bin/fleet.py
 1923:BAND_SOFT_TOKENS = 150_000
 1924:BAND_HARD_TOKENS = 200_000
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ sed -n '2564p' bin/fleet.py
         f"({occ_txt}) is at or above the {BAND_HARD_TOKENS:,}-token hard ceiling "
 ```
@@ -2088,14 +2088,14 @@ $ sed -n '2564p' bin/fleet.py
 that bullet is still unbuilt — this grep would show a second hit if it existed):
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def resolve_model_for_role\|resolve_model_for_role(\"supervisor\", policy)" bin/fleet.py
 10280:def resolve_model_for_role(role: str, policy: dict = None):
 13336:    model = model or resolve_model_for_role("supervisor", policy)
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ sed -n '13369p' bin/fleet.py
         result = dispatch_bg(
 ```
@@ -2106,7 +2106,7 @@ flag and its doctor check (§6.1–6.3, §7.1), the `scheduled_task_*` rename (�
 verb (§3.5.3), and the `tier_preferred`/`tier_current` registry fields of §3.5's step 2–3:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -cE "def cmd_beat|add_parser\(\s*\"beat\"|\"--supervisor-beat\"|scheduled_task_|sup-fallback|tier_preferred|tier_current" bin/fleet.py
 0
 ```
@@ -2115,7 +2115,7 @@ The one tag not covered by that grep is §3.4's worker-model allowlist, which is
 rather than a symbol — `--model` is still a free string with no allowed set:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -cE "WORKER_MODELS|MODEL_ALLOWLIST|ALLOWED_MODELS" bin/fleet.py
 0
 ```

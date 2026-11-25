@@ -17,7 +17,7 @@ the operator's act, recorded and committed by the interface session.)
   factual base **reliable**. The facts were sound and the design they supported was not: a bearer
   secret was used as an authorization credential on a substrate with no privilege separation. §2 is
   the section whose absence caused that, and it is now written first.
-- **v2** (`091d5fa`, 49 receipts) — re-gate returned **`fix-list(N1–N7)`** + **`fix-list(R1–R12)`**.
+- **v2** (`af50585`, 49 receipts) — re-gate returned **`fix-list(N1–N7)`** + **`fix-list(R1–R12)`**.
   **The root was fixed and the escalation trigger did not fire**; 49/49 receipts sound, 24/24 prior
   items fixed, zero collateral. The author's dispute of binding item 3 was **upheld** and the item
   withdrawn — and the narrow form shipped in its place was *also* wrong, for a different reason (N1).
@@ -42,7 +42,7 @@ one-live-session-per-name §16.7, platform-adapter-only OS branching §16.8, G9 
 (`py -3.13` with a 3.10 floor, `bin/fleet.py` stdlib-only single file).
 
 **Receipt pin.** Every fenced block in §4 was executed by me in this worktree and is pinned
-`# at 091d5fa`. The v1/v2 receipts were pinned at `238b7ad`/`ccbbc02`; they remain valid verbatim because the
+`# at af50585`. The v1/v2 receipts were pinned at `238b7ad`/`ccbbc02`; they remain valid verbatim because the
 non-docs tree is byte-identical across that range:
 
 **The pin-proof block that used to sit here is deleted, and its deletion is the point.** It asserted
@@ -215,7 +215,7 @@ strengthen it: the obvious candidate — prompt a human — is **already refuted
 the docstring of the very guard a claim gate would sit beside:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '2049,2054p' bin/fleet.py
     There is deliberately NO interactive prompt. An agent's Bash tool has no
     stdin to answer one with (it gets an EOFError), and `isatty()` cannot tell
@@ -261,7 +261,7 @@ option (c) in §7, priced honestly rather than assumed away.
 
 ---
 
-## 4. THE GREP RECEIPT — every touchpoint, at `091d5fa`
+## 4. THE GREP RECEIPT — every touchpoint, at `af50585`
 
 v1 carried 31 receipts; the spec lens re-ran all 31 and **31/31 reproduced**. They are retained
 verbatim below. §4.13 adds the ones v1 was short of, each of which a builder implementing this
@@ -270,7 +270,7 @@ section literally would have missed.
 ### 4.1 Everything that reads or writes `supervisor/INCARNATION`
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "write_incarnation\|def read_incarnation\|incarnation_path" bin/fleet.py
 6849:def incarnation_path() -> Path:
 6888:def read_incarnation() -> dict | None:
@@ -293,7 +293,7 @@ $ grep -n "write_incarnation\|def read_incarnation\|incarnation_path" bin/fleet.
   `7473` handoff-abort.
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "INCARNATION" bin/fleet.py
 6814:# supervisor/JOURNAL.md append-only). Body claim = supervisor/INCARNATION
 6850:    return supervisor_dir() / "INCARNATION"
@@ -307,7 +307,7 @@ $ grep -n "INCARNATION" bin/fleet.py
 adding fields is the right place to record that.
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "supervisor/" .gitignore
 7:supervisor/INCARNATION
 8:supervisor/HANDSHAKE
@@ -320,7 +320,7 @@ $ grep -n "supervisor/" .gitignore
 site*.** The heading promises "everything that reads", so here is the rest of it:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "read_incarnation()" bin/fleet.py
 6888:def read_incarnation() -> dict | None:
 7137:            claim = read_incarnation()
@@ -347,7 +347,7 @@ so as a statement about the current tree the enumeration was false and the third
 **What does not change: `fleet doctor` and `sup-status` still read the nag**, so §6.3's released-claim
 key set is still not a free choice — the row's point holds with two consumers. The blast radius
 shrank from machine-wide to two verbs; the constraint did not. Receipts and quoted arguments
-elsewhere in this document still name the deleted hook (§4.8's block pinned `# at 091d5fa`, and §6.3's
+elsewhere in this document still name the deleted hook (§4.8's block pinned `# at af50585`, and §6.3's
 binding build rule quoting the review) and are deliberately **not** amended: a reference to a deleted
 file is only rot when it is a claim about the CURRENT tree; a pinned receipt and a quoted argument
 are claims about a PAST tree and are still true.
@@ -360,7 +360,7 @@ this is the load-bearing one: §5.3 rewrites this function's signature and valid
 §5.3's mint rule is stated *per enclosing verb*.
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "_require_claim_holder" bin/fleet.py
 6966:    _require_claim_holder) -- spec §4: append-only, single-writer."""
 7177:def _require_claim_holder(sid_override=None):
@@ -387,7 +387,7 @@ whole cost.
 double-quoted subscripts and undercounted:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "claim.get(.session_id.)\|claim\[.session_id.\]" bin/fleet.py
 7022:    holder_sid = claim.get("session_id")
 7187:    if caller != claim.get("session_id"):
@@ -410,7 +410,7 @@ the enumeration did not. **`7248` matters most: it is the human arm of the view 
 ### 4.3 The `--sid` override, and the sole source of caller identity
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n '"--sid"\|"--expect-sid"\|"--expect-inc"\|"--successor-sid"' bin/fleet.py
 7721:    p_supboot.add_argument("--sid", help="override caller session id (default: CLAUDE_CODE_SESSION_ID)")
 7728:    p_supckpt.add_argument("--sid", help="override caller session id")
@@ -424,7 +424,7 @@ $ grep -n '"--sid"\|"--expect-sid"\|"--expect-inc"\|"--successor-sid"' bin/fleet
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "def current_caller_session" -A 9 bin/fleet.py
 580:def current_caller_session() -> str | None:
 581-    """The Claude Code session id of whoever is running this CLI, or None when
@@ -445,7 +445,7 @@ receipt generalised. §5.3 stops treating a sid as proof of anything.
 ### 4.4 `supervisor_claim_decision` — the guard, and the missing self-parameter
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7014,7042p' bin/fleet.py
 def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
                               stale_seconds: float = SUPERVISOR_CLAIM_STALE_SECONDS):
@@ -483,7 +483,7 @@ def supervisor_claim_decision(claim, live_sids: set, latest_entry, now=None,
 **The membership predicate the guard turns on — never receipted in v1:**
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '6986,6999p' bin/fleet.py
 def _roster_live_sids(entries: list) -> set:
     """Sids whose backing process is LIVE. Contract rule
@@ -507,7 +507,7 @@ caller's own — carries those keys and is therefore in `live_sids`.** §6.1 tur
 The epoch check that gates the whole decision:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7002,7011p' bin/fleet.py
 def supervisor_epoch_check(roster_ok: bool, payload):
     """Roster-epoch sanity check, run BEFORE any claim decision (spec §4).
@@ -525,7 +525,7 @@ def supervisor_epoch_check(roster_ok: bool, payload):
 same gap and was unmentioned in v1:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '1557,1563p' bin/fleet.py
 def native_epoch_suspicious(roster_ok: bool, entries: list, workers: dict) -> bool:
     """G9 epoch-freeze predicate (mirrors supervisor_epoch_check): the
@@ -541,7 +541,7 @@ def native_epoch_suspicious(roster_ok: bool, entries: list, workers: dict) -> bo
 ### 4.5 The sid-rotation paths — three writers, not two
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "_restamp_after_steer(" bin/fleet.py
 3293:                _restamp_after_steer(r, new_sid, short_id)
 6331:def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
@@ -550,7 +550,7 @@ $ grep -n "_restamp_after_steer(" bin/fleet.py
 **One call site.** The docstring names a second caller that does not call it:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '6331,6352p' bin/fleet.py
 def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
     """Mutate `record` in place after a fork-steer (`send`'s idle path,
@@ -577,7 +577,7 @@ def _restamp_after_steer(record: dict, new_sid: str, short_id: str) -> None:
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '3428,3436p' bin/fleet.py
         with fleet_lock():
             data = load_registry()
@@ -594,7 +594,7 @@ The inline copy has **drifted**: it sets `status="working"` and does **not** bum
 shared helper does. And there is a **third** writer v1 missed:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n 'retired_sids' bin/fleet.py | grep -E '3432|3860|6348'
 3432:                r["retired_sids"] = list(r.get("retired_sids", [])) + [old_sid]
 3860:        new_record["retired_sids"] = prior_retired + [old_sid]
@@ -608,7 +608,7 @@ still amends none of them.
 ### 4.6 HANDSHAKE, `--expect-sid`, and the successor's hard-coded protocol
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "def write_handshake" -A 7 bin/fleet.py
 6911:def write_handshake(incarnation_id: str, session_id: str) -> None:
 6912-    _write_json_atomic(handshake_path(), {
@@ -621,7 +621,7 @@ $ grep -n "def write_handshake" -A 7 bin/fleet.py
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "expect_sid\|expect-sid" bin/fleet.py
 7379:          f"  fleet sup-handoff-complete --expect-inc {successor_inc} --expect-sid {successor_sid}\n"
 7386:    """`fleet sup-handoff-complete --expect-inc I --expect-sid S [--sid ...]`.
@@ -635,7 +635,7 @@ $ grep -n "expect_sid\|expect-sid" bin/fleet.py
 **The successor's entire behaviour is a generated prompt string, and v1 never named it:**
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7257,7274p' bin/fleet.py
 def _render_successor_task(successor_inc: str, old_inc: str) -> str:
     """Successor bootstrap body (task-file bootstrap, contract G8 -- never
@@ -665,7 +665,7 @@ table.
 ### 4.7 The journal: entry regex, kinds, and the kind-lists
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n 'SUPERVISOR_JOURNAL_KINDS\|_SUPERVISOR_ENTRY_RE\|choices=\["CHECKPOINT"' bin/fleet.py
 6825:SUPERVISOR_JOURNAL_KINDS = (
 6924:_SUPERVISOR_ENTRY_RE = re.compile(
@@ -678,7 +678,7 @@ $ grep -n 'SUPERVISOR_JOURNAL_KINDS\|_SUPERVISOR_ENTRY_RE\|choices=\["CHECKPOINT
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '6825,6828p;6924,6925p;6981p' bin/fleet.py
 SUPERVISOR_JOURNAL_KINDS = (
     "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED",
@@ -692,7 +692,7 @@ _SUPERVISOR_ENTRY_RE = re.compile(
 Adding a kind touches **four** lists, not three — the fourth is shipped documentation:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "sup-boot\|sup-checkpoint" skills/fleet/SKILL.md
 37:| `fleet sup-boot [--handoff-inc <id>]` | Supervisor boot ritual: epoch check → claim/seize/refuse/freeze + boot bundle. Exit 0=hold/handshake-written, 2=refuse, 3=freeze. See `skills/fleet/supervisor.md`. |
 38:| `fleet sup-checkpoint <text\|@file> [--kind CHECKPOINT\|PROPOSAL]` | Append a journal checkpoint (claim holder only) + refresh heartbeat. |
@@ -702,13 +702,14 @@ $ grep -n "sup-boot\|sup-checkpoint" skills/fleet/SKILL.md
 The fifth is the **shipped, git-tracked journal header**, which is never regenerated:
 
 ```
-# at 091d5fa
+# at af50585
+# volatile: supervisor/JOURNAL.md is local operator data; the public history no longer carries it
 $ sed -n '6p' supervisor/JOURNAL.md
 Kinds: BOOT, CHECKPOINT, PROPOSAL, SEIZED, HANDOFF-BEGIN, HANDOFF-COMPLETE, HANDOFF-ABORT.
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '6969,6971p' bin/fleet.py
     path = supervisor_journal_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -732,7 +733,7 @@ not become a secret store.
 ### 4.8 Doctor checks, and the views that publish the claim
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "_doctor_check_supervisor" bin/fleet.py
 6088:        functools.partial(_doctor_check_supervisor_claim),
 6089:        functools.partial(_doctor_check_supervisor_handoff),
@@ -741,7 +742,7 @@ $ grep -n "_doctor_check_supervisor" bin/fleet.py
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -c "def _doctor_check_" bin/fleet.py
 21
 ```
@@ -754,7 +755,7 @@ behavior is the function body at 7533-7539, not the two greps above.
 published by a lock-free view with no further code change:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7232,7242p' bin/fleet.py
     info = {
         "goals_active": supervisor_goals_active(),
@@ -773,7 +774,7 @@ Note `"handshake": hs` beside `"incarnation": claim` — §6.4 adds a field to H
 redaction rule of §5.8 must cover **both**.
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -rIn "supervisor\|INCARNATION\|sup-" bin/hooks/ bin/fleet_statusline.py
 bin/hooks/sessionstart_fleet.py:126:        sup_line = fleet.supervisor_status_line()
 ```
@@ -781,14 +782,14 @@ bin/hooks/sessionstart_fleet.py:126:        sup_line = fleet.supervisor_status_l
 That receipt supports a **code** conclusion only. The shipped operator contract is wider:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -rIln "sup-status\|sup-boot\|INCARNATION\|supervisor" commands/ skills/
 skills/fleet/SKILL.md
 skills/fleet/supervisor.md
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "sup-boot\|sup-handoff\|rm supervisor\|freeze\|seize" skills/fleet/supervisor.md
 10:1. Run `fleet sup-boot`. Read the ENTIRE bundle it prints (GOALS, journal
 13:   - `claim` / `seize` (exit 0): you hold the claim. Continue the duty.
@@ -811,7 +812,7 @@ commands stay prompt templates by CLAUDE.md rule; this spec adds no slash comman
 ### 4.9 `spawned_by` and the destructive guard
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "spawned_by" bin/fleet.py
 593:                       spawned_by=None, dispatch_kind=None, category=None) -> dict:
 625:        "spawned_by": spawned_by,
@@ -828,7 +829,7 @@ $ grep -n "spawned_by" bin/fleet.py
 **Readers: two**, both feeding the destructive guard:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "def _worker_is_foreign" -A 8 bin/fleet.py
 2019:def _worker_is_foreign(record: dict, caller: str | None) -> bool:
 2020-    """True when this session did not spawn the worker.
@@ -842,7 +843,7 @@ $ grep -n "def _worker_is_foreign" -A 8 bin/fleet.py
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '2042,2047p;2055,2060p' bin/fleet.py
     The guard applies to CLAUDE SESSIONS only. A human at a plain shell has no
     CLAUDE_CODE_SESSION_ID; fleet has always been a human-driven CLI and
@@ -861,7 +862,7 @@ $ sed -n '2042,2047p;2055,2060p' bin/fleet.py
 ### 4.10 The worker child environment — why this spec offers no env-var channel
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "def _worker_env" -A 18 bin/fleet.py
 989:def _worker_env(name: str) -> dict:
 990-    """Child environment for a worker turn: the parent's, plus FLEET_WORKER.
@@ -891,7 +892,7 @@ the nonce would be inherited by every worker fleet spawns and by every subagent 
 ### 4.11 Unknown-field tolerance — confirmed by grep, not assumed
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "def load_registry" -A 10 bin/fleet.py
 526:def load_registry() -> dict:
 527-    """Load state/fleet.json. Missing file -> {"workers": {}}. An existing
@@ -907,7 +908,7 @@ $ grep -n "def load_registry" -A 10 bin/fleet.py
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "def save_registry" -A 9 bin/fleet.py
 562:def save_registry(data: dict) -> None:
 563-    """Atomically write state/fleet.json (temp file + os.replace)."""
@@ -930,7 +931,7 @@ anchored regex. Tolerance is a property of the two JSON stores only.
 ### 4.12 Command seams that exist, and the ones the test plan needs
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "^def cmd_sup_" bin/fleet.py
 7111:def cmd_sup_boot(args, which=shutil.which, run=subprocess.run) -> int:
 7195:def cmd_sup_checkpoint(args) -> int:
@@ -947,7 +948,7 @@ path**: only the two pure functions accept `now=` (`supervisor_claim_decision` @
 `supervisor_status_line` @7503). §10 budgets that seam explicitly instead of presuming it.
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "^@pytest.fixture\|delenv\|def _no_inherited" tests/conftest.py
 21:@pytest.fixture(autouse=True)
 43:@pytest.fixture(autouse=True)
@@ -964,7 +965,7 @@ controlled caller identity must opt back in; §10 budgets it.
 equality inside the stop path.**
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "handoff_abort_flag_path\|read_handoff_abort_flag" bin/fleet.py
 6861:def handoff_abort_flag_path() -> Path:
 6868:def read_handoff_abort_flag() -> dict | None:
@@ -981,7 +982,7 @@ $ grep -n "handoff_abort_flag_path\|read_handoff_abort_flag" bin/fleet.py
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7446,7460p' bin/fleet.py
         else:
             flag = read_handoff_abort_flag()
@@ -1009,14 +1010,14 @@ gap was enumeration, not exposure.
 **(b) The exit-code contract — there is no seam for a new code, and 0/2/3 is published.**
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -rIn "return 4$\|sys.exit(4)\|exit code 4" bin/ docs/SPEC.md skills/
 $ echo "exit $?"
 exit 1
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7166p;7822,7828p' bin/fleet.py
         rc = {"claim": 0, "seize": 0, "refuse": 2, "freeze": 3}[verdict]
     except RegistryCorruptError as exc:
@@ -1036,7 +1037,7 @@ three; §8 lists them.
 **(c) Reserved names — v1's receipt was non-probative.** It was case-sensitive. Corrected:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -rIni "reserved" bin/ | head -4
 bin/fleet.py:497:            f"invalid worker name {name!r}: uuid-shaped names are reserved "
 bin/fleet.py:926:            # registry invariant (6) is preserved.
@@ -1053,7 +1054,7 @@ receipt §4.14a.
 **(d) The handoff task file is written once and never deleted.**
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "supervisor-handoff" bin/fleet.py
 6865:    return state_dir() / "supervisor-handoff-aborted.json"
 7289:        task_path = state_dir() / f"supervisor-handoff-{successor_inc}.md"
@@ -1065,7 +1066,7 @@ One write site, no `unlink`. §5.9 is the consequence.
 **(e) No beat primitive exists in this slice's substrate.**
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n 'ScheduleWakeup\|def cmd_beat\|"beat"' bin/fleet.py
 $ echo "exit $?"
 exit 1
@@ -1084,7 +1085,7 @@ tree is per-home operator data, so temporary claim and handshake files inherit
 the same public-source boundary as their final names:
 
 ```
-# at 091d5fa
+# at af50585
 # live: `git check-ignore` asks git about the WORKING repo's ignore rules; an
 # live: exported tree has no `.git` to answer with, so this one cannot be pinned.
 $ git check-ignore -q supervisor/INCARNATION.tmp
@@ -1112,7 +1113,7 @@ which is why §13 names it as a prerequisite rather than a nicety.
 builds is keyed on a worker name or sid:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '4184,4197p' bin/fleet.py
         logs_dir() / f"{name}.jsonl", logs_dir() / f"{name}.jsonl.1",
         logs_dir() / f"{name}.err", logs_dir() / f"{name}.err.1",
@@ -1133,14 +1134,14 @@ $ sed -n '4184,4197p' bin/fleet.py
 `state/supervisor-handoff-<inc>.md` belongs to no worker record, so `cmd_clean` never reaches it.
 §5.9 withdraws v2's sweep clause on this receipt rather than asking a builder to invent a sweep site.
 
-### 4.14 `[UNBUILT]` proofs — reproduced as no-matches at `091d5fa`
+### 4.14 `[UNBUILT]` proofs — reproduced as no-matches at `af50585`
 
 **Currency note (2026-07-27, `unbuilt-sweep`): every claim in this section has since been built.** The
 blocks stay — a receipt is a claim about a commit — but read §4.14a before quoting any of them as a
 statement about today.
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -rIn "nonce" bin/
 $ echo "exit $?"
 exit 1
@@ -1154,12 +1155,13 @@ $ echo "exit $?"
 exit 1
 ```
 
-Each of the four claims below was true at `091d5fa`. **All four have since been built.** Each is
+Each of the four claims below was true at `af50585`. **All four have since been built.** Each is
 attributed to the commit that actually introduced the symbol, found with `git log -S`, not to a merge
-sha read off a summary — `docs/SPEC.md` §18 attributes this slice to `2d58eba`, which is a *docs*
+sha read off a summary — `docs/SPEC.md` §18 attributes this slice to `2d58eba` (a local-only sha the public history no longer
+carries), which was a *docs*
 commit ("journal kinds line gains RELEASED + LIMIT-TRANSFER"), so that citation does not support the
-build claim and is not reused here. The no-matches above stay because they are claims about `091d5fa`;
-§4.14a re-asks the same questions at `0e8d7ca`.
+build claim and is not reused here. The no-matches above stay because they are claims about `af50585`;
+§4.14a re-asks the same questions at `8f55461`.
 
 - No nonce of any kind exists in `bin/` — was **`[UNBUILT — owned by this slice]`**; **[BUILT
   `568071b`]** (claim-nonce §5.2 continuity primitives), §4.14a.
@@ -1171,22 +1173,22 @@ build claim and is not reused here. The no-matches above stay because they are c
 - No reserved-name list — was **`[UNBUILT — owned by the three-tier slice]`**, receipt at §4.13(c);
   **[BUILT `2ad0053`]** as `RESERVED_NAMES` (merged `31e139e`), §4.14a.
 
-### 4.14a The same four questions, re-asked at `0e8d7ca` (2026-07-27, `unbuilt-sweep`)
+### 4.14a The same four questions, re-asked at `8f55461` (2026-07-27, `unbuilt-sweep`)
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -cI "nonce" bin/fleet.py
 242
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "def cmd_sup_release" bin/fleet.py
 12718:def cmd_sup_release(args) -> int:
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ sed -n '10164,10167p' bin/fleet.py
 SUPERVISOR_JOURNAL_KINDS = (
     "BOOT", "CHECKPOINT", "PROPOSAL", "SEIZED", "RELEASED", "LIMIT-TRANSFER",
@@ -1195,7 +1197,7 @@ SUPERVISOR_JOURNAL_KINDS = (
 ```
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ grep -n "^RESERVED_NAMES\|if name in RESERVED_NAMES" bin/fleet.py
 768:RESERVED_NAMES = frozenset({SUPERVISOR_BODY_NAME})
 796:    if name in RESERVED_NAMES:
@@ -1208,7 +1210,7 @@ to a human at a shell. The current Interface runbook instead prefers the non-des
 wake documented in §5.7; this block remains only as commit-pinned history:
 
 ```
-# at 0e8d7ca
+# at 8f55461
 $ sed -n '196,198p' skills/fleet/supervisor.md
 Below that hour it is `freeze` — page the operator. **The only manual lever is
 the operator's**: remove `supervisor/INCARNATION` by hand. That lever is for a
@@ -1420,7 +1422,7 @@ copy the attack uses.** The nonce is printed as command output, and command outp
 session transcript:
 
 ```
-# at 091d5fa (existence and count only; no transcript contents were read)
+# at af50585 (existence and count only; no transcript contents were read)
 # volatile: a live box mints sessions continuously; the count and the mtime drift by the minute
 $ ls -ld ~/.claude/projects && find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l
 drwxr-xr-x 1 <owner> <group> 0 <date> <time> <home>/.claude/projects
@@ -1588,7 +1590,7 @@ T14. **The rule and T15 are scoped to the dict-dumping paths.**
 `NONCE: <value>` to that same stream:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '7085p;7169,7174p' bin/fleet.py
             out.append(f"## {e['ts']} {e['kind']} inc={e['inc']} sid={e['sid']}")
     lines = [bundle, "", f"EPOCH: {'ok' if epoch_ok else 'FAIL'} -- {epoch_reason}"]
@@ -2285,14 +2287,14 @@ v1 partitioned verbs into "gated mutating" and "exempt views" and justified the 
 terminal-surface doctrine. That justification is false, and the partition was incomplete:
 
 ```
-# at 091d5fa
+# at af50585
 $ sed -n '172p;175p' docs/SPEC.md | cut -b1-200
 | `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the prob
 | `wait <name...> [--any\|--all] [--timeout]` | `wait_for_workers` @2711: poll-recompute until `NATIVE_TERMINAL_STATUSES` (@1305: idle, dead, dead-suspected, limited, over_ceiling, interrupted). One r
 ```
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n "authoritative" docs/specs/terminal-surface.md | head -2 | cut -b1-170
 51:**D2 — the statusline never asserts liveness it did not probe for.** `--stale-ok` returns each worker's **last-committed** status plus `stale_seconds` derived from `
 118:`--json` prints `status_snapshot()` as JSON to stdout. `--stale-ok` selects the probe-free path (no recompute, no lock, no write). Without `--stale-ok`, `--json` prin
@@ -2305,7 +2307,7 @@ fetch the roster and write the registry — they are *authoritative*, not views.
 verbs appeared in neither of v1's lists:
 
 ```
-# at 091d5fa
+# at af50585
 $ grep -n 'add_parser("attach"\|add_parser("release"' bin/fleet.py
 7656:    p_attach = sub.add_parser("attach", help="attach an interactive terminal to a worker")
 7660:    p_release = sub.add_parser("release", help="release an attached worker back to idle")
@@ -2629,7 +2631,7 @@ shrank from machine-wide to two verbs; the requirement did not. **This edit also
 inside this document:** `w43-c337` restated §4.1's `7516` row the same way at `c5e84c9` while this §8
 row still carried the old three-consumer claim, so §4.1 and §8 said different things about the same
 function; they now agree. Receipts and quoted arguments elsewhere in this document still name the
-deleted hook (§4.8's block pinned `# at 091d5fa`, and §6.3's binding build rule quoting the review)
+deleted hook (§4.8's block pinned `# at af50585`, and §6.3's binding build rule quoting the review)
 and are deliberately **not** amended: a reference to a deleted file is only rot when it is a claim
 about the CURRENT tree; a pinned receipt and a quoted argument are claims about a PAST tree and are
 still true.
@@ -2923,7 +2925,7 @@ would have been handed.
    receipt is re-executed post-fix and now pins the glob.
 
 **Withdrawn from this list: the "published exit-code contract mismatch."** There is no mismatch at
-`091d5fa` — `SKILL.md:37` publishes `0=hold/handshake-written, 2=refuse, 3=freeze` and `7166` implements
+`af50585` — `SKILL.md:37` publishes `0=hold/handshake-written, 2=refuse, 3=freeze` and `7166` implements
 exactly `{"claim": 0, "seize": 0, "refuse": 2, "freeze": 3}` (both receipted at §4.7 and §4.13(b)).
 **The mismatch is *created* by this spec** when it adds a fourth code, and §8 and §11 already assign
 that work here. v2 filed a spec-created change as a shipped defect; the misclassification originated
@@ -3051,7 +3053,7 @@ reported `FAIL`. Not a defect in the receipts — a defect in **which tree they 
 | Absent pinned commit | **error, never a skip** — on a shallow clone or after a rebase drops the sha the receipt *cannot be verified*, and green-for-unverifiable is the failure the tool exists to prevent. Recovery is to fetch the object or re-pin deliberately, both human decisions |
 | Genuinely unpinnable receipt | **`# live: <reason>`** — this document has exactly one, `git check-ignore`, which asks git about the *working* repo's ignore rules and has no `.git` to answer with in an exported tree. Still executed and diffed |
 | The pin-proof block | **deleted, not repaired** (§4) — pin resolution makes its cross-commit invariance argument unnecessary |
-| Seed tests | **6** — the one-word-paraphrase seed, plus the drift class: a receipt pinned at `091d5fa` still reproduces while the *same* receipt marked `# live` fails, proving the pin is what does the work; guarded by a non-vacuity check that HEAD's `bin/fleet.py` really has drifted from the pin |
+| Seed tests | **6** — the one-word-paraphrase seed, plus the drift class: a receipt pinned at `af50585` still reproduces while the *same* receipt marked `# live` fails, proving the pin is what does the work; guarded by a non-vacuity check that HEAD's `bin/fleet.py` really has drifted from the pin |
 
 **Why pin-resolution rather than re-pasting on every unrelated commit.** The alternative is an
 unpinnable receipt set that must be re-pasted whenever anyone touches `bin/fleet.py` — which makes
@@ -3141,7 +3143,7 @@ guard that existed (D5, satisfied) keyed on the one thing §6.1 names as prohibi
 change the key, not to choose a document.
 
 ```
-# at 8dee4b8
+# at 3dcef15
 $ sed -n '10899,10906p' bin/fleet.py
     worker = os.environ.get("FLEET_WORKER")
     if worker and worker.strip() and not _is_supervisor_shaped(worker):
@@ -3262,7 +3264,7 @@ against an unresolved hypothesis is a call only the operator can make, and mergi
 ratified structural exemption (§16.5) and the doctor row that reports the leak:
 
 ```
-# at bf32d5e
+# at 0ee3d39
 $ grep -n "os.environ.get(\"FLEET_WORKER\")" bin/fleet.py
 2456:    if not (os.environ.get("FLEET_WORKER") or "").strip():
 8366:    witness = (os.environ.get("FLEET_WORKER") or "").strip()
@@ -3483,7 +3485,7 @@ The corrected state, receipted rather than asserted — every marker names §17,
 marker or pointer at the open question survives:
 
 ```
-# at 7f3acdd
+# at 2718eec
 $ grep -onE "RATIFIED DOCTRINE -- claim-nonce §[0-9.]+" bin/fleet.py
 2143:RATIFIED DOCTRINE -- claim-nonce §17
 2526:RATIFIED DOCTRINE -- claim-nonce §17
