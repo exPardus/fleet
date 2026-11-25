@@ -7,6 +7,7 @@ marks every affected row once with `codex_host_gone`, sends one
 CODEX-HOST-GONE notice, and the keeper pages once per host generation.
 """
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -18,10 +19,16 @@ GEN_OLD = "11111111-2222-4333-8444-555555555555"
 GEN_NEW = "66666666-7777-4888-9999-000000000000"
 
 
+def _iso(age_seconds=60):
+    at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    return at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _native(status="working", generation=GEN_OLD, **over):
     row = {"substrate": "codex", "dispatch_kind": "codex-app-server",
            "session_id": None, "codex_thread_id": "thread", "codex_turn_id": "turn",
-           "codex_host_generation": generation, "status": status, "turns": 1}
+           "codex_host_generation": generation, "status": status, "turns": 1,
+           "last_dispatch_at": _iso()}
     row.update(over)
     return row
 
@@ -75,7 +82,7 @@ def test_the_sweep_marks_every_row_once_and_sends_one_notice(home, monkeypatch):
         assert workers[name]["codex_host_gone"]["generation"] == GEN_OLD
     assert "codex_host_gone" not in workers["c"]
     assert len(mail) == 1 and mail[0][0] == "sup-body"
-    assert mail[0][1].startswith("CODEX-HOST-GONE 2 lane(s): a b")
+    assert mail[0][1].startswith("CODEX-HOST-GONE 2 fresh in-flight lane(s): a b")
     # The next sweep finds nothing new: no second mark, no second notice.
     assert fleet.sweep_codex_host_gone() == []
     assert len(mail) == 1
@@ -236,7 +243,7 @@ def test_a_failed_notice_is_sent_again_next_sweep(home, monkeypatch):
     assert fleet.sweep_codex_host_gone() == ["a", "b"]
     assert fleet.load_registry()["workers"]["a"]["codex_host_gone"]["notified"] is False
     assert fleet.sweep_codex_host_gone() == ["a", "b"]
-    assert len(attempts) == 2 and attempts[1].startswith("CODEX-HOST-GONE 2 lane(s)")
+    assert len(attempts) == 2 and attempts[1].startswith("CODEX-HOST-GONE 2 fresh in-flight lane(s)")
     assert fleet.load_registry()["workers"]["a"]["codex_host_gone"]["notified"] is True
     assert fleet.sweep_codex_host_gone() == []
     assert len(attempts) == 2
@@ -271,4 +278,91 @@ def test_presence_maps_the_existing_client_facade(monkeypatch):
         raise fleet.FleetCliError("Codex host metadata has wrong home")
     monkeypatch.setattr(fleet, "_codex_existing_client", unsafe)
     assert fleet._codex_host_presence()[0] == "unknown"
+
+
+# Interface direction faecbc6d: the first sweep after #101 paged 84 Codex rows
+# dead for weeks. Only fresh in-flight rows page, once per host loss.
+def _wire_mail(monkeypatch):
+    monkeypatch.setattr(fleet, "_codex_host_presence", lambda: GONE)
+    monkeypatch.setattr(fleet, "read_incarnation", lambda: {"state": "held"})
+    monkeypatch.setattr(fleet, "_claim_holder_row_name", lambda c, d: "sup-body")
+    mail = []
+    monkeypatch.setattr(fleet, "_deliver_lane_mail",
+                        lambda claim, parent, message, **k: mail.append(message))
+    return mail
+
+
+def _old_rows(count=84):
+    month = 30 * 24 * 3600
+    rows = {}
+    for i in range(count):
+        status = ("dead-suspected", "working", "dead", "idle")[i % 4]
+        rows[f"old{i:02d}"] = _native(status, last_dispatch_at=_iso(month + i))
+    return rows
+
+
+def test_84_old_dead_rows_produce_no_notice(home, monkeypatch):
+    mail = _wire_mail(monkeypatch)
+    _save(_old_rows())
+    assert fleet.sweep_codex_host_gone() == []
+    assert mail == []
+    workers = fleet.load_registry()["workers"]
+    assert not any("codex_host_gone" in row for row in workers.values())
+
+
+def test_one_fresh_working_row_among_them_produces_exactly_one(home, monkeypatch):
+    mail = _wire_mail(monkeypatch)
+    workers = _old_rows()
+    workers["fresh"] = _native("working")
+    _save(workers)
+    assert fleet.sweep_codex_host_gone() == ["fresh"]
+    assert fleet.sweep_codex_host_gone() == []
+    assert len(mail) == 1
+    assert mail[0].startswith("CODEX-HOST-GONE 1 fresh in-flight lane(s): fresh ")
+
+
+def test_a_dead_suspected_row_is_fresh_only_within_24_hours(home, monkeypatch):
+    mail = _wire_mail(monkeypatch)
+    day = fleet.LANE_DEAD_MAX_AGE_SECONDS
+    _save({"recent": _native("dead-suspected", last_dispatch_at=_iso(day - 600)),
+           "old": _native("dead-suspected", last_dispatch_at=_iso(day + 600))})
+    assert fleet.sweep_codex_host_gone() == ["recent"]
+    assert len(mail) == 1 and " recent " in mail[0] and "old" not in mail[0]
+
+
+def test_a_host_loss_already_paged_is_not_paged_again(home, monkeypatch):
+    mail = _wire_mail(monkeypatch)
+    _save({"a": _native("working")})
+    assert fleet.sweep_codex_host_gone() == ["a"]
+    data = fleet.load_registry()
+    data["workers"]["late"] = _native("working")
+    fleet.save_registry(data)
+    assert fleet.sweep_codex_host_gone() == []
+    late = fleet.load_registry()["workers"]["late"]
+    assert late["codex_host_gone"]["notified"] is True
+    assert len(mail) == 1
+
+
+def test_doctor_lists_old_rows_read_only_as_a_note(home, monkeypatch):
+    monkeypatch.setattr(fleet, "_codex_host_presence", lambda: GONE)
+    workers = _old_rows(8)
+    name, ok, message = fleet._doctor_check_codex_host(workers)
+    assert ok is True and message.startswith("NOTE ")
+    assert "dead > 24 h, never paged: old00, old01, old04, old05" in message
+    workers["fresh"] = _native("working")
+    assert fleet._doctor_check_codex_host(workers)[1] is False
+
+
+def test_the_keeper_skips_host_gone_rows_dead_past_its_horizon():
+    old = fleet_keeper.WORKER_ANOMALY_MAX_AGE_SECONDS + 1
+    obs = {"workers": [
+        {"name": f"old{i}", "status": "dead-suspected", "turns": 1,
+         "stale_seconds": old, "codex_host_gone": {"generation": GEN_OLD}}
+        for i in range(84)]}
+    assert fleet_keeper.worker_anomalies(obs) == {}
+    obs["workers"].append({"name": "fresh", "status": "dead-suspected", "turns": 1,
+                           "stale_seconds": 60,
+                           "codex_host_gone": {"generation": GEN_OLD}})
+    assert fleet_keeper.worker_anomalies(obs) == {
+        f"codex-host-gone:{GEN_OLD}": "codex-host-gone(1 lanes: fresh)"}
 

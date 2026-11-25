@@ -15406,12 +15406,18 @@ def _doctor_check_codex_host(workers):
                 f"host generation {presence[1]} live for {len(native)} lane(s)")
     marked = sorted(n for n in affected if _codex_host_gone_marked(workers[n]))
     unmarked = sorted(set(affected) - set(marked))
+    stale = sorted(n for n in affected
+                   if not _codex_host_gone_fresh(n, workers[n]))
     reason = next(iter(affected.values()))[1]
-    return ("codex-host", False,
-            f"{reason}: {len(affected)} lane(s) bound to it "
+    only_stale = len(stale) == len(affected)
+    return ("codex-host", only_stale,
+            f"{'NOTE ' if only_stale else ''}{reason}: "
+            f"{len(affected)} lane(s) bound to it "
             f"(marked: {', '.join(marked) or 'none'}; unmarked: "
-            f"{', '.join(unmarked) or 'none'}) -- `fleet sup-guard --do` marks "
-            "them once and sends one CODEX-HOST-GONE notice; respawn or kill them")
+            f"{', '.join(unmarked) or 'none'}; dead > 24 h, never paged: "
+            f"{', '.join(stale) or 'none'}) -- `fleet sup-guard --do` marks "
+            "the fresh ones and sends one CODEX-HOST-GONE notice per host loss; "
+            "respawn or kill them")
 
 
 def _doctor_check_exclusive_lock():
@@ -30820,6 +30826,12 @@ def _codex_host_gone_rows(workers, presence, *, include_marked=False) -> dict:
     return found
 
 
+def _codex_host_gone_fresh(name, rec, now=None) -> bool:
+    at = _lane_death_at(name, rec)
+    now = now or datetime.now(timezone.utc)
+    return at is not None and (now - at).total_seconds() <= LANE_DEAD_MAX_AGE_SECONDS
+
+
 def _codex_host_gone_marked(rec) -> bool:
     marker = rec.get("codex_host_gone") if isinstance(rec, dict) else None
     return (isinstance(marker, dict)
@@ -30839,15 +30851,19 @@ def _codex_recovery_in_progress():
     return None
 
 
-def sweep_codex_host_gone(*, sleep=time.sleep) -> list:
+def sweep_codex_host_gone(*, sleep=time.sleep, now=None) -> list:
     if _codex_recovery_in_progress() is not None:
         return []
     presence = _codex_host_presence()
     if presence[0] == "unknown":
         return []
+    now = now or datetime.now(timezone.utc)
     with fleet_lock():
         data = read_registry_no_repair()
-        targets = _codex_host_gone_rows(data["workers"], presence)
+        workers = data["workers"]
+        targets = {n: v for n, v in
+                   _codex_host_gone_rows(workers, presence).items()
+                   if _codex_host_gone_fresh(n, workers[n], now)}
         stamp = now_iso()
         for name, (generation, reason) in targets.items():
             rec = data["workers"][name]
@@ -30856,13 +30872,27 @@ def sweep_codex_host_gone(*, sleep=time.sleep) -> list:
                                       "notified": False}
             rec["status"] = "dead-suspected"
             rec["adapter_state"] = "host-gone"
-        unsent = sorted(
-            name for name, rec in data["workers"].items()
-            if _codex_host_gone_marked(rec) and not rec.get("archived_at")
-            and rec["codex_host_gone"].get("notified") is False)
-        if targets:
+        paged = {rec["codex_host_gone"].get("generation")
+                 for rec in workers.values()
+                 if _codex_host_gone_marked(rec)
+                 and rec["codex_host_gone"].get("notified") is True}
+        unsent, quiet = [], []
+        for name, rec in sorted(workers.items()):
+            if not (_codex_host_gone_marked(rec) and not rec.get("archived_at")
+                    and rec["codex_host_gone"].get("notified") is False):
+                continue
+            if (rec["codex_host_gone"].get("generation") in paged
+                    or not _codex_host_gone_fresh(name, rec, now)):
+                rec["codex_host_gone"]["notified"] = True
+                quiet.append(name)
+            else:
+                unsent.append(name)
+        if targets or quiet:
             save_registry(data)
         if not unsent:
+            if targets:
+                _append_event_quiet("codex_host_gone", "codex-host",
+                                    lanes=sorted(targets), fresh=0)
             return []
         reason = data["workers"][unsent[0]]["codex_host_gone"].get("reason")
         claim = read_incarnation()
@@ -30871,11 +30901,12 @@ def sweep_codex_host_gone(*, sleep=time.sleep) -> list:
                        and claim.get("state") in (None, "held") else None)
     if targets:
         _append_event_quiet("codex_host_gone", "codex-host",
-                            lanes=sorted(targets), reason=reason)
+                            lanes=sorted(targets), reason=reason, fresh=len(unsent))
     if parent_name is None:
         return unsent
-    message = (f"CODEX-HOST-GONE {len(unsent)} lane(s): {' '.join(unsent)} -- "
-               f"{reason}; one notice replaces their LANE-DEAD mail")
+    message = (f"CODEX-HOST-GONE {len(unsent)} fresh in-flight lane(s): "
+               f"{' '.join(unsent)} -- {reason}; one notice per host loss "
+               "replaces their LANE-DEAD mail")
     try:
         _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
                            what="CODEX-HOST-GONE mail")
