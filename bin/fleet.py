@@ -4360,7 +4360,7 @@ def _native_cumulative_tokens(name: str) -> int:
 # An explicit ISO-8601 UTC reset instant takes precedence over local formats.
 _LIMIT_RESET_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
-# Local reset form: "resets 4:40am (Asia/Qyzylorda)" or "resets 12am (Asia/Qyzylorda)".
+# Local reset form: "resets 4:40am (Asia/Karachi)" or "resets 12am (Asia/Karachi)".
 # Only fixed-UTC single-segment aliases are admitted; other bare zone names
 # can mean DST rules and yield an early reset. Area/City names use ZoneInfo
 # validation. The admission regex and resolver share this alias tuple.
@@ -5539,7 +5539,7 @@ def _permission_stall_line(name: str, rec: dict, elapsed, waiting_for) -> str:
     else:
         # Built through Path so the separators match the platform the operator
         # is going to paste it into -- an f-string with "/" renders
-        # `C:\projects\wt/.claude/settings.local.json` on Windows.
+        # `C:\work\wt/.claude/settings.local.json` on Windows.
         settings = str(Path(cwd) / ".claude" / "settings.local.json")
         rules = _worktree_deny_rules(cwd)
         if rules:
@@ -16097,7 +16097,7 @@ def _doctor_check_tzdata():
     """
     import zoneinfo
     try:
-        zoneinfo.ZoneInfo("Asia/Qyzylorda")
+        zoneinfo.ZoneInfo("Asia/Karachi")
     except Exception as exc:
         return ("tzdata", True,
                 f"zoneinfo cannot resolve a named zone ({type(exc).__name__}: {exc}) -- "

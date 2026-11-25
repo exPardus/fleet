@@ -393,7 +393,7 @@ class TestSandbox:
                    (i > 1 and opts[i - 2] in ("--bind", "--ro-bind"))]
         for path in mounted:
             assert path != str(home), "whole HOME must not be mounted"
-            for secret in (".ssh", ".config", "proga", ".gnupg", ".aws"):
+            for secret in (".ssh", ".config", "work", ".gnupg", ".aws"):
                 assert not path.startswith(str(home / secret)), path
 
     def test_missing_bwrap_refuses_spawn_without_running_pi(

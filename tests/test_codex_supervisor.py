@@ -1946,7 +1946,7 @@ def _seed_platform_historical_inventory(home, client, monkeypatch):
             "model": "codex:gpt-6-sol", "status": "idle",
             "archived_at": None, "last_operation_id": None,
         }
-    legacy_name = "sup|inc-20261008T231137Z-b530|successor"
+    legacy_name = "sup|inc-20261008T230000Z-a011|successor"
     data["workers"][legacy_name] = {
         "model": "codex:gpt-6-sol", "dispatch_kind": "bg",
         "substrate": None,
@@ -1963,9 +1963,9 @@ def _seed_platform_historical_inventory(home, client, monkeypatch):
         }
     preclaims = []
     for index, incarnation in enumerate((
-            "inc-20261009T011922Z-2caf",
-            "inc-20261009T011956Z-db85",
-            "inc-20261009T023025Z-7688")):
+            "inc-20261009T011000Z-a012",
+            "inc-20261009T011100Z-a013",
+            "inc-20261009T023000Z-a016")):
         name = f"sup|{incarnation}|boot"
         operation_id = f"supervisor-{incarnation}-thread-preclaim-{index}"
         row = {
@@ -1991,9 +1991,9 @@ def _seed_platform_historical_inventory(home, client, monkeypatch):
         preclaims.append((name, journal, operation_id))
     bound = {}
     for index, (incarnation, thread_id, turn_id) in enumerate((
-            ("inc-20261009T012003Z-89bb", SUCCESSOR_THREAD_ID,
+            ("inc-20261009T012000Z-a014", SUCCESSOR_THREAD_ID,
              NEWER_TURN_ID),
-            ("inc-20261009T015843Z-0815", SUCCESSOR_HANDOFF_THREAD_ID,
+            ("inc-20261009T015000Z-a015", SUCCESSOR_HANDOFF_THREAD_ID,
              SUCCESSOR_TURN_ID))):
         name = f"sup|{incarnation}|boot"
         generation = f"old-bound-generation-{index}"
@@ -2155,6 +2155,15 @@ def test_restored_continuation_actual_retired_observed_roster_stays_held(
     assert {path.stem: path.read_bytes() for path in retired.glob("*.json")} == archived
 
 
+def _hashed_start_archive(archived):
+    """The unbound-start archive the preserved-history evidence hashes.
+
+    Tests that corrupt an archive must pick this one by name: `iterdir`
+    order is filesystem-dependent, so "the first archive" may be one the
+    evidence does not hash."""
+    return next(k for k in archived if k.endswith("-thread-preclaim-0"))
+
+
 def _seed_preserved_observed_history(home, old_client, monkeypatch):
     """Two accepted archives stay observed while a different current thread moves."""
     import hashlib
@@ -2279,8 +2288,8 @@ def test_preserved_observed_history_explicit_current_only_continuation(
         supervisor_home, old_client, monkeypatch)
     original_old_rows = {
         name: dict(row) for name, row in fleet.load_registry()["workers"].items()
-        if name in {"sup|inc-20261009T011922Z-2caf|boot",
-                    "sup|inc-20261009T015843Z-0815|boot"}}
+        if name in {"sup|inc-20261009T011000Z-a012|boot",
+                    "sup|inc-20261009T015000Z-a015|boot"}}
     with pytest.raises(fleet.FleetCliError):
         fleet.cmd_sup_reconcile(args)
     args.preserve_retired_history_evidence = str(evidence_path)
@@ -2335,8 +2344,8 @@ def test_preserved_historical_native_rows_have_no_supported_wake_route(
         _restored_continuation_setup(supervisor_home, monkeypatch)
     _seed_preserved_observed_history(supervisor_home, old_client, monkeypatch)
     data = fleet.load_registry()
-    for old_name in ("sup|inc-20261009T011922Z-2caf|boot",
-                     "sup|inc-20261009T015843Z-0815|boot"):
+    for old_name in ("sup|inc-20261009T011000Z-a012|boot",
+                     "sup|inc-20261009T015000Z-a015|boot"):
         row = data["workers"][old_name]
         with pytest.raises(fleet.FleetCliError):
             fleet._cmd_send_codex_supervisor(old_name, "must stay unsent")
@@ -2416,7 +2425,7 @@ def test_preserved_history_prepare_refuses_unsafe_evidence(
     args.expect_history_sha256 = evidence_sha
     if case == "archive":
         path = supervisor_home / "state" / "codex" / "operations.retired" / (
-            next(iter(archived)) + ".json")
+            _hashed_start_archive(archived) + ".json")
         path.write_bytes(path.read_bytes() + b" ")
     elif case == "unknown-operation":
         OperationJournal(supervisor_home, old_client.generation).prepare({
@@ -2582,7 +2591,7 @@ def test_preserved_history_drift_refuses_before_host_creation(
         fleet.append_mailbox(SUCCESSOR_HANDOFF_THREAD_ID, "new old mail")
     elif case == "row":
         data = fleet.load_registry()
-        old_name = "sup|inc-20261009T011922Z-2caf|boot"
+        old_name = "sup|inc-20261009T011000Z-a012|boot"
         data["workers"][old_name]["last_activity"] = "changed"
         fleet.save_registry(data)
     elif case == "claim":
@@ -2623,7 +2632,7 @@ def test_preserved_history_drift_refuses_before_host_creation(
         path.chmod(0o600)
     else:
         path = supervisor_home / "state" / "codex" / "operations.retired" / (
-            next(iter(archived)) + ".json")
+            _hashed_start_archive(archived) + ".json")
         path.write_bytes(path.read_bytes() + b" ")
     old_client.host_live = False
     old_client.app_live = False

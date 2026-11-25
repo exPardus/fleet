@@ -13,7 +13,7 @@ INTERFACE_SID = "abcd0000-1111-2222-3333-444455556666"
 HOLDER_SID = "99998888-7777-6666-5555-444433332222"
 SUPERVISOR = "sup|inc-mail|boot"
 CODEX_THREAD = "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1"
-CODEX_CLAIM = "c1705ad1-8530-4e90-a8fc-869a7450d77b"
+CODEX_CLAIM = "a0000009-0000-4000-8000-000000000009"
 
 
 def _iso():
@@ -338,7 +338,7 @@ def test_codex_source_is_authenticated_at_issue_but_verify_stays_file_only(
         "CODEX_THREAD_ID", "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1")
     claim = {
         "thread_id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1",
-        "claim_id": "c1705ad1-8530-4e90-a8fc-869a7450d77b",
+        "claim_id": "a0000009-0000-4000-8000-000000000009",
         "ancestor_pid": 41,
         "ancestor_start_identity": "100",
         "uid": 1000,

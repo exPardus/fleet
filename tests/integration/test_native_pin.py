@@ -36,7 +36,7 @@ dispatch does. Step 5 conditions its roster-gone assertion on
 every verdict so a RED is never again misread as "rm is broken".
 
 CONTAINMENT: FLEET_HOME is a throwaway temp dir (state/logs/mailbox/outcomes
-never touch the real fleet at C:/projects/claude-fleet or C:/projects/fleet-mb-t12).
+never touch a real fleet home or checkout).
 This suite NEVER runs `claude daemon stop`/`uninstall`: they terminate
 background sessions machine-wide, including sessions this suite does not own.
 The `claude` DAEMON ITSELF IS NOT SANDBOXED BY FLEET_HOME, though -- every

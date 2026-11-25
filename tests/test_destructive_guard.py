@@ -141,7 +141,7 @@ class TestAWorkerIsNotExempt:
     MEASURED from inside a live `--bg` worker and disproved:
 
         py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
-          -> '820762d0-5298-4b1b-9471-4048ea27e278'
+          -> 'a0000008-0000-4000-8000-000000000008'
 
     which was exactly worker `mf-fix`'s own `session_id` in the registry, with
     `FLEET_WORKER=mf-fix` set alongside it. `_worker_env` strips the manager's
@@ -600,7 +600,7 @@ class TestAWorkerCallerIsNotExempt:
     and it is false. In worker `mf-fix`:
 
         py -3.13 -c "import os; print(repr(os.environ.get('CLAUDE_CODE_SESSION_ID')))"
-          -> '1a9374bd-df92-42ad-972a-06693aeef272'
+          -> 'a000000f-0000-4000-8000-00000000000f'
 
     which is that worker's own `session_id` in the registry -- not the
     manager's, which is what `spawned_by` holds. `_worker_env` strips the

@@ -471,10 +471,10 @@ def _agents(run):
     THAT IS ALSO THE MECHANISM BEHIND THE 10:16Z FALSE PAGE, and it is worth
     stating where the reader is. A fork-steer's session takes its turn, exits,
     goes `done`, and LEAVES the plain list -- MEASURED on the very body:
-    `d605e989...` (an earlier fork of `sup|inc-20260910T075355Z-4f99|
+    `a0000007...` (an earlier fork of `sup|inc-20260910T000000Z-a003|
     successor`) was `--all`-only at 10:56Z while its two sibling sids were in
     the plain list, and `ed943460...` -- the CURRENT `session_id` of
-    `sup|inc-20260910T041459Z-2382|boot` -- was `--all`-only while both of
+    `sup|inc-20260910T000000Z-a004|boot` -- was `--all`-only while both of
     that body's RETIRED sids sat in the plain list as pid-less corpses. A
     reader joining on one sid sees a body appear and disappear; only the union
     sees the body.

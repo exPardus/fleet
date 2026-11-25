@@ -1012,7 +1012,7 @@ class TestTemplate:
     def _render(self):
         raw = TEMPLATE.read_text(encoding="utf-8")
         return raw.replace("{{PYTHON}}", "py -3.13").replace(
-            "{{FLEET_HOME}}", "C:/projects/claude-fleet")
+            "{{FLEET_HOME}}", "C:/fleet-home")
 
     def test_template_renders_and_parses(self):
         parsed = json.loads(self._render())

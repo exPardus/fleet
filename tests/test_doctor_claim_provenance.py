@@ -1,9 +1,9 @@
 """W30 `drill`: a `refused` record is evidence only about the claim NOW HELD.
 
-THE DEFECT THIS EXISTS FOR. Measured 2026-07-30 from a live `fleet doctor` run
-at `3747461` (still present at `b3ec8d7`):
+THE DEFECT THIS EXISTS FOR. Reproduced from a `fleet doctor` run at `3747461`
+(still present at `b3ec8d7`); the ids below are synthetic stand-ins:
 
-    [FAIL] supervisor-claim: SUPERVISOR: inc-20260730T105328Z-77a2 live,
+    [FAIL] supervisor-claim: SUPERVISOR: inc-20260730T100000Z-a041 live,
     heartbeat 1m ago. | 2 continuity refusal(s) in the last 24h (latest:
     sup-release at 2026-07-29T23:09:12Z, expected generation 1) -- a second
     body of this lineage may be acting; census the sessions
@@ -29,7 +29,7 @@ the other side: a fleet "whose state had been wiped by a test escape".
 
 SO THE ROW WAS RED ON EVIDENCE ABOUT A CLAIM THAT NO LONGER EXISTS. The
 refusals were measured against `inc-L`; the claim the operator holds is
-`inc-20260730T105328Z-77a2`, lineage `lin-20260730T105328Z-103b`. Those are
+`inc-20260730T100000Z-a041`, lineage `lin-20260730T100000Z-a042`. Those are
 not the same claim, and this project's own recorded lesson is that
 **"a permanently-red `doctor` is a disabled `doctor`"**
 (`knowledge/lessons.md`, 2026-07-27 evening outage). `supervisor-claim` is one
@@ -256,10 +256,10 @@ class TestTheObservedIncident:
     about a test that polluted live state does not pollute live state."""
 
     def test_the_live_2026_07_30_row_would_have_been_green(self, home):
-        # The claim the operator actually held, verbatim shape.
-        _hold(lineage="lin-20260730T105328Z-103b", claimed_ago=1200,
-              incarnation_id="inc-20260730T105328Z-77a2",
-              session_id="a0dacb0f-763f-4542-b08f-a1010f14d93c",
+        # The shape of the claim the operator held (synthetic ids).
+        _hold(lineage="lin-20260730T100000Z-a042", claimed_ago=1200,
+              incarnation_id="inc-20260730T100000Z-a041",
+              session_id="a000000b-0000-4000-8000-00000000000b",
               claimed_via="seize")
         # The two in-window records, verbatim -- written against `inc-L`, hours
         # before the claim above was ever made, and carrying no lineage field
@@ -279,8 +279,8 @@ class TestTheObservedIncident:
         """The inverse, so the test above cannot be passing because the row has
         stopped counting these records at all. Identical records, identical
         sids -- only the claim moved."""
-        _hold(lineage="lin-20260730T105328Z-103b", claimed_ago=14 * 3600,
-              incarnation_id="inc-20260730T105328Z-77a2")
+        _hold(lineage="lin-20260730T100000Z-a042", claimed_ago=14 * 3600,
+              incarnation_id="inc-20260730T100000Z-a041")
         _log({"ts": _ago(13 * 3600), "kind": "refused", "verb": "sup-heartbeat",
               "caller_sid": DRILL_SID, "expected_seq": 1},
              {"ts": _ago(12 * 3600), "kind": "refused", "verb": "sup-release",

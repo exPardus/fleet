@@ -20,7 +20,7 @@ this project, kept verbatim from measurement receipts.
 MEASURED (docs/lanes/w61-sidcollision.md §2), driving the shipped
 `TestAWorkerCallerIsNotExempt` against a planted bystander home:
 
-    lookup(1a9374bd..) -> hit -> resolved step "lookup"
+    lookup(a000000f..) -> hit -> resolved step "lookup"
     $ fleet kill victim
     bystander/state/fleet.json  workers.victim.status  idle -> "dead"   WRITTEN
     fixture   /state/fleet.json  workers.victim.status  idle            UNTOUCHED
@@ -348,10 +348,11 @@ class TestTheDetectorCanSeeACollision:
         return caller_sid_sites(f)
 
     def test_a_real_sid_is_issuable_and_the_synthetic_one_is_not(self):
-        # the three that stood in this tree until w61
-        for real in ("820762d0-5298-4b1b-9471-4048ea27e278",
-                     "1a9374bd-df92-42ad-972a-06693aeef272",
-                     "20fee653-f07e-4208-8c0e-1c737f9119f7"):
+        # issuable shape (v4, RFC 4122) -- synthetic stand-ins for the three
+        # real sids that stood in this tree until w61
+        for real in ("a0000008-0000-4000-8000-000000000008",
+                     "a000000f-0000-4000-8000-00000000000f",
+                     "a0000010-0000-4000-8000-000000000010"):
             assert is_an_issuable_sid(real), real
         for fake in ("fa15e51d-0000-0000-0000-000000000001", "sess-A",
                      "aaaabbbb-1111-2222-3333-444455556666", "", None, 17):
@@ -359,36 +360,36 @@ class TestTheDetectorCanSeeACollision:
 
     def test_a_literal_kwarg_is_seen(self, tmp_path):
         sites = self._sites(tmp_path,
-                            'e = child_env(t, CLAUDE_CODE_SESSION_ID="820762d0-5298-4b1b-9471-4048ea27e278")\n')
-        assert [s.value for s in sites] == ["820762d0-5298-4b1b-9471-4048ea27e278"]
+                            'e = child_env(t, CLAUDE_CODE_SESSION_ID="a0000008-0000-4000-8000-000000000008")\n')
+        assert [s.value for s in sites] == ["a0000008-0000-4000-8000-000000000008"]
         assert all(s.resolved for s in sites)
 
     def test_a_dict_literal_is_seen(self, tmp_path):
         sites = self._sites(tmp_path,
                             'e = {"FLEET_HOME": "x", "CLAUDE_CODE_SESSION_ID": SID}\n'
-                            'SID = "1a9374bd-df92-42ad-972a-06693aeef272"\n')
-        assert [s.value for s in sites] == ["1a9374bd-df92-42ad-972a-06693aeef272"]
+                            'SID = "a000000f-0000-4000-8000-00000000000f"\n')
+        assert [s.value for s in sites] == ["a000000f-0000-4000-8000-00000000000f"]
 
     def test_a_subscript_assignment_is_seen(self, tmp_path):
         sites = self._sites(tmp_path,
                             'class T:\n'
-                            '    MY = "20fee653-f07e-4208-8c0e-1c737f9119f7"\n'
+                            '    MY = "a0000010-0000-4000-8000-000000000010"\n'
                             '    def go(self, env):\n'
                             '        env["CLAUDE_CODE_SESSION_ID"] = self.MY\n')
-        assert [s.value for s in sites] == ["20fee653-f07e-4208-8c0e-1c737f9119f7"]
+        assert [s.value for s in sites] == ["a0000010-0000-4000-8000-000000000010"]
 
     def test_the_parameter_hop_is_followed(self, tmp_path):
         """The shape both shipped drives actually use."""
         sites = self._sites(tmp_path,
                             'class T:\n'
-                            '    SID = "1a9374bd-df92-42ad-972a-06693aeef272"\n'
+                            '    SID = "a000000f-0000-4000-8000-00000000000f"\n'
                             '    def _run(self, *argv, session="an-agent"):\n'
                             '        env = child_env(t)\n'
                             '        env["CLAUDE_CODE_SESSION_ID"] = session\n'
                             '    def test_x(self):\n'
                             '        self._run("kill", session=self.SID)\n')
         values = {s.value for s in sites}
-        assert "1a9374bd-df92-42ad-972a-06693aeef272" in values, sites
+        assert "a000000f-0000-4000-8000-00000000000f" in values, sites
         assert "an-agent" in values, sites          # the default is checked too
         assert all(s.resolved for s in sites), sites
         # and the positional `*argv` is NOT mistaken for the kwonly parameter
@@ -402,9 +403,9 @@ class TestTheDetectorCanSeeACollision:
         quietly green."""
         armed = self._sites(tmp_path,
                             'e = child_env(t, CLAUDE_CODE_SESSION_ID='
-                            '"820762d0-5298-4b1b-9471-4048ea27e278")\n')
+                            '"a0000008-0000-4000-8000-000000000008")\n')
         assert [s.value for s in offending_sites(armed)] == [
-            "820762d0-5298-4b1b-9471-4048ea27e278"]
+            "a0000008-0000-4000-8000-000000000008"]
         clean = self._sites(tmp_path,
                             'e = child_env(t, CLAUDE_CODE_SESSION_ID='
                             '"fa15e51d-0000-0000-0000-000000000001")\n')

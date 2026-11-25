@@ -58,6 +58,37 @@ def _rec(**over):
     return base
 
 
+# A drive-letter or POSIX home path that names a person. `[\\/]+` also catches
+# the doubled backslash of a JSON or Python string; system and placeholder
+# roots (`Program Files`, `ProgramData`, `Windows`, `PythonNNN`, `C:\tmp`, the
+# GitHub Actions `D:/a/` workspace, `C:\Users\<you>`, `%USERNAME%`, `Public`,
+# `/Users/Shared`, `/home/linuxbrew`, `user`) are allowed.
+_ABSOLUTE_HOME_RE = re.compile(
+    r"\b[A-Za-z]:[\\/]+"
+    r"(?!(?:Program(?:Data)?|Windows|Python\d*|tmp|a)\b"
+    r"|Users[\\/]+(?:<|%|Public\b|user\b))[A-Za-z]"
+    r"|(?<![\w.])/(?:home|Users)/(?!(?:user|Shared|linuxbrew)\b)[A-Za-z][A-Za-z0-9_-]*\b")
+
+
+@pytest.mark.parametrize("text", [
+    r"C:\projects\x", "C:/projects/x", "c:/users/bob/", r'"C:\\projects\\x"',
+    "/home/" + "bob/", "/home/" + "bob", "/Users/" + "bob/", r"C:\Users\bob\.claude",
+])
+def test_absolute_home_re_refuses_personal_paths(text):
+    assert _ABSOLUTE_HOME_RE.search(text), text
+
+
+@pytest.mark.parametrize("text", [
+    r"C:\Program Files\x", r"C:\ProgramData\x", r"C:\Windows\x",
+    r"C:\Python312\x", r"C:\tmp\x", "D:/a/fleet/fleet", r"C:\Users\<you>\.claude",
+    r"C:\Users\%USERNAME%", r"C:\Users\Public", "/home/user/", "/home/user",
+    "/Users/" + "Shared/x", "/home/" + "linuxbrew/.linuxbrew/bin", "%USERPROFILE%",
+    "https://example.com/home/x",
+])
+def test_absolute_home_re_allows_system_and_placeholder_paths(text):
+    assert not _ABSOLUTE_HOME_RE.search(text), text
+
+
 class TestStatusSnapshot:
     def test_missing_registry_reports_not_initialized(self, home):
         snap = fleet.status_snapshot()
@@ -1233,16 +1264,18 @@ class TestCollaboratorInstall:
     def test_shipped_surfaces_hardcode_no_absolute_fleet_home(self, rel):
         # SPEC §14: FLEET_HOME is resolved (env -> ~/.claude/fleet-home marker
         # -> script location), never baked in. `commands/fleet.md` shipped with
-        # a literal C:/projects/claude-fleet fallback, which reads one developer's
-        # machine on every collaborator's.
+        # a literal Windows checkout path as a fallback, which reads one
+        # developer's machine on every collaborator's. Any drive-letter or
+        # personal home path is refused, so no particular path is named here.
         target = REPO / rel
         files = sorted(target.rglob("*")) if target.is_dir() else [target]
         for path in files:
             if not path.is_file():
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            for needle in ("C:/projects/claude-fleet", "C:\\projects\\claude-fleet"):
-                assert needle not in text, f"{path.relative_to(REPO)} hardcodes {needle}"
+            found = _ABSOLUTE_HOME_RE.search(text)
+            assert found is None, (
+                f"{path.relative_to(REPO)} hardcodes an absolute path {found.group(0)!r}")
 
     def test_shell_scripts_are_pinned_to_lf(self):
         # A CRLF shim dies on Linux with `\r: command not found`, and a hook's

@@ -22,8 +22,8 @@ def preaccept_home(tmp_path, monkeypatch):
     lane = tmp_path / "lane"
     lane.mkdir()
     name = "root-worker"
-    operation_id = "worker-root-worker-thread-3b51220e-cd83-4740-8efc-e25a30e86d0a"
-    generation = "f4391e03-8513-4e06-a129-05bf4976f3db"
+    operation_id = "worker-root-worker-thread-a000000a-0000-4000-8000-00000000000a"
+    generation = "a000000c-0000-4000-8000-00000000000c"
     row = {
         "substrate": "codex", "dispatch_kind": "codex-app-server",
         "session_id": None, "mcx_id": None, "adapter_state": "uncertain",

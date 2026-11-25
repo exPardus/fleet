@@ -43,7 +43,7 @@ import pytest
 
 import fleet
 
-SID = "32fbc137-2ccf-4980-a9cd-6695f313cf89"
+SID = "a0000001-0000-4000-8000-000000000001"
 
 # The roster shape the hung session presents: keyed (so Q1 answers LIVE, which is
 # what the respawn guard reads) but no running turn -- `status` is not

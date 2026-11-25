@@ -255,9 +255,9 @@ def test_a_non_string_status_on_the_claim_row_is_not_a_working_body(home):
 # The 2026-09-10 10:16Z false page, end to end through `collect`. The real
 # sids, from the real body.
 
-F4_CLAIM_SID = "42445477-de98-4813-937a-e18c965de740"
-F4_RETIRED_1 = "37e5c61c-cf8f-4fea-9b7b-61f2b22acc60"
-F4_RETIRED_2 = "d605e989-91e1-4640-850b-8548e000328f"
+F4_CLAIM_SID = "a0000003-0000-4000-8000-000000000003"
+F4_RETIRED_1 = "a0000002-0000-4000-8000-000000000002"
+F4_RETIRED_2 = "a0000007-0000-4000-8000-000000000007"
 
 
 def _fork_sup(sids=(F4_CLAIM_SID, F4_RETIRED_1, F4_RETIRED_2)):
@@ -306,7 +306,7 @@ def test_collected_sid_diagnostics_do_not_override_the_supplied_guard_wake(home)
 
 def test_both_rows_reach_the_observation_during_a_turn(home):
     """MEASURED 2026-09-10T10:38Z: one body, two roster rows, two live
-    processes -- `37e5c61c...` idle at pid 434832 and `42445477...` busy at
+    processes -- `a0000002...` idle at pid 434832 and `a0000003...` busy at
     pid 515437."""
     roster = json.dumps([
         {"name": "sup|inc-4f99|successor", "sessionId": F4_RETIRED_1,
