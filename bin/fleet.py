@@ -566,6 +566,17 @@ def _watch_format_gb(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
+def _exclusive_holder_label() -> str:
+    caller = current_caller_session()
+    try:
+        ident = _acting_worker_identity(sid=caller) if caller else None
+    except Exception:
+        ident = None
+    if ident and ident.get("verdict") == IDENTITY_RESOLVED:
+        return ident["name"]
+    return (caller or "")[:8] or "operator"
+
+
 def cmd_exclusive(args, *, sleep=time.sleep, clock=time.monotonic,
                   popen=subprocess.Popen) -> int:
     if getattr(args, "status", False):
@@ -581,8 +592,7 @@ def cmd_exclusive(args, *, sleep=time.sleep, clock=time.monotonic,
         command = command[1:]
     if not command:
         raise FleetCliError("exclusive: give the command after --, or pass --status")
-    holder = (getattr(args, "holder", None) or os.environ.get("FLEET_WORKER")
-              or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "operator")
+    holder = getattr(args, "holder", None) or _exclusive_holder_label()
     return fleet_exclusive.run(
         command, holder_name=holder, label=getattr(args, "label", None),
         ttl=args.ttl, wait_max=args.wait_max, sleep=sleep, clock=clock,
@@ -29444,7 +29454,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_exclusive.add_argument("--label", default=None,
                              help="what this run is, shown to waiters")
     p_exclusive.add_argument("--holder", default=None,
-                             help="holder name (default: $FLEET_WORKER)")
+                             help="holder name (default: this session's registry name)")
     p_exclusive.add_argument(
         "--wait-max", dest="wait_max", type=float,
         default=fleet_exclusive.DEFAULT_WAIT_SECONDS,
