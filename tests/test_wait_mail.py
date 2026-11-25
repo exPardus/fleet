@@ -132,3 +132,56 @@ def test_without_mail_a_name_is_still_required(home):
 def test_the_parser_accepts_a_pure_park():
     args = fleet.build_parser().parse_args(["wait", "--mail"])
     assert args.mail is True and args.names == []
+
+
+# Review w598 of a21621b7 (P3s).
+def test_each_receipt_is_verified_at_most_once(home, monkeypatch):
+    for _ in range(5):
+        _issue("old direction")
+    calls = []
+    real = fleet.cmd_mail_verify
+
+    def counting(args):
+        calls.append(args.mail_id)
+        return real(args)
+
+    monkeypatch.setattr(fleet, "cmd_mail_verify", counting)
+    clock = Clock()
+    forged_id = "11111111-2222-4333-8444-555555555555"
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if clock.now == 3.0:
+            path = fleet.mail_receipts_dir() / f"{forged_id}.json"
+            path.write_text(json.dumps({"id": forged_id}))
+
+    assert fleet.cmd_wait(_args(timeout=30), sleep=sleep, clock=clock) == 1
+    assert calls == [forged_id]  # the old ones never, the forged one once
+
+
+def test_mail_and_a_finishing_lane_in_one_poll_are_both_reported(
+        home, monkeypatch, capsys):
+    state = {"status": "working"}
+    monkeypatch.setattr(fleet, "load_registry",
+                        lambda: {"workers": {"w1": {"status": state["status"],
+                                                    "session_id": "s1"}}})
+    monkeypatch.setattr(fleet, "_fetch_agents_roster", lambda: (True, []))
+    monkeypatch.setattr(fleet, "native_epoch_suspicious", lambda *a: False)
+    monkeypatch.setattr(fleet, "recompute_worker",
+                        lambda n, rec, entries: {"status": state["status"]})
+    monkeypatch.setattr(fleet, "save_registry", lambda data: None)
+    monkeypatch.setattr(fleet, "latest_outcome", lambda *a: None)
+    clock = Clock()
+    arrived = []
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if not arrived:
+            arrived.append(_issue())
+            state["status"] = "idle"  # the lane ends in the same poll
+
+    assert fleet.cmd_wait(_args(["w1"]), sleep=sleep, clock=clock) == 0
+    out = capsys.readouterr().out
+    assert f"MAIL {arrived[0]}" in out
+    assert "w1: idle" in out
+
