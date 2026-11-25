@@ -87,22 +87,17 @@ The sid is used as an identity key and fails that job in **two opposite directio
 
 ### 1.2 The three production incidents
 
-Each anchor re-opened and verified; the spec-lens gate re-verified all three as **EXACT**.
+The three incidents below are paraphrased from the local operator journal and lessons file. That
+record is local operator data and is not in the public history, so it is summarised here, not quoted;
+each paraphrase was checked against its source entry when this section was written.
 
-**Incident 1 — dual supervisor bodies, 2026-07-16.** A CHECKPOINT entry in the local operator
-journal:
-
-> INCIDENT RESOLVED: dual supervisor bodies. Phantom steers (7 sends: 'final
-> micro-wave', 'One last LOW advisory', 'URGENT root-cause task', ...) came from a
-> fork-session resume of THIS conversation created during a host restart, running
-> daemon-hosted with full campaign context, independently re-deriving and dispatching my decisions
-> in paraphrase. [...] Claim-protocol gap exposed: both bodies share incarnation id + sid --
-> sup-claim cannot discriminate bodies of one lineage
-
-Corroborated at `local operator lessons:601`:
-
-> The sup-claim CANNOT see this — both bodies share incarnation id + sid; a per-body nonce is the
-> fix candidate (logged in three-tier-command.md).
+**Incident 1 — dual supervisor bodies, 2026-07-16.** The supervisor received steering messages it had
+not sent: seven of them, from a second body. That body was a fork-session resume of the supervisor's
+own conversation, created during a host restart. It ran daemon-hosted with the full campaign context
+and re-derived and dispatched the supervisor's decisions in its own words. The journal entry names the
+gap this exposed: both bodies shared one incarnation id and one session id, so the claim protocol
+could not tell two bodies of one lineage apart. The operator lessons file records the same conclusion
+and names a per-body nonce as the candidate fix.
 
 Two facts bind the design.
 
@@ -124,36 +119,26 @@ regardless of what this particular zombie did.
 **(2) Fleet never had a handle on the fork.** It was minted by a host restart, outside every fleet
 code path, and its sid reached fleet only via a human process census. This one *is* on the record.
 
-**Incident 2 — `sup-boot` refuses its own holder, 2026-07-17.** A CHECKPOINT entry in the local
-operator journal:
-
-> Host restart overnight (~10h gap): same sid resumed, heartbeat refreshed (NOTE claim wart: sup-boot
-> REFUSES its own holder when heartbeat stale -- self-recognition missing, feeds nonce spec + lessons).
-
-The recovery lever and the observed verdict are recorded at `local operator lessons:627`, **not** in
-the journal entry:
-
-> **Claim-protocol wart found live:** `sup-boot` REFUSES its own holder when the heartbeat is stale
-> (>60m) — after an overnight gap the same-sid manager could not re-boot its own claim (VERDICT
-> refuse/freeze), only `sup-heartbeat` (which doesn't gate on staleness) recovered it.
-> Self-recognition is missing from the claim decision; feeds the nonce spec.
+**Incident 2 — `sup-boot` refuses its own holder, 2026-07-17.** After an overnight host restart
+(roughly a ten-hour gap) the same session resumed and refreshed its heartbeat. The journal entry notes
+that `sup-boot` refused its own holder because the heartbeat was stale: self-recognition was missing.
+The operator lessons file, **not** the journal entry, records the verdict and the recovery lever: with
+the heartbeat stale (over 60 minutes), the same-session supervisor could not re-boot its own claim
+(verdict refuse/freeze), and only `sup-heartbeat`, which does not gate on staleness, recovered it.
 
 The mechanism is structural: **`supervisor_claim_decision` does not take the caller's identity as a
 parameter at all** (§4.4). It cannot recognise self. The observed verdict word — *refuse* — is
 load-bearing for §6.1 and is analysed there.
 
 **Incident 3 — an authorized stop is indistinguishable from a daemon restart, 2026-07-17.**
-An earlier CHECKPOINT entry in the local operator journal:
-
-> Succession: operator-authorized stop of stale body inc-<id> [...] sup-boot
-> refuse->freeze (roster-gone+fresh-heartbeat, G9 heuristic blind to authorized stop); operator
-> pre-ratified seize, INCARNATION cleared as delegate, fresh claim taken.
-
-And `local operator lessons:627`, second clause:
-
-> Also: `sup-boot` freeze heuristic cannot distinguish an operator-authorized `claude stop` from a
-> daemon restart (both = roster-gone + fresh-heartbeat) → froze on a legitimate succession; the
-> manual `rm supervisor/INCARNATION` is the only release lever — there is no `sup-release` verb.
+An earlier journal entry records a succession after the operator authorized stopping a stale body.
+`sup-boot` went from refuse to freeze, because the G9 heuristic saw the roster entry gone and a fresh
+heartbeat and could not see that the stop was authorized. The operator pre-ratified a seize, the
+supervisor cleared `supervisor/INCARNATION` as delegate, and a fresh claim was taken. The operator
+lessons file draws the general point: the freeze heuristic cannot tell an operator-authorized
+`claude stop` from a daemon restart (both look like roster-gone plus fresh heartbeat), so it froze on
+a legitimate succession, and removing `supervisor/INCARNATION` by hand was the only release lever,
+because there was no `sup-release` verb.
 
 ---
 
