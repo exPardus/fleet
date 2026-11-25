@@ -631,11 +631,11 @@ def test_released_claim_ignores_live_supervisor_from_another_fleet_home(
         f"{home}\n{foreign_home}\n", encoding="utf-8")
     foreign = {
         "cwd": str(foreign_home),
-        "id": "60496272",
+        "id": "a0000011",
         "kind": "background",
         "name": "sup|inc-20261001T000000Z-a002|successor",
         "pid": 3601537,
-        "sessionId": "60496272-c1aa-482f-8630-ed3ca4dfa3ca",
+        "sessionId": "a0000011-0000-4000-8000-000000000011",
         "startedAt": 1790880629368,
         "state": "done",
         "status": "idle",

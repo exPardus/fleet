@@ -894,7 +894,7 @@ class TestTheSweepUnderAHeldClaim:
     fresh claim:
 
         autoclean: archive tier failed: archive: refusing -- a supervisor
-        claim (inc-20260727T184603Z-f054) is held and fresh, and this call did
+        claim (inc-20260727T180000Z-a031) is held and fresh, and this call did
         not prove continuity on it (claim-nonce §7).
         autoclean: husks_removed=0 husks_deferred=0 tombstones_expired=0 errors=1
 

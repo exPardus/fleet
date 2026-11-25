@@ -25,6 +25,25 @@ _SECRET_SHAPES = (
     ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")),
     ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
 )
+# A version-4 UUID is the shape of a real Claude session id. Synthetic test
+# ids are low-entropy (`a0000003-0000-4000-8000-000000000003`,
+# `aaaabbbb-1111-2222-3333-444455556666`); a random v4 uses ~14 of the 16 hex
+# digits, so more than `_MAX_SYNTHETIC_DIGITS` distinct digits means the value
+# was very probably copied from a live session. Incarnation and lineage ids
+# carry only a four-digit random suffix, too short to tell apart by shape;
+# scrubbing those stays a review step.
+_V4_UUID = re.compile(
+    r"(?<![0-9A-Fa-f-])[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}"
+    r"-[0-9a-f]{12}(?![0-9A-Fa-f-])")
+_MAX_SYNTHETIC_DIGITS = 10
+_SEQUENTIAL_RUN = "0123456789"
+
+
+def _looks_issued(value: str) -> bool:
+    digits = value.replace("-", "")
+    if _SEQUENTIAL_RUN in digits:
+        return False
+    return len(set(digits)) > _MAX_SYNTHETIC_DIGITS
 
 
 def _tracked_files(repo: Path) -> list[Path]:
@@ -63,6 +82,10 @@ def public_hygiene_violations(repo: Path) -> list[str]:
                 if local.lower() != "noreply" and domain.lower() != "example.com":
                     violations.append(
                         f"{rel}:{line_number}: non-placeholder email address")
+            for match in _V4_UUID.finditer(line):
+                if _looks_issued(match.group(0)):
+                    violations.append(
+                        f"{rel}:{line_number}: random-looking session id")
             for label, pattern in _SECRET_SHAPES:
                 if pattern.search(line):
                     violations.append(f"{rel}:{line_number}: {label}")
@@ -114,3 +137,14 @@ def test_untracked_local_denylist_extends_the_guard(tmp_path):
     assert len(violations) == 1
     assert "local denylist entry" in violations[0]
     assert "state/leak-denylist.txt" not in "\n".join(violations)
+
+
+def test_a_random_looking_session_id_is_refused_and_synthetic_ones_pass(tmp_path):
+    # a fresh uuid4, never issued; split so this file passes its own guard
+    issued = "3c9e71f2-58ad-4b06-" + "9e1f-d27a4c80b5e3"
+    synthetic = ("a0000003-0000-4000-8000-000000000003\n"
+                 "aaaabbbb-1111-2222-3333-444455556666\n"
+                 "1234abcd-0000-4000-8000-0123456789ab\n")
+    repo = _seed_repo(tmp_path, f"sid = {issued!r}\n" + synthetic)
+    violations = public_hygiene_violations(repo)
+    assert violations == ["tracked.txt:1: random-looking session id"]

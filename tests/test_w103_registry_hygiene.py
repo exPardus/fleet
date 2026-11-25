@@ -26,7 +26,7 @@ import fleet
 
 THREAD_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b7"
 TURN_ID = "018f22d3-9b4a-7cc3-8a0e-36d4f59106b8"
-GENERATION = "3f0e8a52-5d1c-4a51-9f4e-4c1b9a0d7e21"
+GENERATION = "a000000d-0000-4000-8000-00000000000d"
 
 
 def _iso(dt):

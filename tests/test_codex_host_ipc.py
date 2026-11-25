@@ -430,7 +430,7 @@ def test_interface_claim_authorizes_current_peer_and_refuses_stale_sources(
     host = host_module.Host.__new__(host_module.Host)
     host.home = _home(tmp_path)
     claim = {"schema": 1, "home": str(host.home), "thread_id": "thread-current",
-             "claim_id": "c1705ad1-8530-4e90-a8fc-869a7450d77b",
+             "claim_id": "a0000009-0000-4000-8000-000000000009",
              "ancestor_pid": 41, "ancestor_start_identity": "100", "uid": 1000}
     monkeypatch.setattr(host_module, "read_interface_claim", lambda _home: claim)
     monkeypatch.setattr(host_module.os, "getuid", lambda: 1000)
@@ -561,7 +561,7 @@ def test_host_records_authentication_rejection_before_provider_acceptance(tmp_pa
         claim_path.write_text(json.dumps({
             "schema": 1, "home": str(client.home),
             "thread_id": "018f22d3-9b4a-7cc3-8a0e-36d4f59106c1",
-            "claim_id": "c1705ad1-8530-4e90-a8fc-869a7450d77b",
+            "claim_id": "a0000009-0000-4000-8000-000000000009",
             "ancestor_pid": 999999, "ancestor_start_identity": "stale",
             "uid": os.getuid(),
         }), encoding="utf-8")

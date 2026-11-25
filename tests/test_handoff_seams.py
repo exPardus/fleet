@@ -161,8 +161,8 @@ def _orphan(sup_home, inc, age_seconds=2 * T):
     return _age_file(path, age_seconds)
 
 
-DEAD_INC_A = "inc-20260724T045450Z-0dea"
-DEAD_INC_B = "inc-20260724T081049Z-754f"
+DEAD_INC_A = "inc-20260724T040000Z-a021"
+DEAD_INC_B = "inc-20260724T081000Z-a022"
 
 
 def _roster_run(*sids):
@@ -504,9 +504,9 @@ class TestAbortResolution(_HandoffBase):
 class TestSweepPredicateFailsClosed:
     """R2 -- the pure predicate, over `(name, age_seconds)` pairs."""
 
-    HOLDER = "inc-20260724T045450Z-0dea"
-    PENDING = "inc-20260724T082006Z-696e"
-    DEAD = "inc-20260724T081049Z-754f"
+    HOLDER = "inc-20260724T040000Z-a021"
+    PENDING = "inc-20260724T082000Z-a023"
+    DEAD = "inc-20260724T081000Z-a022"
 
     def _claim(self, pending=(), holder=HOLDER):
         claim = {"incarnation_id": holder}
@@ -650,9 +650,9 @@ class TestPathConfinement:
 
     def test_the_minted_shape_is_the_only_accepted_shape(self):
         assert fleet.valid_incarnation_id(fleet.mint_incarnation_id())
-        for bad in ("../../evil", "inc-succ", "inc-20260724T045450Z-0DEA",
-                    "", None, 7, "inc-2026724T045450Z-0dea",
-                    "inc-20260724T045450Z-0dea/../x"):
+        for bad in ("../../evil", "inc-succ", "inc-20260724T040000Z-A021",
+                    "", None, 7, "inc-2026724T040000Z-a021",
+                    "inc-20260724T040000Z-a021/../x"):
             with pytest.raises(ValueError):
                 fleet.valid_incarnation_id(bad)
 
@@ -1298,17 +1298,17 @@ class TestTornPendingMembersFailClosed:
     """rb-MIN-7: a torn entry failed OPEN while a torn claim failed CLOSED --
     inside a predicate whose whole doctrine is fail-closed."""
 
-    CLAIM = "inc-20260724T045450Z-0dea"
+    CLAIM = "inc-20260724T040000Z-a021"
 
     def _claim(self, *members):
         return {"incarnation_id": self.CLAIM, "handoff_pending": list(members)}
 
     def test_an_unreadable_member_protects_every_task_file(self):
         candidates = [(f"supervisor-handoff-{DEAD_INC_B}.md", 10 * T),
-                      ("supervisor-handoff-inc-20260724T082006Z-696e.md", 10 * T)]
+                      ("supervisor-handoff-inc-20260724T082000Z-a023.md", 10 * T)]
         readable = self._claim({"successor_inc": DEAD_INC_B, "minted_at": "x"})
         assert fleet.handoff_task_files_to_sweep(candidates, readable) == \
-            ["supervisor-handoff-inc-20260724T082006Z-696e.md"]
+            ["supervisor-handoff-inc-20260724T082000Z-a023.md"]
         for torn in ("not-a-dict", None, 7, {"successor_sid": "sid-x"},
                      {"successor_inc": ""}):
             claim = self._claim({"successor_inc": DEAD_INC_B, "minted_at": "x"}, torn)
