@@ -9513,9 +9513,11 @@ def wait_for_workers(names, mode: str = "all", timeout=None, poll_interval: floa
 
 
 MAIL_WAIT_CAP_SECONDS = 600
+MAIL_RECHECK_SECONDS = 15.0
 
 
-def _verified_interface_mail_ids(skip=frozenset(), cache=None) -> set:
+def _verified_interface_mail_ids(skip=frozenset(), cache=None,
+                                 clock=time.monotonic) -> set:
     try:
         paths = list(mail_receipts_dir().glob("*.json"))
     except OSError:
@@ -9531,10 +9533,12 @@ def _verified_interface_mail_ids(skip=frozenset(), cache=None) -> set:
         except OSError:
             continue
         known = cache.get(mail_id)
-        if known is None or known[0] != stamp:
+        now = clock()
+        if (known is None or known[0] != stamp
+                or (not known[1] and now - known[2] >= MAIL_RECHECK_SECONDS)):
             with redirect_stdout(io.StringIO()):
                 ok = cmd_mail_verify(SimpleNamespace(mail_id=mail_id)) == 0
-            cache[mail_id] = (stamp, ok)
+            cache[mail_id] = (stamp, ok, now)
         if cache[mail_id][1]:
             verified.add(mail_id)
     return verified
@@ -9561,7 +9565,8 @@ def cmd_wait(args, sleep=time.sleep, clock=time.monotonic) -> int:
                      } if mail_receipts_dir().is_dir() else set()
 
     def mail_arrived():
-        new_mail[:] = sorted(_verified_interface_mail_ids(mail_seen, verdicts))
+        new_mail[:] = sorted(_verified_interface_mail_ids(mail_seen, verdicts,
+                                                          clock))
         return bool(new_mail)
 
     mode = "any" if args.any else "all"
