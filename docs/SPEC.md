@@ -71,6 +71,7 @@ claude-fleet\
     fleet_lock.py            # shared owner-safe lock, no registry/claim writers
     fleet.py                 # single-file CLI, Python >=3.10, stdlib only (23100 lines @ 708fa45; §0)
     fleet_statusline.py      # statusline renderer (imports fleet.py; read-only view)
+    fleet_statusline.sh      # installed statusline: prints the cached row (sh builtins only)
     fleet.cmd / fleet        # PATH shims (cmd.exe + POSIX sh)
     hooks\
       posttooluse_mailbox.py # mid-turn mailbox injection

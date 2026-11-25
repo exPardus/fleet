@@ -1176,12 +1176,54 @@ def memoize_registry_reads() -> None:
     fleet.lookup_home_for_sid = lookup_home_for_sid
 
 
+def render_rows(payload: str, population, pane: str = "",
+                color: bool = True) -> list:
+    """Fleet's own rows for one stdin blob: no delegates, no output.
+
+    The whole render path of `main` minus the operator's delegates, so the
+    live command and the cache writer (`cache_outputs`) render the same bytes.
+    `fleet.FLEET_HOME` is pointed at the resolved home for the render and
+    restored afterwards, so a writer process keeps its own home."""
+    saved_home = fleet.FLEET_HOME
+    try:
+        decision = resolve_blob_home(payload, population=population)
+        if decision["home"] is not None:
+            fleet.FLEET_HOME = decision["home"]
+        # Interface mode (w106): `[]` on a single-home machine, on any failure,
+        # and for every session that is not a registered interface.
+        view_homes = (interface_view_homes(decision, population, payload, pane)
+                      if population is not None else [])
+        # A session that belongs to no fleet home gets no fleet row at all.
+        unregistered = session_is_unregistered(payload, population, pane)
+        # At the terminus and at an ambiguity there is no home to read a
+        # roster from, so the word takes the row's place.
+        line = render_home_terminus(decision, color=color)
+        if unregistered and line is None:
+            return []
+        if view_homes:
+            return list(render_interface_rows(view_homes, color=color, lead=line))
+        if line is None:
+            # `fleet.FLEET_HOME` is read TWICE here and both reads must see the
+            # same value: `status_snapshot()` counts that home's workers and
+            # `rendered_home_tag` names it.
+            line = render_statusline(
+                fleet.status_snapshot(), color=color,
+                tag=rendered_home_tag(decision, fleet.FLEET_HOME))
+        return [line]
+    finally:
+        fleet.FLEET_HOME = saved_home
+
+
 def main() -> int:
+    """The LIVE statusline: resolve, read and render on every call.
+
+    Kept for `fleet statusline --live` style diagnosis and for the tests that
+    pin the render path; the INSTALLED statusline is `fleet_statusline.sh`,
+    which only prints what `cache_outputs` rendered (terminal-surface §4.3)."""
     try:
         memoize_registry_reads()
-        # Claude Code passes a session JSON blob on stdin. Fleet needs none of
-        # it, but a chained delegate might, so it is captured and forwarded
-        # verbatim. Read it in full so the writer never blocks on a full pipe.
+        # Claude Code passes a session JSON blob on stdin. Read it in full so
+        # the writer never blocks on a full pipe.
         try:
             payload = sys.stdin.read()
         except (OSError, ValueError):
@@ -1195,39 +1237,15 @@ def main() -> int:
             pass
 
         # THE HOME THE STATUSLINE STARTED IN, captured BEFORE §5 is allowed to
-        # move it. Everything the operator's own terminal executes is anchored
-        # here; only what fleet READS follows the resolution. See
-        # `_legacy_chain_path`.
+        # move it. See `_legacy_chain_path`.
         launch_home = fleet.FLEET_HOME
-
-        # §5, before any read (multi-fleet slice d). On a single-home machine
-        # this is a no-op by construction.
         try:
             population = fleet.resolution_population()
         except BaseException:  # noqa: BLE001 -- degrade to the shipped path
             population = None
-        decision = resolve_blob_home(payload, population=population)
-        if decision["home"] is not None:
-            fleet.FLEET_HOME = decision["home"]
-        # Interface mode (w106): `[]` on a single-home machine, on any failure,
-        # and for every session that is not a registered interface.
-        view_homes = (interface_view_homes(decision, population, payload,
-                                           os.environ.get("TMUX_PANE"))
-                      if population is not None else [])
 
-        # A session that belongs to no fleet home gets no fleet row at all
-        # (delegates still run below -- they are the operator's own statusline).
-        unregistered = session_is_unregistered(
-            payload, population, os.environ.get("TMUX_PANE"))
-
-        # Delegates print above fleet's row. A delegate that fails, hangs, or
-        # emits unprintable bytes is dropped -- it must never cost fleet's row.
-        #
-        # AND THE CONVERSE: fleet failing to resolve a home must never cost the
-        # DELEGATE its row. The delegate is the operator's own statusline,
-        # captured from the one machine-global `statusLine` entry Claude Code
-        # allows; it has nothing to do with which fleet home this session
-        # belongs to, so it runs on every path including the terminus.
+        # Delegates print above fleet's row, on every path including the
+        # terminus; a failing delegate is dropped and never costs fleet's row.
         try:
             for row in _delegate_rows(payload, legacy_home=launch_home):
                 if _stdout_can_encode(row):
@@ -1235,31 +1253,198 @@ def main() -> int:
         except BaseException:  # noqa: BLE001
             pass
 
-        # Fleet's own row is pure ASCII, so no console encoding can reject it
-        # and there is no fallback renderer to get wrong. At the terminus and at
-        # an ambiguity there is no home to read a roster from, so the word takes
-        # the row's place -- one line either way, exit 0 either way.
-        line = render_home_terminus(decision, color=_want_color())
-        if unregistered and line is None:
-            return 0
-        if view_homes:
-            for row in render_interface_rows(view_homes, color=_want_color(),
-                                             lead=line):
-                print(row)
-            return 0
-        if line is None:
-            # `fleet.FLEET_HOME` is read TWICE here and both reads must see the
-            # same value: `status_snapshot()` counts that home's workers and
-            # `rendered_home_tag` names it. Passing the tag in rather than
-            # letting the renderer reach for the global is what keeps the row
-            # from ever naming a home it did not count.
-            line = render_statusline(
-                fleet.status_snapshot(), color=_want_color(),
-                tag=rendered_home_tag(decision, fleet.FLEET_HOME))
-        print(line)
+        rows = render_rows(payload, population, os.environ.get("TMUX_PANE"),
+                           color=_want_color())
+        if rows:
+            # render_rows moved and restored the home; the main() contract
+            # has always left the resolved home in place for its caller.
+            decision = resolve_blob_home(payload, population=population)
+            if decision["home"] is not None:
+                fleet.FLEET_HOME = decision["home"]
+        for row in rows:
+            print(row)
     except BaseException:  # noqa: BLE001 -- a statusline never surfaces a traceback
         return 0
     return 0
+
+
+# --- the cache (terminal-surface §4.3, "one writer, a fork-free reader") ----
+#
+# Fifteen sessions each running this module every 10 s cost 20-55 % of a CPU
+# per run: the interpreter start, `import fleet` and the registry reads, for a
+# row that changes only when fleet state changes. So the state changes render
+# it. `cache_outputs` renders every row a session on this machine can be shown
+# -- one per session id fleet knows, one per registered interface pane, the
+# no-sid and the unregistered rows -- and `fleet.refresh_statusline_cache`
+# (called when a fleet verb wrote the registry, by every keeper tick, and by
+# `fleet init --statusline`) writes them to `fleet.statusline_cache_dir()`. The
+# installed statusline is `bin/fleet_statusline.sh`: it picks one file by the
+# blob's session id and `$TMUX_PANE` and prints it with shell builtins only.
+
+def cache_key(value) -> str:
+    """`value` when it is usable as a cache file name (ASCII letters, digits,
+    `-`, `_`), else `""`. The reader applies the same rule to the blob."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if (not value or len(value) > 128 or not value.isascii()
+            or not all(c.isalnum() or c in "-_" for c in value)):
+        return ""
+    return value
+
+
+#: The sid the cache renders the "unregistered" row for: a well-formed id no
+#: home holds (the nil UUID is never issued).
+UNREGISTERED_PROBE_SID = "00000000-0000-0000-0000-000000000000"
+
+
+def _home_session_ids(home) -> list:
+    """Session ids that can be showing a statusline for this home: every live
+    (unarchived) row's current sid, the supervisor claim's sid and the
+    registered interface session. Pure reads."""
+    sids = []
+    ok, _reason, data = fleet.read_registry_at(home)
+    if ok:
+        for rec in (data.get("workers") or {}).values():
+            if (isinstance(rec, dict) and not rec.get("archived_at")
+                    and isinstance(rec.get("session_id"), str)):
+                sids.append(rec["session_id"])
+    saved = fleet.FLEET_HOME
+    try:
+        fleet.FLEET_HOME = Path(home)
+        claim = fleet.read_incarnation()
+        if isinstance(claim, dict) and isinstance(claim.get("session_id"), str):
+            sids.append(claim["session_id"])
+    except BaseException:  # noqa: BLE001
+        pass
+    finally:
+        fleet.FLEET_HOME = saved
+    marker = _read_marker(Path(home) / "state" / "interface-session")
+    if marker:
+        sids.append(marker)
+    return sids
+
+
+def _sid_membership(population) -> dict:
+    """{sid: frozenset of listed homes whose registry holds it}, one pass.
+
+    The same membership `fleet.lookup_home_for_sid` tests per sid
+    (`fleet._record_sids`, every listed home), computed once for all sids."""
+    out = {}
+    if population is None:
+        return out
+    for ident in population.get("homes", ()):
+        try:
+            ok, _reason, data = fleet.read_registry_at(ident)
+        except BaseException:  # noqa: BLE001
+            continue
+        if not ok:
+            continue
+        for rec in data["workers"].values():
+            try:
+                for sid in fleet._record_sids(rec):
+                    out.setdefault(sid, set()).add(str(ident))
+            except BaseException:  # noqa: BLE001
+                continue
+    return {sid: frozenset(homes) for sid, homes in out.items()}
+
+
+def _memoized_snapshots():
+    """Patch `fleet.status_snapshot` to compute once per home; returns undo."""
+    original = fleet.status_snapshot
+    memo = {}
+
+    def status_snapshot(*args, **kwargs):
+        key = (str(fleet.FLEET_HOME), args, tuple(sorted(kwargs.items())))
+        if key not in memo:
+            memo[key] = original(*args, **kwargs)
+        return copy.deepcopy(memo[key])
+
+    fleet.status_snapshot = status_snapshot
+
+    def undo():
+        fleet.status_snapshot = original
+    return undo
+
+
+def cache_outputs() -> dict:
+    """{file name: text} for every row the cached statusline can print.
+
+    Each output exists twice, coloured and `<name>.nocolor` (the reader picks
+    by `$NO_COLOR`). `delegates` lists the chained statusline commands, one
+    per line. Pure reads: no lock, no probe, no write; never raises out of a
+    single session's render (that session's file is simply absent)."""
+    saved = (fleet.read_registry_at, fleet.lookup_home_for_sid)
+    memoize_registry_reads()
+    undo = _memoized_snapshots()
+    try:
+        try:
+            population = fleet.resolution_population()
+        except BaseException:  # noqa: BLE001
+            population = None
+        homes = [fleet.FLEET_HOME]
+        if population is not None:
+            homes.extend(Path(h) for h in population.get("homes", ()))
+        payloads = {"nosid": ("", ""),
+                    "unregistered": (json.dumps(
+                        {"session_id": UNREGISTERED_PROBE_SID}), "")}
+        sids, interface_sids, seen_homes = [], set(), set()
+        for home in homes:
+            ident = str(home)
+            if ident in seen_homes:
+                continue
+            seen_homes.add(ident)
+            try:
+                sids.extend(_home_session_ids(home))
+                marker = _read_marker(Path(home) / "state" / "interface-session")
+                if marker:
+                    interface_sids.add(marker)
+                pane = _pane_id(_read_marker(Path(home) / "state" / "interface-pane"))
+                if pane:
+                    payloads["pane-" + pane[1:]] = (
+                        json.dumps({"session_id": marker}) if marker else "", pane)
+            except BaseException:  # noqa: BLE001 -- one home never costs the rest
+                continue
+        # A sid's row depends on it only through which listed homes hold it
+        # (§5's lookup) and whether it is a registered interface. Sids that
+        # agree on both render identically, so each group renders ONCE, through
+        # the real path, from one representative: the lookup is a scan of every
+        # record per sid, and hundreds of sids made that quadratic.
+        members = _sid_membership(population)
+        groups = {}
+        for sid in sids:
+            key = cache_key(sid)
+            if not key:
+                continue
+            signature = (sid if sid in interface_sids
+                         else members.get(sid, frozenset()))
+            groups.setdefault(signature, []).append(key)
+        for signature, keys in groups.items():
+            payloads["sid-" + keys[0]] = (
+                json.dumps({"session_id": keys[0]}), "")
+        out = {}
+        for name, (payload, pane) in payloads.items():
+            for suffix, color in (("", True), (".nocolor", False)):
+                try:
+                    rows = render_rows(payload, population, pane, color=color)
+                except BaseException:  # noqa: BLE001
+                    continue
+                out[name + suffix] = "".join(row + "\n" for row in rows)
+        for keys in groups.values():
+            for key in keys[1:]:
+                for suffix in ("", ".nocolor"):
+                    if "sid-" + keys[0] + suffix in out:
+                        out["sid-" + key + suffix] = out["sid-" + keys[0] + suffix]
+        try:
+            commands = [c for c in _load_delegates(fleet.FLEET_HOME)
+                        if "\n" not in c and "\r" not in c]
+        except BaseException:  # noqa: BLE001
+            commands = []
+        out["delegates"] = "".join(c + "\n" for c in commands)
+        return out
+    finally:
+        undo()
+        fleet.read_registry_at, fleet.lookup_home_for_sid = saved
 
 
 if __name__ == "__main__":

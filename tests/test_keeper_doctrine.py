@@ -80,6 +80,9 @@ ALLOWED_FLEET_ATTRIBUTES = {
     "KEEPER_LINE_PREFIX", "INTERFACE_LINE_LIMIT",
     "one_line", "interface_line", "tmux_command", "type_interface_line",
     "append_interface_log",
+    # Writes only the machine statusline cache (rendered rows), never fleet
+    # state: no lock, no registry, no events.
+    "refresh_statusline_cache",
 }
 
 

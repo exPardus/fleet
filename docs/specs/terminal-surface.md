@@ -110,7 +110,8 @@ One source, one derivation, four consumers. Nothing on this diagram writes.
 state/fleet.json ──┐
                    ├──▶ fleet.status_snapshot()   read-only · no lock · no probe · no write
 mailbox/*.md ──────┘             │
-                                 ├──▶ bin/fleet_statusline.py     (import; every ~10 s)
+                                 ├──▶ fleet_statusline.cache_outputs() ──▶ statusline cache ──▶ bin/fleet_statusline.sh
+                                 │      (written by fleet verbs that changed state, keeper ticks, init --statusline)
                                  ├──▶ fleet status --json          (/fleet:* inline exec)
                                  └──▶ [future] watchtower, web UI
 ```
@@ -169,7 +170,13 @@ always retains the complete worker name.
 Bare `fleet status` recompute and anomaly-flag behaviour is **unchanged**; only
 the human table's fixed-width name rendering is bounded as described above.
 
-### 4.3 `bin/fleet_statusline.py`
+### 4.3 `bin/fleet_statusline.py` and `bin/fleet_statusline.sh`
+
+**One writer, a fork-free reader** *(2026-11-25, operator: the live statusline cost 20–55 % of a CPU per run, every 10 s, in ~15 sessions, and was disabled)*. The installed command is `sh bin/fleet_statusline.sh <cache>`, where `<cache>` is `fleet.statusline_cache_dir()` (`~/.claude/fleet-statusline/`, beside the settings entry). The reader takes the blob's `session_id` by parameter expansion and `$TMUX_PANE`, picks one file — `pane-<n>` (a registered interface pane), else `sid-<sid>`, else `unregistered` (a sid fleet does not know), else `nosid` — with a `.nocolor` twin under `NO_COLOR`, and prints it. Shell builtins only: no interpreter, no fork, no registry, log, transcript or process read; it writes nothing. A call costs one `sh` start (< 5 ms CPU, asserted by `tests/test_statusline_cache.py`). There is no `refreshInterval`: Claude Code re-runs the command on its own events, and the row only changes when fleet state does.
+
+The rows are rendered by `fleet.refresh_statusline_cache()`, the one writer of the cache, through `fleet_statusline.cache_outputs()` — the same `render_rows` path as the live renderer below, so the cached bytes are the live bytes (pinned per sid, across homes). It runs when a fleet verb wrote the registry or a mailbox (`save_registry`/`append_mailbox` mark it; `fleet.main` refreshes once on exit), on every keeper tick (the clock for ages and stale suffixes), and on `fleet init --statusline`, which creates the directory. A machine with no cache directory pays nothing. Rows cover every live (unarchived) row's sid, the supervisor claim's sid and each registered interface, in every listed home; sids with the same home membership render once. Files are replaced atomically and only when their bytes change; a sid fleet no longer knows loses its file. Measured on a six-home machine (≈150 live sids): ~0.2 s per refresh. Between refreshes ages are as of the last refresh.
+
+`python bin/fleet_statusline.py` remains the **live** renderer (diagnosis and tests); the bullets below describe the render, which both paths share.
 
 - Resolves `FLEET_HOME` (env var, else from its own location — SPEC §14), `sys.path.insert`s `FLEET_HOME/bin`, `import fleet`, calls `fleet.status_snapshot()`.
 - Reads the Claude Code session JSON on stdin and discards it (accepted; the schema may grow, and fleet needs none of it today).
@@ -215,9 +222,9 @@ the human table's fixed-width name rendering is bounded as described above.
 - **The line is pure ASCII by construction** — no glyphs, no box drawing. A cp1252 console cannot encode geometric glyphs; `print()` then raises `UnicodeEncodeError`, the exit-0 guard swallows it, and the operator gets a permanently **blank** statusline. Colour and word already carry the whole signal, so the glyphs bought nothing but width and that failure mode. Asserted by test, not convention.
 - `NO_COLOR` env (or a non-tty) → no escapes; the same words, unpainted.
 - **Exit 0 on every path.** On any exception: print nothing, exit 0. This is the statusline analogue of invariant 2 (exit-0 hooks) — a traceback in a statusline is rendered under the operator's input box on every keystroke-adjacent refresh.
-- Wall-clock budget: **< 20 ms**, zero subprocesses. Asserted by test. Interface mode costs one `status_snapshot()` per candidate home (measured 2026-09-28 on the live homes: 5–28 ms each, dominated by the per-row outcome tail reads), still zero subprocesses; the candidate set is bounded by the homes list, and the render by `INTERFACE_MAX_ROWS`.
+- Live-render budget: **< 20 ms**, zero subprocesses (asserted by test); this is now the writer's per-home cost, not a per-call cost — the installed reader's budget is < 5 ms CPU. Interface mode costs one `status_snapshot()` per candidate home (measured 2026-09-28 on the live homes: 5–28 ms each, dominated by the per-row outcome tail reads), still zero subprocesses; the candidate set is bounded by the homes list, and the render by `INTERFACE_MAX_ROWS`.
 
-Installed via `settings.json` with `refreshInterval: 10`.
+Installed via `settings.json` as `sh "<install>/bin/fleet_statusline.sh" "<cache>"`, with no `refreshInterval`.
 
 ### 4.4 `commands/` — the slash-command set
 
@@ -268,10 +275,10 @@ A future injection surface is not forbidden by fiat, but it inherits D7's bar: i
 ### 4.7 `fleet init --statusline [--chain | --force]`
 
 1. Locate `~/.claude/settings.json` (create if absent).
-2. If a `statusLine` key exists and does not point at `fleet_statusline.py` → **refuse, exit 1**, naming the incumbent. `--force` overrides.
+2. If a `statusLine` key exists and does not point at `fleet_statusline.sh` (or the older `fleet_statusline.py`) → **refuse, exit 1**, naming the incumbent. `--force` overrides.
 3. Back up to `settings.json.bak.<YYYYMMDD-HHMMSS>`.
 4. Merge only the `statusLine` key; every sibling key preserved byte-for-byte in value.
-5. Print the interpreter path used and remind the operator to restart Claude Code.
+5. Write `statusLine` as the cache reader with no `refreshInterval`, render the cache once (`refresh_statusline_cache(create=True)`), and remind the operator to restart Claude Code.
 
 Idempotent: re-running against a fleet-owned statusline rewrites it in place without a second backup churn (backup still taken; harmless).
 
@@ -282,7 +289,7 @@ Plain `fleet init` (existing behaviour: render `state/worker-settings.json`) nev
 **The chain file is MACHINE-plane, not home-plane** *(moved 2026-08-09, multi-fleet slice (d); it lived at `state/statusline-chain.json` before)*. There is one `statusLine` entry per machine and the delegate is whatever was in it, so a per-home copy was a plane error with two consequences: `init --statusline --chain` on a second install captured nothing (a foreign install's fleet statusline is not "foreign") and silently overwrote the entry anyway, and — once slice (d) let the statusline resolve a home from a session-id claim — a home merely listed in `~/.claude/fleet-homes.list` could put a shell command on the operator's machine. `bin/fleet_statusline.py` still reads the old home-scoped path when the machine-plane file says nothing, anchored to the home the statusline started in and never to a resolved one.
 
 This is the **one** place fleet's statusline spawns a subprocess, and a deliberate, opt-in exception to D1: the delegate is a command the operator was already paying for on every refresh, and fleet's own row still costs zero subprocesses. Guards:
-- A delegate that exits nonzero, hangs past `DELEGATE_TIMEOUT_SECONDS` (4 s), or emits unencodable bytes is **dropped** — fleet's row always prints.
+- A delegate that exits nonzero, hangs past `DELEGATE_TIMEOUT_SECONDS` (4 s; in the sh reader, `timeout 4` where that command exists), or emits unencodable bytes is **dropped** — fleet's row always prints.
 - A fleet-owned incumbent is never captured as a delegate: chaining fleet's statusline into itself would make it invoke itself once per refresh, forever.
 - `--force` overwrites the incumbent outright and chains nothing.
 - The delegate command is executed through a shell. It comes from the operator's own `settings.json`, which is already an arbitrary-command surface; chaining moves no trust boundary — **provided the file naming the command is one the operator controls.** *(Corrected 2026-08-09. That proviso was implicit and stopped holding the moment multi-fleet slice (d) let the statusline resolve a home from an unauthenticated session-id claim: with the chain file home-scoped, a listed home ran its own command in the operator's session every ten seconds, with the rendered line unchanged — driven end to end in `docs/lanes/w50-gd.md` §1.1. The plane move above is what restores the sentence; `a local review record` had examined this same sink and correctly refuted it for the single-fleet scenario, where the attacker can already edit the executing script.)*

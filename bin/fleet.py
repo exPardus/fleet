@@ -1030,6 +1030,10 @@ def statusline_script_path() -> Path:
     return INSTALL_ROOT / "bin" / "fleet_statusline.py"
 
 
+def statusline_reader_path() -> Path:
+    return INSTALL_ROOT / "bin" / "fleet_statusline.sh"
+
+
 # Do not resolve a home through a stale machine marker: it could retarget destructive verbs.
 
 
@@ -1296,6 +1300,8 @@ def _replace_with_retry(tmp_name: str, dest: str, sleep=None) -> None:
 def save_registry(data: dict) -> None:
     """Atomically write state/fleet.json (temp file + os.replace, with a
     bounded win32 sharing-violation retry -- see `_replace_with_retry`)."""
+    global _STATUSLINE_DIRTY
+    _STATUSLINE_DIRTY = True
     d = state_dir()
     d.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(d), prefix=".fleet.", suffix=".tmp")
@@ -1565,6 +1571,8 @@ def append_mailbox(sid: str, message: str) -> None:
     concurrent messages. Replace unencodable characters to avoid stranding a
     pre-claimed launch on an argv surrogate; retain the rest of the message.
     """
+    global _STATUSLINE_DIRTY
+    _STATUSLINE_DIRTY = True
     d = mailbox_dir()
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"{sid}.md"
@@ -6898,6 +6906,56 @@ def statusline_chain_path() -> Path:
     return user_settings_path().with_name("fleet-statusline-chain.json")
 
 
+def statusline_cache_dir() -> Path:
+    return user_settings_path().with_name("fleet-statusline")
+
+
+_STATUSLINE_DIRTY = False
+_STATUSLINE_CACHE_PREFIXES = ("sid-", "pane-")
+
+
+def refresh_statusline_cache(create: bool = False) -> bool:
+    global _STATUSLINE_DIRTY
+    _STATUSLINE_DIRTY = False
+    try:
+        root = statusline_cache_dir()
+        if not root.is_dir():
+            if not create:
+                return False
+            root.mkdir(parents=True, exist_ok=True)
+        import fleet_statusline
+        outputs = fleet_statusline.cache_outputs()
+        for name, text in outputs.items():
+            path = root / name
+            data = text.encode("utf-8")
+            try:
+                if path.read_bytes() == data:
+                    continue
+            except OSError:
+                pass
+            fd, tmp = tempfile.mkstemp(dir=str(root), prefix=".tmp.")
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(data)
+                _replace_with_retry(tmp, str(path))
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        for path in root.iterdir():
+            if (path.name.startswith(_STATUSLINE_CACHE_PREFIXES)
+                    and path.name not in outputs):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+        return True
+    except Exception:  # noqa: BLE001 -- a display never fails a verb
+        return False
+
+
 def _capture_statusline_delegate(command: str) -> None:
     """Record an incumbent statusline command for composition above fleet's row.
     Claude Code has one statusLine entry, so both displays share that command."""
@@ -6977,9 +7035,8 @@ def _confirm_destructive(action: str, names: list, records: dict, assume_yes: bo
 
 
 def _install_statusline(force: bool = False, chain: bool = False) -> None:
-    """Back up user settings and merge fleet's statusLine entry.
-    Refuse a foreign incumbent unless force replaces it or chain captures it
-    at statusline_chain_path() for composition above fleet's row."""
+    """Back up user settings and merge fleet's statusLine (cache reader, no refreshInterval).
+    Refuse a foreign incumbent unless force replaces it or chain captures it."""
     path = user_settings_path()
     settings = {}
     if path.exists():
@@ -6992,12 +7049,14 @@ def _install_statusline(force: bool = False, chain: bool = False) -> None:
         if not isinstance(settings, dict):
             raise FleetCliError(f"refusing to touch {path}: not a JSON object")
 
-    script = statusline_script_path().resolve().as_posix()
+    script = statusline_reader_path().resolve().as_posix()
+    cache = statusline_cache_dir().resolve().as_posix()
     existing = settings.get("statusLine")
     incumbent = str(existing.get("command", "")) if isinstance(existing, dict) else ""
     # A fleet-owned incumbent is a re-install, never a delegate: chaining it
     # would make fleet's statusline invoke itself, once per refresh, forever.
-    foreign = bool(incumbent) and "fleet_statusline.py" not in incumbent
+    foreign = bool(incumbent) and not any(
+        own in incumbent for own in ("fleet_statusline.py", "fleet_statusline.sh"))
 
     if foreign:
         if chain:
@@ -7018,11 +7077,11 @@ def _install_statusline(force: bool = False, chain: bool = False) -> None:
     settings["statusLine"] = {
         "type": "command",
         # A shell runs this: forward slashes, and QUOTED -- a spaced path splits.
-        "command": f'"{Path(sys.executable).resolve().as_posix()}" "{script}"',
-        "refreshInterval": 10,
+        "command": f'sh "{script}" "{cache}"',
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    refresh_statusline_cache(create=True)
     print(f"fleet init: installed statusLine into {path}")
     print("  restart Claude Code to see it")
 
@@ -29941,6 +30000,14 @@ def _refuse_ph(args=None, nonce=None):
 
 
 def main(argv=None) -> int:
+    try:
+        return _main(argv)
+    finally:
+        if _STATUSLINE_DIRTY:
+            refresh_statusline_cache()
+
+
+def _main(argv=None) -> int:
     # Use UTF-8 with replacement before output: legacy Windows code pages
     # cannot encode arbitrary Unicode roster and transcript text.
     for _stream in (sys.stdout, sys.stderr):

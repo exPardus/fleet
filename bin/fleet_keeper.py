@@ -1141,6 +1141,9 @@ def main(argv=None, *, run=subprocess.run, now_fn=time.time,
             print(f"[{tag}] KEEPER: home tick failed ({exc})", file=out)
             one_rc = 1
         rc = max(rc, one_rc)
+    # The tick is the statusline cache's clock: ages and stale suffixes move
+    # with time even when no verb writes state. A no-op without a cache.
+    fleet.refresh_statusline_cache()
     return rc
 
 
