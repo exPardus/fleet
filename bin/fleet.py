@@ -30826,8 +30826,19 @@ def _codex_host_gone_rows(workers, presence, *, include_marked=False) -> dict:
     return found
 
 
+def _codex_host_gone_seen_at(name, rec):
+    seen = [_lane_death_at(name, rec)]
+    for key in ("last_activity", "last_dispatch_at"):
+        try:
+            seen.append(_parse_iso(rec.get(key)))
+        except (TypeError, ValueError):
+            pass
+    seen = [at for at in seen if at is not None]
+    return max(seen) if seen else None
+
+
 def _codex_host_gone_fresh(name, rec, now=None) -> bool:
-    at = _lane_death_at(name, rec)
+    at = _codex_host_gone_seen_at(name, rec)
     now = now or datetime.now(timezone.utc)
     return at is not None and (now - at).total_seconds() <= LANE_DEAD_MAX_AGE_SECONDS
 
@@ -30906,7 +30917,8 @@ def sweep_codex_host_gone(*, sleep=time.sleep, now=None) -> list:
         return unsent
     message = (f"CODEX-HOST-GONE {len(unsent)} fresh in-flight lane(s): "
                f"{' '.join(unsent)} -- {reason}; one notice per host loss "
-               "replaces their LANE-DEAD mail")
+               "replaces their LANE-DEAD mail; lanes found later for this loss are "
+               "marked without another notice (`fleet doctor` lists them)")
     try:
         _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
                            what="CODEX-HOST-GONE mail")

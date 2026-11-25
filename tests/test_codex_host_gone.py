@@ -366,3 +366,19 @@ def test_the_keeper_skips_host_gone_rows_dead_past_its_horizon():
     assert fleet_keeper.worker_anomalies(obs) == {
         f"codex-host-gone:{GEN_OLD}": "codex-host-gone(1 lanes: fresh)"}
 
+
+def test_an_old_dispatch_with_recent_activity_is_fresh(home, monkeypatch):
+    """Review w598 of 6ad34143 (P2): the Codex observation path updates
+    last_activity, which the keeper ages by; a lane dispatched 30 h ago but
+    seen working 5 minutes before the host died must be marked and paged."""
+    mail = _wire_mail(monkeypatch)
+    old = _iso(30 * 3600)
+    _save({"long-lane": _native("working", created=old, last_dispatch_at=old,
+                                last_activity=_iso(300))})
+    assert fleet.sweep_codex_host_gone() == ["long-lane"]
+    assert len(mail) == 1 and " long-lane " in mail[0]
+    row = fleet.load_registry()["workers"]["long-lane"]
+    assert row["status"] == "dead-suspected"
+    name, ok, message = fleet._doctor_check_codex_host({"long-lane": row})
+    assert ok is False and "never paged: none" in message
+
