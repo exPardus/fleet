@@ -15,6 +15,15 @@ home directory (such as `/home`). Subdirectories of home, including every
 worktree, stay allowed. Anything this hook cannot parse is allowed: it is a
 guard against an expensive habit, not a sandbox, and it must never block a
 legitimate command because of a parsing gap. Exit 0 on every path.
+
+The same hook refuses hand-rolled wait loops: a `while`/`until` loop that
+polls `pgrep`, `pidof` or `ps` and sleeps, the shape lanes used to wait for
+"no other pytest/buf run" before starting their own. On a shared box some
+test run is nearly always alive, so such a loop starved reviewer lanes for
+hours. The refusal names the replacement, `fleet exclusive`, which waits a
+capped time on a lock that names its holder. A single `pgrep` with no loop is
+allowed. Loops inside `sh -c`, and inside a small script run by path
+(`bash wait.sh`, `./wait.sh`, `source wait.sh`), are found too.
 """
 import json
 import os
@@ -249,6 +258,86 @@ def command_roots(command, cwd, home, depth=0):
     return roots
 
 
+PROCESS_POLLERS = {"pgrep", "pidof", "ps"}
+LOOP_KEYWORDS = {"{", "}", "!", "then", "else", "elif", "do", "time"}
+SCRIPT_MAX_BYTES = 64 * 1024
+
+
+def _lead(words):
+    index = 0
+    while index < len(words) and words[index] in LOOP_KEYWORDS:
+        index += 1
+    return words[index:]
+
+
+def _script_path(words, cwd):
+    """The script a segment runs by path, if it is a small local file."""
+    name, args = os.path.basename(words[0]), words[1:]
+    if name in SHELLS:
+        args = [a for a in args if not a.startswith("-")]
+        target = args[0] if args else None
+    elif name in ("source", "."):
+        target = args[0] if args else None
+    elif words[0].endswith(".sh") or words[0].startswith("./"):
+        target = words[0]
+    else:
+        return None
+    if not target:
+        return None
+    path = target if os.path.isabs(target) else os.path.join(cwd or os.getcwd(), target)
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) <= SCRIPT_MAX_BYTES:
+            return path
+    except OSError:
+        return None
+    return None
+
+
+def wait_loop(command, cwd=None, depth=0):
+    """True when the command polls for a process in a sleeping loop."""
+    segments = [_strip_wrappers(words) for words in _segments(command)]
+    loop = None  # words seen since the open `while`/`until`
+    for raw in segments:
+        words = _lead(raw)
+        if raw and raw[0] == "done" and loop is not None:
+            names = {os.path.basename(w) for w in loop}
+            if names & PROCESS_POLLERS and "sleep" in names:
+                return True
+            loop = None
+            continue
+        if words and words[0] in ("while", "until") and loop is None:
+            loop = list(words[1:])
+            continue
+        if loop is not None:
+            loop.extend(_lead(raw))
+            continue
+        if not words or depth >= 3:
+            continue
+        name, args = os.path.basename(words[0]), words[1:]
+        if name in SHELLS and "-c" in args:
+            index = args.index("-c")
+            if index + 1 < len(args) and wait_loop(args[index + 1], cwd, depth + 1):
+                return True
+            continue
+        script = _script_path(words, cwd)
+        if script:
+            try:
+                with open(script, encoding="utf-8", errors="replace") as stream:
+                    if wait_loop(stream.read(), cwd, depth + 1):
+                        return True
+            except (OSError, ValueError):
+                pass
+    return False
+
+
+WAIT_LOOP_REASON = (
+    "fleet host rule: refusing a wait loop that polls pgrep/pidof/ps and "
+    "sleeps -- on a shared box some test run is nearly always alive, so this "
+    "can wait for hours. Run the command under the box-wide lock instead: "
+    "`fleet exclusive --label <lane> -- <cmd>` (waits at most 30 minutes, "
+    "names the holder, takes over a dead one).")
+
+
 def _glob_root(pattern):
     """The literal directory an absolute Glob pattern starts from."""
     if not isinstance(pattern, str) or not pattern.startswith(("/", "~")):
@@ -271,6 +360,8 @@ def refusal(payload):
         if not isinstance(command, str):
             return None
         try:
+            if wait_loop(command, cwd):
+                return WAIT_LOOP_REASON
             roots = command_roots(command, cwd, home)
         except ValueError:  # unbalanced quotes: allow rather than guess
             return None
