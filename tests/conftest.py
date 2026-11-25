@@ -152,6 +152,13 @@ def child_env(sandbox, **over):
 
 
 @pytest.fixture(autouse=True)
+def _box_lock_is_never_the_real_one(tmp_path_factory, monkeypatch):
+    """`fleet exclusive` is box-wide; no test may hold or read the real lock."""
+    lock = tmp_path_factory.mktemp("exclusive") / "fleet-exclusive.json"
+    monkeypatch.setenv("FLEET_EXCLUSIVE_LOCK", str(lock))
+
+
+@pytest.fixture(autouse=True)
 def _host_disk_never_decides_a_test(monkeypatch):
     """The spawn disk floor reads the host's free space; no ordinary test may
     pass or fail on that. Tests of the floor restore the defaults explicitly."""

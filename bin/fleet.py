@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
-import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec"); fleet_manager_mail = importlib.import_module("fleet_manager_mail")
+import fleet_index, importlib; fleet_land = importlib.import_module("fleet_land"); fleet_brief = importlib.import_module("fleet_brief"); fleet_mailman = importlib.import_module("fleet_mailman"); fleet_spec = importlib.import_module("fleet_spec"); fleet_manager_mail = importlib.import_module("fleet_manager_mail"); fleet_exclusive = importlib.import_module("fleet_exclusive")
 from fleet_errors import FleetCliError
 
 
@@ -564,6 +564,29 @@ def _watch_mcx_states(mcx_dirs, run=None, which=None) -> dict[str, str]:
 
 def _watch_format_gb(value: float) -> str:
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def cmd_exclusive(args, *, sleep=time.sleep, clock=time.monotonic,
+                  popen=subprocess.Popen) -> int:
+    if getattr(args, "status", False):
+        holder = fleet_exclusive.read_holder()
+        reason = fleet_exclusive.stale_reason(holder)
+        print(f"exclusive lock {fleet_exclusive.lock_path()}: "
+              f"{fleet_exclusive.describe(holder)}"
+              + (f" -- STALE: {reason}; the next `fleet exclusive` takes it over"
+                 if reason else ""))
+        return 1 if reason else 0
+    command = list(args.exclusive_command or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        raise FleetCliError("exclusive: give the command after --, or pass --status")
+    holder = (getattr(args, "holder", None) or os.environ.get("FLEET_WORKER")
+              or (os.environ.get("CLAUDE_CODE_SESSION_ID") or "")[:8] or "operator")
+    return fleet_exclusive.run(
+        command, holder_name=holder, label=getattr(args, "label", None),
+        ttl=args.ttl, wait_max=args.wait_max, sleep=sleep, clock=clock,
+        popen=popen)
 
 
 def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
@@ -1878,6 +1901,7 @@ This is a headless worker: never call `AskUserQuestion` or wait for an interacti
 End every turn with a compact result summary: changed, verified, blocked.
 Do not leave servers or watchers running past the end of the turn without recording their PIDs in the journal.
 Host rules: never search `/` or your home directory (no find, bfs or recursive grep over them); search only inside your working tree. Use a private test database for this lane and drop only databases you created.
+Run a full test suite, `buf` generation or docker database run as `fleet exclusive --label TEXT -- <command>`: one such run at a time box-wide, waiting at most 30 minutes. Never wait on other lanes with `pgrep` loops or background waiters.
 """
 
 
@@ -15339,6 +15363,17 @@ def _doctor_check_codex_host(workers):
             "them once and sends one CODEX-HOST-GONE notice; respawn or kill them")
 
 
+def _doctor_check_exclusive_lock():
+    holder = fleet_exclusive.read_holder()
+    reason = fleet_exclusive.stale_reason(holder)
+    if reason:
+        return ("exclusive-lock", True,
+                f"NOTE stale box-wide run lock ({reason}): "
+                f"{fleet_exclusive.describe(holder)} -- the next `fleet "
+                "exclusive` takes it over; lanes must not wait on it")
+    return ("exclusive-lock", True, fleet_exclusive.describe(holder))
+
+
 def _doctor_check_posttooluse_hook_smoke(run=subprocess.run):
     """End-to-end smoke test (SPEC §5/§7 silent-failure alarm): fire the
     real PostToolUse hook script as a real subprocess with synthetic
@@ -16335,6 +16370,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(_doctor_check_outbound_mail),
         functools.partial(_doctor_check_codex_host, workers),
+        functools.partial(_doctor_check_exclusive_lock),
         functools.partial(
             _doctor_check_dead_suspected, workers, reconciled_codex,
             reconciled_codex_errors),
@@ -29347,6 +29383,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
+    p_exclusive = sub.add_parser(
+        "exclusive",
+        help="run one command under the box-wide exclusive lock (full test "
+             "suites, buf, docker database runs); waits, then fails, naming "
+             "the holder")
+    p_exclusive.add_argument("--status", action="store_true",
+                             help="print the holder; exit 1 when it is stale")
+    p_exclusive.add_argument("--label", default=None,
+                             help="what this run is, shown to waiters")
+    p_exclusive.add_argument("--holder", default=None,
+                             help="holder name (default: $FLEET_WORKER)")
+    p_exclusive.add_argument(
+        "--wait-max", dest="wait_max", type=float,
+        default=fleet_exclusive.DEFAULT_WAIT_SECONDS,
+        help="seconds to wait for the holder (default 1800, capped at 14400); "
+             f"then exit {fleet_exclusive.WAIT_TIMEOUT_EXIT}")
+    p_exclusive.add_argument(
+        "--ttl", type=float, default=fleet_exclusive.DEFAULT_TTL_SECONDS,
+        help="seconds after which waiters may take this run's lock over "
+             "(default 14400); a dead holder is taken over at once")
+    p_exclusive.add_argument("exclusive_command", nargs=argparse.REMAINDER,
+                             metavar="-- COMMAND")
+
     p_mailman = sub.add_parser(
         "mailman", help="sort the home inbox; wake only for mail needing the interface")
     mailman_sub = p_mailman.add_subparsers(dest="mailman_command", required=True)
@@ -29836,6 +29895,8 @@ def main(argv=None) -> int:
                 and home_flag is None and not args.statusline):
             _refuse_ph(args)
             return cmd_init(args, create_in=Path.cwd())
+        if args.command == "exclusive":
+            return cmd_exclusive(args)
         if args.command == "watch":
             if home_flag:
                 args.watch_homes = list(args.watch_homes or []) + list(home_flag)
