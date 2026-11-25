@@ -89,12 +89,12 @@ The sid is used as an identity key and fails that job in **two opposite directio
 
 Each anchor re-opened and verified; the spec-lens gate re-verified all three as **EXACT**.
 
-**Incident 1 — dual supervisor bodies, 2026-07-16.** `supervisor/JOURNAL.md:94-96`, entry
-`## 2026-07-16T16:11:19Z CHECKPOINT inc=inc-20260716T130803Z-5325 sid=90bab65e-b4af-4c63-9c64-d4b4ea3d9037`:
+**Incident 1 — dual supervisor bodies, 2026-07-16.** A CHECKPOINT entry in the local operator
+journal:
 
-> INCIDENT RESOLVED: dual supervisor bodies. Phantom steers (14:23Z-16:03Z, 7 sends: 'final
-> micro-wave', 'One last LOW advisory', 'URGENT root-cause task', ...) came from c787a667 -- a
-> fork-session resume of THIS conversation created ~20:56 local during a host restart, running
+> INCIDENT RESOLVED: dual supervisor bodies. Phantom steers (7 sends: 'final
+> micro-wave', 'One last LOW advisory', 'URGENT root-cause task', ...) came from a
+> fork-session resume of THIS conversation created during a host restart, running
 > daemon-hosted with full campaign context, independently re-deriving and dispatching my decisions
 > in paraphrase. [...] Claim-protocol gap exposed: both bodies share incarnation id + sid --
 > sup-claim cannot discriminate bodies of one lineage
@@ -124,8 +124,8 @@ regardless of what this particular zombie did.
 **(2) Fleet never had a handle on the fork.** It was minted by a host restart, outside every fleet
 code path, and its sid reached fleet only via a human process census. This one *is* on the record.
 
-**Incident 2 — `sup-boot` refuses its own holder, 2026-07-17.** `supervisor/JOURNAL.md:146-148`,
-entry `## 2026-07-17T13:45:26Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3`:
+**Incident 2 — `sup-boot` refuses its own holder, 2026-07-17.** A CHECKPOINT entry in the local
+operator journal:
 
 > Host restart overnight (~10h gap): same sid resumed, heartbeat refreshed (NOTE claim wart: sup-boot
 > REFUSES its own holder when heartbeat stale -- self-recognition missing, feeds nonce spec + lessons).
@@ -143,9 +143,9 @@ parameter at all** (§4.4). It cannot recognise self. The observed verdict word 
 load-bearing for §6.1 and is analysed there.
 
 **Incident 3 — an authorized stop is indistinguishable from a daemon restart, 2026-07-17.**
-`supervisor/JOURNAL.md:114-116`, entry `## 2026-07-17T01:12:15Z CHECKPOINT inc=inc-20260717T011200Z-f1d0 sid=8b0d1ec8-a531-4a43-9a01-3827d786d1c3`:
+An earlier CHECKPOINT entry in the local operator journal:
 
-> Succession: operator-authorized stop of stale body inc-20260716T130803Z-5325 [...] sup-boot
+> Succession: operator-authorized stop of stale body inc-<id> [...] sup-boot
 > refuse->freeze (roster-gone+fresh-heartbeat, G9 heuristic blind to authorized stop); operator
 > pre-ratified seize, INCARNATION cleared as delegate, fresh claim taken.
 
@@ -699,7 +699,8 @@ $ grep -n "sup-boot\|sup-checkpoint" skills/fleet/SKILL.md
 ```
 
 **There are five kind-lists, not four.** v1 said three; v2 corrected it to four and was still short.
-The fifth is the **shipped, git-tracked journal header**, which is never regenerated:
+The fifth is the **journal header written at first use** (local operator data; not in the public
+history), which is never regenerated:
 
 ```
 # at af50585
@@ -1419,21 +1420,11 @@ refused. Exactly one wins, which is the property §5.6 states.
 
 Hashing the value in `supervisor/INCARNATION` protects the copy in `supervisor/`. **That is not the
 copy the attack uses.** The nonce is printed as command output, and command output is persisted in the
-session transcript:
-
-```
-# at af50585 (existence and count only; no transcript contents were read)
-# volatile: a live box mints sessions continuously; the count and the mtime drift by the minute
-$ ls -ld ~/.claude/projects && find ~/.claude/projects -maxdepth 2 -name '*.jsonl' | wc -l
-drwxr-xr-x 1 <owner> <group> 0 <date> <time> <home>/.claude/projects
-762
-```
-
-*(The count drifted 732 → 735 → 743 → 762 across this document's five waves, and v2's paste additionally
-carried a trailing slash the command does not emit. Both were caught by `tools/verify_receipts.py`,
-and the block is now marked `# volatile` so the harness reports future drift as a WARN instead of a
-FAIL. The load-bearing facts are **existence** and **same-user readability**, neither of which
-drifts.)*
+session transcript. Claude Code keeps each session's transcript as a `.jsonl` file under
+`~/.claude/projects/`, readable by the same user. *(An earlier version pasted a live `ls`/`find`
+over that directory as a volatile receipt. It reproduced nothing from this repository and searched
+the home directory, so it was removed; the load-bearing facts are **existence** and
+**same-user readability**, which Claude Code documents.)*
 
 `--fork-session` **duplicates that store by design** — which is precisely how the second body in
 §5.4(c) comes to hold generation *G*.
@@ -3076,7 +3067,7 @@ not taken.
   `ME-NONCE-DESIGN-REVIEW-SPEC-2026-07-21.md` (fix list S1–S24).
 - The slice's authority: `a local review record` (binding list items 1–3,
   §Sequencing item 2).
-- Incidents: `supervisor/JOURNAL.md:94`, `:114`, `:146`; `local operator lessons:601`, `:625`, `:627`.
+- Incidents: three CHECKPOINT entries in the local operator journal, and local operator lessons (§1.2).
 - Substrate (read-only input, status unchanged): `docs/specs/native-substrate.md:43`, `:146`,
   `:208-213`, `:233`, `:268-274`.
 
@@ -3170,15 +3161,15 @@ disagreement reconstructed in a sandbox registry —
 `tests/test_identity_registry.py::TestTheReceipt`, which fails if either read site is ever re-keyed
 back onto `FLEET_WORKER`. The original measurement, indented as the prose it is:
 
-    my env CLAUDE_CODE_SESSION_ID : 108300de-8d43-411e-8177-94843bee05ab
-    my env FLEET_WORKER           : sup|inc-20260726T140146Z-5a0e|boot
+    my env CLAUDE_CODE_SESSION_ID : <my-sid>
+    my env FLEET_WORKER           : sup|inc-<X>|boot
 
-    records whose sid union contains MY env sid: ['sup|inc-20260726T164152Z-8180|boot']
-    my actual dispatched worker name          : sup|inc-20260726T164152Z-8180|boot
+    records whose sid union contains MY env sid: ['sup|inc-<Y>|boot']
+    my actual dispatched worker name          : sup|inc-<Y>|boot
     env FLEET_WORKER names a DIFFERENT record :  True (status: idle )
 
-`fleet doctor` in the same minute reported `daemon.lock held by pid 28812 since
-2026-07-26T14:01:49Z` — the daemon was started by the **14:01** supervisor dispatch and had been
+`fleet doctor` in the same minute reported `daemon.lock held by pid <pid> since
+<time>` — the daemon was started by an earlier supervisor dispatch and had been
 donating that dispatch's identity to every session it hosted since.
 
 At one instant, on one body: the registry judged identity correctly and the environment judged it

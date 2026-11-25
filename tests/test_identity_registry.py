@@ -14,10 +14,10 @@ daemon-hosted session inherits the `FLEET_WORKER` of a long-dead dispatch.
 Measured on a live supervisor body, 2026-07-26 (the receipt encoded by
 `TestTheReceipt`)::
 
-    my env CLAUDE_CODE_SESSION_ID : 108300de-8d43-411e-8177-94843bee05ab
-    my env FLEET_WORKER           : sup|inc-20260726T140146Z-5a0e|boot
-    records whose sid union contains MY env sid: ['sup|inc-20260726T164152Z-8180|boot']
-    my actual dispatched worker name          : sup|inc-20260726T164152Z-8180|boot
+    my env CLAUDE_CODE_SESSION_ID : 00000000-0000-4000-8000-0000000000a1
+    my env FLEET_WORKER           : sup|inc-20260726T000000Z-000a|boot
+    records whose sid union contains MY env sid: ['sup|inc-20260726T000001Z-000b|boot']
+    my actual dispatched worker name          : sup|inc-20260726T000001Z-000b|boot
     env FLEET_WORKER names a DIFFERENT record :  True (status: idle)
 
 At one instant, on one body: resolving identity from the REGISTRY by the acting
@@ -250,9 +250,9 @@ class TestTheReceipt:
     names record X while the acting sid belongs to record Y -- and assert
     every read site answers **Y**."""
 
-    ENV_NAME = "sup|inc-20260726T140146Z-5a0e|boot"     # X: the donated witness
-    MY_NAME = "sup|inc-20260726T164152Z-8180|boot"      # Y: my real record
-    MY_SID = "108300de-8d43-411e-8177-94843bee05ab"
+    ENV_NAME = "sup|inc-20260726T000000Z-000a|boot"     # X: the donated witness
+    MY_NAME = "sup|inc-20260726T000001Z-000b|boot"      # Y: my real record
+    MY_SID = "00000000-0000-4000-8000-0000000000a1"
 
     def _leak(self, monkeypatch, x_status="idle"):
         monkeypatch.setenv("FLEET_WORKER", self.ENV_NAME)

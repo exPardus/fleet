@@ -103,11 +103,11 @@ three times against the machine's live fleet home (`~/.claude/fleet-home`) and a
 worker records. **A receipt must never quote a mutating verb** — see the note appended to §17 of
 `docs/SPEC.md`. What the live run reported, quoted as prose so nothing executes it:
 
-- `fleet autoclean`, from a beat holding `inc-20260727T184603Z-f054`, printed
+- `fleet autoclean`, from a beat holding a supervisor claim, printed
   *"autoclean: archive tier failed: archive: refusing -- a supervisor claim ... is held and fresh, and
   this call did not prove continuity on it (claim-nonce §7)"*, then
   *"husks_removed=0 husks_deferred=0 tombstones_expired=0 errors=1"*. The event it wrote survives in
-  `state/events.jsonl` as the `autoclean_run` record at `2026-07-27T19:07:03Z`, which is the durable
+  `state/events.jsonl` as the `autoclean_run` record of that run, which is the durable
   form of this evidence and needs no paste.
 - `fleet doctor` reported *"[PASS] autoclean: last run 0.0h ago; last run reported 1 error(s):
   archive: SupervisorClaimGateError ..."* — the D4 amendment's `errors`-array pass-through doing

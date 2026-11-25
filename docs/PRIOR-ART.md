@@ -30,7 +30,7 @@ Rejected: tmux pane scraping/idle detection (our hooks are cleaner), DAG workflo
 
 ## Local prior art: acme knowledge librarian (added 2026-07-17)
 
-Sibling project on this machine — `C:\projects\acme\acme_knowledge\` (toolkit under `tools/knowledge/`, librarian under `tools/knowledge/librarian/`, design doc at `C:\projects\acme\docs\superpowers\specs\2026-06-18-knowledge-librarian-design.md`). A schema-enforced knowledge base with a nightly unattended maintenance loop: deterministic ref-check of each entry's `source:` anchors (ok/moved/missing/doc) → headless-Claude judge (holds/drifted/dead + dup clusters) over a `last_verified`-windowed candidate set → deterministic apply where destruction is corroboration-gated and circuit-breaker-capped. ~600 lines, stdlib+PyYAML, tested.
+A sibling project's knowledge toolkit (toolkit under `tools/knowledge/`, librarian under `tools/knowledge/librarian/`, with its own design doc). A schema-enforced knowledge base with a nightly unattended maintenance loop: deterministic ref-check of each entry's `source:` anchors (ok/moved/missing/doc) → headless-Claude judge (holds/drifted/dead + dup clusters) over a `last_verified`-windowed candidate set → deterministic apply where destruction is corroboration-gated and circuit-breaker-capped. ~600 lines, stdlib+PyYAML, tested.
 
 Adopted into `docs/specs/phase-5-intelligence.md` (fixed-constraints block) and campaign-template v1.5:
 - **Evidence-gated destruction** — LLM verdict alone never retires knowledge; needs deterministic ref-miss corroboration (the grep-receipt gate, mechanized).
@@ -42,7 +42,7 @@ Adopted into `docs/specs/phase-5-intelligence.md` (fixed-constraints block) and 
 - **Judge-empty alerting** (2 consecutive empty runs → alert) for any unattended LLM loop.
 - Code idioms: `write_if_changed` with LF-normalization (no git churn), pure `apply_verdicts` core (no I/O) for testability.
 
-Skipped: MAP/ generators (Django/env-var specific), ADR tier (unbuilt there), one-fact-per-file atomization of lessons.md (campaign narratives earn their freeform shape). Their KNOWLEDGE/ content itself was thin (4 notes); only transferable note: OneDrive silently reverts long-running agents' uncommitted edits — moot for `C:\projects` but reinforces git-log-is-truth.
+Skipped: MAP/ generators (Django/env-var specific), ADR tier (unbuilt there), one-fact-per-file atomization of lessons.md (campaign narratives earn their freeform shape). Their KNOWLEDGE/ content itself was thin (4 notes); only transferable note: OneDrive silently reverts long-running agents' uncommitted edits — moot for the checkout directory but reinforces git-log-is-truth.
 
 ## Source tables
 

@@ -29,7 +29,7 @@ one. Today there is one fleet because `FLEET_HOME` is two variables wearing one 
 (data plane) and the install locator. Measured repeatedly: a data-only home yields four dead
 hooks, silently. **The split is the work.**
 
-Incident receipt: 2026-07-29T22:58:39Z — fleet code run from inside the repo with no
+Incident (2026-07-29): fleet code run from inside the repo with no
 `FLEET_HOME` overwrote the real registry + INCARNATION with fixture data. **Honest scope
 (rb6 CRITICAL-3): the §1.4 legacy fallback means this class closes only for callers that name
 a home, plus the §7 pins for the suite; full closure is §8's exit, not M1's.** A lens body
@@ -229,7 +229,7 @@ begins at a population of two, so below that there is no disagreement to correct
 >
 > **Why the divergence was nevertheless the right call, and why no code changed.** Implemented
 > literally, step 3's fall-through means the operator names a home, the home has no registry
-> yet, and fleet silently writes into the install root instead — the 2026-07-29T22:58:39Z
+> yet, and fleet silently writes into the install root instead — the 2026-07-29
 > incident recorded at the top of this document, reached through the mechanism this document
 > was built to prevent. Refusing is the safe direction; a2 took it and reported it rather than
 > editing this section from inside its own fence. **What was owed was the record, not a
