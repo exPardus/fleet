@@ -4,9 +4,9 @@ THE INCIDENT THIS FILE EXISTS FOR (MEASURED on this host, 2026-09-10). Every
 `fleet send` to an idle supervisor FORK-STEERS it: the registry record is
 restamped eagerly, `session_id` becomes the fork's sid and the pre-steer sid
 moves into `retired_sids`. At 10:38Z the body
-`sup|inc-20260910T075355Z-4f99|successor` had TWO live `claude` processes and
-TWO rows in `claude agents --json` -- `37e5c61c...` idle at pid 434832 (the
-pre-steer session) and `42445477...` busy at pid 515437 (the fork holding the
+`sup|inc-20260910T000000Z-a003|successor` had TWO live `claude` processes and
+TWO rows in `claude agents --json` -- `a0000002...` idle at pid 434832 (the
+pre-steer session) and `a0000003...` busy at pid 515437 (the fork holding the
 claim). At 10:16Z, between two turns, only the FIRST of those rows existed, and
 the keeper -- which joined the bare claim sid against the roster -- paged
 `supervisor-dead` about a supervisor that was alive, listed, and idle.
@@ -25,10 +25,10 @@ import fleet
 
 # The real sids from the 2026-09-10 body, truncated at the point where they
 # stop being a measurement and start being a fixture.
-CLAIM_SID = "42445477-de98-4813-937a-e18c965de740"
-RETIRED_1 = "37e5c61c-cf8f-4fea-9b7b-61f2b22acc60"
-RETIRED_2 = "d605e989-91e1-4640-850b-8548e000328f"
-BODY = "sup|inc-20260910T075355Z-4f99|successor"
+CLAIM_SID = "a0000003-0000-4000-8000-000000000003"
+RETIRED_1 = "a0000002-0000-4000-8000-000000000002"
+RETIRED_2 = "a0000007-0000-4000-8000-000000000007"
+BODY = "sup|inc-20260910T000000Z-a003|successor"
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def _install(rec, name=BODY):
 
 
 def _held(sid=CLAIM_SID, **extra):
-    claim = {"incarnation_id": "inc-20260910T075355Z-4f99", "session_id": sid,
+    claim = {"incarnation_id": "inc-20260910T000000Z-a003", "session_id": sid,
              "lineage_id": "lin-L", "claimed_via": "handoff",
              "claimed_at": fleet.now_iso(), "heartbeat_at": fleet.now_iso()}
     claim.update(extra)

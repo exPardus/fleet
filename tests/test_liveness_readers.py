@@ -377,6 +377,9 @@ class TestTheCensus:
             # The root preclaim lock breaker probes a local kernel PID, not
             # the Claude roster whose Q1 readers this census enumerates.
             "_fleet_lock_live_owner",
+            # sup-notify's tmux pane check: is the registered interface pane
+            # still a live tmux pane? A tmux question, not a Claude roster one.
+            "_live_notify_pane",
         }
         shaped = {n.name for n in ast.walk(tree)
                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -471,7 +474,7 @@ class TestDisagreementOne:
     # incarnation, alive as a process, its turn over.
     LIVE_SHAPE = {"sessionId": SID, "state": "blocked", "status": "idle",
                   "pid": 38336, "kind": "bg", "name": "sup|inc-c477|boot",
-                  "cwd": "C:/projects/claude-fleet", "startedAt": "2026-08-09T01:49:12Z"}
+                  "cwd": "C:/work/fleet", "startedAt": "2026-08-09T01:49:12Z"}
 
     def test_respawn_and_status_split_on_a_real_roster_entry(self, monkeypatch):
         """INVERT-ON-BUILD. One entry, two readers, opposite answers.
@@ -580,7 +583,7 @@ class TestTheShapeALingeringFinishedSessionPresents:
     # SHAPE measured; the sid is this lane's, spliced (see the module docstring).
     LINGERING_DONE = {"sessionId": SID, "state": "done", "status": "idle",
                       "pid": 4436, "kind": "background",
-                      "cwd": "C:\\projects\\fleet-w50-live"}
+                      "cwd": "C:\\work\\lane-live"}
 
     def test_the_q1_predicate_calls_a_live_process_not_live(self):
         """The predicate, stated without a consequence attached.

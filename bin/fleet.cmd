@@ -1,7 +1,7 @@
 @echo off
 rem SPEC §14 portability: %~dp0 is this .cmd file's own directory (with a
 rem trailing backslash), so this shim finds fleet.py wherever the repo is
-rem actually cloned -- no hardcoded C:\projects\claude-fleet literal here.
+rem actually cloned -- no hardcoded checkout path here.
 rem
 rem P1-9 (ULTRAREVIEW 2026-07-30), the same defect one level up: cmd.exe
 rem resolves a bare command out of the CURRENT DIRECTORY before PATH, so a

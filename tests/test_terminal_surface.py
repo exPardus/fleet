@@ -58,6 +58,10 @@ def _rec(**over):
     return base
 
 
+_ABSOLUTE_HOME_RE = re.compile(
+    r"\b[A-Za-z]:[\\/](?!Program\b|Windows\b|Python)[A-Za-z]"
+    r"|/(?:home|Users)/(?!user/)[A-Za-z][A-Za-z0-9_-]*/")
+
 class TestStatusSnapshot:
     def test_missing_registry_reports_not_initialized(self, home):
         snap = fleet.status_snapshot()
@@ -1233,16 +1237,18 @@ class TestCollaboratorInstall:
     def test_shipped_surfaces_hardcode_no_absolute_fleet_home(self, rel):
         # SPEC §14: FLEET_HOME is resolved (env -> ~/.claude/fleet-home marker
         # -> script location), never baked in. `commands/fleet.md` shipped with
-        # a literal C:/projects/claude-fleet fallback, which reads one developer's
-        # machine on every collaborator's.
+        # a literal Windows checkout path as a fallback, which reads one
+        # developer's machine on every collaborator's. Any drive-letter or
+        # personal home path is refused, so no particular path is named here.
         target = REPO / rel
         files = sorted(target.rglob("*")) if target.is_dir() else [target]
         for path in files:
             if not path.is_file():
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            for needle in ("C:/projects/claude-fleet", "C:\\projects\\claude-fleet"):
-                assert needle not in text, f"{path.relative_to(REPO)} hardcodes {needle}"
+            found = _ABSOLUTE_HOME_RE.search(text)
+            assert found is None, (
+                f"{path.relative_to(REPO)} hardcodes an absolute path {found.group(0)!r}")
 
     def test_shell_scripts_are_pinned_to_lf(self):
         # A CRLF shim dies on Linux with `\r: command not found`, and a hook's

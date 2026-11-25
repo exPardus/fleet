@@ -15,8 +15,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "bin" / "hooks" / "pretooluse_search_guard.py"
-HOME = "/home/lane-user"
-CWD = "/home/lane-user/work/lane-tree"
+HOME = "/home/user"
+CWD = "/home/user/work/lane-tree"
 
 
 def _guard():
@@ -48,14 +48,14 @@ def _bash(command):
     "fd pattern /",
     "fd -e py pattern ~",
     "fd --search-path / pattern",
-    "fdfind x /home/lane-user",
+    "fdfind x /home/user",
     "rg TODO /",
     "rg -n -i 'needle' ~",
     "rg -e needle -e other /home",
     "rg --files /",
     "grep -r needle /",
     "grep -rn needle ~/",
-    "grep --recursive needle /home/lane-user",
+    "grep --recursive needle /home/user",
     "cd src && find / -name x",
     "ls; sudo find / -xdev -name x 2>/dev/null | head",
     "timeout 30 rg x /",
@@ -161,7 +161,7 @@ def test_review_bypasses_are_refused(guard, command):
     "cat <<EOF\nfind / -name x\nEOF",
     "cat <<-'EOF'\n\trg foo ~\n\tEOF\necho done",
     "cd src && find . -name x",
-    "cd /tmp/../home/lane-user/work/lane-tree && rg foo",
+    "cd /tmp/../home/user/work/lane-tree && rg foo",
     "cd - && find .",
     "grep -r --include '*.md' '/' docs",
     "rg --hyperlink-format default '/' src",
@@ -175,8 +175,8 @@ def test_review_false_positives_are_allowed(guard, command):
 
 
 @pytest.mark.parametrize("pattern, refused", [
-    ("/**/*.py", True), ("~/**/*.md", True), ("/home/*/x", True),
-    ("/home/lane-user/work/lane-tree/**/*.py", False), ("**/*.py", False),
+    ("/**/*.py", True), ("~/**/*.md", True), ("/home/" "*/x", True),
+    ("/home/user/work/lane-tree/**/*.py", False), ("**/*.py", False),
     ("src/*.py", False),
 ])
 def test_an_absolute_glob_pattern_without_a_path(guard, pattern, refused):

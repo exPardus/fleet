@@ -43,7 +43,7 @@ INCIDENT_LOCK = {
     "logPath": "C:\\Users\\user\\.claude\\daemon.log",
     "startedAt": 1784589928352,          # 2026-07-20T23:25:28.352Z
     "origin": "transient",
-    "spawnedBy": {"label": "claude", "cwd": "C:\\projects\\claude-fleet", "pid": 16144},
+    "spawnedBy": {"label": "claude", "cwd": "C:\\work\\fleet", "pid": 16144},
     "procStart": "639202047274516770",   # .NET ticks, LOCAL -- deliberately unused
     "launchTarget": "C:\\Users\\user\\.local\\bin\\claude.exe",
     "processWrapper": "",

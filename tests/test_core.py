@@ -131,7 +131,7 @@ class TestRegistry:
         assert set(rec.keys()) == expected_fields
 
     def test_new_worker_record_matches_schema_and_defaults(self):
-        rec = fleet.new_worker_record("sid-1", r"C:\projects\x", "x" * 300, "bypass")
+        rec = fleet.new_worker_record("sid-1", r"C:\work\x", "x" * 300, "bypass")
         assert set(rec.keys()) == {
             "session_id", "cwd", "task", "mode", "model", "created",
             "status", "attached_since",
@@ -159,7 +159,7 @@ class TestRegistry:
             "mcx_id",
         }
         assert rec["session_id"] == "sid-1"
-        assert rec["cwd"] == r"C:\projects\x"
+        assert rec["cwd"] == r"C:\work\x"
         assert len(rec["task"]) == 200  # truncated to first ~200 chars (SPEC §4)
         assert rec["mode"] == "bypass"
         assert rec["model"] is None
@@ -848,10 +848,10 @@ class TestRestoreMailboxClaim:
 
 class TestComposePrompt:
     def test_preamble_mentions_name_cwd_and_rules(self, isolated_home):
-        prompt, claim, _mail = fleet.compose_prompt("probe-1", r"C:\projects\projectx", "do the thing", "sid-1")
+        prompt, claim, _mail = fleet.compose_prompt("probe-1", r"C:\work\projectx", "do the thing", "sid-1")
         assert claim is None
         assert "probe-1" in prompt
-        assert r"C:\projects\projectx" in prompt
+        assert r"C:\work\projectx" in prompt
         assert "MANAGER MESSAGE" in prompt
         assert "state/journals/probe-1.md" in prompt.replace("\\", "/")
         assert "do the thing" in prompt
@@ -1088,7 +1088,7 @@ def _parse(ctime_iso):
 def _worker_record():
     return {
         "session_id": "11111111-1111-1111-1111-111111111111",
-        "cwd": "C:\\projects\\projectx",
+        "cwd": "C:\\work\\projectx",
         "task": "first ~200 chars of original task",
         "mode": "bypass",
         "model": None,

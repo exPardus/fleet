@@ -612,15 +612,15 @@ def test_released_claim_ignores_live_supervisor_from_another_fleet_home(
     claim = fleet.read_incarnation()
     claim.update(
         state="released",
-        released_by_sid="d5df5ca8-748e-4e2d-bc46-c87391c17e7f",
+        released_by_sid="a0000006-0000-4000-8000-000000000006",
     )
     fleet.write_incarnation(claim)
     data = fleet.load_registry()
     data["workers"][BODY].update(
         session_id=claim["released_by_sid"],
         retired_sids=[
-            "5c53e2a7-2fc1-4735-ac70-c4d4ef8007b2",
-            "a3ca3705-4384-440e-9703-52e2358c196c",
+            "a0000004-0000-4000-8000-000000000004",
+            "a0000005-0000-4000-8000-000000000005",
         ],
         status="dead",
     )
@@ -633,7 +633,7 @@ def test_released_claim_ignores_live_supervisor_from_another_fleet_home(
         "cwd": str(foreign_home),
         "id": "60496272",
         "kind": "background",
-        "name": "sup|inc-20261001T144601Z-1fb3|successor",
+        "name": "sup|inc-20261001T000000Z-a002|successor",
         "pid": 3601537,
         "sessionId": "60496272-c1aa-482f-8630-ed3ca4dfa3ca",
         "startedAt": 1790880629368,
@@ -679,7 +679,7 @@ def test_released_claim_sid_with_live_same_home_body_still_pages(
     claim = fleet.read_incarnation()
     claim.update(
         state="released",
-        released_by_sid="d5df5ca8-748e-4e2d-bc46-c87391c17e7f",
+        released_by_sid="a0000006-0000-4000-8000-000000000006",
     )
     fleet.write_incarnation(claim)
     data = fleet.load_registry()
@@ -900,10 +900,10 @@ def test_limit_discovered_by_send_is_published_as_park_not_retry(home, monkeypat
     assert not result['sent'] and len(calls) == 1
 
 
-INCIDENT_BODY = "sup|inc-20260911T195615Z-a6c9|successor"
-INCIDENT_LIVE = "612ed197-0000-0000-0000-000000000000"
-INCIDENT_RETIRED_1 = "2516bcf0-0000-0000-0000-000000000000"
-INCIDENT_RETIRED_2 = "e65ef203-0000-0000-0000-000000000000"
+INCIDENT_BODY = "sup|inc-20260911T000000Z-a001|successor"
+INCIDENT_LIVE = "b0000002-0000-0000-0000-000000000000"
+INCIDENT_RETIRED_1 = "b0000001-0000-0000-0000-000000000000"
+INCIDENT_RETIRED_2 = "b0000003-0000-0000-0000-000000000000"
 
 
 def _install_2026_09_15_incident():
@@ -915,7 +915,7 @@ def _install_2026_09_15_incident():
                                      "bypass", dispatch_kind="bg")
     record["retired_sids"] = [INCIDENT_RETIRED_1, INCIDENT_RETIRED_2]
     fleet.save_registry({"workers": {INCIDENT_BODY: record}})
-    claim = {"incarnation_id": "inc-20260911T195615Z", "session_id": INCIDENT_LIVE,
+    claim = {"incarnation_id": "inc-20260911T000000Z", "session_id": INCIDENT_LIVE,
              "claimed_via": "handoff", "heartbeat_at": "2026-09-09T00:00:00Z"}
     fleet.write_incarnation(claim)
 

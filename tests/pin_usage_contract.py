@@ -60,7 +60,7 @@ stale counter. Keying the lookup by `result_text` (the last `message.id` group
 whose text equals the stored report) is turn-scoped and immune to that.
 
 MEASURED ON THE REAL STORE, 2026-08-05, read-only, 154 `kind=="result"` records
-in `C:/projects/claude-fleet/state/outcomes` (THIS predicate, as written below, run
+in the real fleet home's `state/outcomes` (THIS predicate, as written below, run
 over every one of them):
   * POST-gate (ts >= 2026-07-30, n=10): 10 withheld, 0 rejected. The turn's own
     message was located in the settled transcript 10/10 times and carried an

@@ -47,7 +47,7 @@ def _tzdata_available() -> bool:
     box without it -- a clean box is a valid environment, not a broken one.
 
     ND-4 (re-review): probes all three zones the gated test classes
-    actually need (`America/New_York` for the DST tests, `Asia/Qyzylorda`
+    actually need (`America/New_York` for the DST tests, `Asia/Karachi`
     for the local-format/hour-validation tests, `UTC` for the
     single-segment-zone tests) rather than just the first -- on a full
     tzdb these are equivalent, but a partial one (e.g. a slim container
@@ -57,7 +57,7 @@ def _tzdata_available() -> bool:
     actually present gets skipped anyway)."""
     import zoneinfo
     try:
-        for zone in ("America/New_York", "Asia/Qyzylorda", "UTC"):
+        for zone in ("America/New_York", "Asia/Karachi", "UTC"):
             zoneinfo.ZoneInfo(zone)
         return True
     except Exception:
@@ -79,17 +79,17 @@ class TestTzdataGuardCanary:
     ND-6 (re-review, nit): the first version of this canary cross-checked
     `_tzdata_available()` against `_doctor_check_tzdata()` by equality. After
     ND-4 widened the guard to probe THREE zones while the doctor check still
-    probes only `Asia/Qyzylorda`, an equality check diverges on a partial
-    tzdb that has Qyzylorda but is missing `America/New_York` or `UTC` --
+    probes only `Asia/Karachi`, an equality check diverges on a partial
+    tzdb that has Karachi but is missing `America/New_York` or `UTC` --
     the guard correctly returns `False`, the doctor check (only checking
-    Qyzylorda) returns `True`, and the canary would FAIL on that legitimate
+    Karachi) returns `True`, and the canary would FAIL on that legitimate
     (if unlikely) environment -- reintroducing the M2 failure mode one call
     site away. `test_guard_agrees_with_independent_recomputation` fixes this
     by comparing the guard against its own logic recomputed independently,
     over the SAME zone set, rather than against a probe of a different set.
     `test_doctor_check_agrees_when_all_needed_zones_resolve` keeps the
     doctor cross-check but as a one-way implication (guard True implies
-    doctor True), which holds regardless of tzdb partiality since Qyzylorda
+    doctor True), which holds regardless of tzdb partiality since Karachi
     is one of the guard's three zones."""
 
     def test_guard_agrees_with_independent_recomputation(self):
@@ -103,7 +103,7 @@ class TestTzdataGuardCanary:
                 return False
 
         assert _tzdata_available() == all(
-            resolves(z) for z in ("America/New_York", "Asia/Qyzylorda", "UTC"))
+            resolves(z) for z in ("America/New_York", "Asia/Karachi", "UTC"))
 
     def test_doctor_check_agrees_when_all_needed_zones_resolve(self):
         _name, _ok, msg = fleet._doctor_check_tzdata()
@@ -292,7 +292,7 @@ class TestDoctorInstanceSettings:
 
     def test_backslash_hook_command_fails(self, isolated_home):
         data = {"hooks": {"PostToolUse": [{"hooks": [
-            {"type": "command", "command": r"py C:\projects\claude-fleet\bin\hooks\posttooluse_mailbox.py"}
+            {"type": "command", "command": r"py C:\fleet-home\bin\hooks\posttooluse_mailbox.py"}
         ]}]}}
         fleet.instance_settings_path().write_text(json.dumps(data), encoding="utf-8")
         name, ok, msg = fleet._doctor_check_instance_settings()
@@ -658,7 +658,7 @@ class TestSettingSourcesPassthrough:
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# M-D item 3: local-format ("resets 4:40am (Asia/Qyzylorda)") reset-time
+# M-D item 3: local-format ("resets 4:40am (Asia/Karachi)") reset-time
 # fallback in _parse_limit_signal -- production gap, journal 2026-07-16 /
 # knowledge/lessons.md#2026-07-17-mc.
 # ---------------------------------------------------------------------------
@@ -666,7 +666,7 @@ class TestSettingSourcesPassthrough:
 @pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
 class TestParseLimitSignalLocalFormat:
     def test_iso_wins_verbatim_over_local_text(self):
-        text = "resets 2026-07-18T04:40:00Z, but also resets 4:40am (Asia/Qyzylorda)"
+        text = "resets 2026-07-18T04:40:00Z, but also resets 4:40am (Asia/Karachi)"
         reset_at, kind = fleet._parse_limit_signal(text, now=None)
         assert reset_at == "2026-07-18T04:40:00Z"
 
@@ -688,38 +688,38 @@ class TestParseLimitSignalLocalFormat:
         monkeypatch.setattr(zoneinfo, "ZoneInfo", boom)
         now = datetime(2026, 7, 17, 10, 0, 0, tzinfo=timezone.utc)
         reset_at, kind = fleet._parse_limit_signal(
-            "resets 4:40am (Asia/Qyzylorda)", now=now)
+            "resets 4:40am (Asia/Karachi)", now=now)
         assert reset_at is None
 
     @pytest.mark.parametrize(
         "text,now,expected",
         [
-            # Asia/Qyzylorda is UTC+5, no DST. now=10:00 UTC == 15:00 local,
+            # Asia/Karachi is UTC+5, no DST. now=10:00 UTC == 15:00 local,
             # so today's 04:40 local is already past -> rolls to tomorrow's
             # 04:40 local, which lands on 2026-07-16T23:40:00Z in UTC (the
             # local date rolls to the 17th but UTC is still 5h behind it).
             (
-                "You've hit your session limit -- resets 4:40am (Asia/Qyzylorda)",
+                "You've hit your session limit -- resets 4:40am (Asia/Karachi)",
                 datetime(2026, 7, 16, 10, 0, 0, tzinfo=timezone.utc),
                 "2026-07-16T23:40:00Z",
             ),
             # 12am -> 00:00 local, hour-only form (the production gap).
             # now=01:00 UTC == 06:00 local (past midnight) -> tomorrow.
             (
-                "session limit -- resets 12am (Asia/Qyzylorda)",
+                "session limit -- resets 12am (Asia/Karachi)",
                 datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc),
                 "2026-07-16T19:00:00Z",
             ),
             # 12pm -> 12:00 local. now=01:00 UTC == 06:00 local -> today's
             # noon local (still ahead) == 07:00 UTC same day.
             (
-                "session limit -- resets 12pm (Asia/Qyzylorda)",
+                "session limit -- resets 12pm (Asia/Karachi)",
                 datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc),
                 "2026-07-16T07:00:00Z",
             ),
             # 11:59pm -> 23:59 local, still ahead of 06:00 local -> today.
             (
-                "session limit -- resets 11:59pm (Asia/Qyzylorda)",
+                "session limit -- resets 11:59pm (Asia/Karachi)",
                 datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc),
                 "2026-07-16T18:59:00Z",
             ),
@@ -734,13 +734,13 @@ class TestParseLimitSignalLocalFormat:
         # now is exactly at local midnight + 1 minute -- today's "12am"
         # occurrence is already behind now, must roll to tomorrow.
         now = datetime(2026, 7, 16, 19, 1, 0, tzinfo=timezone.utc)  # 00:01 local
-        reset_at, _ = fleet._parse_limit_signal("resets 12am (Asia/Qyzylorda)", now=now)
+        reset_at, _ = fleet._parse_limit_signal("resets 12am (Asia/Karachi)", now=now)
         assert reset_at == "2026-07-17T19:00:00Z"
 
     @pytest.mark.parametrize("text", [
-        "session limit -- resets 13am (Asia/Qyzylorda)",
-        "session limit -- resets 0pm (Asia/Qyzylorda)",
-        "session limit -- resets 23am (Asia/Qyzylorda)",
+        "session limit -- resets 13am (Asia/Karachi)",
+        "session limit -- resets 0pm (Asia/Karachi)",
+        "session limit -- resets 23am (Asia/Karachi)",
     ])
     def test_out_of_range_hour_yields_null_horizon(self, text):
         # D2 (MD-ULPARSER-REVIEW): \d{1,2} admits hours outside the 12-hour
@@ -761,7 +761,7 @@ class TestParseLimitSignalLocalFormat:
         # 13:00 local (UTC+5) == 08:00 UTC; now=06:00 local -> today.
         now = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)
         reset_at, _ = fleet._parse_limit_signal(
-            "resets 1pm (Asia/Qyzylorda)", now=now)
+            "resets 1pm (Asia/Karachi)", now=now)
         assert reset_at == "2026-07-16T08:00:00Z"
 
     def test_single_segment_utc_zone_parses(self):
@@ -804,7 +804,7 @@ class TestParseLimitSignalLocalFormat:
         # local-format branch -- it stays unresolved (None), a
         # conservative null-horizon park, never a possibly-wrong guess.
         reset_at, kind = fleet._parse_limit_signal(
-            "session limit -- resets 4:40am (Asia/Qyzylorda)", now=None)
+            "session limit -- resets 4:40am (Asia/Karachi)", now=None)
         assert reset_at is None
         assert kind == "session_5h"  # kind detection is independent of the anchor
 
@@ -818,7 +818,7 @@ class TestParseLimitSignalLocalFormat:
 # ---------------------------------------------------------------------------
 
 class TestParseLimitSignalHourValidation:
-    _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)  # 06:00 Qyzylorda
+    _NOW = datetime(2026, 7, 16, 1, 0, 0, tzinfo=timezone.utc)  # 06:00 Karachi
 
     @pytest.mark.parametrize(
         "hour_text,expected",
@@ -831,7 +831,7 @@ class TestParseLimitSignalHourValidation:
     @pytest.mark.skipif(not _tzdata_available(), reason=_TZDATA_SKIP_REASON)
     def test_valid_boundary_hours_still_resolve(self, hour_text, expected):
         reset_at, _ = fleet._parse_limit_signal(
-            f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
+            f"session limit -- resets {hour_text} (Asia/Karachi)", now=self._NOW)
         assert reset_at == expected
 
     @pytest.mark.parametrize("hour_text", ["13am", "0pm"])
@@ -841,7 +841,7 @@ class TestParseLimitSignalHourValidation:
         # horizon (1pm). Post-fix: out-of-range hours take the null-park
         # branch, same as an unresolvable tz.
         reset_at, kind = fleet._parse_limit_signal(
-            f"session limit -- resets {hour_text} (Asia/Qyzylorda)", now=self._NOW)
+            f"session limit -- resets {hour_text} (Asia/Karachi)", now=self._NOW)
         assert reset_at is None
         assert kind == "session_5h"  # kind detection is independent of the hour parse
 
@@ -921,7 +921,7 @@ class TestParseLimitSignalSingleSegmentZone:
 
         monkeypatch.setattr(zoneinfo, "ZoneInfo", no_tz_database_whatsoever)
         reset_at, kind = fleet._parse_limit_signal(
-            "session limit -- resets 4:40am (Asia/Qyzylorda)", now=self._NOW)
+            "session limit -- resets 4:40am (Asia/Karachi)", now=self._NOW)
         assert reset_at is None
         assert kind == "session_5h"
 
@@ -984,11 +984,11 @@ class TestNowParameterRequired:
         # m5 (ME-UL-REVIEW-2026-07-21.md): match= so this stays pinned to
         # the missing-keyword shape specifically, not any TypeError.
         with pytest.raises(TypeError, match=r"missing 1 required keyword-only argument: 'now'"):
-            fleet._parse_limit_signal("resets 4:40am (Asia/Qyzylorda)")
+            fleet._parse_limit_signal("resets 4:40am (Asia/Karachi)")
 
     def test_next_local_reset_utc_requires_now_kwarg(self):
         with pytest.raises(TypeError, match=r"missing 1 required keyword-only argument: 'now'"):
-            fleet._next_local_reset_utc(4, 40, "Asia/Qyzylorda")
+            fleet._next_local_reset_utc(4, 40, "Asia/Karachi")
 
 
 # ---------------------------------------------------------------------------

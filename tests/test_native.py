@@ -1927,7 +1927,7 @@ LIMIT_RECORD = {
     "type": "assistant",
     "message": {"model": "<synthetic>", "role": "assistant",
                 "content": [{"type": "text",
-                             "text": "You've hit your session limit — resets 4:40am (Asia/Qyzylorda)"}]},
+                             "text": "You've hit your session limit — resets 4:40am (Asia/Karachi)"}]},
     "error": "rate_limit", "isApiErrorMessage": True, "apiErrorStatus": 429,
     "timestamp": "2026-07-13T22:32:01.933Z",
 }
@@ -2000,7 +2000,7 @@ class TestTranscriptLimitScanAnchoring:
     def test_anchors_to_message_instant_same_evening(self, native_home, tmp_path):
         # The real corroborated G7 timeline (VERDICTS.md:428-436): 429 hit
         # at 2026-07-13T22:32:01.933Z, message "resets 4:40am
-        # (Asia/Qyzylorda)". True reset instant is 2026-07-13T23:40:00Z --
+        # (Asia/Karachi)". True reset instant is 2026-07-13T23:40:00Z --
         # the actual resume landed 8 minutes later, at 23:48:10Z.
         rec = self._record("2026-07-13T22:32:01.933Z")
         t = _write_native_transcript(tmp_path, SID, [rec])
