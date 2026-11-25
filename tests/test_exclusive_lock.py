@@ -329,3 +329,49 @@ def test_a_signalled_command_exits_128_plus_the_signal(lock):
                 path=lock, popen=lambda *a, **k: Child(), out=None)
     assert rc == 143 and not lock.exists()
 
+
+# Review w598 of #109 (P3): the --holder default is the caller's registry
+# identity, never the FLEET_WORKER witness.
+def _capture_holder(monkeypatch, argv):
+    seen = {}
+
+    def run(command, *, holder_name, **kw):
+        seen["holder"] = holder_name
+        return 0
+
+    monkeypatch.setattr(fleet.fleet_exclusive, "run", run)
+    assert fleet.cmd_exclusive(fleet.build_parser().parse_args(
+        ["exclusive", *argv, "--", "true"])) == 0
+    return seen["holder"]
+
+
+def test_the_holder_default_is_the_registry_identity(lock, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abcdef01-0000-4000-8000-000000000001")
+    monkeypatch.setenv("FLEET_WORKER", "a-witness-that-lies")
+    monkeypatch.setattr(fleet, "_acting_worker_identity", lambda sid: {
+        "verdict": fleet.IDENTITY_RESOLVED, "name": "w583"})
+    assert _capture_holder(monkeypatch, []) == "w583"
+    assert _capture_holder(monkeypatch, ["--holder", "manual"]) == "manual"
+
+
+@pytest.mark.parametrize("ident", [None, {"verdict": "unresolved"}, RuntimeError])
+def test_an_unresolved_caller_is_named_by_its_session_prefix(lock, monkeypatch, ident):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abcdef01-0000-4000-8000-000000000001")
+    monkeypatch.setenv("FLEET_WORKER", "a-witness-that-lies")
+
+    def identity(sid):
+        if ident is RuntimeError:
+            raise RuntimeError("no fleet home")
+        return ident
+
+    monkeypatch.setattr(fleet, "_acting_worker_identity", identity)
+    assert _capture_holder(monkeypatch, []) == "abcdef01"
+
+
+def test_a_plain_shell_is_the_operator(lock, monkeypatch):
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.setenv("FLEET_WORKER", "a-witness-that-lies")
+    monkeypatch.setattr(fleet, "_acting_worker_identity",
+                        lambda sid: pytest.fail("no sid, no identity lookup"))
+    assert _capture_holder(monkeypatch, []) == "operator"
+

@@ -7,8 +7,9 @@ waited for hours on a run that had ended long before. This module replaces
 those waiters with one fleet-owned lock.
 
 The lock is one JSON file per machine (`~/.claude/fleet-exclusive.json`, or
-`$FLEET_EXCLUSIVE_LOCK`), created with O_EXCL. It records the holder (the
-lane name from `$FLEET_WORKER`, else the caller), the pid and process
+`$FLEET_EXCLUSIVE_LOCK`). It records the holder (`--holder`, else the
+caller's registry-resolved lane name, else its session id prefix, never the
+`FLEET_WORKER` witness), the pid and process
 identity of the `fleet exclusive` process, the child pid, the start time, the
 TTL, a label and the command. A holder is stale when neither recorded process
 is alive (checked by pid and start identity, so a reused pid does not count),
