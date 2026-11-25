@@ -2,9 +2,9 @@
 
 **Status:** DRAFT, gated (dual-lens ESCALATE from both lenses, 2026-07-27), **revised 2026-07-28** for
 the findings that are not blocked on the operator. Nothing here is built. Written by the
-`succession-spec` slice on `spec/succession-signal`, **rebased onto `main` @ `cebae4f`**.
+`succession-spec` slice on `spec/succession-signal`, **rebased onto `main` @ `ec35f05`**.
 
-**Vantage.** Every receipt is pinned `# at cebae4f` and re-executed against that commit's materialised
+**Vantage.** Every receipt is pinned `# at ec35f05` and re-executed against that commit's materialised
 tree by `tools/verify_receipts.py`. `bin/fleet.py` is untouched by this slice; the deliverable is this
 document plus one `RECEIPT_FLOOR` entry (§8.1).
 
@@ -17,7 +17,7 @@ move `bin/fleet.py` by ~2,375 lines. The document's own rule applied to itself �
 > *If a later rebase crosses a commit that does touch `bin/`, every receipt here must be re-measured,
 > not just re-pinned.*
 
-— so **R1–R14 were each re-executed against `cebae4f` and their outputs replaced with what was
+— so **R1–R14 were each re-executed against `ec35f05` and their outputs replaced with what was
 measured**, not with their old text under a new sha. Every one still holds structurally; only line
 numbers moved. Eight new receipts (R15–R22) were added for the claims this revision makes. **What did
 not survive re-measurement is called out where it lived**: the doctor check count (§3, §6.3) and D4's
@@ -224,7 +224,7 @@ hook and the plugin `hooks` key were deleted and a test pins their absence.
 
 ---
 
-## 3. CURRENT STATE, re-measured at `cebae4f`
+## 3. CURRENT STATE, re-measured at `ec35f05`
 
 Descriptive. Every row has a receipt in §9. **Every row below was re-executed for the 2026-07-28
 revision** — this table was stale on arrival at the gate and one row was numerically wrong.
@@ -254,7 +254,7 @@ Two things in that table are the whole defect:
 ### 3.1 A correction the brief needs, now partly overtaken
 
 The brief states that `_ceiling_refuses_dispatch` *"already refuses `spawn`, `send` and `sup-spawn`"*.
-At `cebae4f` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
+At `ec35f05` it refuses at **five** call sites — `spawn`, `send`, `sup-spawn`, and `respawn` twice,
 gated on `--task` (R10). *(Five at `c318224` too; re-measured across the rebase rather than carried.)*
 
 The operator has since **ratified the extension** (evening docket), with a **binding process
@@ -266,7 +266,7 @@ three-tier half of this correction; this spec keeps the practice, citing
 `_ceiling_refuses_dispatch` **by grep** (R10) and by function name, never by line.
 
 **What is not closed:** `skills/fleet/supervisor.md` still reads *"It does not yet cover `fleet
-respawn`"* — re-verified present at `cebae4f`. That is stale in the under-claiming direction and now
+respawn`"* — re-verified present at `ec35f05`. That is stale in the under-claiming direction and now
 contradicts a ratified decision as well as shipped code. **Filed, not fixed** (§10.2 A4).
 
 *(Scope note, since it changed between revisions: `skills/**` was outside this slice's original fence.
@@ -1125,7 +1125,7 @@ nothing is owed, `sup-recover` refuses and names the other verb (§5.4 fall-thro
 **AMENDED 2026-09-09 — the row above and the box above are BOTH now wrong in the present tense, and
 they are wrong in two different ways. The 2026-07-27 text stands verbatim; this is what a reader must
 carry with it.** *(Landed by lane `w59-proven`; every number below is a pinned receipt in §9.4, counted
-over `supervisor/JOURNAL.md` at `1294920` rather than inherited from any prose.)*
+over `supervisor/JOURNAL.md` at `76ade95` rather than inherited from any prose.)*
 
 - **The route is REPAIRED and has been since `87cbf9a` (2026-07-27T19:10Z), so the row's
   "currently UNREPAIRED" no longer holds.** §10.3 of this same document already recorded the repair;
@@ -1137,7 +1137,7 @@ over `supervisor/JOURNAL.md` at `1294920` rather than inherited from any prose.)
   attempt"*. That is exactly right for `SUCCESSOR_DEFAULT_MODE = "dontask"`: 17/17, no exceptions. It was
   never a claim that the ROUTE had never completed — the journal records **9 `HANDOFF-COMPLETE` entries
   before this box was written**, all of them successors dispatched under an explicit `bypass`.
-- **The eight are ALL pre-fix, and the post-fix record is 6-for-6.** Counted at `1294920`: 26
+- **The eight are ALL pre-fix, and the post-fix record is 6-for-6.** Counted at `76ade95`: 26
   `HANDOFF-BEGIN`, 15 `HANDOFF-COMPLETE`, 3 `HANDOFF-ABORT`. Every completion after the fix:
   `2026-08-05T16:48:54Z`, `17:32:10Z`, `19:33:26Z`, `2026-08-09T19:03:01Z`, `22:54:36Z`,
   `2026-09-09T17:49:36Z`. **Five of those six are on the RETIRED WINDOWS HOST** (`task=C:/projects/claude-fleet/…`,
@@ -1332,15 +1332,15 @@ supervisor: inc-20260727T024550Z-4743 RELEASED at 2026-07-27T04:00:41Z by sid=34
   > **The framing this bullet used to carry has been retired, and the correction is a caution rather
   > than a relaxation.** It read: *"it is one of only **three** verbs measured lock-free and
   > non-quarantining in terminal-surface's D4 receipts."* That was true when written and is **false at
-  > `cebae4f`**: `wave2/doctor-repair` merged, so `peek`, `result` and `doctor` are now lock-free too,
+  > `ec35f05`**: `wave2/doctor-repair` merged, so `peek`, `result` and `doctor` are now lock-free too,
   > and **no read surface quarantines any more** — only bare `fleet status` still takes `fleet.lock`.
   > Measured on this base, not inferred from the merge commit.
   >
   > **D4's own receipts still say the old thing, and that is correct behaviour, not a second defect.**
-  > They are pinned `# at 02bf276` — a receipt is a claim about a commit — so they will keep reporting
+  > They are pinned `# at ccb896c` — a receipt is a claim about a commit — so they will keep reporting
   > the pre-`doctor-repair` world until someone deliberately re-pins them. **The trap for the next
   > author is reading a green receipt as a description of shipped code.** It is a description of
-  > `02bf276`. Root `CLAUDE.md` has already been updated to the post-repair statement; D4's prose in
+  > `ccb896c`. Root `CLAUDE.md` has already been updated to the post-repair statement; D4's prose in
   > `docs/specs/terminal-surface.md` has not, and that gap is filed as A9.
   >
   > **Why the requirement survives its framing dying.** `sup-status` being lock-free is not valuable
@@ -1354,7 +1354,7 @@ supervisor: inc-20260727T024550Z-4743 RELEASED at 2026-07-27T04:00:41Z by sid=34
 
 > **The ordinal moved under this document, and it will move again — so here is the audit rather than
 > just the new number.** Measured, not asserted: R23's command returns **24** at `c318224` and **25**
-> at `cebae4f`. So this section's *"a 25th check"* and §3's *"24 checks"* were **both correct at the
+> at `ec35f05`. So this section's *"a 25th check"* and §3's *"24 checks"* were **both correct at the
 > base they were written against**, and both went stale when `idx/core` merged. The new row is
 > therefore the **26th**. `docs/SPEC.md` §13 says **23**, which was wrong before this branch existed
 > and is not this slice's regression.
@@ -1474,7 +1474,7 @@ spec *"was designed not to need the answer and still does not"*.
    refusal is better justified after the repair than before it**, which is the opposite of what a
    reader would guess from "the premise died".
 3. **A caveat this amendment will not paper over:** `sup-recover` is **SPECIFIED AND UNBUILT** —
-   `grep -c "sup-recover" bin/fleet.py` returns **0** at `1294920` (§9.4). So the **No** above is a
+   `grep -c "sup-recover" bin/fleet.py` returns **0** at `76ade95` (§9.4). So the **No** above is a
    claim about a design, not a measurement of shipped call graph, and it must be re-derived against
    real code the day the verb is built. The 2026-07-27 text does not say this and a reader can easily
    miss it.
@@ -1578,12 +1578,12 @@ it — so adding a spec without adding the floor leaves the suite red. **`bin/fl
 
 ## 9. Receipts
 
-Re-executed against the materialised tree of `cebae4f` by `tools/verify_receipts.py`. No block is
+Re-executed against the materialised tree of `ec35f05` by `tools/verify_receipts.py`. No block is
 `# volatile` or `# live`: every one is a `grep`, `sed` or `echo` over a file in the repo, so they are
 ordinary pinned receipts and no evidence here lives outside it.
 
 **Every block below was RE-EXECUTED for this revision, not re-pinned.** The base moved from `c318224`
-to `cebae4f` across ~2,375 lines of `bin/fleet.py`, so the previous outputs' line numbers were all
+to `ec35f05` across ~2,375 lines of `bin/fleet.py`, so the previous outputs' line numbers were all
 stale. R1–R14 each still hold **structurally** — every anchor is still there and still says the same
 thing — but not one of them still holds *textually*, which is the entire reason the rule exists.
 
@@ -1595,7 +1595,7 @@ CI), against whatever state it finds. **A receipt that mutates is a defect howev
 **R1 — the statusline's four supervisor words. None means "outage".**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "_SUP_STATE_LABEL = " -A 1 bin/fleet_statusline.py
 123:_SUP_STATE_LABEL = {"held": "sup held", "released": "sup released",
 124-                    "none": "sup none", "unknown": "sup ?"}
@@ -1604,7 +1604,7 @@ $ grep -n "_SUP_STATE_LABEL = " -A 1 bin/fleet_statusline.py
 **R2 — a live supervisor body leaves the worker buckets, so a `limited` supervisor is in no bucket.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'if w.get("tier") == "supervisor" and w.get("status") != "dead":' -A 1 bin/fleet_statusline.py
 186:        if w.get("tier") == "supervisor" and w.get("status") != "dead":
 187-            continue
@@ -1613,7 +1613,7 @@ $ grep -n 'if w.get("tier") == "supervisor" and w.get("status") != "dead":' -A 1
 **R3 — the supervisor projection carries four keys; none is a verdict.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'out = {"goals_active": False, "state": "none",' -A 1 bin/fleet.py
 3029:    out = {"goals_active": False, "state": "none",
 3030-           "incarnation_id": None, "heartbeat_age_seconds": None}
@@ -1622,7 +1622,7 @@ $ grep -n 'out = {"goals_active": False, "state": "none",' -A 1 bin/fleet.py
 **R4 — `sup-status --json`'s eight keys; none is a succession verdict.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n '^        "goals_active"\|^        "incarnation"\|^        "heartbeat_age_seconds"\|^        "handshake"\|^        "abort_flag"\|^        "pending_decision"\|^        "interface_divergence"\|^        "nag"' bin/fleet.py
 13078:        "goals_active": supervisor_goals_active(),
 13083:        "incarnation": _project_claim(claim),
@@ -1637,7 +1637,7 @@ $ grep -n '^        "goals_active"\|^        "incarnation"\|^        "heartbeat_
 **R5 — the only two supervisor rows in doctor's check list.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "functools.partial(_doctor_check_supervisor" bin/fleet.py
 9122:        functools.partial(_doctor_check_supervisor_claim),
 9123:        functools.partial(_doctor_check_supervisor_handoff),
@@ -1646,7 +1646,7 @@ $ grep -n "functools.partial(_doctor_check_supervisor" bin/fleet.py
 **R6 — `limited-parks` is always `ok=True`, so a limit-parked supervisor reads `[PASS]`.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'return ("limited-parks"' bin/fleet.py
 8163:        return ("limited-parks", True, "no usage-limit parks")
 8176:    return ("limited-parks", True, " | ".join(parts))
@@ -1656,7 +1656,7 @@ $ grep -n 'return ("limited-parks"' bin/fleet.py
 This is window A's state, and it is what §5.1 R-a is about.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'is released -- there is no holder to respawn' -A 1 bin/fleet.py
 5987:            detail = (f"claim {inc} is released -- there is no holder to respawn. "
 5988-                      f"Boot a fresh body with `fleet sup-spawn --task <brief>`.")
@@ -1665,7 +1665,7 @@ $ grep -n 'is released -- there is no holder to respawn' -A 1 bin/fleet.py
 **R8 — `sup-release`'s `reason` is free text on the claim: the string that was accurate and unread.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'released\["reason"\] = reason' -B 1 bin/fleet.py
 12924-        if reason:
 12925:            released["reason"] = reason
@@ -1674,7 +1674,7 @@ $ grep -n 'released\["reason"\] = reason' -B 1 bin/fleet.py
 **R9 — `[UNBUILT]`: nothing this spec specifies exists yet, in either file.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -c "succession_needed\|succession_cause\|sup-recover\|sup_recover" bin/fleet.py bin/fleet_statusline.py
 bin/fleet.py:0
 bin/fleet_statusline.py:0
@@ -1686,7 +1686,7 @@ exit 1
 per the operator's binding process condition (§3.1).**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n '_ceiling_refuses_dispatch("' bin/fleet.py
 3838:    _ceiling_refusal = _ceiling_refuses_dispatch("spawn")
 4956:    _ceiling_refusal = _ceiling_refuses_dispatch("send")
@@ -1699,7 +1699,7 @@ $ grep -n '_ceiling_refuses_dispatch("' bin/fleet.py
 is not always fresh.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'updated\["status"\] = "limited"' -B 2 -A 2 bin/fleet.py
 2813-        is_limit, reset_at, kind = scan(sid, transcript_path=path)
 2814-        if is_limit:
@@ -1713,7 +1713,7 @@ gains the four keys, the snapshot that publishes them, and the shipped precedent
 holder's record from a view path (`_claim_holder_dead_note`, called by `supervisor_status_line`).**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "def _read_registry_readonly\|def status_snapshot\|def _claim_holder_dead_note\|def _supervisor_tier_snapshot" bin/fleet.py
 2985:def _read_registry_readonly() -> tuple:
 3005:def _supervisor_tier_snapshot(now=None) -> dict:
@@ -1725,7 +1725,7 @@ $ grep -n "def _read_registry_readonly\|def status_snapshot\|def _claim_holder_d
 consults it, and the own-record writer `sup-release` calls (§5.1).**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "def _releaser_body_is_tombstoned\|_releaser_body_is_tombstoned(released_by, registry)\|def _tombstone_releasing_body" bin/fleet.py
 11218:def _releaser_body_is_tombstoned(released_by, registry) -> bool:
 11339:    if _releaser_body_is_tombstoned(released_by, registry):
@@ -1737,7 +1737,7 @@ $ grep -n "def _releaser_body_is_tombstoned\|_releaser_body_is_tombstoned(releas
 simply stopped — so a usage-limit park can never tombstone itself (§5.1.1).**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "_tombstone_releasing_body\|^def cmd_sup_release" bin/fleet.py
 11223:    own record (`_tombstone_releasing_body`), so `_releaser_live_sids` below is
 12759:def _tombstone_releasing_body(caller: str, inc: str):
@@ -1760,7 +1760,7 @@ commit before the verb returns. So a `sup-recover` successor NEVER reads `0 turn
 stillborn, and §5.6's old heuristic could not have fired.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "def _dispatch_supervisor_body\|def _commit_native_stamp" bin/fleet.py
 3963:    def _commit_native_stamp():
 13481:def _dispatch_supervisor_body(campaign, mode, model, *, run=subprocess.run,
@@ -1777,7 +1777,7 @@ keyed on `sid is None`, and the sid is stamped by R15's commit — so on THIS pa
 and only on this path.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'no transcript yet' bin/fleet.py
 4299:        print(f"{name}: no transcript yet -- dispatch may still be in flight", file=sys.stderr)
 ```
@@ -1787,7 +1787,7 @@ literal — including `handoff_pending` and `handoff_token_hash` — is dropped 
 unconditionally.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'released = {"incarnation_id": inc,' -A 8 bin/fleet.py
 12918:        released = {"incarnation_id": inc,
 12919-                    "lineage_id": claim.get("lineage_id"),
@@ -1805,7 +1805,7 @@ the projection (`:3074`), and passes it nothing. §4.3.1 threads it in rather th
 read it twice on every statusline refresh.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n -A 25 "^def status_snapshot" bin/fleet.py | grep "_read_registry_readonly\|_supervisor_tier_snapshot"
 3061-    ok, reason, data = _read_registry_readonly()
 3073-        # File-only, never raises: see `_supervisor_tier_snapshot`.
@@ -1817,7 +1817,7 @@ ISO→`HH:MM` formatter (fine); the snapshot's worker rows carry NO `session_id`
 from the claim to the holder's row. Hence §4.3.2's fourth key.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "def _reset_clock" -A 1 bin/fleet_statusline.py
 92:def _reset_clock(iso) -> str:
 93-    """'2026-07-09T14:20:00Z' -> '14:20'. Any other shape -> the raw value."""
@@ -1831,7 +1831,7 @@ exit 1
 "parked" and for "will not decode", and row 0 is first in precedence (§4.4).**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "def supervisor_goals_active" -A 9 bin/fleet.py
 14415:def supervisor_goals_active() -> bool:
 14416-    """GOALS.md exists, decodes, and is not parked. Operator parks the nag by
@@ -1849,7 +1849,7 @@ $ grep -n "def supervisor_goals_active" -A 9 bin/fleet.py
 borrowed string and needs the §4.6 fallback.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n 'if holder is None or holder.get("status") != "dead":' -A 1 bin/fleet.py
 14459:    if holder is None or holder.get("status") != "dead":
 14460-        return None
@@ -1860,7 +1860,7 @@ tombstone arm needs a carrier (`bool(carriers)`), but B6's disarm has a second, 
 stop alone satisfies (§5.4).**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -n "carriers = \[rec for rec in workers.values()" -A 2 bin/fleet.py
 11265:    carriers = [rec for rec in workers.values()
 11266-                if released_by in _record_sids(rec)]
@@ -1871,7 +1871,7 @@ $ grep -n "carriers = \[rec for rec in workers.values()" -A 2 bin/fleet.py
 a reader might infer from "a 25th check". §3's row and §6.3's ordinal both key on this.**
 
 ```
-# at cebae4f
+# at ec35f05
 $ grep -c "functools.partial(_doctor_check" bin/fleet.py
 25
 ```
@@ -1894,7 +1894,7 @@ generic implementation.
 record, `:17486` a key list, `:19041` the transfer. No other site assigns the field.
 
 ```
-# at 1294920
+# at 76ade95
 $ grep -n '"claimed_via"' bin/fleet.py
 16130:                         "claimed_via": "fresh",
 16179:                         "claimed_via": verdict if verdict != "seize" else "seize",
@@ -1911,7 +1911,7 @@ produced by any path but a completed handoff**, and the live claim reads
 `lineage_id: lin-20260909T162943Z-6040` against `claimed_at: 2026-09-09T17:49:36Z`.
 
 ```
-# at 1294920
+# at 76ade95
 $ grep -n 'mint_lineage_id()' bin/fleet.py
 15379:def mint_lineage_id() -> str:
 16132:                         "lineage_id": mint_lineage_id()}
@@ -1921,7 +1921,7 @@ $ grep -n 'mint_lineage_id()' bin/fleet.py
 **W6 — `sup-recover`, the subject of §5.3–§5.7, is still UNBUILT.**
 
 ```
-# at 1294920
+# at 76ade95
 $ grep -c 'sup-recover' bin/fleet.py
 0
 $ echo "exit $?"
@@ -1949,7 +1949,7 @@ operator owes** (which I may not make).
 | **O10** | The predicate uses **liveness proxies, not liveness** (§4.9), and I named that as a deviation from the ratified wording rather than redefining the wording. | A roster fetch on a statusline refresh path is the exact defect D1 exists for. | A doctor-only roster-confirmed arm is a clean follow-up; **filed, not built.** |
 | **O11** | The rejected post-reboot arm is **kept in the document as a recorded refusal** (§1.2) rather than deleted. | A spec that silently omits a rejected option invites the next author to re-propose it, and the grounds generalise beyond this case. | Not really overturnable — the deletion is the operator's ruling; only the *recording* of it is mine. |
 | **O12** | §4.10 makes "**measurement or state, never self-report**" a binding property of every input, not just a habit. | A body estimated 60k where `sup-context` measured 198,767. A detector built on what a degrading actor believes about itself degrades with it. | Show an input that must be a self-report. I could not find one. |
-| **O13** | §5.7 **downgrades** `sup-handoff-*` from "PREFERRED" to "designed but unrepaired", and `sup-recover` is specified to route through `_dispatch_supervisor_body` exclusively. | Three stillbirths; three supervisors in a row released at the ceiling rather than hand off. A recovery verb built on the mechanism that fails is not a recovery verb. | ~~Repair the handoff path and the word can be restored. The routing choice should stand either way.~~ **AMENDED 2026-09-09 (lane `w59-proven`): the condition is MET, and the two halves part company.** The path was repaired at `87cbf9a` (2026-07-27T19:10Z) and has completed **6-for-6** since — first on this host `2026-09-09T17:49:36Z`, receipts §9.4 — so **"unrepaired" is retired** and §5.7 carries the amendment. **What is NOT restored is "PREFERRED".** A route that works is not thereby the route to prefer; that word was ratified out and re-earning it is an operator judgement about routing under a keeper, not a consequence of one green drill. **The routing half is UNTOUCHED and the drill says nothing about it** — it is an argument about which function `sup-recover` calls, and `sup-recover` is still **UNBUILT** (0 hits in `bin/fleet.py` at `1294920`), so there is no shipped call graph to re-derive it against either way. |
+| **O13** | §5.7 **downgrades** `sup-handoff-*` from "PREFERRED" to "designed but unrepaired", and `sup-recover` is specified to route through `_dispatch_supervisor_body` exclusively. | Three stillbirths; three supervisors in a row released at the ceiling rather than hand off. A recovery verb built on the mechanism that fails is not a recovery verb. | ~~Repair the handoff path and the word can be restored. The routing choice should stand either way.~~ **AMENDED 2026-09-09 (lane `w59-proven`): the condition is MET, and the two halves part company.** The path was repaired at `87cbf9a` (2026-07-27T19:10Z) and has completed **6-for-6** since — first on this host `2026-09-09T17:49:36Z`, receipts §9.4 — so **"unrepaired" is retired** and §5.7 carries the amendment. **What is NOT restored is "PREFERRED".** A route that works is not thereby the route to prefer; that word was ratified out and re-earning it is an operator judgement about routing under a keeper, not a consequence of one green drill. **The routing half is UNTOUCHED and the drill says nothing about it** — it is an argument about which function `sup-recover` calls, and `sup-recover` is still **UNBUILT** (0 hits in `bin/fleet.py` at `76ade95`), so there is no shipped call graph to re-derive it against either way. |
 
 ### 10.2 Ratifications the operator owes
 
@@ -1962,8 +1962,8 @@ operator owes** (which I may not make).
 | **A1** | **The §7.2 disarm table is now incomplete about shipped code.** The tombstone merge (`0cda9f6`, now in base) adds a third disarm — releaser tombstoned — and the ratified table says *"releaser roster-**LIVE** → **ARMED, unconditionally**"*. The tombstone slice reported this and correctly refused to edit it. **This spec is built on that code, so it inherits the debt and restates it rather than assuming it discharged.** | **operator** — §7 is operator-owned; **the supervisor may not ratify a narrowing of an operator-owned section** | Not mine to ratify. `the local operator decision record` already records *"an in-fleet disarm path is owed"*, so this discharges scheduled work rather than inventing a narrowing — the shape still needs the tick. |
 | **A2** | ~~**`claim-nonce` §6.3's post-release key set does not say what happens to `handoff_pending` and `handoff_token_hash`.**~~ **DOWNGRADED — the hazard was measured and cannot occur; only the doc gap survives.** §6.3 enumerates seven keys kept and six removed and these two are in neither list, so the **documentation** gap is real. The **hazard** this row escalated — *"a released claim still carrying a minted token"* — **cannot happen in shipped code** (R17): `cmd_sup_release` does not mutate the claim, it **builds a fresh dict** of six keys (`incarnation_id`, `lineage_id`, `claimed_via`, `released_at`, `released_by_sid`, `state`) plus an optional `reason`, and hands that to `write_incarnation`. **Every key not in that literal is dropped on every release, unconditionally, including both handoff keys.** So `sup-recover`'s §5.7 refusal can never fire on a released claim, and no superseded successor can validate against a token that is not there. | ~~operator~~ **doc-sync** | **Closed as an escalation by measurement.** What remains is that §6.3's key set does not *say* this, so a future edit could regress it with nothing to catch it. That is a doc-sync item and a test obligation (§8), not a question for the operator. **This row escalated a question shipped code answers in six lines, and I should have grepped before escalating.** |
 | **A8** | **D-GS1 deviates from the ratified word *"records"*** — the ratified shape says *"a supervisor that can no longer dispatch **records** a machine-readable succession-needed fact with its cause"*; this spec's answer is that **nothing records it and there is no writer** (§4.11). **Moved here from §10.1 O1**, where it was misfiled as a design choice of mine. | **operator** — it is their wording | The technical argument is sound and I stand behind it (§4.1), but *"is this deviation acceptable"* is not a question a supervisor may answer about an operator's ratified element. **Stated as a finding (§4.11), designed as specified, and flagged rather than smoothed over.** Falsifier named: a consumer that needs the fact when no reader is running. |
-| **A3** | **A ~~25th~~ 26th doctor check that can FAIL changes `fleet doctor`'s exit-code contract for a new class of condition,** and `docs/SPEC.md` §13 records the roster and a check count. **Three documents now disagree about that count**: this spec said 24, `docs/SPEC.md` says **23**, and the measured value at `cebae4f` is **25** (R23). SPEC.md's number was wrong before this branch existed, so it is not this slice's regression — but it is now three-way, and the new row makes it 26. | operator / doc-sync | Adding a FAIL-capable row is a policy change about what makes doctor red, and the count is a ratified number. **The count itself is now measured rather than asserted (R23); what is owed is the ratification and SPEC.md's correction, not the arithmetic.** |
-| **A9** | **`docs/specs/terminal-surface.md` D4's prose is stale in the *under*-claiming direction.** It reads *"a REQUIREMENT, not a description: VIOLATED by every read-only `/fleet:*` command at `02bf276`"*, and its receipt tables show `peek`/`result`/`doctor` taking the lock and quarantining. **`wave2/doctor-repair` merged and that is no longer true** — measured on this base: only bare `fleet status` still takes the lock, and **nothing quarantines from a read surface**. Root `CLAUDE.md` has been updated; D4 has not. Its receipts are correctly pinned at `02bf276` and are **not** the defect — the surrounding prose, which reads as present tense, is. | doc-sync (**not** operator: D4's REQUIREMENT is unchanged and nothing is being narrowed) | **Filed, not fixed — outside this slice's scope fence** (`docs/specs/terminal-surface.md` is another document's). Raised because §6.2 cited that framing and a reader following the citation lands on prose that contradicts shipped code. |
+| **A3** | **A ~~25th~~ 26th doctor check that can FAIL changes `fleet doctor`'s exit-code contract for a new class of condition,** and `docs/SPEC.md` §13 records the roster and a check count. **Three documents now disagree about that count**: this spec said 24, `docs/SPEC.md` says **23**, and the measured value at `ec35f05` is **25** (R23). SPEC.md's number was wrong before this branch existed, so it is not this slice's regression — but it is now three-way, and the new row makes it 26. | operator / doc-sync | Adding a FAIL-capable row is a policy change about what makes doctor red, and the count is a ratified number. **The count itself is now measured rather than asserted (R23); what is owed is the ratification and SPEC.md's correction, not the arithmetic.** |
+| **A9** | **`docs/specs/terminal-surface.md` D4's prose is stale in the *under*-claiming direction.** It reads *"a REQUIREMENT, not a description: VIOLATED by every read-only `/fleet:*` command at `ccb896c`"*, and its receipt tables show `peek`/`result`/`doctor` taking the lock and quarantining. **`wave2/doctor-repair` merged and that is no longer true** — measured on this base: only bare `fleet status` still takes the lock, and **nothing quarantines from a read surface**. Root `CLAUDE.md` has been updated; D4 has not. Its receipts are correctly pinned at `ccb896c` and are **not** the defect — the surrounding prose, which reads as present tense, is. | doc-sync (**not** operator: D4's REQUIREMENT is unchanged and nothing is being narrowed) | **Filed, not fixed — outside this slice's scope fence** (`docs/specs/terminal-surface.md` is another document's). Raised because §6.2 cited that framing and a reader following the citation lands on prose that contradicts shipped code. |
 | **A4** | **`skills/fleet/supervisor.md` is stale about the respawn ceiling** (§3.1, R10) — it still says the ceiling covers *three* verbs and *"does not yet cover `fleet respawn`"*, which now contradicts a ratified decision (`d543691`) as well as shipped code. Still present at `c318224`. **Note for whoever fixes it: the sentence wraps as `It does` / `not yet cover`, so a single-line grep for the phrase returns nothing and reads as already-fixed.** I nearly recorded it as discharged on exactly that mistake. | doc-sync; **outside this slice's scope fence** (`skills/**`) | Filed, not fixed. |
 | **A5** | ~~§11.3's enumeration must name task-bearing `respawn` and `sup-spawn`, edited by grep rather than by the three cited line numbers.~~ **DISCHARGED at `d543691`** while this spec was being written — §11.3 now names all four verbs and marks the `--task` discriminator normative. Left in the table rather than deleted, because a row that silently disappears is indistinguishable from one that was never raised. | ~~doc-sync~~ **done** | Nothing owed. Verified rather than assumed: `d543691` touches `docs/specs/three-tier-command.md` only, so re-pinning the receipts across it changed no output. |
 | **A6** | **Whether a test pins "a released claim renders no age"** (§6.1). I did not read the statusline test suite. | builder + gate | Asserting either way would be a claim I had not measured. **Stated as unverified.** |
@@ -2007,8 +2007,8 @@ tick.
 | `docs/specs/claim-nonce.md` | §6.3 boot table | additive note: the signal is a **view** over the same state and fires on `claim`/`seize`/`limit-transfer` plus `holder-frozen`; it moves no threshold in this table (§4.6). | operator / gate |
 | `docs/specs/three-tier-command.md` | §10.4 | record that `respawn supervisor` is one arm of a larger front door, and that `sup-recover` delegates to it rather than duplicating it. | operator / gate |
 | `docs/specs/three-tier-command.md` | §11.3 enumeration | **A5 — ALREADY DONE at `d543691`.** Named here so a reader of this table does not re-open it. | ~~doc-sync~~ done |
-| `docs/SPEC.md` | §13 doctor roster | **A3** — 26th check `supervisor-succession`; the roster count changes. **And SPEC.md's stated count is `23`, which was already wrong before this branch existed — measured 25 at `cebae4f` (R23).** Correcting that is doc-sync's, independent of this spec landing. | operator / doc-sync |
-| `docs/specs/terminal-surface.md` | D4 prose | **A9** — D4 still reads *"VIOLATED by every read-only `/fleet:*` command"*; `wave2/doctor-repair` merged and it is not. Its **receipts** are correctly pinned at `02bf276` and are not the defect; the present-tense prose around them is. **Filed, not fixed — another document's.** | doc-sync |
+| `docs/SPEC.md` | §13 doctor roster | **A3** — 26th check `supervisor-succession`; the roster count changes. **And SPEC.md's stated count is `23`, which was already wrong before this branch existed — measured 25 at `ec35f05` (R23).** Correcting that is doc-sync's, independent of this spec landing. | operator / doc-sync |
+| `docs/specs/terminal-surface.md` | D4 prose | **A9** — D4 still reads *"VIOLATED by every read-only `/fleet:*` command"*; `wave2/doctor-repair` merged and it is not. Its **receipts** are correctly pinned at `ccb896c` and are not the defect; the present-tense prose around them is. **Filed, not fixed — another document's.** | doc-sync |
 | `skills/fleet/SKILL.md` | Succession bullet (`:95`) | **DONE in this slice.** It stated *"the old middle step is gone … nobody stops the retired body to make succession work"* **unqualified**, which is false on both walls the signal fires on, in the file an interface session reads at startup. Now qualified to the clean-release path, with both walls named, the retraction of *"0 turns"* carried, and the stillbirth root cause pointed at. **`skills/**` was outside the original scope fence; the operator brief for this revision put this file explicitly in scope.** | ~~doc-sync~~ done |
-| `skills/fleet/supervisor.md` | Handoff section | **A4** — the respawn-ceiling paragraph is stale (R10). **Still outside scope and still filed, not fixed** — the widened fence named `SKILL.md`, not this file. Re-verified present at `cebae4f`. | doc-sync |
+| `skills/fleet/supervisor.md` | Handoff section | **A4** — the respawn-ceiling paragraph is stale (R10). **Still outside scope and still filed, not fixed** — the widened fence named `SKILL.md`, not this file. Re-verified present at `ec35f05`. | doc-sync |
 | `skills/fleet/supervisor.md` | Standing down | when `sup-recover` ships, the recipe becomes *release, then stop* for the supervisor and *`fleet sup-recover`* for the interface — one command, not three. **Outside scope; filed.** | doc-sync |

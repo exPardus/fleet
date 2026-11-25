@@ -32,7 +32,7 @@ These are the constraints the design is built on. A builder must not assume othe
 ### Architectural constraints
 
 - **stdlib only, no pip deps** (SPEC §14). `fleet_statusline.py` obeys the same rule as `fleet.py` (as did the SessionStart hook, while it existed).
-- **No view writes.** Nothing in this phase writes `state/fleet.json`, `state/events.jsonl`, or takes `state/fleet.lock`. The single exception in the whole phase is `fleet init --statusline` writing `~/.claude/settings.json` — outside `state/`, once, explicitly, with a backup. **This constraint is met — by the statusline and, since `doctor-repair` merged on 2026-07-27, by the read-only `/fleet:*` commands too.** *(It was NOT met by those commands at `02bf276`; that gap is closed. See D4's CURRENT STATE.)*
+- **No view writes.** Nothing in this phase writes `state/fleet.json`, `state/events.jsonl`, or takes `state/fleet.lock`. The single exception in the whole phase is `fleet init --statusline` writing `~/.claude/settings.json` — outside `state/`, once, explicitly, with a backup. **This constraint is met — by the statusline and, since `doctor-repair` merged on 2026-07-27, by the read-only `/fleet:*` commands too.** *(It was NOT met by those commands at `ccb896c`; that gap is closed. See D4's CURRENT STATE.)*
 - **No view probes.** No surface here calls `PLATFORM.get_process_info` or spawns any subprocess on a refresh path.
 - **One derivation, many entry points.** All four surfaces read `fleet.status_snapshot()`. The statusline **imports** it rather than shelling out, so registry-schema knowledge stays inside `fleet.py` and the additive-schema rule (SPEC §4) binds exactly one reader.
 - **Views degrade, never fail.** A view exits 0 on every error path and prints degraded output. It never mutates state to repair itself (§5).
@@ -61,11 +61,11 @@ Direct control is preserved — `/fleet:kill botx` still kills `botx` — it mer
 **Enforced by test, not convention:** a lint asserts no mutating command file contains `` !` ``.
 
 <!-- ts-corrupt-registry -->
-**D4 — a view reports registry corruption; it does not quarantine.** *(A REQUIREMENT **and**, since 2026-07-27, a true description of shipped code. It was VIOLATED by every read-only `/fleet:*` command at `02bf276`; `doctor-repair` closed that. Both measurements are receipted below — read which is which before citing this decision.)*
+**D4 — a view reports registry corruption; it does not quarantine.** *(A REQUIREMENT **and**, since 2026-07-27, a true description of shipped code. It was VIOLATED by every read-only `/fleet:*` command at `ccb896c`; `doctor-repair` closed that. Both measurements are receipted below — read which is which before citing this decision.)*
 
 **THE REQUIREMENT — binding, unchanged, and correct.** SPEC §11 requires the single writer to quarantine an unparseable `fleet.json` to `fleet.json.corrupt.<ts>`, append a `registry_corrupt` event, and exit 1 loudly. A view must do **none** of that: quarantine is a write, and a statusline refiring every 10 s would quarantine in a loop, shredding operator evidence. A view prints `[fleet]: registry unreadable` and exits 0. The next real `fleet` command performs the quarantine. Direct consequence of invariant 6.
 
-**THE CURRENT STATE — the requirement is MET, by the statusline and by every read-only `/fleet:*` command.** Measured at `35cd7b7`; the receipts are in *Receipts — D4 measured against shipped code* below, in the **post-fix** subsection. The gap this paragraph used to record was closed by the `doctor-repair` slice on 2026-07-27 (merge `9739e74`, fix `0c873b6`), and root `CLAUDE.md` calls the REQUIREMENT/CURRENT-STATE split *now-discharged*. This document is the last place that still said otherwise.
+**THE CURRENT STATE — the requirement is MET, by the statusline and by every read-only `/fleet:*` command.** Measured at `809275a`; the receipts are in *Receipts — D4 measured against shipped code* below, in the **post-fix** subsection. The gap this paragraph used to record was closed by the `doctor-repair` slice on 2026-07-27 (merge `9739e74`, fix `0c873b6`), and root `CLAUDE.md` calls the REQUIREMENT/CURRENT-STATE split *now-discharged*. This document is the last place that still said otherwise.
 - `bin/fleet_statusline.py` honours D4 on every clause: no lock, no quarantine, `[fleet]: registry unreadable`, exit 0. It always did; the sentence that names the statusline first was always true of the statusline.
 - `fleet status --stale-ok`, `fleet peek`, `fleet result` and `fleet doctor` (without `--repair`) read through `read_registry_no_repair()` — *"`load_registry()` MINUS THE QUARANTINE"*, same validation, no rename. A corrupt `state/fleet.json` **survives** all four; they refuse loudly and print the `fleet doctor --repair` hint instead. `peek`, `result` and `doctor` take no lock at all.
 - **Two residuals, stated so they are not mistaken for the closed gap.** (1) Bare `fleet status` — no `--stale-ok` — still takes `fleet_lock()`, at a point *after* its non-quarantining pre-probe read, so it contends for the lock but cannot quarantine. No `/fleet:*` template reaches it: `commands/status.md` and `commands/overview.md` both inline `` !`fleet status --stale-ok` ``, pinned by `tests/test_view_quarantine.py::test_the_inline_status_call_is_the_stale_ok_read`. (2) `fleet doctor --repair` is the only quarantining path a view could reach, and it is not a view — it is the operator's explicit repair verb. D4 governs views; `--repair` is outside it by construction. **It is NOT the only path that performs the rename, and this residual used to say it was the "one quarantine site left in the tree".** The rename lives in `load_registry`, whose sole caller of `_quarantine_registry` it is, so every lock-holding mutating verb that loads the registry still quarantines a corrupt one — measured at `b3ec8d7`, `fleet clean`/`kill`/`archive`/`wait` all do. That is SPEC §11's single writer behaving correctly and is outside D4 for the same reason `--repair` is; what D4 constrains is the read surface, and there the claim holds.
@@ -75,7 +75,7 @@ Why the old gap was more than a wording defect, kept because the reasoning is wh
 
 **The gap is closed; `doctor-repair` was the slice that closed it.** The remedy was the code change this document declined to make — the read verbs were routed off `load_registry()` onto a non-quarantining read, which is the second of the two options sketched here. `tests/test_views_doctrine.py` pinned the pair and **went green on its own**, exactly as designed: its D4-restatement test now takes `pytest.skip` because an unqualified restatement is no longer a defect, and `test_the_quarantine_detector_can_see_a_quarantine` is what stops a broken detector from reaching that skip. **The unqualified rule is now the correct statement.**
 
-> **A NOTE ON HOW THIS PARAGRAPH WENT STALE — the mechanism, not the incident.** The previous CURRENT STATE ended *"this paragraph is not to be deleted until they [the receipts] say something else."* The receipts were pinned `# at 02bf276`, a pre-fix commit — and a receipt pinned to a commit can never say something else. The instruction was therefore self-sealing: it made the paragraph permanent while promising it was conditional. That is the drift class, and the fix is structural, not editorial: **a CURRENT-STATE claim must cite a receipt pinned at or after the commit that makes it true, and gets re-pinned deliberately when the claim is re-measured.** Both measurements are now present below, each pinned to the commit it is true of.
+> **A NOTE ON HOW THIS PARAGRAPH WENT STALE — the mechanism, not the incident.** The previous CURRENT STATE ended *"this paragraph is not to be deleted until they [the receipts] say something else."* The receipts were pinned `# at ccb896c`, a pre-fix commit — and a receipt pinned to a commit can never say something else. The instruction was therefore self-sealing: it made the paragraph permanent while promising it was conditional. That is the drift class, and the fix is structural, not editorial: **a CURRENT-STATE claim must cite a receipt pinned at or after the commit that makes it true, and gets re-pinned deliberately when the claim is re-measured.** Both measurements are now present below, each pinned to the commit it is true of.
 >
 > The pin that was supposed to catch this only ever fired in one direction — "code violates while docs claim compliance". Stale *"code violates"* prose is invisible to it, which is why this went unnoticed for three days across two documents that root `CLAUDE.md` names as a pair. **A bidirectional guard is owed and is not in this document's gift** — it needs a test asserting that no D4 CURRENT-STATE paragraph contradicts the live `_any_view_still_quarantines()` measurement *in either direction*. Filed rather than built here: the change belongs in `tests/`.
 
@@ -117,7 +117,7 @@ mailbox/*.md ──────┘             │
 
 Every consumer on this diagram is **pulled** by the operator or by a surface they installed on purpose (D7). Nothing here is pushed into a session that did not ask.
 
-Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary CLI, which takes `fleet.lock` and recomputes exactly as before. The read surface and the write surface never contend for a lock, because the read surface never takes one — **and since 2026-07-27 that is the shipped behaviour, not only the requirement.** The read-only `/fleet:*` commands reach it by a second route rather than through this diagram: they inline `fleet status --stale-ok` / `fleet peek` / `fleet result` / `fleet doctor`, which read through `read_registry_no_repair()` — lock-free for `peek`/`result`/`doctor`, and quarantining in no case. *(At `02bf276` they inlined the bare verbs and all four took `fleet.lock` and quarantined; only the statusline was on the arrow. See D4's CURRENT STATE for the closed gap.)*
+Mutating `/fleet:*` commands bypass this path entirely: they invoke the ordinary CLI, which takes `fleet.lock` and recomputes exactly as before. The read surface and the write surface never contend for a lock, because the read surface never takes one — **and since 2026-07-27 that is the shipped behaviour, not only the requirement.** The read-only `/fleet:*` commands reach it by a second route rather than through this diagram: they inline `fleet status --stale-ok` / `fleet peek` / `fleet result` / `fleet doctor`, which read through `read_registry_no_repair()` — lock-free for `peek`/`result`/`doctor`, and quarantining in no case. *(At `ccb896c` they inlined the bare verbs and all four took `fleet.lock` and quarantined; only the statusline was on the arrow. See D4's CURRENT STATE for the closed gap.)*
 
 ## Components
 
@@ -312,7 +312,7 @@ Two rules follow, and they are the shape of the fix rather than its patch:
 - **The last row is a backstop, never a degrade path.** A shape that is foreseeable at a trust boundary must be answered by a word, not by the swallow — the swallow is what makes a failure silent, so catching *more* there is the same defect with more surface.
 - **The narrowing precedes the sanitiser.** `fleet_statusline._safe` is a TEXT sanitiser: printable ASCII, bounded, brackets neutralised. Its guarantees are about characters and it has none about structure, so a wrongly-typed field is narrowed to a word fleet authors (`fleet.registry_status` → `?type`) *before* any sanitiser sees it, and `_safe` refuses a non-string rather than stringifying one. Coercing with `str()` would also make the render total and is refused: `_safe(["idle"])` and `_safe("['idle']")` are both `('idle')`, so a malformed record and a record forging that repr would render identical bytes on the one surface the operator reads continuously — P1-13, one field over. `?type` is distinct from `?` (absent or null) for the same reason, and is exempt from the unknown-bucket cap so that three hostile statuses sorting earlier cannot suppress it.
 
-The corrupt-registry row is D4: views report, the writer quarantines. The `/fleet:*` column of that row is written as the CLI's behaviour because it *is* the CLI — and since `doctor-repair`, D4 holds for both columns: a `/fleet:status` on a corrupt registry reports and exits 0, and `/fleet:peek`/`/fleet:result`/`/fleet:doctor` refuse without renaming anything. The only surface reachable from the read path that still quarantines is `fleet doctor --repair`, which is the operator's explicit repair verb and not a view — the lock-holding mutating verbs still quarantine too, and are not in this row's scope. *(At `02bf276` this row read "CLI quarantines + exits 1 (§11)" and was correct: the read verbs inlined the bare CLI and did quarantine. That was the D4 violation, stated in the table rather than hidden by it. See D4's CURRENT STATE and both receipt sets below.)*
+The corrupt-registry row is D4: views report, the writer quarantines. The `/fleet:*` column of that row is written as the CLI's behaviour because it *is* the CLI — and since `doctor-repair`, D4 holds for both columns: a `/fleet:status` on a corrupt registry reports and exits 0, and `/fleet:peek`/`/fleet:result`/`/fleet:doctor` refuse without renaming anything. The only surface reachable from the read path that still quarantines is `fleet doctor --repair`, which is the operator's explicit repair verb and not a view — the lock-holding mutating verbs still quarantine too, and are not in this row's scope. *(At `ccb896c` this row read "CLI quarantines + exits 1 (§11)" and was correct: the read verbs inlined the bare CLI and did quarantine. That was the D4 violation, stated in the table rather than hidden by it. See D4's CURRENT STATE and both receipt sets below.)*
 
 ## Testing
 
@@ -333,7 +333,7 @@ Tier-3 live suite (`FLEET_LIVE=1`): **unaffected.** This phase adds no claude in
 Cites the numbered "Architectural invariants" section of `docs/SPEC.md`. All four are **preserved**; none is modified.
 
 - **1 daemonless launch** — every surface here is optional and additive. The CLI works fully with the statusline uninstalled, the plugin absent, and the hook unregistered. The statusline *flags* a resume-eligible `limited` worker; it never launches the resume turn (that stays the explicit `fleet resume-limited` sweep, SPEC §5).
-- **6 single-writer registry** — the requirement is that no surface in this phase writes `fleet.json` or `events.jsonl` and none takes `fleet.lock`. D4 is this invariant made literal: even registry *corruption* is not to be repaired from a view. **Shipped code holds this across the whole read surface as of 2026-07-27** — the statusline, `fleet status --stale-ok`, `peek`, `result` and `doctor` all read without quarantining, and `peek`/`result`/`doctor` without taking the lock. Two residuals, neither a violation of the invariant as stated: bare `fleet status` still takes `fleet.lock` (no `/fleet:*` template invokes it — they inline `--stale-ok`), and `fleet doctor --repair` still quarantines, which is the writer doing the writer's job. The invariant is unmodified and binding. *(Measured VIOLATED through the slash-command surface at `02bf276`; `doctor-repair` was the slice that closed it — merge `9739e74`. Both measurements receipted below.)*
+- **6 single-writer registry** — the requirement is that no surface in this phase writes `fleet.json` or `events.jsonl` and none takes `fleet.lock`. D4 is this invariant made literal: even registry *corruption* is not to be repaired from a view. **Shipped code holds this across the whole read surface as of 2026-07-27** — the statusline, `fleet status --stale-ok`, `peek`, `result` and `doctor` all read without quarantining, and `peek`/`result`/`doctor` without taking the lock. Two residuals, neither a violation of the invariant as stated: bare `fleet status` still takes `fleet.lock` (no `/fleet:*` template invokes it — they inline `--stale-ok`), and `fleet doctor --repair` still quarantines, which is the writer doing the writer's job. The invariant is unmodified and binding. *(Measured VIOLATED through the slash-command surface at `ccb896c`; `doctor-repair` was the slice that closed it — merge `9739e74`. Both measurements receipted below.)*
 - **8 platform-adapter-only OS branching** — the new files add no `os.name`/`sys.platform` branch; the boundary lint is extended to cover them. The Windows PowerShell probe stays where it already is, inside the adapter, untouched. [SUPERSEDED (mechanism only) — native-substrate pivot 2026-07-13: that probe is going away with PID-liveness (`docs/SPEC.md` §6); the invariant itself — no OS branching outside the adapter — is unaffected and stays binding.]
 - **9 one-state-many-views** — `status_snapshot()` is the single derivation; the statusline, the slash commands, and (later) watchtower and the web UI are views of it holding no independent state. Removing a view (the SessionStart hook, D7) cost nothing elsewhere, which is the invariant paying out. The statusline importing `fleet.py` rather than re-parsing `fleet.json` is this invariant applied to code, not just to data.
 
@@ -355,17 +355,17 @@ Interpreter resolution goes through the repo's own `bin/hooks/run_py.sh` rather 
 
 | Subsection | Pin | What it proves |
 |---|---|---|
-| *§A — the gap, as measured* | `# at 02bf276` | The D4 violation was real. Four read verbs quarantined and took the lock. **History. Do not act on it as current.** |
-| *§B — the gap, closed* | `# at 35cd7b7` | The same probes at a post-`doctor-repair` commit: nothing quarantines, and `peek`/`result`/`doctor` are lock-free. **This is the CURRENT STATE claim, measured.** |
+| *§A — the gap, as measured* | `# at ccb896c` | The D4 violation was real. Four read verbs quarantined and took the lock. **History. Do not act on it as current.** |
+| *§B — the gap, closed* | `# at 809275a` | The same probes at a post-`doctor-repair` commit: nothing quarantines, and `peek`/`result`/`doctor` are lock-free. **This is the CURRENT STATE claim, measured.** |
 
-§A is kept, not deleted, and its pin is **not** re-pointed: those blocks are true of `02bf276` and re-pinning them would destroy the evidence that the gap existed. §B is what makes the CURRENT STATE a measurement instead of another assertion — the defect this pair replaces was a CURRENT-STATE paragraph whose only evidence was pinned at a pre-fix commit, so it could never be contradicted by its own receipts.
+§A is kept, not deleted, and its pin is **not** re-pointed: those blocks are true of `ccb896c` and re-pinning them would destroy the evidence that the gap existed. §B is what makes the CURRENT STATE a measurement instead of another assertion — the defect this pair replaces was a CURRENT-STATE paragraph whose only evidence was pinned at a pre-fix commit, so it could never be contradicted by its own receipts.
 
-### §A — the gap, as measured at `02bf276` (HISTORY)
+### §A — the gap, as measured at `ccb896c` (HISTORY)
 
 **Quarantine.** A corrupt `state/fleet.json`, one surface per row; `survives` means the file is still there afterwards, `RENAMED ASIDE` means `load_registry()` quarantined it:
 
 ```
-# at 02bf276
+# at ccb896c
 $ for v in "status" "status --json --stale-ok" "peek w" "result w" "doctor" "sup-status" "knowledge"; do rm -rf .probe; mkdir -p .probe/state; printf 'not json {{{' > .probe/state/fleet.json; FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet.py $v >/dev/null 2>&1; [ -f .probe/state/fleet.json ] && r=survives || r="RENAMED ASIDE"; printf '%-32s %s\n' "fleet $v" "$r"; done; rm -rf .probe; mkdir -p .probe/state; printf 'not json {{{' > .probe/state/fleet.json; echo '{}' | FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet_statusline.py >/dev/null 2>&1; [ -f .probe/state/fleet.json ] && r=survives || r="RENAMED ASIDE"; printf '%-32s %s\n' "statusline" "$r"; rm -rf .probe
 fleet status                     RENAMED ASIDE
 fleet status --json --stale-ok   survives
@@ -382,7 +382,7 @@ statusline                       survives
 **Lock contention.** D4's sibling clause. A `state/fleet.lock` is pre-created (a live holder), the registry is valid, and the surface is run: a lock-free surface answers, a contending one blocks for `LOCK_TIMEOUT_SECONDS` and dies on `timed out waiting for lock`. This block is the slowest thing in the receipt suite (~20 s) precisely because four of these surfaces really do wait on a lock they are documented never to take:
 
 ```
-# at 02bf276
+# at ccb896c
 $ for v in "status" "status --json --stale-ok" "peek w" "result w" "doctor" "sup-status"; do rm -rf .probe; mkdir -p .probe/state; printf '{"workers": {}}' > .probe/state/fleet.json; printf 'held-by-another-process' > .probe/state/fleet.lock; o=$(FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet.py $v 2>&1); case "$o" in *"timed out waiting for lock"*) r="TAKES fleet.lock";; *) r="lock-free";; esac; printf '%-32s %s\n' "fleet $v" "$r"; done; rm -rf .probe; mkdir -p .probe/state; printf '{"workers": {}}' > .probe/state/fleet.json; printf 'held-by-another-process' > .probe/state/fleet.lock; o=$(echo '{}' | FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet_statusline.py 2>&1); case "$o" in *"timed out waiting for lock"*) r="TAKES fleet.lock";; *) r="lock-free";; esac; printf '%-32s %s\n' "statusline" "$r"; rm -rf .probe
 fleet status                     TAKES fleet.lock
 fleet status --json --stale-ok   lock-free
@@ -396,7 +396,7 @@ statusline                       lock-free
 **The call sites.** The behaviour above is not incidental — the three read-only verbs each open with the same two lines:
 
 ```
-# at 02bf276
+# at ccb896c
 $ grep -n "^def cmd_status\|^def cmd_peek\|^def cmd_result\|^def load_registry\|^def _quarantine_registry" bin/fleet.py
 812:def _quarantine_registry(path: Path) -> Path:
 828:def load_registry() -> dict:
@@ -406,7 +406,7 @@ $ grep -n "^def cmd_status\|^def cmd_peek\|^def cmd_result\|^def load_registry\|
 ```
 
 ```
-# at 02bf276
+# at ccb896c
 $ awk 'NR==3675||NR==3676||NR==3947||NR==3948||NR==3997||NR==3998 {print NR": "$0}' bin/fleet.py
 3675:     with fleet_lock():
 3676:         data = load_registry()
@@ -419,15 +419,15 @@ $ awk 'NR==3675||NR==3676||NR==3947||NR==3948||NR==3997||NR==3998 {print NR": "$
 The quarantine is a rename, which is why it destroys the operator's evidence rather than merely annotating it:
 
 ```
-# at 02bf276
+# at ccb896c
 $ grep -n "path.rename(quarantined)" bin/fleet.py
 818:        path.rename(quarantined)
 ```
 
-**The surface D4 names by name.** At `02bf276` every read-only slash command inlined a bare verb and none went through `status_snapshot()`. *(No longer true of `commands/status.md` and `commands/overview.md` — see §B.)*
+**The surface D4 names by name.** At `ccb896c` every read-only slash command inlined a bare verb and none went through `status_snapshot()`. *(No longer true of `commands/status.md` and `commands/overview.md` — see §B.)*
 
 ```
-# at 02bf276
+# at ccb896c
 $ grep -n '^!`fleet ' commands/status.md commands/peek.md commands/result.md commands/overview.md commands/doctor.md
 commands/status.md:6:!`fleet status`
 commands/peek.md:7:!`fleet peek $ARGUMENTS`
@@ -442,7 +442,7 @@ commands/doctor.md:6:!`fleet doctor`
 **On the "never probe a PID" clause of the doctrine sentence.** PID probing no longer exists anywhere in `bin/fleet.py` — the native-substrate pivot deleted it (D1's superseded marker), so that clause is now vacuously true of every surface. Its live successor is the roster subprocess, and `cmd_status` does spawn one:
 
 ```
-# at 02bf276
+# at ccb896c
 $ grep -n "_fetch_agents_roster()" bin/fleet.py
 3699:        roster_ok, payload = _fetch_agents_roster()
 4041:            roster_ok, payload = _fetch_agents_roster()
@@ -452,14 +452,14 @@ $ grep -n "_fetch_agents_roster()" bin/fleet.py
 
 `3699` is inside `cmd_status`, so `/fleet:status` spawns a subprocess on a path D1 forbids one on. That is the same gap in its post-pivot spelling and it closes with the same fix.
 
-### §B — the gap, closed: the same probes at `35cd7b7` (CURRENT STATE)
+### §B — the gap, closed: the same probes at `809275a` (CURRENT STATE)
 
 Added 2026-07-30. `doctor-repair` merged on 2026-07-27 (`9739e74`, fix `0c873b6`) and this document was not revised with it, so for three days D4 asserted that shipped code violated D4 while root `CLAUDE.md` asserted the opposite. §A's pin could not catch that — a receipt pinned at a pre-fix commit reproduces forever and confirms nothing about later code. §B is the correction: **the same two probe shapes, byte-identical apart from the pin**, so the two tables are directly comparable and the difference is the fix.
 
 **Quarantine, re-measured.** Identical command to §A's quarantine block:
 
 ```
-# at 35cd7b7
+# at 809275a
 $ for v in "status" "status --json --stale-ok" "peek w" "result w" "doctor" "sup-status" "knowledge"; do rm -rf .probe; mkdir -p .probe/state; printf 'not json {{{' > .probe/state/fleet.json; FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet.py $v >/dev/null 2>&1; [ -f .probe/state/fleet.json ] && r=survives || r="RENAMED ASIDE"; printf '%-32s %s\n' "fleet $v" "$r"; done; rm -rf .probe; mkdir -p .probe/state; printf 'not json {{{' > .probe/state/fleet.json; echo '{}' | FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet_statusline.py >/dev/null 2>&1; [ -f .probe/state/fleet.json ] && r=survives || r="RENAMED ASIDE"; printf '%-32s %s\n' "statusline" "$r"; rm -rf .probe
 fleet status                     survives
 fleet status --json --stale-ok   survives
@@ -476,7 +476,7 @@ Four rows flipped from `RENAMED ASIDE` to `survives`: `status`, `peek`, `result`
 **Lock contention, re-measured.** Identical command to §A's lock block:
 
 ```
-# at 35cd7b7
+# at 809275a
 $ for v in "status" "status --json --stale-ok" "peek w" "result w" "doctor" "sup-status"; do rm -rf .probe; mkdir -p .probe/state; printf '{"workers": {}}' > .probe/state/fleet.json; printf 'held-by-another-process' > .probe/state/fleet.lock; o=$(FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet.py $v 2>&1); case "$o" in *"timed out waiting for lock"*) r="TAKES fleet.lock";; *) r="lock-free";; esac; printf '%-32s %s\n' "fleet $v" "$r"; done; rm -rf .probe; mkdir -p .probe/state; printf '{"workers": {}}' > .probe/state/fleet.json; printf 'held-by-another-process' > .probe/state/fleet.lock; o=$(echo '{}' | FLEET_HOME=.probe sh bin/hooks/run_py.sh bin/fleet_statusline.py 2>&1); case "$o" in *"timed out waiting for lock"*) r="TAKES fleet.lock";; *) r="lock-free";; esac; printf '%-32s %s\n' "statusline" "$r"; rm -rf .probe
 fleet status                     TAKES fleet.lock
 fleet status --json --stale-ok   lock-free
@@ -490,7 +490,7 @@ statusline                       lock-free
 `peek`, `result` and `doctor` flipped to `lock-free`. **Bare `fleet status` still takes the lock, and that row is why this receipt is here rather than a sentence claiming total compliance.** It is not a D4 violation: its lock is taken *after* a non-quarantining pre-probe read, so it can block but cannot quarantine, and no `/fleet:*` template invokes it — both templates that used to inline the bare verb now inline `--stale-ok`:
 
 ```
-# at 35cd7b7
+# at 809275a
 $ grep -n '^!`fleet ' commands/status.md commands/peek.md commands/result.md commands/overview.md commands/doctor.md
 commands/status.md:6:!`fleet status --stale-ok`
 commands/peek.md:7:!`fleet peek $ARGUMENTS`
@@ -507,7 +507,7 @@ Compare §A's copy of this grep: `commands/status.md` and `commands/overview.md`
 **The call sites, re-measured.** §A showed three read verbs each opening with `with fleet_lock(): data = load_registry()`. Those pairs are gone from the read path, replaced by the non-quarantining reader:
 
 ```
-# at 35cd7b7
+# at 809275a
 $ grep -n "read_registry_no_repair" bin/fleet.py
 716:    Shared by `load_registry` (which quarantines) and `read_registry_no_repair`
 742:    uses `read_registry_no_repair` (same validation, no rename) or
@@ -524,7 +524,7 @@ $ grep -n "read_registry_no_repair" bin/fleet.py
 
 **Live pins, so this subsection is not the only thing holding the fix.** `tests/test_view_quarantine.py` measures that no view quarantines and pins `commands/status.md`'s inline call as the `--stale-ok` read; `tests/test_load_registry_callers.py` pins which functions may reach `load_registry()` at all. `tests/test_views_doctrine.py` remains the doctrine pin named by root `CLAUDE.md`, and its D4-restatement test now skips **by design** — the skip is the green path, guarded by `test_the_quarantine_detector_can_see_a_quarantine` so a broken detector cannot reach it silently. All three are named because a receipt is evidence about one commit and a test is evidence about every commit; the pair is the point.
 
-**What this pair still does not guard, stated plainly:** nothing fails if §B itself goes stale the way §A's prose did. The pins fire when *code* regresses, and `tools/verify_receipts.py` fires when a *paste* stops reproducing at its own commit — but a future fix that changes this behaviour again would leave §B green at `35cd7b7` and the prose above it wrong, which is the exact shape of the defect this section was rewritten to fix. Closing that needs a test comparing every D4 CURRENT-STATE paragraph against the live measurement in **both** directions. It is owed, it lives in `tests/`, and it is not in this document's gift.
+**What this pair still does not guard, stated plainly:** nothing fails if §B itself goes stale the way §A's prose did. The pins fire when *code* regresses, and `tools/verify_receipts.py` fires when a *paste* stops reproducing at its own commit — but a future fix that changes this behaviour again would leave §B green at `809275a` and the prose above it wrong, which is the exact shape of the defect this section was rewritten to fix. Closing that needs a test comparing every D4 CURRENT-STATE paragraph against the live measurement in **both** directions. It is owed, it lives in `tests/`, and it is not in this document's gift.
 
 ## Notes for the builder
 

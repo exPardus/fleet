@@ -174,7 +174,7 @@ A digest is a rendering of the shard, not a stored artifact:
 **Built 2026-07-27**, as a spawn-only flag:
 
 ```
-# at 1844a1f
+# at 319bd69
 $ grep -n '"--context"' bin/fleet.py
 15673:    p_spawn.add_argument("--context", default=None,
 ```
@@ -205,7 +205,7 @@ The last row is not a hypothetical: it is FINDING C, and it is the reason there 
 **Built 2026-07-30:**
 
 ```
-# at b7a3500
+# at c0e0b47
 $ grep -n '^INDEX_DIGEST_\|^class IndexDigestTooLargeError' bin/fleet.py
 15354:class IndexDigestTooLargeError(FleetCliError):
 16026:INDEX_DIGEST_WARN_CHARS = 50_000
@@ -410,7 +410,7 @@ An unauthorised tool call under a non-bypass headless worker hangs on a permissi
    **The experiment, run 2026-07-27** (supervisor checkpoint G-B; the transcript is in the supervisor journal under the fleet home). Two arms, one variable — same task file, same cwd, same mode (`dontask`), same model, same everything except the grant. The cwd was a scratch directory with **no `.claude/` in it at all**, confirmed by `ls -a` showing only `./` and `../`:
 
 ```
-# at 9f7fe26
+# at f7b42f2
 $ sed -n '/^  ARM B, CONTROL/,/^    PROBE-EXECUTED/p' docs/specs/receipts/fleet-index-11.7-grant-experiment.txt
   ARM B, CONTROL (no grant anywhere), worker probe-nogrant, dontask, sonnet:
     PROBE-DENIED Permission to use Bash has been denied because Claude Code is running in don't ask mode.
@@ -440,7 +440,7 @@ $ sed -n '/^  ARM B, CONTROL/,/^    PROBE-EXECUTED/p' docs/specs/receipts/fleet-
    The tree-side half of the same claim is not volatile and is pinned here:
 
 ```
-# at 1844a1f
+# at 319bd69
 $ grep -n '"permissions"' worker-settings.template.json
 2:  "permissions": { "allow": ["Bash(fleet q:*)"] },
 ```
@@ -448,7 +448,7 @@ $ grep -n '"permissions"' worker-settings.template.json
    …and the narrowness, which is the part a future edit is most likely to erode — `grep -c` exits 1 on zero matches, so the exit assertion is doing real work here:
 
 ```
-# at 1844a1f
+# at 319bd69
 $ grep -c 'Bash(fleet:\*)' worker-settings.template.json
 0
 $ echo "exit $?"
@@ -462,7 +462,7 @@ exit 1
    **What WAS fixed: doctor now says so (`instance-grants`).** Re-measured 2026-07-27: widening the rendered instance's grant to `Bash(fleet:*)` — the **kill grant**, reaching the irreversible `fleet kill` and `fleet clean` — left `instance-freshness` reporting `stale: False` and `[PASS]`, and a second `fleet init` really does repair it. So the finding was never that freshness is wrong; it was that **nothing told the operator the repair existed.** `_doctor_check_instance_grants` compares the instance's *fleet* grants against the template's **by content**, which is precisely what makes it immune to the mtime limit that produced the hole, and it names `fleet init` in the failure line. Both directions fail, and they fail differently: a widened grant is a privilege nobody issued reaching every worker on the machine; a missing one is silent and is the §11.9 false-negative above. It reads only *fleet* grants — an operator's own unrelated `allow` entries are their business, and a check that fires on those trains the operator to ignore it.
 
 ```
-# at 9f7fe26
+# at f7b42f2
 $ grep -n 'def _doctor_check_instance_grants\|_doctor_check_instance_grants),' bin/fleet.py
 8301:def _doctor_check_instance_grants():
 9368:        functools.partial(_doctor_check_instance_grants),
@@ -479,7 +479,7 @@ A worker cannot call a tool it has never heard of, and `compose_prompt`'s preamb
 **Built 2026-07-27.** The cap and the two call-site facts are pinned rather than asserted. Four lines, counted off the constant's own continuation strings; the check inside `compose_prompt` (so every compose path gets it by construction, which is what makes "all four paths" a property rather than four coincidences); and the digest's single read, which goes through §11.3's choke point:
 
 ```
-# at 1844a1f
+# at 319bd69
 $ sed -n '/^INDEX_TEACH_LINES = ($/,/^)$/p' bin/fleet.py | grep -c '\\n"$'
 4
 $ echo "exit $?"
@@ -487,7 +487,7 @@ exit 0
 ```
 
 ```
-# at 1844a1f
+# at 319bd69
 $ grep -n 'index_teach_lines(cwd)\|verified_shard_rows(root, rel, sleep=sleep)' bin/fleet.py
 1354:             + index_teach_lines(cwd)]
 15379:def index_teach_lines(cwd) -> str:
@@ -499,7 +499,7 @@ $ grep -n 'index_teach_lines(cwd)\|verified_shard_rows(root, rel, sleep=sleep)' 
 So `index_teach_lines` renders **only when both gates pass**: the dispatch target carries `.fleet-index/`, **and** every `fleet <verb>` the teach lines name is a registered subcommand. The verb list is **derived from `INDEX_TEACH_LINES` itself**, not written down twice, so a fifth line naming a new verb cannot slip past because a hand-written tuple was not extended. The gate reads `build_parser()`, so it is **unconditional and self-correcting**: it needs no flag, no branch check and no knowledge of which slice landed, and the lines light up on their own the moment `fleet q` is registered. The two gates are AND, not OR — a registered verb is not an opt-in.
 
 ```
-# at 9f7fe26
+# at f7b42f2
 $ grep -n 'def index_teach_verbs\|def registered_cli_verbs\|if any(verb not in available' bin/fleet.py
 15491:def index_teach_verbs() -> tuple:
 15502:def registered_cli_verbs() -> frozenset:
