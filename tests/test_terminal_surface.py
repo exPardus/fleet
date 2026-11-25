@@ -1228,7 +1228,7 @@ class TestCollaboratorInstall:
 
     @pytest.mark.parametrize("rel", [
         "commands", "skills", ".claude-plugin", "bin/fleet",
-        "bin/hooks/run_py.sh", "bin/fleet_statusline.py",
+        "bin/hooks/run_py.sh", "bin/fleet_statusline.py", "bin/fleet_statusline.sh",
     ])
     def test_shipped_surfaces_hardcode_no_absolute_fleet_home(self, rel):
         # SPEC §14: FLEET_HOME is resolved (env -> ~/.claude/fleet-home marker
@@ -1568,8 +1568,10 @@ class TestInitStatusline:
         fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
         assert fleet.cmd_init(self._args(statusline=True)) == 0
         payload = json.loads(settings.read_text(encoding="utf-8"))
-        assert "fleet_statusline.py" in payload["statusLine"]["command"]
+        assert "fleet_statusline.sh" in payload["statusLine"]["command"]
         assert payload["statusLine"]["type"] == "command"
+        # Event-driven only: no polling interval re-runs it every N seconds.
+        assert "refreshInterval" not in payload["statusLine"]
 
     def test_statusline_command_uses_forward_slashes(self, home, settings):
         fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
@@ -1609,7 +1611,7 @@ class TestInitStatusline:
             {"statusLine": {"type": "command", "command": "ccusage statusline"}}), encoding="utf-8")
 
         assert fleet.cmd_init(self._args(statusline=True, force=True)) == 0
-        assert "fleet_statusline.py" in settings.read_text(encoding="utf-8")
+        assert "fleet_statusline.sh" in settings.read_text(encoding="utf-8")
 
     def test_reinstall_over_fleets_own_statusline_is_idempotent(self, home, settings):
         fleet.template_settings_path().write_text('{"hooks":{}}', encoding="utf-8")
@@ -1672,7 +1674,7 @@ class TestStatuslineChainInstall:
         chain = json.loads(fleet.statusline_chain_path().read_text(encoding="utf-8"))
         assert chain["delegates"][0]["command"] == "caveman-statusline.ps1"
         assert chain["delegates"][0]["captured_at"]
-        assert "fleet_statusline.py" in json.loads(
+        assert "fleet_statusline.sh" in json.loads(
             settings.read_text(encoding="utf-8"))["statusLine"]["command"]
 
     def test_chain_never_captures_fleets_own_statusline(self, home, settings):
