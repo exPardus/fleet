@@ -16,14 +16,18 @@ worktree, stay allowed. Anything this hook cannot parse is allowed: it is a
 guard against an expensive habit, not a sandbox, and it must never block a
 legitimate command because of a parsing gap. Exit 0 on every path.
 
-The same hook refuses hand-rolled wait loops: a `while`/`until` loop that
-polls `pgrep`, `pidof` or `ps` and sleeps, the shape lanes used to wait for
-"no other pytest/buf run" before starting their own. On a shared box some
-test run is nearly always alive, so such a loop starved reviewer lanes for
-hours. The refusal names the replacement, `fleet exclusive`, which waits a
-capped time on a lock that names its holder. A single `pgrep` with no loop is
-allowed. Loops inside `sh -c`, and inside a small script run by path
-(`bash wait.sh`, `./wait.sh`, `source wait.sh`), are found too.
+The same hook refuses hand-rolled wait loops in Bash and Monitor commands: a
+`while`/`until`/`for` loop that polls `pgrep`, `pidof` or `ps` and sleeps, the
+shape lanes used to wait for "no other pytest/buf run" before starting their
+own. On a shared box some test run is nearly always alive, so such a loop
+starved reviewer lanes for hours. The refusal names the replacement,
+`fleet exclusive`, which waits a capped time on a lock that names its holder.
+A poller counts only as a command word (so `docker ps` is not one), or as a
+shell function whose body polls. A single `pgrep` with no loop is allowed.
+Loops behind detaching wrappers (`nohup`, `setsid`, `systemd-run`), inside
+`sh -c`, in a heredoc fed to a shell, and inside a small script run by path
+(`bash $CLAUDE_JOB_DIR/tmp/wait.sh`, `./wait.sh`, `source wait.sh`) are found
+too.
 """
 import json
 import os
@@ -33,7 +37,8 @@ import sys
 
 SEPARATORS = {";", "&&", "||", "|", "&", "(", ")", "|&", "\n"}
 WRAPPERS = {"sudo", "time", "nice", "nohup", "command", "exec", "env",
-            "ionice", "stdbuf", "builtin", "timeout"}
+            "ionice", "stdbuf", "builtin", "timeout", "setsid", "systemd-run",
+            "daemonize"}
 # Wrapper options that take a separate value, so the value is not mistaken
 # for the wrapped command.
 WRAPPER_VALUE = {
@@ -41,9 +46,17 @@ WRAPPER_VALUE = {
     "nice": {"-n"}, "ionice": {"-c", "-n", "-p"},
     "stdbuf": {"-i", "-o", "-e"}, "env": {"-u", "-C", "-S"},
     "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "systemd-run": {"-p", "--property", "-u", "--unit", "--description",
+                    "--slice", "-E", "--setenv", "--uid", "--gid", "--nice",
+                    "--working-directory", "-M", "--machine", "-H", "--host",
+                    "--on-active", "--on-boot", "--on-startup",
+                    "--on-unit-active", "--on-unit-inactive", "--on-calendar",
+                    "--timer-property", "--path-property", "--socket-property",
+                    "--service-type", "--wait-for"},
+    "daemonize": {"-a", "-c", "-e", "-o", "-p", "-l", "-u", "-E"},
 }
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
-HEREDOC = re.compile(r"<<(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+HEREDOC = re.compile(r"(?<!<)<<(?!<)(-?)\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
 FD_VALUE = {"-e", "--extension", "-t", "--type", "-E", "--exclude", "-d",
             "--max-depth", "--min-depth", "--exact-depth", "-j", "--threads",
             "-c", "--color", "-o", "--owner", "-S", "--size", "--changed-within",
@@ -259,31 +272,69 @@ def command_roots(command, cwd, home, depth=0):
 
 
 PROCESS_POLLERS = {"pgrep", "pidof", "ps"}
-LOOP_KEYWORDS = {"{", "}", "!", "then", "else", "elif", "do", "time"}
+LOOP_OPENERS = {"while", "until", "for"}
+# Words that may precede the command word of a segment inside a loop.
+LEAD_WORDS = {"{", "}", "!", "then", "else", "elif", "do", "time", "if",
+              "while", "until"}
 SCRIPT_MAX_BYTES = 64 * 1024
+SUBSTITUTION = re.compile(r"\$\(([^()]*(?:\([^()]*\)[^()]*)*)\)|`([^`]*)`")
+FUNCTION_HEAD = re.compile(
+    r"(?:^|[;&|\n{(])\s*(?:function\s+([A-Za-z_][\w-]*)\s*(?:\(\s*\))?"
+    r"|([A-Za-z_][\w-]*)\s*\(\s*\))\s*\{")
 
 
-def _lead(words):
-    index = 0
-    while index < len(words) and words[index] in LOOP_KEYWORDS:
-        index += 1
-    return words[index:]
+def _core(words, lead=LEAD_WORDS):
+    """A segment's words from its command word on: past keywords and wrappers."""
+    while True:
+        index = 0
+        while index < len(words) and words[index] in lead:
+            index += 1
+        stripped = _strip_wrappers(words[index:])
+        if stripped == words:
+            return words
+        words = stripped
+
+
+def _command_word(words):
+    """The command a segment runs, as a basename."""
+    words = _core(words)
+    return os.path.basename(words[0]) if words else None
+
+
+def _loop_opener(words):
+    """`while`, `until` or `for` when the segment opens a loop."""
+    words = _core(words, LEAD_WORDS - LOOP_OPENERS)
+    return words[0] if words and words[0] in LOOP_OPENERS else None
+
+
+def _shell_c_body(words):
+    """The string a `sh -c BODY` (or `bash -lc BODY`) segment runs."""
+    if not words or os.path.basename(words[0]) not in SHELLS:
+        return None
+    for index, word in enumerate(words[1:], start=1):
+        if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word):
+            return words[index + 1] if index + 1 < len(words) else None
+    return None
 
 
 def _script_path(words, cwd):
-    """The script a segment runs by path, if it is a small local file."""
+    """The script a segment runs by path, if it is a small local file.
+
+    `$VAR` and `~` are expanded from the hook's environment, which is the
+    session's: lanes keep scratch scripts under `$CLAUDE_JOB_DIR/tmp`."""
     name, args = os.path.basename(words[0]), words[1:]
     if name in SHELLS:
         args = [a for a in args if not a.startswith("-")]
         target = args[0] if args else None
     elif name in ("source", "."):
         target = args[0] if args else None
-    elif words[0].endswith(".sh") or words[0].startswith("./"):
+    elif words[0].endswith(".sh") or words[0].startswith(("./", "../", "$", "~")):
         target = words[0]
     else:
         return None
     if not target:
         return None
+    target = os.path.expanduser(os.path.expandvars(target))
     path = target if os.path.isabs(target) else os.path.join(cwd or os.getcwd(), target)
     try:
         if os.path.isfile(path) and os.path.getsize(path) <= SCRIPT_MAX_BYTES:
@@ -293,41 +344,128 @@ def _script_path(words, cwd):
     return None
 
 
-def wait_loop(command, cwd=None, depth=0):
-    """True when the command polls for a process in a sleeping loop."""
-    segments = [_strip_wrappers(words) for words in _segments(command)]
-    loop = None  # words seen since the open `while`/`until`
-    for raw in segments:
-        words = _lead(raw)
-        if raw and raw[0] == "done" and loop is not None:
-            names = {os.path.basename(w) for w in loop}
-            if names & PROCESS_POLLERS and "sleep" in names:
+def _function_bodies(command):
+    """{name: body} for every shell function defined in the text."""
+    bodies = {}
+    for match in FUNCTION_HEAD.finditer(command):
+        name = match.group(1) or match.group(2)
+        depth, index = 1, match.end()
+        while index < len(command) and depth:
+            depth += {"{": 1, "}": -1}.get(command[index], 0)
+            index += 1
+        bodies[name] = command[match.end():index - 1]
+    return bodies
+
+
+def _segment_commands(words, pollers):
+    """Command words a loop segment runs, including `$(...)` and backticks."""
+    found = {_command_word(words)}
+    for word in words:
+        for match in SUBSTITUTION.finditer(word):
+            inner = match.group(1) if match.group(1) is not None else match.group(2)
+            try:
+                for inner_words in _segments(inner):
+                    found |= _segment_commands(inner_words, pollers)
+            except ValueError:
+                pass
+    return found
+
+
+def _poller_functions(command):
+    """Names of shell functions whose bodies call a process poller."""
+    bodies = _function_bodies(command)
+    pollers = set(PROCESS_POLLERS)
+    changed = True
+    while changed:  # a function may poll through another function
+        changed = False
+        for name, body in bodies.items():
+            if name in pollers:
+                continue
+            try:
+                words = set()
+                for segment in _segments(body):
+                    words |= _segment_commands(segment, pollers)
+            except ValueError:
+                continue
+            if words & pollers:
+                pollers.add(name)
+                changed = True
+    return pollers
+
+
+def _heredoc_shell_bodies(command):
+    """Bodies of heredocs fed to a shell (`bash <<EOF`, `cat <<EOF | sh`)."""
+    bodies, lines, index = [], command.split("\n"), 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        heads = list(HEREDOC.finditer(line))
+        if not heads:
+            continue
+        try:
+            feeds_shell = any(_command_word(words) in SHELLS
+                              for words in _segments(HEREDOC.sub(" ", line)))
+        except ValueError:
+            feeds_shell = False
+        for head in heads:
+            body = []
+            while index < len(lines):
+                text = lines[index].lstrip("\t") if head.group(1) else lines[index]
+                index += 1
+                if text == head.group(3):
+                    break
+                body.append(lines[index - 1])
+            if feeds_shell:
+                bodies.append("\n".join(body))
+    return bodies
+
+
+def wait_loop(command, cwd=None, depth=0, pollers=None):
+    """True when the command polls for a process in a sleeping loop.
+
+    A poller counts only as the command word of a segment (or of a `$(...)`
+    inside one), so `docker ps` or a variable named `ps` is not a poller. A
+    shell function whose body polls counts as a poller where it is called."""
+    pollers = set(pollers or ()) | _poller_functions(command)
+    if depth < 3:
+        for body in _heredoc_shell_bodies(command):
+            if wait_loop(body, cwd, depth + 1, pollers):
                 return True
-            loop = None
+    nesting, seen = 0, set()
+    for words in _segments(command):
+        opener = _loop_opener(words)
+        if nesting:
+            seen |= _segment_commands(words, pollers)
+            if words and words[0] == "done":
+                nesting -= 1
+                if not nesting:
+                    if seen & pollers and "sleep" in seen:
+                        return True
+                    seen = set()
+                continue
+            if opener:
+                nesting += 1
             continue
-        if words and words[0] in ("while", "until") and loop is None:
-            loop = list(words[1:])
+        if opener:
+            nesting, seen = 1, _segment_commands(words, pollers)
             continue
-        if loop is not None:
-            loop.extend(_lead(raw))
-            continue
+        words = _core(words)
         if not words or depth >= 3:
             continue
-        name, args = os.path.basename(words[0]), words[1:]
-        if name in SHELLS and "-c" in args:
-            index = args.index("-c")
-            if index + 1 < len(args) and wait_loop(args[index + 1], cwd, depth + 1):
+        body = _shell_c_body(words)
+        if body is not None:
+            if wait_loop(body, cwd, depth + 1, pollers):
                 return True
             continue
         script = _script_path(words, cwd)
         if script:
             try:
                 with open(script, encoding="utf-8", errors="replace") as stream:
-                    if wait_loop(stream.read(), cwd, depth + 1):
+                    if wait_loop(stream.read(), cwd, depth + 1, pollers):
                         return True
             except (OSError, ValueError):
                 pass
-    return False
+    return bool(nesting and seen & pollers and "sleep" in seen)
 
 
 WAIT_LOOP_REASON = (
@@ -355,7 +493,7 @@ def refusal(payload):
     cwd = payload.get("cwd")
     home = _home()
     roots = []
-    if tool == "Bash":
+    if tool in ("Bash", "Monitor"):
         command = tool_input.get("command")
         if not isinstance(command, str):
             return None

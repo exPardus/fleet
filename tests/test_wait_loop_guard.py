@@ -46,6 +46,21 @@ REFUSED = [
     "while true; do pgrep -f pytest >/dev/null || break; sleep 20; done; pytest",
     "nohup bash -c 'while pgrep -f pytest; do sleep 30; done; pytest -q' &",
     "timeout 3600 sh -c \"while pgrep pytest >/dev/null; do sleep 60; done\"",
+    # Review of #112: detached wrappers, substitutions, `for`, functions, heredocs.
+    'setsid sh -c "until ! pgrep -f X; do sleep 1; done" &',
+    'systemd-run --user --unit=w -p Nice=5 sh -c "until ! pgrep -f X; do sleep 1; done"',
+    'daemonize -c /tmp /bin/sh -c "while pgrep x; do sleep 1; done"',
+    'bash -lc "while pgrep x; do sleep 1; done"',
+    'until [ -z "$(pgrep -f X)" ]; do sleep 1; done',
+    "while [ -n \"`pidof buf`\" ]; do sleep 1; done",
+    "while [ $(pgrep -c pytest) -gt 0 ]; do sleep 1; done",
+    "for i in $(seq 100); do pgrep -f pytest >/dev/null || break; sleep 5; done",
+    'busy() { pgrep -f "pytest" >/dev/null; }\nwhile busy; do sleep 10; done',
+    "function busy { ps -C pytest >/dev/null; }; until ! busy; do sleep 10; done",
+    "bash <<EOF\nuntil ! pgrep -f pytest; do sleep 15; done\nEOF",
+    "cat <<'EOF' | sh\nwhile pgrep -f pytest; do sleep 15; done\nEOF",
+    "while true; do if pgrep -f pytest; then sleep 5; else break; fi; done",
+    "while true; do\n  while pgrep x; do sleep 1; done\n  echo next\ndone",
 ]
 
 ALLOWED = [
@@ -59,6 +74,18 @@ ALLOWED = [
     "git commit -m 'refuse while pgrep -f pytest; do sleep 20; done loops'",
     "echo \"while pgrep x; do sleep 1; done\"",
     "fleet exclusive --label w1 -- pytest -q",
+    # Review of #112: `ps` counts only as a command word.
+    "until docker ps | grep -q testdb; do sleep 1; done",
+    "until docker compose ps --status running | grep -q db; do sleep 2; done",
+    "until podman ps --format '{{.Names}}' | grep -q db; do sleep 1; done",
+    "while read -r ps; do echo \"$ps\"; sleep 0.1; done < list.txt",
+    "until pg_isready -h localhost; do sleep 1; done",
+    "until curl -sf http://localhost:8080/health; do sleep 1; done",
+    "while kill -0 \"$PID\"; do sleep 1; done",
+    "for f in *.py; do ps -p 1; done",
+    "sleep 5; pgrep pytest",
+    "cat <<EOF > notes.md\nwhile pgrep x; do sleep 1; done\nEOF",
+    "jq -r . <<<'while pgrep x; do sleep 1; done'",
 ]
 
 
@@ -90,6 +117,47 @@ def test_a_wait_loop_inside_a_script_run_by_path_is_refused(guard, tmp_path):
     clean = tmp_path / "run.sh"
     clean.write_text("#!/bin/bash\npgrep -f pytest\npython -m pytest -q\n")
     assert guard.refusal(_bash("bash run.sh", tmp_path)) is None
+
+
+def test_a_script_named_by_a_variable_path_is_read(guard, tmp_path, monkeypatch):
+    """Lanes keep scratch scripts under `$CLAUDE_JOB_DIR/tmp`."""
+    jobtmp = tmp_path / "job" / "tmp"
+    jobtmp.mkdir(parents=True)
+    (jobtmp / "plain.sh").write_text("until ! pgrep -f runtests.sh; do sleep 15; done\n")
+    monkeypatch.setenv("JOBTMP", str(jobtmp))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for command in ("bash $JOBTMP/plain.sh", 'bash "$JOBTMP/plain.sh"',
+                    "bash ${JOBTMP}/plain.sh", "$JOBTMP/plain.sh",
+                    "nohup bash ~/job/tmp/plain.sh &"):
+        assert guard.refusal(_bash(command, tmp_path)) is not None, command
+
+
+def test_a_poller_behind_a_function_in_a_script_is_refused(guard, tmp_path):
+    """The runner shape: `busy() { pgrep ...; }` then `while busy; do sleep`."""
+    (tmp_path / "runtests.sh").write_text(
+        "#!/bin/bash\n"
+        "busy() {\n  pgrep -f 'pytest|buf' >/dev/null\n}\n"
+        "while busy; do sleep 10; done\n"
+        "python -m pytest -q\n")
+    assert guard.refusal(_bash("bash runtests.sh", tmp_path)) is not None
+    (tmp_path / "quiet.sh").write_text(
+        "#!/bin/bash\nbusy() { echo hi; }\nwhile busy; do sleep 1; break; done\n")
+    assert guard.refusal(_bash("bash quiet.sh", tmp_path)) is None
+
+
+def test_the_monitor_tool_command_is_checked(guard, tmp_path):
+    payload = {"tool_name": "Monitor", "cwd": str(tmp_path),
+               "tool_input": {"command": "until ! pgrep -f pytest; do sleep 5; done",
+                              "description": "x", "timeout_ms": 1000}}
+    assert guard.refusal(payload) is not None
+    payload["tool_input"]["command"] = "tail -f run.log | grep --line-buffered ERROR"
+    assert guard.refusal(payload) is None
+
+
+def test_the_template_hook_matcher_covers_monitor():
+    template = json.loads((ROOT / "worker-settings.template.json").read_text(encoding="utf-8"))
+    matcher = template["hooks"]["PreToolUse"][0]["matcher"]
+    assert set(matcher.split("|")) >= {"Bash", "Monitor", "Grep", "Glob"}
 
 
 def test_the_hook_process_denies_and_exits_zero(tmp_path):
