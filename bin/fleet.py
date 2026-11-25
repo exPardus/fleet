@@ -5168,7 +5168,7 @@ def recompute_worker_codex(name: str, record: dict,
 
     route = _codex_record_route(record)
     if route == "native":
-        if record.get("status") in _NATIVE_STICKY:
+        if record.get("status") in _NATIVE_STICKY or _codex_host_gone_marked(record):
             return updated
         # A poisoned cache may also represent an accepted provider mutation.
         # Ordinary status cannot distinguish it from a failed active read.
@@ -6503,6 +6503,8 @@ def status_snapshot(now=None, include_archived: bool = False) -> dict:
                 or _supervisor_row_incarnation(name, rec) == claim_inc)
         if _codex_record_route(rec) == "native":
             row["codex_waits"] = _codex_wait_summaries(rec, codex_wait_store)
+            if _codex_host_gone_marked(rec):
+                row["codex_host_gone"] = dict(rec["codex_host_gone"])
         if _codex_record_route(rec) == "mcx":
             row["mcx_approval"] = rec.get("mcx_approval") or _mcx_approval(
                 rec.get("mode") or "dontask")
@@ -15310,6 +15312,33 @@ def _doctor_check_outbound_mail():
             "check it before sending more")
 
 
+def _doctor_check_codex_host(workers):
+    native = [n for n, r in workers.items() if isinstance(r, dict)
+              and not r.get("archived_at") and not _is_supervisor_shaped(n)
+              and _codex_record_route(r) == "native"
+              and r.get("status") in CODEX_HOST_GONE_STATUSES]
+    if not native:
+        return ("codex-host", True, "no in-flight native Codex lanes")
+    recovery = _codex_recovery_in_progress()
+    if recovery is not None:
+        return ("codex-host", True, f"{recovery}; host-gone marking paused")
+    presence = _codex_host_presence()
+    if presence[0] == "unknown":
+        return ("codex-host", False, presence[2])
+    affected = _codex_host_gone_rows(workers, presence, include_marked=True)
+    if not affected:
+        return ("codex-host", True,
+                f"host generation {presence[1]} live for {len(native)} lane(s)")
+    marked = sorted(n for n in affected if _codex_host_gone_marked(workers[n]))
+    unmarked = sorted(set(affected) - set(marked))
+    reason = next(iter(affected.values()))[1]
+    return ("codex-host", False,
+            f"{reason}: {len(affected)} lane(s) bound to it "
+            f"(marked: {', '.join(marked) or 'none'}; unmarked: "
+            f"{', '.join(unmarked) or 'none'}) -- `fleet sup-guard --do` marks "
+            "them once and sends one CODEX-HOST-GONE notice; respawn or kill them")
+
+
 def _doctor_check_posttooluse_hook_smoke(run=subprocess.run):
     """End-to-end smoke test (SPEC §5/§7 silent-failure alarm): fire the
     real PostToolUse hook script as a real subprocess with synthetic
@@ -16305,6 +16334,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
         functools.partial(_doctor_check_outbound_mail),
+        functools.partial(_doctor_check_codex_host, workers),
         functools.partial(
             _doctor_check_dead_suspected, workers, reconciled_codex,
             reconciled_codex_errors),
@@ -25734,6 +25764,14 @@ def _sup_guard_idle_sweep(roster_fn=None) -> list:
         return []
 
 
+def _sup_guard_codex_host_sweep() -> list:
+    try:
+        return sweep_codex_host_gone()
+    except Exception as exc:
+        print(f"fleet: sup-guard codex-host sweep failed: {exc}", file=sys.stderr)
+        return []
+
+
 def _sup_guard_dead_sweep(roster_fn=None) -> dict:
     """Run the lane-dead backstop; its failure never changes the verdict."""
     try:
@@ -25790,9 +25828,11 @@ def cmd_sup_guard(args, *, snapshot_fn=None, roster_fn=None,
     do = getattr(args, "do", False)
     # Lane-done and lane-dead backstops (SPEC §8) run before the verdict.
     lane_done = _sup_guard_lane_sweep(roster_fn) if do else []
+    codex_host_gone = _sup_guard_codex_host_sweep() if do else []
     lane_dead = (_sup_guard_dead_sweep(roster_fn) if do
                  else {"stream_retried": [], "lane_dead_sent": []})
     lane_dead["idle_stopped"] = _sup_guard_idle_sweep(roster_fn) if do else []
+    lane_dead["codex_host_gone"] = codex_host_gone
     if isinstance(claim, dict) and claim.get("provider") == "codex":
         return _cmd_codex_sup_guard(args, lane_done=lane_done, lane_dead=lane_dead)
     observation = _sup_guard_observe(
@@ -30578,7 +30618,8 @@ def notify_lane_dead(name, reason, *, run=subprocess.run, sleep=time.sleep,
     with fleet_lock():
         data = read_registry_no_repair()
         rec = data["workers"].get(name)
-        if not isinstance(rec, dict) or rec.get("archived_at"):
+        if (not isinstance(rec, dict) or rec.get("archived_at")
+                or _codex_host_gone_marked(rec)):
             return False
         claim = read_incarnation()
         if not isinstance(claim, dict) or claim.get("state") not in (None, "held"):
@@ -30620,6 +30661,124 @@ def notify_lane_dead(name, reason, *, run=subprocess.run, sleep=time.sleep,
     _settle_lane_dead(name, key, delivered=True)
     _append_event_quiet("lane_dead_sent", name, reason=reason, to=parent_name)
     return True
+
+
+CODEX_HOST_GONE_STATUSES = frozenset({"working", "dead-suspected"})
+
+
+def _codex_host_presence():
+    try:
+        from fleet_codex import HostUnavailable
+    except ImportError:
+        return "unknown", None, "Codex adapter unavailable"
+    try:
+        client = _codex_existing_client(FLEET_HOME)
+    except HostUnavailable as exc:
+        return "gone", None, f"no ready Codex host ({exc})"
+    except (FleetCliError, OSError, ValueError) as exc:
+        return "unknown", None, f"Codex host unreadable ({exc})"
+    owner_live = getattr(client, "_owner_live", None)
+    if callable(owner_live) and not owner_live():
+        return ("gone", client.generation,
+                f"Codex host pid {getattr(client, 'host_pid', '?')} gone")
+    return "live", client.generation, None
+
+
+def _codex_host_gone_rows(workers, presence, *, include_marked=False) -> dict:
+    state, live_generation, reason = presence
+    if state == "unknown":
+        return {}
+    found = {}
+    for name, rec in workers.items():
+        if (not isinstance(rec, dict) or rec.get("archived_at")
+                or _is_supervisor_shaped(name)
+                or _codex_record_route(rec) != "native"
+                or rec.get("status") not in CODEX_HOST_GONE_STATUSES):
+            continue
+        generation = rec.get("codex_host_generation")
+        if not isinstance(generation, str) or (
+                state == "live" and generation == live_generation):
+            continue
+        marker = rec.get("codex_host_gone")
+        if (not include_marked and isinstance(marker, dict)
+                and marker.get("generation") == generation):
+            continue
+        found[name] = (generation, reason or (
+            f"Codex host generation {generation} replaced by {live_generation}"))
+    return found
+
+
+def _codex_host_gone_marked(rec) -> bool:
+    marker = rec.get("codex_host_gone") if isinstance(rec, dict) else None
+    return (isinstance(marker, dict)
+            and marker.get("generation") == rec.get("codex_host_generation"))
+
+
+def _codex_recovery_in_progress():
+    try:
+        from fleet_codex import failed_client_recovery_barrier
+        barrier = failed_client_recovery_barrier(FLEET_HOME)
+    except ImportError:
+        return None
+    except Exception as exc:
+        return f"failed-client recovery fence unreadable ({exc})"
+    if isinstance(barrier, dict) and barrier.get("state") != "complete":
+        return f"failed-client recovery in progress (state {barrier.get('state')})"
+    return None
+
+
+def sweep_codex_host_gone(*, sleep=time.sleep) -> list:
+    if _codex_recovery_in_progress() is not None:
+        return []
+    presence = _codex_host_presence()
+    if presence[0] == "unknown":
+        return []
+    with fleet_lock():
+        data = read_registry_no_repair()
+        targets = _codex_host_gone_rows(data["workers"], presence)
+        stamp = now_iso()
+        for name, (generation, reason) in targets.items():
+            rec = data["workers"][name]
+            rec["codex_host_gone"] = {"generation": generation,
+                                      "detected_at": stamp, "reason": reason,
+                                      "notified": False}
+            rec["status"] = "dead-suspected"
+            rec["adapter_state"] = "host-gone"
+        unsent = sorted(
+            name for name, rec in data["workers"].items()
+            if _codex_host_gone_marked(rec) and not rec.get("archived_at")
+            and rec["codex_host_gone"].get("notified") is False)
+        if targets:
+            save_registry(data)
+        if not unsent:
+            return []
+        reason = data["workers"][unsent[0]]["codex_host_gone"].get("reason")
+        claim = read_incarnation()
+        parent_name = (_claim_holder_row_name(claim, data)
+                       if isinstance(claim, dict)
+                       and claim.get("state") in (None, "held") else None)
+    if targets:
+        _append_event_quiet("codex_host_gone", "codex-host",
+                            lanes=sorted(targets), reason=reason)
+    if parent_name is None:
+        return unsent
+    message = (f"CODEX-HOST-GONE {len(unsent)} lane(s): {' '.join(unsent)} -- "
+               f"{reason}; one notice replaces their LANE-DEAD mail")
+    try:
+        _deliver_lane_mail(claim, parent_name, message, sleep=sleep,
+                           what="CODEX-HOST-GONE mail")
+    except Exception as exc:
+        print(f"fleet: CODEX-HOST-GONE mail failed (retried next sweep): {exc}",
+              file=sys.stderr)
+        return unsent
+    with fleet_lock():
+        data = read_registry_no_repair()
+        for name in unsent:
+            rec = data["workers"].get(name)
+            if _codex_host_gone_marked(rec):
+                rec["codex_host_gone"]["notified"] = True
+        save_registry(data)
+    return unsent
 
 
 def _settle_lane_dead(name, key, *, delivered) -> None:

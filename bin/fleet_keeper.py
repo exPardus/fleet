@@ -180,11 +180,19 @@ def worker_anomalies(obs):
     re-steered and dies again is a new anomaly; the same death keeps its key.
     Rows idle past `WORKER_ANOMALY_MAX_AGE_SECONDS` are left out."""
     found = {}
+    host_gone = {}
     guard = obs.get("supervisor_guard") or {}
     for w in obs.get("workers", []):
         # The guard has the current supervisor's dedicated alert and horizon.
         # Including it here would re-page a limited body on the worker cadence.
         if w.get("name") and w.get("name") == guard.get("body_name"):
+            continue
+        # A gone native Codex host fails every lane bound to it at once: one
+        # anomaly per host generation, not one page per lane.
+        marker = w.get("codex_host_gone")
+        if isinstance(marker, dict):
+            host_gone.setdefault(str(marker.get("generation")), []).append(
+                str(w.get("name")))
             continue
         status = w.get("status")
         if status in ANOMALOUS_STATUSES:
@@ -197,6 +205,9 @@ def worker_anomalies(obs):
         if isinstance(stale, (int, float)) and stale > WORKER_ANOMALY_MAX_AGE_SECONDS:
             continue
         found[f"{label}:{w.get('turns')}"] = label
+    for generation, names in host_gone.items():
+        found[f"codex-host-gone:{generation}"] = (
+            f"codex-host-gone({len(names)} lanes: {', '.join(sorted(names))})")
     return found
 
 
