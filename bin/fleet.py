@@ -418,7 +418,7 @@ def watch_cursor_path(home=None) -> Path:
 def _watch_read_cursor(home) -> tuple[dict, bool]:
     path = watch_cursor_path(home)
     empty = {"mail": [], "lanes": {}, "mcx": {},
-             "lanes_valid": False, "mcx_valid": False}
+             "lanes_valid": False, "mcx_valid": False, "stale_out": []}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, ValueError, UnicodeError):
@@ -435,9 +435,12 @@ def _watch_read_cursor(home) -> tuple[dict, bool]:
     mcx_valid = value.get("mcx_valid")
     if not isinstance(mcx_valid, bool):
         mcx_valid = bool(mcx)
+    stale_out = value.get("stale_out")
+    stale_out = stale_out if isinstance(stale_out, list) else []
     return ({"mail": [str(x) for x in mail], "lanes": dict(lanes),
              "mcx": dict(mcx), "lanes_valid": lanes_valid,
-             "mcx_valid": mcx_valid}, True)
+             "mcx_valid": mcx_valid,
+             "stale_out": [str(x) for x in stale_out]}, True)
 
 
 def _watch_write_cursor(home, cursor: dict) -> None:
@@ -450,6 +453,37 @@ def _watch_mail_names(home) -> list[str]:
         return sorted(p.name for p in root.iterdir() if p.is_file())
     except (FileNotFoundError, OSError):
         return []
+
+
+OUTBOUND_STALE_MINUTES_DEFAULT = 30
+
+
+def _outbound_mail_stale(home, max_age_seconds, now=None) -> list:
+    root = Path(home) / "mailbox"
+    now = time.time() if now is None else now
+    stale = []
+    try:
+        outboxes = sorted(d for d in root.glob("to-*")
+                          if d.is_dir() and not d.is_symlink() and d.name != "to-fleet")
+    except OSError:
+        return []
+    for outbox in outboxes:
+        try:
+            entries = sorted(outbox.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if (entry.name.startswith(".") or entry.name.endswith(".tmp")
+                    or entry.is_symlink() or not entry.is_file()):
+                continue
+            try:
+                info = entry.stat()
+            except OSError:
+                continue
+            age = now - info.st_mtime
+            if age > max_age_seconds:
+                stale.append((f"{outbox.name}/{entry.name}", age))
+    return stale
 
 
 def _watch_lane_observation(home) -> tuple[dict[str, str], bool]:
@@ -552,6 +586,8 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
             raise FleetCliError("watch timeout must be finite and non-negative")
     mem_floor = int(getattr(args, "mem_floor_mb", 1500))
     disk_floor = float(getattr(args, "disk_floor_gb", 4))
+    outbound_minutes = float(getattr(args, "outbound_stale_min",
+                                     OUTBOUND_STALE_MINUTES_DEFAULT))
     cursors = {}
     for home in homes:
         cursor, _ = _watch_read_cursor(home)
@@ -578,6 +614,19 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
                     dirty[home] = True
                     events.append((0, f"MAIL {home_tag(home)} {name}"))
                     break
+            if outbound_minutes > 0:
+                stale = _outbound_mail_stale(home, outbound_minutes * 60)
+                pending = {name for name, _age in stale}
+                reported = [n for n in cursor["stale_out"] if n in pending]
+                if reported != cursor["stale_out"]:
+                    cursor["stale_out"] = reported
+                    dirty[home] = True
+                for name, age in stale:
+                    if name not in reported:
+                        events.append((5, f"STALEOUT {home_tag(home)} {name} "
+                                          f"{int(age // 60)}m not picked up",
+                                       home, name))
+                        break
             current, valid = _watch_lane_observation(home)
             if not valid:
                 continue
@@ -626,7 +675,11 @@ def cmd_watch(args, *, sleep=time.sleep, clock=time.monotonic,
             if free is not None and free < disk_floor:
                 events.append((4, f"LOWDISK {_watch_format_gb(free)}"))
         if events:
-            print(min(events, key=lambda item: item[0])[1])
+            chosen = min(events, key=lambda item: item[0])
+            if len(chosen) == 4:
+                cursors[chosen[2]]["stale_out"].append(chosen[3])
+                _watch_write_cursor(chosen[2], cursors[chosen[2]])
+            print(chosen[1])
             return 0
         if timeout is not None and clock() - started >= timeout:
             return 3
@@ -15244,6 +15297,19 @@ def _run_hook_smoke(script_path: Path, home: Path, run=subprocess.run):
                text=True, env=env, timeout=15)
 
 
+def _doctor_check_outbound_mail():
+    stale = _outbound_mail_stale(FLEET_HOME, OUTBOUND_STALE_MINUTES_DEFAULT * 60)
+    if not stale:
+        return ("outbound-mail", True,
+                f"no outbox file older than {OUTBOUND_STALE_MINUTES_DEFAULT} minutes")
+    oldest = max(stale, key=lambda item: item[1])
+    return ("outbound-mail", True,
+            f"NOTE {len(stale)} outbox file(s) not picked up for over "
+            f"{OUTBOUND_STALE_MINUTES_DEFAULT} minutes (oldest {oldest[0]}, "
+            f"{int(oldest[1] // 60)}m) -- the receiving side is not polling; "
+            "check it before sending more")
+
+
 def _doctor_check_posttooluse_hook_smoke(run=subprocess.run):
     """End-to-end smoke test (SPEC §5/§7 silent-failure alarm): fire the
     real PostToolUse hook script as a real subprocess with synthetic
@@ -16238,6 +16304,7 @@ def cmd_doctor(args, which=shutil.which, run=subprocess.run) -> int:
         functools.partial(_doctor_check_limited_parks, workers),
         functools.partial(_doctor_check_legacy_mix, workers),
         functools.partial(_doctor_check_codex_adapters, workers, which=which),
+        functools.partial(_doctor_check_outbound_mail),
         functools.partial(
             _doctor_check_dead_suspected, workers, reconciled_codex,
             reconciled_codex_errors),
@@ -29232,6 +29299,11 @@ def build_parser() -> argparse.ArgumentParser:
                          metavar="DIR", help="mcx state directory; repeatable")
     p_watch.add_argument("--mem-floor-mb", type=int, default=1500)
     p_watch.add_argument("--disk-floor-gb", type=float, default=4)
+    p_watch.add_argument(
+        "--outbound-stale-min", dest="outbound_stale_min", type=float,
+        default=OUTBOUND_STALE_MINUTES_DEFAULT,
+        help="report STALEOUT once per file left in a mailbox/to-* outbox "
+             "(other than to-fleet) for longer than this; 0 turns it off")
     p_watch.add_argument("--interval", type=_watch_interval_arg, default=60)
     p_watch.add_argument("--timeout", type=_watch_timeout_arg, default=None)
 
