@@ -156,7 +156,9 @@ def test_each_receipt_is_verified_at_most_once(home, monkeypatch):
             path.write_text(json.dumps({"id": forged_id}))
 
     assert fleet.cmd_wait(_args(timeout=30), sleep=sleep, clock=clock) == 1
-    assert calls == [forged_id]  # the old ones never, the forged one once
+    # The old ones never; the forged one once, then once per recheck interval.
+    assert calls and set(calls) == {forged_id}
+    assert len(calls) <= 1 + int(27 // fleet.MAIL_RECHECK_SECONDS)
 
 
 def test_mail_and_a_finishing_lane_in_one_poll_are_both_reported(
@@ -184,4 +186,30 @@ def test_mail_and_a_finishing_lane_in_one_poll_are_both_reported(
     out = capsys.readouterr().out
     assert f"MAIL {arrived[0]}" in out
     assert "w1: idle" in out
+
+
+def test_a_receipt_that_failed_once_is_rechecked(home, monkeypatch, capsys):
+    """Review w598 of df29dea9 (P3): a False verdict was cached for the whole
+    wait, so mail whose first check hit a short-lived failure never woke it."""
+    clock = Clock()
+    real = fleet.cmd_mail_verify
+    flaky = {"left": 1}
+
+    def verify(args):
+        if flaky["left"]:
+            flaky["left"] -= 1
+            return 1  # e.g. an OSError reading the registration token
+        return real(args)
+
+    monkeypatch.setattr(fleet, "cmd_mail_verify", verify)
+    arrived = []
+
+    def sleep(seconds):
+        clock.sleep(seconds)
+        if not arrived:
+            arrived.append(_issue())
+
+    assert fleet.cmd_wait(_args(timeout=120), sleep=sleep, clock=clock) == 0
+    assert f"MAIL {arrived[0]}" in capsys.readouterr().out
+    assert clock.now < 120
 
