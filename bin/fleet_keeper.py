@@ -190,7 +190,12 @@ def worker_anomalies(obs):
         # A gone native Codex host fails every lane bound to it at once: one
         # anomaly per host generation, not one page per lane.
         marker = w.get("codex_host_gone")
+        stale = w.get("stale_seconds")
+        too_old = (isinstance(stale, (int, float))
+                   and stale > WORKER_ANOMALY_MAX_AGE_SECONDS)
         if isinstance(marker, dict):
+            if too_old:
+                continue
             host_gone.setdefault(str(marker.get("generation")), []).append(
                 str(w.get("name")))
             continue
@@ -201,8 +206,7 @@ def worker_anomalies(obs):
             label = f"{w.get('name')}(idle+mail)"
         else:
             continue
-        stale = w.get("stale_seconds")
-        if isinstance(stale, (int, float)) and stale > WORKER_ANOMALY_MAX_AGE_SECONDS:
+        if too_old:
             continue
         found[f"{label}:{w.get('turns')}"] = label
     for generation, names in host_gone.items():
