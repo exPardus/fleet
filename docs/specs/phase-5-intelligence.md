@@ -26,7 +26,7 @@ In: trust ledger, plan-approval gate flow, definition-of-done contracts, session
 - Distillation is a manager turn on a schedule/trigger, not a daemon feature.
 
 <!-- librarian: adopted prior art, acme knowledge-librarian design (see docs/PRIOR-ART.md §"Local prior art") -->
-**Knowledge-librarian safety architecture (adopted, not open).** Any automated pass that mutates `knowledge/` inherits these rules wholesale from the acme librarian design (built + reviewed there; C:\projects\acme\acme_knowledge\tools\knowledge\librarian\ and its design doc). They are fixed constraints of this spec, not open questions:
+**Knowledge-librarian safety architecture (adopted, not open).** Any automated pass that mutates `knowledge/` inherits these rules wholesale from the acme librarian design (built + reviewed there; its librarian toolkit and design doc). They are fixed constraints of this spec, not open questions:
 
 1. **Evidence-gated destruction.** An LLM verdict alone never retires knowledge. Retirement (entry → superseded/stale-pin moved) requires an independent deterministic signal — a ref-check showing the entry's source anchor missing/moved, i.e. exactly the grep-receipt gate mechanized. A "dead" verdict on an entry whose anchors still resolve is downgraded to "stale" (flag, don't destroy). This is the C4 lesson ("an enumeration produced by inspection is wrong") applied to the maintenance loop itself.
 2. **Supersede, never delete.** Retired entries flip status/move sections; content remains. Matches the existing MOVE-stale-pins-never-delete doctrine (campaign-template §2).

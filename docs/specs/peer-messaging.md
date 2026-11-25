@@ -4,7 +4,7 @@ Status: design and spike, 2026-09-30, Claude Code 2.1.285. Built in this
 branch: `fleet address` and `crossSessionInbound: "accept"` in the worker
 settings template. Everything under "Proposed" is not built.
 
-Operator request (interface log 2026-09-30T01:36:46Z): "put native
+Operator request (2026-09-30): "put native
 cross-session messaging (ListAgents/SendMessage) into fleet."
 
 ## What the native surface is

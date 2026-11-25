@@ -35,9 +35,8 @@ Committing the excerpt does not make the experiment re-runnable. It makes the
 CITATION verifiable, which is the property the receipt convention is actually
 about.
 
-PROVENANCE. Supervisor checkpoint G-B, incarnation `inc-20260727T003737Z-0ccd`,
-session `3fb1127d-1514-4e5d-8830-e42d7fec508b`, timestamped
-`2026-07-27T00:59:55Z`. Two arms, one variable — same task file, same cwd,
+PROVENANCE. Supervisor checkpoint G-B, 2026-07-27 (incarnation and session ids are local
+operator data and are not reproduced here). Two arms, one variable — same task file, same cwd,
 same mode (`dontask`), same model, same everything except the grant. The cwd
 was a scratch directory with no `.claude/` in it at all, confirmed by `ls -a`
 showing only `./` and `../`. The grant was

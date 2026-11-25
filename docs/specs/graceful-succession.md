@@ -75,7 +75,7 @@ operator typing the verb *is* the human in the loop.
 
 ## 1. The incident — measured, not inferred
 
-On 2026-07-27 the supervisor `inc-20260727T024550Z-4743` hit the 200k context ceiling, attempted
+On 2026-07-27 the supervisor `inc-<id>` hit the 200k context ceiling, attempted
 `sup-handoff-begin` **three times** — every successor stillborn, no handoff completed — released the
 claim cleanly at `04:00:41Z`, and stopped. Nothing restarted it. Twenty-nine commits of finished work
 sat unpushed the whole time.
@@ -362,7 +362,7 @@ carries eight:
 {
   "goals_active": True,
   "state": "released",                 # unchanged: held | released | none | unknown
-  "incarnation_id": "inc-20260727T024550Z-4743",
+  "incarnation_id": "inc-<id>",
   "heartbeat_age_seconds": None,       # unchanged; None on a released claim BY DESIGN (CN §6.3)
 
   "succession_needed": True,           # NEW. True | False | None -- tri-state, §4.4 row 1
@@ -1003,8 +1003,8 @@ which prints the whole bundle anyway; pasting it would put a second, staler copy
 ```
 SUP-RECOVER <arm>: <one line naming the state it resolved>
   cause         : released
-  since         : 2026-07-27T04:00:41Z (12h53m)
-  predecessor   : inc-20260727T024550Z-4743  (reason: "<verbatim, quoted, attributed>")
+  since         : <released-at> (12h53m)
+  predecessor   : inc-<id>  (reason: "<verbatim, quoted, attributed>")
   action        : dispatching gen-0 body sup|<launch-id>|boot
 SUP-RECOVER-DISPATCHED <name> sid=<sid>
   next          : that body's first act is `fleet sup-boot`. It holds NO claim yet.
@@ -1124,24 +1124,23 @@ nothing is owed, `sup-recover` refuses and names the other verb (§5.4 fall-thro
 
 **AMENDED 2026-09-09 — the row above and the box above are BOTH now wrong in the present tense, and
 they are wrong in two different ways. The 2026-07-27 text stands verbatim; this is what a reader must
-carry with it.** *(Landed by lane `w59-proven`; every number below is a pinned receipt in §9.4, counted
-over `supervisor/JOURNAL.md` at `76ade95` rather than inherited from any prose.)*
+carry with it.** *(Landed by lane `w59-proven`. The handoff record below was read from local operator data — the
+supervisor journal at a local-only commit — so it is summarised here, not receipted: `76ade95` does
+not carry that file.)*
 
-- **The route is REPAIRED and has been since `87cbf9a` (2026-07-27T19:10Z), so the row's
+- **The route is REPAIRED and has been since `87cbf9a` (2026-07-27), so the row's
   "currently UNREPAIRED" no longer holds.** §10.3 of this same document already recorded the repair;
   the §5.7 row and box were never reconciled with it, so this file has carried its own discharge and
   its own stale claim side by side since 2026-07-30.
 - **"Stillborn on every attempt" was CORRECT when written and is now false as a present-tense claim —
   but the qualifier is what made it correct, and it must not be dropped when the sentence is retired.**
   The claim was *"`sup-handoff-begin` **under its shipped default** has been stillborn on every
-  attempt"*. That is exactly right for `SUCCESSOR_DEFAULT_MODE = "dontask"`: 17/17, no exceptions. It was
-  never a claim that the ROUTE had never completed — the journal records **9 `HANDOFF-COMPLETE` entries
+  attempt"*. That is exactly right for `SUCCESSOR_DEFAULT_MODE = "dontask"`: every such attempt, no exceptions. It was
+  never a claim that the ROUTE had never completed — the journal records **`HANDOFF-COMPLETE` entries
   before this box was written**, all of them successors dispatched under an explicit `bypass`.
-- **The eight are ALL pre-fix, and the post-fix record is 6-for-6.** Counted at `76ade95`: 26
-  `HANDOFF-BEGIN`, 15 `HANDOFF-COMPLETE`, 3 `HANDOFF-ABORT`. Every completion after the fix:
-  `2026-08-05T16:48:54Z`, `17:32:10Z`, `19:33:26Z`, `2026-08-09T19:03:01Z`, `22:54:36Z`,
-  `2026-09-09T17:49:36Z`. **Five of those six are on the RETIRED WINDOWS HOST** (`task=C:/projects/claude-fleet/…`,
-  25 of the 26 begins); the sixth is this host.
+- **The earlier completions are ALL pre-fix, and every completion recorded after the fix succeeded.**
+  Most of those post-fix completions ran on a retired Windows host; the most recent ran on this
+  host.
 - **So the sentence the 2026-09-09 drill earns is narrower than "proven":** the claim moved by the
   handoff path **for the first time on this host and on POSIX**, on `server/persistent-fleet`, on a
   quiet fleet with no lane in flight, at ~169k, at a boundary the outgoing body chose for itself. It
@@ -1302,9 +1301,9 @@ already named by the tier field, now with its cause — and would break the tier
 "succession": {
   "needed": true,
   "cause": "released",
-  "since": "2026-07-27T04:00:41Z",
+  "since": "<released-at>",
   "age_seconds": 46405.0,
-  "detail": "claim inc-20260727T024550Z-4743 was released 12h53m ago and no body has claimed since"
+  "detail": "claim inc-<id> was released 12h53m ago and no body has claimed since"
 }
 ```
 
@@ -1317,9 +1316,9 @@ not.
 an operator types mid-incident must lead with the verdict:
 
 ```
-SUCCESSION NEEDED (released): claim inc-20260727T024550Z-4743 released 12h53m ago; nothing holds it.
+SUCCESSION NEEDED (released): claim inc-<id> released 12h53m ago; nothing holds it.
   recover with: fleet sup-recover
-supervisor: inc-20260727T024550Z-4743 RELEASED at 2026-07-27T04:00:41Z by sid=3430c962-... -- no holder; `fleet sup-boot` claims fresh
+supervisor: inc-<id> RELEASED at <released-at> by sid=<sid> -- no holder; `fleet sup-boot` claims fresh
 ```
 
 - When `needed` is `False`, **no line is printed.** A health surface that prints a line saying nothing
@@ -1453,8 +1452,8 @@ matters: it declines to act, rather than depending on the broken mechanism to su
 **AMENDED 2026-09-09 — THE PREMISE OF THIS QUESTION IS DEAD AND THE ANSWER SURVIVES IT INTACT.
 I checked rather than assumed, in both directions, because the brief that sent me here said not to
 assume either.** *(Lane `w59-proven`.)* The premise — *"has never completed under its shipped
-default"* — was true when written and is false now: 6-for-6 post-fix, first on this host
-2026-09-09T17:49:36Z (§5.7 amendment, receipts §9.4).
+default"* — was true when written and is false now: every post-fix attempt completed, first on this
+host on 2026-09-09 (§5.7 amendment).
 
 **The answer does not move, and the reason it does not move is that it was never grounded in the
 premise.** *"Every dispatching arm routes through `_dispatch_supervisor_body` and never through
@@ -1908,7 +1907,7 @@ $ grep -n '"claimed_via"' bin/fleet.py
 seize/limit-transfer arm. `cmd_sup_handoff_complete` calls neither: it CARRIES the predecessor's
 lineage. **So a claim whose `lineage_id` stamp strictly predates its own `claimed_at` cannot have been
 produced by any path but a completed handoff**, and the live claim reads
-`lineage_id: lin-20260909T162943Z-6040` against `claimed_at: 2026-09-09T17:49:36Z`.
+a `lineage_id` stamped earlier on 2026-09-09 than its `claimed_at`.
 
 ```
 # at 76ade95
@@ -1949,7 +1948,7 @@ operator owes** (which I may not make).
 | **O10** | The predicate uses **liveness proxies, not liveness** (§4.9), and I named that as a deviation from the ratified wording rather than redefining the wording. | A roster fetch on a statusline refresh path is the exact defect D1 exists for. | A doctor-only roster-confirmed arm is a clean follow-up; **filed, not built.** |
 | **O11** | The rejected post-reboot arm is **kept in the document as a recorded refusal** (§1.2) rather than deleted. | A spec that silently omits a rejected option invites the next author to re-propose it, and the grounds generalise beyond this case. | Not really overturnable — the deletion is the operator's ruling; only the *recording* of it is mine. |
 | **O12** | §4.10 makes "**measurement or state, never self-report**" a binding property of every input, not just a habit. | A body estimated 60k where `sup-context` measured 198,767. A detector built on what a degrading actor believes about itself degrades with it. | Show an input that must be a self-report. I could not find one. |
-| **O13** | §5.7 **downgrades** `sup-handoff-*` from "PREFERRED" to "designed but unrepaired", and `sup-recover` is specified to route through `_dispatch_supervisor_body` exclusively. | Three stillbirths; three supervisors in a row released at the ceiling rather than hand off. A recovery verb built on the mechanism that fails is not a recovery verb. | ~~Repair the handoff path and the word can be restored. The routing choice should stand either way.~~ **AMENDED 2026-09-09 (lane `w59-proven`): the condition is MET, and the two halves part company.** The path was repaired at `87cbf9a` (2026-07-27T19:10Z) and has completed **6-for-6** since — first on this host `2026-09-09T17:49:36Z`, receipts §9.4 — so **"unrepaired" is retired** and §5.7 carries the amendment. **What is NOT restored is "PREFERRED".** A route that works is not thereby the route to prefer; that word was ratified out and re-earning it is an operator judgement about routing under a keeper, not a consequence of one green drill. **The routing half is UNTOUCHED and the drill says nothing about it** — it is an argument about which function `sup-recover` calls, and `sup-recover` is still **UNBUILT** (0 hits in `bin/fleet.py` at `76ade95`), so there is no shipped call graph to re-derive it against either way. |
+| **O13** | §5.7 **downgrades** `sup-handoff-*` from "PREFERRED" to "designed but unrepaired", and `sup-recover` is specified to route through `_dispatch_supervisor_body` exclusively. | Three stillbirths; three supervisors in a row released at the ceiling rather than hand off. A recovery verb built on the mechanism that fails is not a recovery verb. | ~~Repair the handoff path and the word can be restored. The routing choice should stand either way.~~ **AMENDED 2026-09-09 (lane `w59-proven`): the condition is MET, and the two halves part company.** The path was repaired at `87cbf9a` (2026-07-27) and has completed on every attempt since — first on this host on 2026-09-09 — so **"unrepaired" is retired** and §5.7 carries the amendment. **What is NOT restored is "PREFERRED".** A route that works is not thereby the route to prefer; that word was ratified out and re-earning it is an operator judgement about routing under a keeper, not a consequence of one green drill. **The routing half is UNTOUCHED and the drill says nothing about it** — it is an argument about which function `sup-recover` calls, and `sup-recover` is still **UNBUILT** (0 hits in `bin/fleet.py` at `76ade95`), so there is no shipped call graph to re-derive it against either way. |
 
 ### 10.2 Ratifications the operator owes
 

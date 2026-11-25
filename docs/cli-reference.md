@@ -1030,7 +1030,7 @@ options:
   -h, --help           show this help message and exit
   --status             print the holder; exit 1 when it is stale
   --label LABEL        what this run is, shown to waiters
-  --holder HOLDER      holder name (default: $FLEET_WORKER)
+  --holder HOLDER      holder name (default: this session's registry name)
   --wait-max WAIT_MAX  seconds to wait for the holder (default 1800, capped at
                        14400); then exit 75
   --ttl TTL            seconds after which waiters may take this run's lock
