@@ -117,6 +117,8 @@ def test_a_stale_holder_is_taken_over(lock, capsys, stale):
         _hold(lock, started_at_epoch=time.time() - 7200, ttl_seconds=3600)
     else:
         lock.write_text("not json")
+        old = time.time() - ex.UNREADABLE_GRACE_SECONDS - 1
+        os.utime(lock, (old, old))
     ran = []
 
     class Child:
@@ -232,8 +234,8 @@ def test_doctor_reports_a_stale_holder(lock):
     assert fleet._doctor_check_exclusive_lock()[1] is True
     _hold(lock, pid=_dead_pid())
     name, ok, message = fleet._doctor_check_exclusive_lock()
-    assert (name, ok) == ("exclusive-lock", False)
-    assert "w583" in message and "stale" in message
+    assert (name, ok) == ("exclusive-lock", True)
+    assert message.startswith("NOTE ") and "w583" in message and "stale" in message
 
 
 def test_the_preamble_tells_lanes_to_use_it_instead_of_pgrep(tmp_path, monkeypatch):
@@ -241,3 +243,89 @@ def test_the_preamble_tells_lanes_to_use_it_instead_of_pgrep(tmp_path, monkeypat
     prompt, _claim, _mail = fleet.compose_prompt("w1", "/x", "t", None)
     assert "fleet exclusive --label TEXT -- <command>" in prompt
     assert "Never wait on other lanes with `pgrep` loops" in prompt
+
+
+def test_an_empty_lock_is_not_stale_within_the_grace(lock):
+    """Review w598 of #103 (P1): a waiter read the empty file between create
+    and write, judged it stale, and two runs then held the lock."""
+    lock.write_text("")
+    holder = ex.read_holder(lock)
+    assert "unreadable" in holder
+    assert ex.stale_reason(holder) is None
+    old = time.time() - ex.UNREADABLE_GRACE_SECONDS - 1
+    os.utime(lock, (old, old))
+    assert ex.stale_reason(ex.read_holder(lock)) == "lock file unreadable"
+
+
+def test_the_lock_never_exists_half_written(lock, monkeypatch):
+    seen = []
+    real_link = os.link
+
+    def link(src, dst):
+        seen.append((lock.exists(), json.loads(Path(src).read_text())["token"]))
+        real_link(src, dst)
+
+    monkeypatch.setattr(ex.os, "link", link)
+    record = _record(token="mine")
+    assert ex._write_new(lock, record) is True
+    assert seen == [(False, "mine")]
+    assert json.loads(lock.read_text())["token"] == "mine"
+    assert ex._write_new(lock, _record(token="late")) is False
+    assert json.loads(lock.read_text())["token"] == "mine"
+    assert sorted(x.name for x in lock.parent.iterdir()) == [lock.name]
+
+
+def test_a_waiter_never_takes_over_a_lock_being_written(lock):
+    lock.write_text("")
+    clock = Clock()
+    clock.now = time.time()
+    got, holder = ex.acquire(_record(token="mine"), wait_max=1, path=lock,
+                             sleep=clock.sleep, clock=clock, out=None)
+    assert got is None and lock.read_text() == ""
+
+
+def test_release_and_update_run_under_the_guard(lock, monkeypatch):
+    entered = []
+    real = ex._guard
+
+    def guard(path):
+        entered.append(path)
+        return real(path)
+
+    monkeypatch.setattr(ex, "_guard", guard)
+    record = _hold(lock, token="mine")
+    assert ex._update(lock, dict(record, child_pid=1)) is True
+    assert ex._update(lock, dict(record, token="lost")) is False
+    assert ex.release(lock, "mine") is True
+    assert entered == [lock, lock, lock]
+
+
+def test_the_guard_falls_back_to_msvcrt_without_fcntl(lock, monkeypatch):
+    """Review w598 of #103 (P2): Windows has no fcntl; takeover had no guard."""
+    calls = []
+    fake = SimpleNamespace(LK_LOCK=1, LK_UNLCK=0,
+                           locking=lambda fd, mode, n: calls.append((mode, n)))
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.setitem(sys.modules, "msvcrt", fake)
+    with ex._guard(lock):
+        assert calls == [(1, 1)]
+    assert calls == [(1, 1), (0, 1)]
+    holder = _hold(lock, pid=_dead_pid())
+    assert ex._take_over(lock, holder) is True and not lock.exists()
+    assert calls[-2:] == [(1, 1), (0, 1)]
+
+
+def test_a_signalled_command_exits_128_plus_the_signal(lock):
+    class Child:
+        pid = os.getpid()
+
+        def wait(self):
+            return -15
+
+        def poll(self):
+            return -15
+
+    rc = ex.run(["x"], holder_name="w1", label="t", ttl=60, wait_max=1,
+                path=lock, popen=lambda *a, **k: Child(), out=None)
+    assert rc == 143 and not lock.exists()
+

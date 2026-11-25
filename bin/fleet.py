@@ -15367,8 +15367,8 @@ def _doctor_check_exclusive_lock():
     holder = fleet_exclusive.read_holder()
     reason = fleet_exclusive.stale_reason(holder)
     if reason:
-        return ("exclusive-lock", False,
-                f"stale box-wide run lock ({reason}): "
+        return ("exclusive-lock", True,
+                f"NOTE stale box-wide run lock ({reason}): "
                 f"{fleet_exclusive.describe(holder)} -- the next `fleet "
                 "exclusive` takes it over; lanes must not wait on it")
     return ("exclusive-lock", True, fleet_exclusive.describe(holder))

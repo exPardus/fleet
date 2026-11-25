@@ -16,6 +16,18 @@ or when it has outlived its TTL; a waiter then takes the lock over. A waiter
 polls in the foreground for at most `--wait-max` seconds and then fails with
 the holder named, never silently. The command's exit status is returned, and
 the lock is released on every exit path, including a signal.
+
+The lock file never exists half-written: the record is written to a private
+temporary file and linked into place, so a waiter can never read an empty
+lock and mistake it for a stale one; an unreadable lock is still left alone
+for `UNREADABLE_GRACE_SECONDS`. Every compare-then-change (takeover, the
+holder's update, release) runs under a guard lock on a sidecar file: flock
+on POSIX, msvcrt.locking on Windows.
+
+The TTL is a liveness bound, not a promise of exclusion: a run still alive
+past it is taken over and the two then overlap, so give long runs a larger
+`--ttl`. Without `fleet_codex._process_identity` (an unsupported platform)
+the identity is None and a reused pid reads as alive until the TTL.
 """
 from __future__ import annotations
 
@@ -27,6 +39,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,6 +49,7 @@ MAX_WAIT_SECONDS = 4 * 3600
 POLL_SECONDS = 5.0
 WAIT_TIMEOUT_EXIT = 75
 LOCK_MAX_BYTES = 64 * 1024
+UNREADABLE_GRACE_SECONDS = 5.0
 
 
 def lock_path() -> Path:
@@ -90,23 +104,34 @@ def read_holder(path=None):
     """The current holder record, or None when free or unreadable."""
     path = Path(path or lock_path())
     try:
-        if path.is_symlink() or path.stat().st_size > LOCK_MAX_BYTES:
-            return {"unreadable": "unsafe lock file"}
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return {"unreadable": "lock file unreadable", "mtime": 0.0}
+    if path.is_symlink() or info.st_size > LOCK_MAX_BYTES:
+        return {"unreadable": "unsafe lock file", "mtime": info.st_mtime}
+    try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError, UnicodeError):
-        return {"unreadable": "lock file unreadable"}
-    return value if isinstance(value, dict) else {"unreadable": "lock file malformed"}
+        return {"unreadable": "lock file unreadable", "mtime": info.st_mtime}
+    if not isinstance(value, dict):
+        return {"unreadable": "lock file malformed", "mtime": info.st_mtime}
+    return value
 
 
 def stale_reason(holder, now=None):
     """Why this holder no longer holds the lock, or None while it does."""
     if holder is None:
         return None
-    if "unreadable" in holder:
-        return holder["unreadable"]
     now = _now() if now is None else now
+    if "unreadable" in holder:
+        mtime = holder.get("mtime")
+        if isinstance(mtime, (int, float)) and now - mtime < UNREADABLE_GRACE_SECONDS:
+            return None
+        return holder["unreadable"]
     started = holder.get("started_at_epoch")
     ttl = holder.get("ttl_seconds")
     if (isinstance(started, (int, float)) and isinstance(ttl, (int, float))
@@ -132,50 +157,84 @@ def describe(holder, now=None) -> str:
             f"{holder.get('label') or holder.get('command')}")
 
 
-def _write_new(path: Path, record: dict) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
+@contextmanager
+def _guard(path: Path):
+    """Exclusive guard on a sidecar file for every compare-then-change."""
+    guard = path.with_name(f".{path.name}.guard")
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(guard), os.O_CREAT | os.O_RDWR, 0o600)
+    unlock = None
     try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        return False
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        json.dump(record, stream, sort_keys=True)
+        try:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            unlock = lambda: fcntl.flock(fd, fcntl.LOCK_UN)  # noqa: E731
+        except ImportError:
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            unlock = lambda: (os.lseek(fd, 0, os.SEEK_SET),  # noqa: E731
+                              msvcrt.locking(fd, msvcrt.LK_UNLCK, 1))
+        yield
+    finally:
+        if unlock is not None:
+            try:
+                unlock()
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _write_new(path: Path, record: dict) -> bool:
+    """Create the lock complete or not at all: write a private file, link it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{record['token']}.new")
+    fd = os.open(str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def _update(path: Path, record: dict) -> bool:
+    """Rewrite the holder's own record; never touch a lock it lost."""
+    temporary = path.with_name(f".{path.name}.{record['token']}.tmp")
+    with _guard(path):
+        current = read_holder(path)
+        if not isinstance(current, dict) or current.get("token") != record["token"]:
+            return False
+        temporary.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, path)
     return True
-
-
-def _update(path: Path, record: dict) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
-    os.replace(temporary, path)
 
 
 def _take_over(path: Path, holder: dict) -> bool:
     """Move a stale lock aside; only one waiter wins.
 
-    The compare and the rename run under an flock on a sidecar file, so a
-    second waiter that judged the same stale holder cannot move aside the
-    lock the first waiter has just created.
+    The compare and the rename run under the guard, so a second waiter that
+    judged the same stale holder cannot move aside the lock the first waiter
+    has just created.
     """
     aside = path.with_name(f"{path.name}.stale-{uuid.uuid4().hex[:8]}")
-    guard = path.with_name(f".{path.name}.guard")
     try:
-        import fcntl
-    except ImportError:
-        fcntl = None
-    try:
-        fd = os.open(str(guard), os.O_CREAT | os.O_RDWR, 0o600)
+        with _guard(path):
+            current = read_holder(path)
+            if current != holder or stale_reason(current) is None:
+                return False
+            os.replace(path, aside)
     except OSError:
         return False
-    try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        if read_holder(path) != holder:
-            return False
-        os.replace(path, aside)
-    except OSError:
-        return False
-    finally:
-        os.close(fd)
     try:
         aside.unlink()
     except OSError:
@@ -184,12 +243,13 @@ def _take_over(path: Path, holder: dict) -> bool:
 
 
 def release(path: Path, token: str) -> bool:
-    """Remove the lock only while it is still this token's."""
-    holder = read_holder(path)
-    if not isinstance(holder, dict) or holder.get("token") != token:
-        return False
+    """Remove the lock only while it is still this token's (under the guard)."""
     try:
-        path.unlink()
+        with _guard(path):
+            holder = read_holder(path)
+            if not isinstance(holder, dict) or holder.get("token") != token:
+                return False
+            path.unlink()
     except OSError:
         return False
     return True
@@ -266,7 +326,8 @@ def run(command, *, holder_name, label=None, ttl=DEFAULT_TTL_SECONDS,
         record["child_pid"] = child.pid
         record["child_identity"] = _identity(child.pid)
         _update(path, record)
-        return child.wait()
+        code = child.wait()
+        return 128 - code if code < 0 else code
     finally:
         try:
             if child is not None and child.poll() is None:
