@@ -246,9 +246,13 @@ differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:
   slugs by default. Setting `FLEET_PI_ALLOW_PAID_FLASH=1` also admits exactly
   `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash`; the hard-coded set
   cannot be extended through the environment. Any other non-free slug is
-  refused. The flag must be set for spawn and each later steer or respawn;
-  refusal happens before a registry write or pi process. Existing Fleet
-  `--token-ceiling` dispatch and follow-up checks still apply. The wrapper
+  refused. The flag must be set for each spawn, steer, limited resume, or
+  respawn. A revoked opt-in refuses before stopping the old job or changing
+  its registry row.
+  With a row `--token-ceiling`, Fleet sums input, output, cache-read and
+  cache-write tokens from the pi job's `events.jsonl` before steer and limited
+  resume. Reaching the ceiling, or missing or malformed usage, refuses the
+  follow-up. The wrapper
   always passes `--provider openrouter` and the exact slug (pi fuzzy-matches) and
   fails a run whose assistant messages report a different model. `sup-spawn` and
   other non-worker roles refuse `pi:` models.
