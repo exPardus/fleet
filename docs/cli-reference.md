@@ -568,6 +568,9 @@ options:
 
 ### fleet abandon
 
+An idle native Codex row can be abandoned even though it has no `session_id`.
+Native Codex rows still refuse during the `preclaim` or `bound` launch window.
+
 ```text
 usage: fleet abandon [-h] --reason REASON [--force] [--nonce NONCE] name
 

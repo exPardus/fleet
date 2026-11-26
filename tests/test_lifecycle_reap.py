@@ -15,6 +15,7 @@ import fleet
 SID = "aaaa1111-1111-2222-3333-444455556666"
 RETIRED = "bbbb2222-1111-2222-3333-444455556666"
 CURRENT = "cccc3333-1111-2222-3333-444455556666"
+PEER = "dddd4444-1111-2222-3333-444455556666"
 
 
 @pytest.fixture
@@ -162,6 +163,72 @@ def test_reap_uses_autoclean_archive_writer_and_counts_once(home):
     events = [json.loads(line) for line in fleet.events_path().read_text().splitlines()]
     assert any(event["kind"] == "autoclean_run" for event in events)
     assert fleet._supervisor_reap(run=run, which=lambda _: "claude")[0] == 0
+
+
+@pytest.mark.parametrize("path", ["boot", "handoff", "release", "autoclean"])
+def test_reap_paths_keep_idle_kernel_peer_authority(home, path, monkeypatch):
+    seed(lane_state="landed")  # Proves each path actually ran its archive tier.
+    peer = seed("peer", PEER, category="kernel", last_activity="2020-01-01T00:00:00Z")
+    fleet.append_outcome("peer", {"session_id": PEER, "kind": "result",
+                                   "ts": fleet.now_iso()})
+    calls = []
+    run = runner([entry(status="idle"), entry(PEER, status="idle")], calls)
+    if path == "boot":
+        assert fleet.cmd_sup_boot(SimpleNamespace(sid=CURRENT), run=run,
+                                  which=lambda _: "claude") == 0
+    elif path in ("handoff", "release"):
+        nonce = claim(handoff_token_hash=fleet.nonce_digest("token"))
+        args = SimpleNamespace(sid=CURRENT, nonce=nonce, expect_inc="inc-next")
+        if path == "handoff":
+            fleet.write_handshake("inc-next", RETIRED,
+                                  handoff_token_hash=fleet.nonce_digest("token"),
+                                  nonce_hash=fleet.nonce_digest("successor-nonce"))
+            assert fleet.cmd_sup_handoff_complete(args, run=run,
+                                                  which=lambda _: "claude") == 0
+        else:
+            assert fleet.cmd_sup_release(args, run=run, which=lambda _: "claude") == 0
+    else:
+        # The idle-session tier is separate from the archive tier under test.
+        monkeypatch.setattr(fleet, "stop_idle_sessions", lambda **_kw: [])
+        assert fleet.cmd_autoclean(SimpleNamespace(reap=True), run=run,
+                                   which=lambda _: "claude") == 0
+    workers = fleet.load_registry()["workers"]
+    assert workers["finished"]["archived_at"]
+    assert workers["peer"] == peer
+    assert not (home / "logs/archive/peer").exists()
+    assert PEER[:8] not in {argv[2] for argv in calls if argv[1] == "rm"}
+
+
+@pytest.mark.parametrize("lane_state", ["landed", "abandoned"])
+def test_explicitly_terminal_kernel_row_can_reap(home, lane_state):
+    seed(category="kernel", lane_state=lane_state)
+    calls = []
+    count, error = fleet._supervisor_reap(
+        run=runner([entry(status="idle")], calls), which=lambda _: "claude")
+    assert (count, error) == (1, None)
+    assert fleet.load_registry()["workers"]["finished"]["archived_at"]
+
+
+def test_reap_skips_pending_archive_moves_for_kernel_peer(home):
+    peer = seed("peer", PEER, category="kernel", archived_at=fleet.now_iso())
+    task = fleet.task_file_path("peer")
+    task.parent.mkdir(parents=True, exist_ok=True)
+    task.write_text("retained evidence", encoding="utf-8")
+    calls = []
+    fleet._supervisor_reap(run=runner([entry(PEER, status="idle")], calls),
+                           which=lambda _: "claude")
+    assert fleet.load_registry()["workers"]["peer"] == peer
+    assert task.read_text(encoding="utf-8") == "retained evidence"
+    assert not any(argv[1] == "rm" for argv in calls)
+
+
+def test_codex_peer_authority_skips_reap_ttl(home):
+    record = {"substrate": "codex", "dispatch_kind": "codex-app-server",
+              "session_id": None, "adapter_state": "idle", "status": "idle",
+              "last_activity": "2020-01-01T00:00:00Z", "archived_at": None,
+              "category": "kernel"}
+    assert fleet._archive_eligible("peer", record, [], datetime.now(timezone.utc),
+                                   reap=True) == (False, "peer-authority")
 
 
 def test_reap_archives_landed_lane_with_retired_idle_spare(home):
