@@ -10,10 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
-from pi_test_support import (SLUG, calls, error_run, install_fake_pi, ok_run,
-                             wait_for, wait_terminal)
+from pi_test_support import (SLUG, assistant, calls, error_run, install_fake_pi,
+                             ok_run, wait_for, wait_terminal)
 
 MODEL = "pi:" + SLUG
+PAID_FLASH = ("z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash")
 
 
 @pytest.fixture
@@ -75,6 +76,31 @@ class TestHelpers:
     def test_non_free_models_are_refused(self, model):
         with pytest.raises(fleet.FleetCliError, match="pi model refused"):
             fleet._require_pi_free_model(model)
+
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_is_off_by_default(self, monkeypatch, slug):
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH", raising=False)
+        with pytest.raises(fleet.FleetCliError, match="FLEET_PI_ALLOW_PAID_FLASH=1"):
+            fleet._require_pi_free_model("pi:" + slug)
+
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_requires_explicit_one(self, monkeypatch, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "true")
+        with pytest.raises(fleet.FleetCliError, match="pi model refused"):
+            fleet._require_pi_free_model("pi:" + slug)
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        assert fleet._require_pi_free_model("pi:" + slug) == slug
+
+    @pytest.mark.parametrize("slug", [
+        "other/glm-5.3-flash", "z-ai/glm-5.3-flash-extra",
+        "z-ai/GLM-5.3-flash", "z-ai/glm-5.3-flash ",
+        "deepseek/deepseek-v4.1-flash:paid",
+        "deepseek/deepseek-v4.1-flash\n",
+    ])
+    def test_paid_opt_in_refuses_near_misses(self, monkeypatch, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        with pytest.raises(fleet.FleetCliError, match="pi model refused"):
+            fleet._require_pi_free_model("pi:" + slug)
 
     def test_wave_substrate_accepts_pi(self):
         assert fleet._wave_substrate_of_record(
@@ -144,9 +170,26 @@ class TestSpawn:
         assert call["argv"][call["argv"].index("--model") + 1] == SLUG
         assert call["argv"][call["argv"].index("--provider") + 1] == "openrouter"
 
-    @pytest.mark.parametrize("model", ["pi:acme/tiny-1", "pi:acme/tiny:paid"])
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_spawn_with_opt_in(self, pi_home, monkeypatch, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        run = ok_run()
+        run["events"][4] = assistant("done", model=slug)
+        log, worktree, rec = _spawn(pi_home, monkeypatch, [run],
+                                    model="pi:" + slug)
+        assert rec["model"] == "pi:" + slug
+        assert rec["substrate"] == "pi/" + slug
+        assert wait_terminal(_job(worktree, rec)) == "done"
+        [call] = calls(log)
+        assert call["argv"][call["argv"].index("--model") + 1] == slug
+
+    @pytest.mark.parametrize("model", [
+        "pi:acme/tiny-1", "pi:acme/tiny:paid",
+        "pi:z-ai/glm-5.3-flash", "pi:deepseek/deepseek-v4.1-flash",
+    ])
     def test_non_free_spawn_is_refused_before_any_write(self, pi_home,
                                                         monkeypatch, model):
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH", raising=False)
         log = install_fake_pi(pi_home, monkeypatch, [ok_run()])
         worktree = pi_home / "lane"
         (worktree / ".git").mkdir(parents=True)

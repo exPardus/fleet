@@ -2457,15 +2457,19 @@ def _codex_substrate(model):
     return "codex" if _codex_model_slug(model) is not None else None
 
 
-_PI_MODEL_RE = re.compile(r"^pi:(?P<bare>.+)$")
+_PI_MODEL_RE = re.compile(r"pi:(?P<bare>.+)", re.DOTALL)
 _PI_FREE_SLUG_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:free$")
+_PI_PAID_FLASH_SLUGS = frozenset({
+    "z-ai/glm-5.3-flash",
+    "deepseek/deepseek-v4.1-flash",
+})
 
 
 def _pi_model_slug(model):
     if not isinstance(model, str):
         return None
-    match = _PI_MODEL_RE.match(model)
+    match = _PI_MODEL_RE.fullmatch(model)
     return match.group("bare") if match else None
 
 
@@ -2480,10 +2484,14 @@ def _require_pi_free_model(model) -> str:
     except UnsupportedPlatformError as exc:
         raise FleetCliError(f"pi model refused: {exc}") from exc
     slug = _pi_model_slug(model)
-    if slug is None or not _PI_FREE_SLUG_RE.match(slug):
+    if slug is None or not (
+            _PI_FREE_SLUG_RE.fullmatch(slug) or
+            (os.environ.get("FLEET_PI_ALLOW_PAID_FLASH") == "1"
+             and slug in _PI_PAID_FLASH_SLUGS)):
         raise FleetCliError(
             f"pi model refused: {model!r} -- pi lanes take only exact "
-            "pi:<vendor>/<model>:free OpenRouter slugs")
+            "pi:<vendor>/<model>:free OpenRouter slugs or the two paid Flash "
+            "slugs with FLEET_PI_ALLOW_PAID_FLASH=1")
     return slug
 
 
