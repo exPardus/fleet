@@ -45,6 +45,17 @@ def _seed(isolated_home, status="idle", branch="lane/one"):
     return sid
 
 
+def _seed_native_codex(repo, adapter_state="idle"):
+    rec = fleet.new_worker_record(None, str(repo), "t", "dontask",
+                                  model="codex:gpt-5.6-luna",
+                                  dispatch_kind="codex-app-server",
+                                  substrate="codex", branch="lane/one")
+    rec.update(status="idle", adapter_state=adapter_state,
+               codex_thread_id="thread-1", codex_turn_id="turn-1")
+    fleet.save_registry({"workers": {"w1": rec}})
+    return rec
+
+
 def _run(*argv):
     return fleet.cmd_abandon(fleet.build_parser().parse_args(["abandon", "w1", *argv]))
 
@@ -60,6 +71,41 @@ def test_records_state_reason_outcome_event(isolated_home, repo, capsys):
     assert len(events) == 1 and "superseded by HEAD" in events[0]
     out = capsys.readouterr().out
     assert "next reap" in out and "left in place" in out
+
+
+def test_idle_native_codex_row_can_be_abandoned(isolated_home, repo):
+    _seed_native_codex(repo)
+    assert _run("--reason", "done") == 0
+    rec = fleet.load_registry()["workers"]["w1"]
+    assert rec["lane_state"] == "abandoned"
+    assert rec["abandoned_reason"] == "done"
+
+
+@pytest.mark.parametrize("adapter_state", ["preclaim", "bound"])
+def test_native_codex_launch_window_still_refuses_abandon(
+        isolated_home, repo, adapter_state):
+    _seed_native_codex(repo, adapter_state=adapter_state)
+    with pytest.raises(fleet.FleetCliError, match="launch in flight"):
+        _run("--reason", "done")
+    assert fleet.load_registry()["workers"]["w1"].get("lane_state") is None
+
+
+@pytest.mark.parametrize("adapter_state,expected", [
+    ("idle", False), ("preclaim", True), ("bound", True)])
+def test_native_codex_respawn_uses_launch_window(
+        isolated_home, repo, monkeypatch, adapter_state, expected):
+    rec = _seed_native_codex(repo, adapter_state=adapter_state)
+    calls = []
+    monkeypatch.setattr(fleet, "_cmd_respawn_codex_native",
+                        lambda _args, _before: calls.append("respawn") or 0)
+    args = fleet.build_parser().parse_args(["respawn", "w1", "--yes"])
+    if expected:
+        with pytest.raises(fleet.FleetCliError, match="launch in flight"):
+            fleet._cmd_respawn_codex(args, rec)
+        assert calls == []
+    else:
+        assert fleet._cmd_respawn_codex(args, rec) == 0
+        assert calls == ["respawn"]
 
 
 def test_reap_predicate_honours_it(isolated_home, repo):

@@ -643,6 +643,12 @@ the row's recorded brief, then removes the composed respawn task file.
 
 ### 8.3 Interrupt and terminal operations
 
+The launch-in-flight guard uses the adapter state for native Codex rows:
+`preclaim` and `bound` remain protected during the launch grace period. An
+`idle` row has no `session_id` by design; that absence does not block
+`abandon`, `kill`, or `respawn`. The mcx route uses its missing `mcx_id` as
+the preclaim marker.
+
 `respawn` also accepts a `systemError` thread (for example after a
 `serverOverloaded` turn) as terminal proof, but only when the full public read
 shows the exact newest bound turn `completed`, `failed`, or `interrupted`. The

@@ -7,6 +7,9 @@ bodies. Current claim/incarnation, live PID/busy status and unread/claimed mail
 remain protected (including retired sids). Result-only idle is not proof of
 landing; registry `lane_state` or matching outcome kind records it. The older TTL
 policy remains a fallback, and the archive verb itself retains its TTL contract.
+Peer-authority categories (currently `kernel`) are protected from every reap
+path, including TTL fallback and pending archive moves, until an explicit verb
+records the row as landed or abandoned. Manual archive retains its TTL contract.
 The validated lifecycle caller's current/retired SID union is protected for the
 entire pass, including after release or handoff transfers away its holdership.
 Overlapping SID ownership between any registry rows independently protects all

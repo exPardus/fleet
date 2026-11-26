@@ -734,9 +734,14 @@ pending successors, unread/claimed mail and live PID or busy-status evidence
 protect a row; PID/mail checks include retired sids, except an idle PID-bearing
 retired daemon spare on a landed/abandoned row. Roster absence alone is not
 daemon-dead evidence. The legacy TTL fallback remains for ordinary older completed
-workers, with the same stronger PID/mail protections in autoclean. Manual archive
-keeps its existing TTL contract. Crash-resumes and husks share the same whole-row protection. Automatic archive
-leaves mailbox files in place, including mail that arrives during evidence moves.
+workers, with the same stronger PID/mail protections in autoclean. Crash-resumes
+and husks share the same whole-row protection. Automatic archive leaves mailbox
+files in place, including mail that arrives during evidence moves.
+Rows in `REAP_PEER_AUTHORITY_CATEGORIES` (currently `kernel`) remain unarchived
+through boot, handoff completion, release and autoclean, including TTL fallback
+and pending archive moves, until a verb records `lane_state=landed|abandoned`.
+Manual archive keeps its TTL contract for those rows.
+
 Lifecycle calls explicitly carry the validated caller SID through the pass:
 the caller's whole current/retired SID union is protected even after release or
 handoff removes its claim holdership. Any overlap in SID ownership between
@@ -750,7 +755,14 @@ owned dead predecessor. Unreadable ownership evidence defers removal.
 The rendered roster/status portion is the pre-pass snapshot; use the post-boot
 roster for the after receipt. Codex rows (native app-server and mcx) archive by TTL
 alone -- unarchived, idle/dead/interrupted, no unread mail on their thread, older than
-the TTL -- with no `claude rm`, and Codex lanes still count toward the combined dispatch limit.
+the TTL -- with no `claude rm`, subject to the same peer-authority category guard
+when reaping. Codex lanes still count toward the combined dispatch limit.
+
+`abandon` and Codex `kill`/`respawn` use the row adapter's launch marker:
+native Codex is in flight only while `adapter_state` is `preclaim` or `bound`,
+and mcx is in flight while `mcx_id` is absent, within the launch grace period.
+An idle native Codex row has no `session_id` by design and can be abandoned;
+the same missing field cannot identify an in-flight Codex launch.
 
 - **`fleet archive`** (@4443): TTL sweep. Eligibility gates in binding order (`_archive_eligible` @4250): native + not already archived; recomputed status ∈ {idle, dead, interrupted}; roster entry absent or dead (**never** a live-process entry); an outcome record exists for the current sid (any kind — no record is dead-suspected territory, never auto-archived); TTL elapsed (default 24 h) on a parseable `last_activity` (unparseable fails safe). `limited` is never archived. Archive = evidence files (outcomes, journal, task file) moved to `logs/archive/<name>/`, registry entry tombstoned (`archived_at`), native sessions removed via `claude rm` (current + retired sids, G12). Reversible history; deletion stays `fleet clean`.
 - **`fleet clean` evidence guard:** before deleting a dead worker's brief, journal,

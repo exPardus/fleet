@@ -2546,6 +2546,18 @@ def _codex_record_route(record) -> str | None:
     return "invalid"
 
 
+def _launch_in_flight(record: dict) -> bool:
+    """Use each adapter's pre-claim marker, not Codex's absent session id."""
+    route = _codex_record_route(record)
+    if route == "native":
+        pending = record.get("adapter_state") in ("preclaim", "bound")
+    elif route == "mcx":
+        pending = record.get("mcx_id") is None
+    else:
+        pending = record.get("session_id") is None
+    return pending and not _launch_claim_expired(record.get("last_activity"))
+
+
 def _require_mcx_codex_record(name, record, verb) -> None:
     route = _codex_record_route(record)
     if route == "mcx":
@@ -11833,7 +11845,7 @@ def cmd_abandon(args, run=subprocess.run) -> int:
         if rec.get("status") in SUPERVISOR_BUSY_LANE_STATUSES:
             raise FleetCliError(
                 f"abandon: {name} is {rec['status']} -- interrupt it first")
-        if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+        if _launch_in_flight(rec):
             raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
         branch = rec.get("branch")
         ahead = 0
@@ -12252,6 +12264,7 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
     signals a Codex process directly, and ambiguous provider mutations remain
     reserved instead of being retried."""
     name = args.name
+    _refuse_launch_in_flight("respawn", name, before)
     if _codex_record_route(before) == "native":
         return _cmd_respawn_codex_native(args, before)
     _require_mcx_codex_record(name, before, "respawn")
@@ -12942,18 +12955,7 @@ def cmd_kill(args, run=subprocess.run, which=shutil.which,
             raise FleetCliError(f"unknown worker: {args.name!r}")
         rec = data["workers"][args.name]
         refuse_if_archived(args.name, rec, "kill")
-        if _is_codex_record(rec):
-            # A native row has no mcx id; its launch is in flight while preclaimed
-            # or bound (spawn's turn/start commit requires "bound" and would
-            # overwrite a kill landed in that window).
-            in_flight = (rec.get("adapter_state") in ("preclaim", "bound")
-                         if _codex_record_route(rec) == "native"
-                         else rec.get("mcx_id") is None)
-            if in_flight and not _launch_claim_expired(rec.get("last_activity")):
-                raise FleetCliError(
-                    f"launch in flight for {args.name}; retry in a few seconds"
-                )
-        elif rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+        if _launch_in_flight(rec):
             raise FleetCliError(
                 f"launch in flight for {args.name}; retry in a few seconds"
             )
@@ -13136,7 +13138,7 @@ def _refetch_holder_record(name, fallback):
 def _refuse_launch_in_flight(verb, name, rec):
     """Refuse an unexpired sid-less pre-claim before supervisor stop or respawn.
     No session is yet available to stop, and a dead mark would race dispatch."""
-    if rec.get("session_id") is None and not _launch_claim_expired(rec.get("last_activity")):
+    if _launch_in_flight(rec):
         raise FleetCliError(f"launch in flight for {name}; retry in a few seconds")
 
 
@@ -13911,6 +13913,15 @@ def cmd_clean(args, run=subprocess.run, which=shutil.which) -> int:
 # tombstones. Never remove roster-live sessions; clean owns evidence deletion.
 
 ARCHIVE_TTL_HOURS_DEFAULT = 24.0
+REAP_PEER_AUTHORITY_CATEGORIES = frozenset({"kernel"})
+
+
+def _reap_peer_authority_protected(record: dict) -> bool:
+    """Keep peer authorities until a verb explicitly lands or abandons them."""
+    category = record.get("category")
+    return (isinstance(category, str)
+            and category in REAP_PEER_AUTHORITY_CATEGORIES
+            and record.get("lane_state") not in ("landed", "abandoned"))
 
 
 def _reap_mail_pending(sid: str) -> bool:
@@ -14060,9 +14071,11 @@ def _terminal_lane_idle_spare(record: dict, sid: str, entry: dict) -> bool:
 def _reap_protection(name: str, record: dict, roster_entries: list, claim,
                      reap_caller_sid=None):
     """Return the shared whole-record veto for automatic reaping.
-    Protect the caller, ambiguous/unreadable ownership, current claim/incarnation,
-    pending mail and any current/retired sid with a PID or nonidle roster status,
-    except an idle PID-bearing retired spare on a terminal lane row."""
+    Protect peer authorities, the caller, ambiguous/unreadable ownership, current
+    claim/incarnation, pending mail and any current/retired sid with a PID or
+    nonidle roster status, except an idle retired spare on a terminal lane."""
+    if _reap_peer_authority_protected(record):
+        return "peer-authority"
     sids = _record_sids(record)
     caller = reap_caller_sid or current_caller_session()
     if caller and caller in sids:
@@ -14142,12 +14155,15 @@ def _archive_eligible(name, record, roster_entries, now,
                       reap=False, reap_caller_sid=None):
     """Return eligibility or the first failed gate, protecting the claim holder first.
     Indeterminate claims protect supervisor-shaped names only. Internal reap=True
-    first applies age-independent eligibility and shared PID/mail/claim vetoes.
+    first protects peer authorities, then applies age-independent eligibility
+    and shared PID/mail/claim vetoes.
     TTL eligibility requires native/unarchived, idle/dead/interrupted, current sid
     absent or dead in the roster, an outcome, and last_activity older than TTL.
     Also protect a released-body record currently wedging the fleet: archiving it
     must not remove the evidence the guard reads. Ordinary live retired sids are
     skipped by the removal loop rather than vetoing the whole TTL archive."""
+    if reap and _reap_peer_authority_protected(record):
+        return (False, "peer-authority")
     # Share one claim read across both claim-keyed archive gates.
     claim = read_incarnation()
     holder = _record_is_supervisor_claim_holder(record, claim=claim)
@@ -14281,14 +14297,14 @@ def _archive_resume_pending(name: str, record: dict) -> bool:
 
 def _archive_move_and_rm(n, sid, retired, dest_dir, roster_entries, run, which,
                          reap=False, reap_caller_sid=None,
-                         remove_sessions=True, lane_state=None):
+                         remove_sessions=True, lane_state=None, category=None):
     """Move evidence, then best-effort remove current and retired native sessions.
     Use the eligibility roster snapshot to skip every live sid, including retired
     forks, except an idle PID-bearing spare on a terminal lane row; current-sid
     eligibility alone cannot establish their safety. Codex rows pass
     remove_sessions=False: they have no Claude session to remove."""
     record = {"session_id": sid, "retired_sids": retired,
-              "lane_state": lane_state}
+              "lane_state": lane_state, "category": category}
     if reap:
         # The same protection applies to crash-resumes, and BEFORE moving mail
         # out of its inbox. A post-commit arrival leaves the archive resumable.
@@ -14500,6 +14516,7 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
     # removal phase must still establish which sids are safe to remove.
     resume_names = [n for n in names
                     if (is_native(before[n]) or _is_codex_record(before[n]))
+                    and (not reap or not _reap_peer_authority_protected(before[n]))
                     and _archive_resume_pending(n, before[n])]
     native_names = [n for n in names
                     if is_native(before[n]) and before[n].get("archived_at") is None]
@@ -14562,7 +14579,8 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
                              roster_entries, run, which, reap=reap,
                              reap_caller_sid=reap_caller_sid,
                              remove_sessions=is_native(rec),
-                             lane_state=rec.get("lane_state"))
+                             lane_state=rec.get("lane_state"),
+                             category=rec.get("category"))
         _archive_msg_spool(n)
 
     # Resumes finish prior work; do not count or emit a second archived transition.
@@ -14576,7 +14594,8 @@ def cmd_archive(args, run=subprocess.run, which=shutil.which,
                              roster_entries, run, which, reap=reap,
                              reap_caller_sid=reap_caller_sid,
                              remove_sessions=is_native(rec),
-                             lane_state=rec.get("lane_state"))
+                             lane_state=rec.get("lane_state"),
+                             category=rec.get("category"))
         _archive_msg_spool(n)
 
     skipped_count = len(names) - archived_count
@@ -15190,7 +15209,8 @@ SUPERVISOR_REAP_RULE = (
     "current claim, regardless of age; unread mail and any live PID protect a row "
     "except an idle PID-bearing retired spare on a landed/abandoned row. The "
     "calling body's SID union and rows with overlapping SID ownership "
-    "are also protected. Record landing as lane_state=landed or abandoned in the registry "
+    "are also protected. Peer-authority categories such as kernel remain until "
+    "a verb records lane_state=landed or abandoned. Record landing in the registry "
     "(or a matching outcome kind); a result alone is not a landing. "
     "Before any dispatch, allow at most 3 live worker sessions total across Claude "
     "and Codex (a Codex lane counts as one), and require at least 1.5 GB available "
