@@ -10,10 +10,17 @@ from types import SimpleNamespace
 import pytest
 
 import fleet
-from pi_test_support import (SLUG, calls, error_run, install_fake_pi, ok_run,
-                             wait_for, wait_terminal)
+from pi_test_support import (SLUG, assistant, calls, error_run, install_fake_pi,
+                             ok_run, wait_for, wait_terminal)
 
 MODEL = "pi:" + SLUG
+PAID_FLASH = ("z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash")
+
+
+def _paid_run(slug=PAID_FLASH[0]):
+    run = ok_run()
+    run["events"][4] = assistant("done", model=slug)
+    return run
 
 
 @pytest.fixture
@@ -75,6 +82,31 @@ class TestHelpers:
     def test_non_free_models_are_refused(self, model):
         with pytest.raises(fleet.FleetCliError, match="pi model refused"):
             fleet._require_pi_free_model(model)
+
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_is_off_by_default(self, monkeypatch, slug):
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH", raising=False)
+        with pytest.raises(fleet.FleetCliError, match="FLEET_PI_ALLOW_PAID_FLASH=1"):
+            fleet._require_pi_free_model("pi:" + slug)
+
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_requires_explicit_one(self, monkeypatch, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "true")
+        with pytest.raises(fleet.FleetCliError, match="pi model refused"):
+            fleet._require_pi_free_model("pi:" + slug)
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        assert fleet._require_pi_free_model("pi:" + slug) == slug
+
+    @pytest.mark.parametrize("slug", [
+        "other/glm-5.3-flash", "z-ai/glm-5.3-flash-extra",
+        "z-ai/GLM-5.3-flash", "z-ai/glm-5.3-flash ",
+        "deepseek/deepseek-v4.1-flash:paid",
+        "deepseek/deepseek-v4.1-flash\n",
+    ])
+    def test_paid_opt_in_refuses_near_misses(self, monkeypatch, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        with pytest.raises(fleet.FleetCliError, match="pi model refused"):
+            fleet._require_pi_free_model("pi:" + slug)
 
     def test_wave_substrate_accepts_pi(self):
         assert fleet._wave_substrate_of_record(
@@ -144,9 +176,26 @@ class TestSpawn:
         assert call["argv"][call["argv"].index("--model") + 1] == SLUG
         assert call["argv"][call["argv"].index("--provider") + 1] == "openrouter"
 
-    @pytest.mark.parametrize("model", ["pi:acme/tiny-1", "pi:acme/tiny:paid"])
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_spawn_with_opt_in(self, pi_home, monkeypatch, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        run = ok_run()
+        run["events"][4] = assistant("done", model=slug)
+        log, worktree, rec = _spawn(pi_home, monkeypatch, [run],
+                                    model="pi:" + slug)
+        assert rec["model"] == "pi:" + slug
+        assert rec["substrate"] == "pi/" + slug
+        assert wait_terminal(_job(worktree, rec)) == "done"
+        [call] = calls(log)
+        assert call["argv"][call["argv"].index("--model") + 1] == slug
+
+    @pytest.mark.parametrize("model", [
+        "pi:acme/tiny-1", "pi:acme/tiny:paid",
+        "pi:z-ai/glm-5.3-flash", "pi:deepseek/deepseek-v4.1-flash",
+    ])
     def test_non_free_spawn_is_refused_before_any_write(self, pi_home,
                                                         monkeypatch, model):
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH", raising=False)
         log = install_fake_pi(pi_home, monkeypatch, [ok_run()])
         worktree = pi_home / "lane"
         (worktree / ".git").mkdir(parents=True)
@@ -261,6 +310,104 @@ class TestVerbs:
         out = capsys.readouterr().out
         assert "same pi session" in out and "Codex" not in out
 
+    def test_paid_send_refuses_at_token_ceiling_without_steer(
+            self, pi_home, monkeypatch):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        log, worktree, rec = _spawn(pi_home, monkeypatch,
+                                    [_paid_run(), _paid_run()],
+                                    model="pi:" + PAID_FLASH[0], token_ceiling=12)
+        wait_terminal(_job(worktree, rec))
+        before = fleet.recompute_worker_codex("pi1", rec)
+        _write_rec("pi1", before)
+        with pytest.raises(fleet.FleetCliError, match="reached token_ceiling 12"):
+            fleet.cmd_send(SimpleNamespace(
+                name="pi1", message="continue", nonce=None, force_band=False))
+        assert calls(log) and len(calls(log)) == 1
+        assert fleet.load_registry()["workers"]["pi1"] == before
+        assert (_job(worktree, rec) / "turn").read_text().strip() == "1"
+
+    def test_paid_send_counts_usage_across_turns(self, pi_home, monkeypatch):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        log, worktree, rec = _spawn(pi_home, monkeypatch,
+                                    [_paid_run(), _paid_run()],
+                                    model="pi:" + PAID_FLASH[0], token_ceiling=20)
+        job = _job(worktree, rec)
+        wait_terminal(job)
+        _write_rec("pi1", fleet.recompute_worker_codex("pi1", rec))
+        assert fleet.cmd_send(SimpleNamespace(
+            name="pi1", message="continue", nonce=None, force_band=False)) == 0
+        wait_for(lambda: len(calls(log)) == 2, 10)
+        wait_for(lambda: (job / "state").read_text().strip() == "done"
+                 and (job / "turn").read_text().strip() == "2", 10)
+        fresh = fleet.load_registry()["workers"]["pi1"]
+        _write_rec("pi1", fleet.recompute_worker_codex("pi1", fresh))
+        with pytest.raises(fleet.FleetCliError, match="cumulative tokens 24"):
+            fleet.cmd_send(SimpleNamespace(
+                name="pi1", message="again", nonce=None, force_band=False))
+        assert len(calls(log)) == 2
+
+    def test_paid_send_refuses_revoked_opt_in_without_mutation(
+            self, pi_home, monkeypatch):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        log, worktree, rec = _spawn(pi_home, monkeypatch, [_paid_run()],
+                                    model="pi:" + PAID_FLASH[0])
+        job = _job(worktree, rec)
+        wait_terminal(job)
+        before = fleet.recompute_worker_codex("pi1", rec)
+        _write_rec("pi1", before)
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH")
+        with pytest.raises(fleet.FleetCliError,
+                           match="FLEET_PI_ALLOW_PAID_FLASH=1"):
+            fleet.cmd_send(SimpleNamespace(
+                name="pi1", message="continue", nonce=None, force_band=False))
+        assert fleet.load_registry()["workers"]["pi1"] == before
+        assert (job / "turn").read_text().strip() == "1"
+        assert len(calls(log)) == 1
+
+    def test_paid_send_refuses_without_usage_evidence(
+            self, pi_home, monkeypatch):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        _log, worktree, rec = _spawn(pi_home, monkeypatch, [_paid_run()],
+                                     model="pi:" + PAID_FLASH[0], token_ceiling=13)
+        job = _job(worktree, rec)
+        wait_terminal(job)
+        before = fleet.recompute_worker_codex("pi1", rec)
+        _write_rec("pi1", before)
+        events = [json.loads(line) for line in
+                  (job / "events.jsonl").read_text().splitlines()]
+        for event in events:
+            if event.get("type") == "message_end":
+                event["message"].pop("usage")
+        (job / "events.jsonl").write_text(
+            "".join(json.dumps(event) + "\n" for event in events))
+        with pytest.raises(fleet.FleetCliError, match="token usage unavailable"):
+            fleet.cmd_send(SimpleNamespace(
+                name="pi1", message="continue", nonce=None, force_band=False))
+        assert fleet.load_registry()["workers"]["pi1"] == before
+
+    @pytest.mark.parametrize("revoke_opt_in,ceiling", [(True, None), (False, 12)])
+    def test_paid_limited_resume_refuses_before_registry_write(
+            self, pi_home, monkeypatch, revoke_opt_in, ceiling):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        log, worktree, rec = _spawn(pi_home, monkeypatch, [_paid_run()],
+                                    model="pi:" + PAID_FLASH[0],
+                                    token_ceiling=ceiling)
+        wait_terminal(_job(worktree, rec))
+        parked = dict(rec, status="limited", limit_kind="usage_limit",
+                      limit_reset_at="2020-01-01T00:00:00Z",
+                      last_activity="2020-01-01T00:00:00Z")
+        _write_rec("pi1", parked)
+        if revoke_opt_in:
+            monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH")
+        match = ("FLEET_PI_ALLOW_PAID_FLASH=1" if revoke_opt_in
+                 else "reached token_ceiling 12")
+        with pytest.raises(fleet.FleetCliError, match=match):
+            fleet.cmd_resume_limited(SimpleNamespace(
+                name="pi1", force_now=False, nonce=None))
+        assert fleet.load_registry()["workers"]["pi1"] == parked
+        assert len(calls(log)) == 1
+        assert (_job(worktree, rec) / "turn").read_text().strip() == "1"
+
     def test_send_refuses_a_running_turn(self, pi_home, monkeypatch):
         run = {"events": [{"type": "agent_start"}, {"sleep": 30}]}
         _log, worktree, rec = _spawn(pi_home, monkeypatch, [run])
@@ -297,6 +444,30 @@ class TestVerbs:
         wait_terminal(_job(worktree, new))
         second = calls(log)[1]["argv"]
         assert "--continue" not in second  # fresh context, not a resume
+
+    def test_paid_forced_respawn_refuses_before_stopping_old_job(
+            self, pi_home, monkeypatch):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        run = {"events": [{"type": "agent_start"}, {"sleep": 30}]}
+        log, worktree, rec = _spawn(pi_home, monkeypatch, [run],
+                                    model="pi:" + PAID_FLASH[0])
+        job = _job(worktree, rec)
+        wait_for(lambda: (job / "state").read_text().strip() == "running", 10)
+        wait_for(lambda: len(calls(log)) == 1, 10)
+        before = fleet.load_registry()["workers"]["pi1"]
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH")
+        try:
+            with pytest.raises(fleet.FleetCliError,
+                               match="FLEET_PI_ALLOW_PAID_FLASH=1"):
+                fleet.cmd_respawn(SimpleNamespace(
+                    name="pi1", task=None, force=True, yes=True, nonce=None,
+                    force_band=False, max_budget_usd=None, setting_sources=None,
+                    token_ceiling=None))
+            assert (job / "state").read_text().strip() == "running"
+            assert fleet.load_registry()["workers"]["pi1"] == before
+            assert len(calls(log)) == 1
+        finally:
+            fleet.cmd_kill(SimpleNamespace(name="pi1", nonce=None, yes=True))
 
     def test_wave_close_style_stop_uses_the_wrapper(self, pi_home, monkeypatch):
         run = {"events": [{"type": "agent_start"}, {"sleep": 30}]}

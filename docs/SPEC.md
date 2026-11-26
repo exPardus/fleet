@@ -232,9 +232,9 @@ restarted run. `fleet status` and `fleet peek` show the approval mode so a
 sandboxed lane is visible. Legacy rows without these fields derive approval
 from their saved Fleet mode and use medium effort.
 
-### 6.2a pi lanes (`--model pi:<vendor>/<model>:free`)
+### 6.2a pi lanes (`--model pi:<vendor>/<model>:free` or opt-in paid Flash)
 
-A `pi:` model runs the pi coding agent against a free OpenRouter model through
+A `pi:` model runs the pi coding agent against an OpenRouter model through
 `bin/fleet_pi.py`, a stdlib-only wrapper that speaks mcx's verb and job-directory
 contract (`spawn`, `result` with exit 2 live / 0 done / 1 failed or stopped,
 `steer ID -`, `stop`, `list`; state under `<lane worktree>/.mcx/<id>/`). The row
@@ -242,8 +242,17 @@ persists `substrate=pi/<slug>` and `dispatch_kind=mcx`, so every verb, wave-clos
 stop and LANE-DONE mail rides the mcx route; only the executable behind it
 differs. There is no pi-specific `--codex-adapter`; the flag is ignored for `pi:`.
 
-- **Free only.** Fleet and the wrapper both refuse any slug that is not an exact
-  `<vendor>/<model>:free`, before a registry write or a pi process. The wrapper
+- **Model gate.** Fleet and the wrapper accept exact `<vendor>/<model>:free`
+  slugs by default. Setting `FLEET_PI_ALLOW_PAID_FLASH=1` also admits exactly
+  `z-ai/glm-5.3-flash` and `deepseek/deepseek-v4.1-flash`; the hard-coded set
+  cannot be extended through the environment. Any other non-free slug is
+  refused. The flag must be set for each spawn, steer, limited resume, or
+  respawn. A revoked opt-in refuses before stopping the old job or changing
+  its registry row.
+  With a row `--token-ceiling`, Fleet sums input, output, cache-read and
+  cache-write tokens from the pi job's `events.jsonl` before steer and limited
+  resume. Reaching the ceiling, or missing or malformed usage, refuses the
+  follow-up. The wrapper
   always passes `--provider openrouter` and the exact slug (pi fuzzy-matches) and
   fails a run whose assistant messages report a different model. `sup-spawn` and
   other non-worker roles refuse `pi:` models.
@@ -371,7 +380,7 @@ Pinned by `TestDispatchPathsAreDocumented` (`tests/test_supervisor.py`): the bui
 
 | Verb | Native behavior (receipt) |
 |---|---|
-| `spawn <name> --dir --task [--mode dontask] [--model] [--effort medium] [--codex-adapter native\|mcx] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. Codex `--model codex:<model>` defaults to the native app-server adapter and accepts `--effort low|medium|high|xhigh`; explicit mcx persists its selected effort and approval on that row. `--model pi:<vendor>/<model>:free` dispatches a pi lane (§6.2a); any non-`:free` slug is refused. |
+| `spawn <name> --dir --task [--mode dontask] [--model] [--effort medium] [--codex-adapter native\|mcx] [--category] [--token-ceiling] [--setting-sources]` | §6 launch contract. `--max-budget-usd` **refused** (G3: no USD under `--bg`); `--token-ceiling` is the only fleet-side cap. Ceiling file written after the sid is known (@2320). Default mode `dontask` (@7153); mode map `MODE_FLAGS` @949. Codex `--model codex:<model>` defaults to the native app-server adapter and accepts `--effort low|medium|high|xhigh`; explicit mcx persists its selected effort and approval on that row. `--model pi:<vendor>/<model>:free` dispatches a pi lane; two exact paid Flash slugs require `FLEET_PI_ALLOW_PAID_FLASH=1` (§6.2a). |
 | `send <name> <text\|@file>` | `_cmd_send_native` @2928. Working (roster busy/waiting) → mailbox append, unchanged mid-turn path (G1). An ordinary idle worker → **fork-steer** (RATIFIED G2(b)): ceiling check via summed outcome tokens, pre-claim, mailbox append rides the drain, `dispatch_bg(resume_sid=old_sid)` mints a NEW sid; `_restamp_after_steer` retires the old sid, restamps sid/short-id, and `_migrate_residual_mailbox` re-points late mail. An idle supervisor holder instead wakes unforked with a fresh wake nonce, resumes the same incarnation, and its fixed bootstrap aborts every pending handoff successor before campaign work. Refuses: dead-suspected, dead/interrupted (→ respawn), limited (→ resume-limited), other sticky states, and any G9-suspicious roster. Rollback restores the mailbox claim and the pre-claim **only if** the record still matches the claim this call wrote. |
 | `mail verify <id>` | File-only Interface-mail verification. Reads one atomic `state/mail-receipts/<id>.json`, checks its body digest and source against the current Interface registration, and prints the canonical body only after `VERIFIED`; missing, malformed, forged, or superseded evidence prints `UNVERIFIED` and exits 1. It takes no `fleet.lock`, probes nothing live, writes nothing, and never trusts mailbox content as provenance. |
 | `status [name] [--json] [--stale-ok] [--all]` | `cmd_status` @2355. Authoritative path: F4 lock shape, one roster fetch, recompute + conditional merge, table + anomaly flags. `--stale-ok` = the probe-free/lock-free/write-free view path (`status_snapshot` @1558). Archived records hidden by default (`--all` or a named query includes them) and **never recomputed**. Epoch-frozen ⇒ verdicts carried, not derived. |

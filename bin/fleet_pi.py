@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fleet_pi -- mcx-shaped external wrapper that runs one pi lane (stdlib only).
 
-Fleet dispatches `--model pi:<openrouter-slug>:free` lanes through this file
+Fleet dispatches `--model pi:<openrouter-slug>` lanes through this file
 exactly as it dispatches `codex:` lanes through `mcx`: one directory per job
 under $MCX_DIR (default ./.mcx) holding `state`, `log`, `events.jsonl`,
 `result`, `cwd`, `model`, `approval` and `effort`.
@@ -15,9 +15,10 @@ under $MCX_DIR (default ./.mcx) holding `state`, `log`, `events.jsonl`,
   list                               one line per job
 
 Hard rules, enforced here and again in fleet:
-  * only `<vendor>/<model>:free` slugs run; anything else exits 1 before pi
-    starts. pi fuzzy-matches model names, so the exact slug is always passed
-    together with `--provider openrouter`.
+  * only `<vendor>/<model>:free` slugs run by default. Two exact paid Flash
+    slugs require FLEET_PI_ALLOW_PAID_FLASH=1. Anything else exits 1 before
+    pi starts. pi fuzzy-matches model names, so the exact slug is always
+    passed together with `--provider openrouter`.
   * the outcome comes from pi's JSON events, never from the exit code
     (`--mode json` exits 0 on a provider failure).
   * a stall watchdog kills a job that emits no event for N minutes and marks
@@ -57,6 +58,10 @@ from pathlib import Path
 from fleet_platform import PLATFORM, UnsupportedPlatformError
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:free$")
+PAID_FLASH_SLUGS = frozenset({
+    "z-ai/glm-5.3-flash",
+    "deepseek/deepseek-v4.1-flash",
+})
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9]{8}$")
 EFFORTS = ("low", "medium", "high", "xhigh")
 
@@ -102,13 +107,17 @@ def _env_number(name, default, cast=float):
 
 
 def check_slug(model) -> str:
-    """Return the bare slug, or raise unless it is an exact `:free` slug."""
+    """Return an exact free slug or an explicitly enabled paid Flash slug."""
     if isinstance(model, str) and model.startswith("pi:"):
         model = model[3:]
-    if not isinstance(model, str) or not SLUG_RE.match(model):
+    if not isinstance(model, str) or not (
+            SLUG_RE.fullmatch(model) or
+            (os.environ.get("FLEET_PI_ALLOW_PAID_FLASH") == "1"
+             and model in PAID_FLASH_SLUGS)):
         raise WrapperError(
             f"refusing model {model!r}: only exact <vendor>/<model>:free "
-            "OpenRouter slugs may run on pi lanes")
+            "OpenRouter slugs or the two paid Flash slugs with "
+            "FLEET_PI_ALLOW_PAID_FLASH=1 may run on pi lanes")
     return model
 
 
@@ -875,6 +884,7 @@ def cmd_steer(args) -> int:
         return 1
     if effective_state(job) in _LIVE_STATES:
         raise WrapperError(f"worker {args.id} is running; stop it or wait")
+    check_slug(_read(job / "model", ""))
     message = sys.stdin.read() if args.message == "-" else args.message
     if not message.strip():
         raise WrapperError("empty steer message")

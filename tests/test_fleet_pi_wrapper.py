@@ -13,6 +13,7 @@ from pi_test_support import (KEY, SLUG, assistant, calls, error_run,
                              wait_terminal)
 
 WRAPPER = Path(__file__).resolve().parents[1] / "bin" / "fleet_pi.py"
+PAID_FLASH = ("z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash")
 
 
 def wrap(args, cwd, input_text=None):
@@ -56,6 +57,61 @@ class TestSlugGuard:
         job_id, job = spawn(lane, slug="pi:" + SLUG)
         assert wait_terminal(job) == "done"
         assert (job / "model").read_text().strip() == SLUG
+
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_is_off_by_default(self, tmp_path, monkeypatch, lane,
+                                          slug):
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH", raising=False)
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        proc = wrap(["spawn", "-m", slug, "x"], lane)
+        assert proc.returncode == 1
+        assert "FLEET_PI_ALLOW_PAID_FLASH=1" in proc.stderr
+        assert calls(log) == []
+        assert not (lane / ".mcx").exists()
+
+    @pytest.mark.parametrize("slug", PAID_FLASH)
+    def test_paid_flash_opt_in_passes_exact_slug(self, tmp_path, monkeypatch,
+                                                  lane, slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        run = ok_run()
+        run["events"][4] = assistant("done", model=slug)
+        log = install_fake_pi(tmp_path, monkeypatch, [run])
+        _job_id, job = spawn(lane, slug=slug)
+        assert wait_terminal(job) == "done"
+        [call] = calls(log)
+        assert call["argv"][call["argv"].index("--model") + 1] == slug
+
+    @pytest.mark.parametrize("slug", [
+        "other/glm-5.3-flash", "z-ai/glm-5.3-flash-extra",
+        "z-ai/GLM-5.3-flash", "z-ai/glm-5.3-flash ",
+        "deepseek/deepseek-v4.1-flash:paid",
+        "deepseek/deepseek-v4.1-flash\n",
+    ])
+    def test_paid_opt_in_refuses_near_misses(self, tmp_path, monkeypatch, lane,
+                                              slug):
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        log = install_fake_pi(tmp_path, monkeypatch, [ok_run()])
+        proc = wrap(["spawn", "-m", slug, "x"], lane)
+        assert proc.returncode == 1
+        assert "refusing model" in proc.stderr
+        assert calls(log) == []
+        assert not (lane / ".mcx").exists()
+
+    def test_paid_steer_requires_opt_in_before_mutation(self, tmp_path,
+                                                        monkeypatch, lane):
+        slug = PAID_FLASH[0]
+        monkeypatch.setenv("FLEET_PI_ALLOW_PAID_FLASH", "1")
+        run = ok_run()
+        run["events"][4] = assistant("done", model=slug)
+        install_fake_pi(tmp_path, monkeypatch, [run])
+        job_id, job = spawn(lane, slug=slug)
+        assert wait_terminal(job) == "done"
+        monkeypatch.delenv("FLEET_PI_ALLOW_PAID_FLASH")
+        proc = wrap(["steer", job_id, "-"], lane, input_text="continue")
+        assert proc.returncode == 1
+        assert "FLEET_PI_ALLOW_PAID_FLASH=1" in proc.stderr
+        assert (job / "state").read_text().strip() == "done"
+        assert (job / "turn").read_text().strip() == "1"
 
 
 class TestRun:

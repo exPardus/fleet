@@ -2457,15 +2457,19 @@ def _codex_substrate(model):
     return "codex" if _codex_model_slug(model) is not None else None
 
 
-_PI_MODEL_RE = re.compile(r"^pi:(?P<bare>.+)$")
+_PI_MODEL_RE = re.compile(r"pi:(?P<bare>.+)", re.DOTALL)
 _PI_FREE_SLUG_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*:free$")
+_PI_PAID_FLASH_SLUGS = frozenset({
+    "z-ai/glm-5.3-flash",
+    "deepseek/deepseek-v4.1-flash",
+})
 
 
 def _pi_model_slug(model):
     if not isinstance(model, str):
         return None
-    match = _PI_MODEL_RE.match(model)
+    match = _PI_MODEL_RE.fullmatch(model)
     return match.group("bare") if match else None
 
 
@@ -2480,11 +2484,64 @@ def _require_pi_free_model(model) -> str:
     except UnsupportedPlatformError as exc:
         raise FleetCliError(f"pi model refused: {exc}") from exc
     slug = _pi_model_slug(model)
-    if slug is None or not _PI_FREE_SLUG_RE.match(slug):
+    if slug is None or not (
+            _PI_FREE_SLUG_RE.fullmatch(slug) or
+            (os.environ.get("FLEET_PI_ALLOW_PAID_FLASH") == "1"
+             and slug in _PI_PAID_FLASH_SLUGS)):
         raise FleetCliError(
             f"pi model refused: {model!r} -- pi lanes take only exact "
-            "pi:<vendor>/<model>:free OpenRouter slugs")
+            "pi:<vendor>/<model>:free OpenRouter slugs or the two paid Flash "
+            "slugs with FLEET_PI_ALLOW_PAID_FLASH=1")
     return slug
+
+
+def _require_pi_token_ceiling(name: str, record: dict) -> None:
+    """Refuse a pi follow-up when its job's recorded usage reaches the cap."""
+    ceiling = record.get("token_ceiling")
+    if ceiling is None:
+        return
+    if type(ceiling) is not int or ceiling < 0:
+        raise FleetCliError(f"{name}: invalid pi token_ceiling {ceiling!r}")
+    mcx_id = record.get("mcx_id")
+    if (not isinstance(mcx_id, str)
+            or not _CODEX_WORKER_ID_RE.fullmatch(mcx_id)):
+        raise FleetCliError(f"{name}: no valid pi job id for token-ceiling check")
+    path = _mcx_dir(record) / mcx_id / "events.jsonl"
+    used = 0
+    measured = False
+    try:
+        with path.open(encoding="utf-8") as events:
+            for line in events:
+                event = json.loads(line)
+                if not isinstance(event, dict) or event.get("type") != "message_end":
+                    continue
+                message = event.get("message")
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                usage = message.get("usage")
+                fields = ("input", "output", "cacheRead", "cacheWrite")
+                if (not isinstance(usage, dict)
+                        or not any(field in usage for field in fields)):
+                    raise ValueError("assistant usage missing")
+                for field in fields:
+                    value = usage.get(field, 0)
+                    if type(value) is not int or value < 0:
+                        raise ValueError(f"invalid {field} usage")
+                    used += value
+                measured = True
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise FleetCliError(
+            f"{name}: pi token usage unavailable -- refusing follow-up "
+            f"under token_ceiling {ceiling}: {exc}") from exc
+    if not measured:
+        raise FleetCliError(
+            f"{name}: pi token usage missing -- refusing follow-up "
+            f"under token_ceiling {ceiling}")
+    if used >= ceiling:
+        raise FleetCliError(
+            f"{name}: pi cumulative tokens {used} reached token_ceiling "
+            f"{ceiling} -- refusing follow-up; respawn with a higher "
+            "--token-ceiling or retire it")
 
 
 def _require_pi_key() -> None:
@@ -11149,6 +11206,8 @@ def _cmd_send_codex(name: str, message: str,
                 f"{name}: dispatch in flight -- retry in a few seconds")
         rec = dict(rec)
 
+    if _is_pi_record(rec):
+        _require_pi_free_model(rec.get("model"))
     if native_supervisor:
         return _cmd_send_codex_supervisor(name, message)
     if native_worker:
@@ -11189,6 +11248,8 @@ def _cmd_send_codex(name: str, message: str,
         raise FleetCliError(
             f"{name}: worker is dead -- run `fleet respawn {name}` first")
 
+    if _is_pi_record(rec):
+        _require_pi_token_ceiling(name, rec)
     _mcx_reconcile_saved_settings(name, rec)
     proc = _mcx_run(rec, ["steer", rec["mcx_id"], "-"],
                     run=run, which=which, input_text=message)
@@ -11416,6 +11477,9 @@ def _resume_one_limited(name: str, which, sleep, run=subprocess.run) -> bool:
                 if not rec.get("mcx_id"):
                     raise FleetCliError(
                         f"{name}: no mcx worker id recorded -- cannot resume")
+                if _is_pi_record(rec):
+                    _require_pi_free_model(rec.get("model"))
+                    _require_pi_token_ceiling(name, rec)
                 # Claim under the lock before steering outside it.
                 mcx_claim = str(uuid.uuid4())
                 rec["status"] = "working"
@@ -12260,6 +12324,8 @@ def _cmd_respawn_codex(args, before: dict, run=subprocess.run,
         raise FleetCliError(
             f"{name}: codex record without a codex:<model> model "
             f"({model!r}) -- kill it and spawn a replacement")
+    if _is_pi_record(before):
+        _require_pi_free_model(model)
     cwd = Path(before["cwd"])
     if not cwd.is_dir():
         raise FleetCliError(
